@@ -24,5 +24,5 @@ runs:
         sudo apt-get install -y --no-install-recommends \
           gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu libc6-dev-riscv64-cross libc6-dev:riscv64 qemu-user \
           libxkbcommon-dev:riscv64 libwayland-dev:riscv64 libx11-dev:riscv64 libxrandr-dev:riscv64 \
-          libxi-dev:riscv64 libgl1-mesa-dev:riscv64 \
+          libxi-dev:riscv64 libgl1-mesa-dev:riscv64 libasound2-dev:riscv64 pkg-config \
           desktop-file-utils appstream

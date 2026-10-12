@@ -20,6 +20,7 @@ runs:
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+          libasound2-dev pkg-config \
           desktop-file-utils appstream python3-yaml zsync
 
     - uses: storytold/craft-common-actions/actions/install-nfpm@main
