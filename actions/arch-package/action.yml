@@ -1,0 +1,39 @@
+name: "Arch Linux package"
+description: "Builds an Arch Linux package (.pkg.tar.zst) from a Craft app's release .deb"
+
+inputs:
+  deb:
+    description: "Path to the release .deb (<app>-<version>-linux-<arch>.deb)"
+    required: true
+  output-dir:
+    description: "Directory the .pkg.tar.zst is written to"
+    required: false
+    default: "dist/release"
+  license:
+    description: "SPDX license expression for the package"
+    required: false
+    default: "MIT OR Apache-2.0"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install bsdtar
+      shell: bash
+      run: |
+        if ! command -v bsdtar >/dev/null; then
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libarchive-tools
+        fi
+    - name: Build the Arch package
+      shell: bash
+      env:
+        ARCH_LICENSE: ${{ inputs.license }}
+        DEB: ${{ inputs.deb }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+      run: |
+        # SOURCE_DATE_EPOCH: the commit time, so a rebuild of the same commit is identical.
+        if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct 2>/dev/null || date +%s)"
+        fi
+        export SOURCE_DATE_EPOCH
+        "$GITHUB_ACTION_PATH/arch-package.sh" "$DEB" "$OUTPUT_DIR"
