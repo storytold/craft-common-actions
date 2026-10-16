@@ -41,6 +41,11 @@ on:
         type: boolean
         required: false
         default: true
+      has-arch:
+        description: "Whether to build the Arch Linux package (.pkg.tar.zst) via makepkg"
+        type: boolean
+        required: false
+        default: true
       wix-version:
         description: "Version of WiX tool to install"
         type: string
@@ -556,6 +561,41 @@ jobs:
           path: dist/release/*.flatpak
           if-no-files-found: error
 
+  arch:
+    name: Arch Linux ${{ matrix.arch }}
+    if: inputs.has-arch
+    needs: [version, linux]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/linux
+      - name: Find the release tarball
+        id: tarball
+        run: |
+          shopt -s nullglob
+          tarballs=(dist/linux/*-linux-${{ matrix.arch }}.tar.gz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one tarball in release-linux-${{ matrix.arch }}, found ${#tarballs[@]}"
+            exit 1
+          fi
+          echo "path=${tarballs[0]}" >>"$GITHUB_OUTPUT"
+      - uses: storytold/craft-common-actions/actions/arch-package@main
+        with:
+          tarball: ${{ steps.tarball.outputs.path }}
+          arch: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-arch-${{ matrix.arch }}
+          path: dist/release/*.pkg.tar.zst
+          if-no-files-found: error
+
   freebsd:
     name: FreeBSD x86_64
     if: inputs.has-freebsd
@@ -907,7 +947,7 @@ jobs:
     timeout-minutes: 10
     name: Draft GitHub Release
     if: "!cancelled() && !contains(needs.*.result, 'failure')"
-    needs: [version, macos, windows, linux, linux-riscv64, flatpak, freebsd, web, server]
+    needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-latest
     environment: release
     permissions:

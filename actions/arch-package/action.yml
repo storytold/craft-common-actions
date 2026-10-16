@@ -1,0 +1,60 @@
+name: "Arch Linux package"
+description: "Builds an Arch Linux package (.pkg.tar.zst) from a Craft app's release tarball using makepkg"
+
+inputs:
+  tarball:
+    description: "Path to the release tarball (<app>-<version>-linux-<arch>.tar.gz)"
+    required: true
+  arch:
+    description: "Target architecture (x86_64 or aarch64)"
+    required: false
+    default: "x86_64"
+  output-dir:
+    description: "Directory the .pkg.tar.zst is written to"
+    required: false
+    default: "dist/release"
+  license:
+    description: "SPDX license expression for the package"
+    required: false
+    default: "MIT OR Apache-2.0"
+  pkgrel:
+    description: "Package release number"
+    required: false
+    default: "1"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build the Arch package with makepkg
+      shell: bash
+      env:
+        TARBALL: ${{ inputs.tarball }}
+        TARGET_ARCH: ${{ inputs.arch }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        ARCH_LICENSE: ${{ inputs.license }}
+        PKGREL: ${{ inputs.pkgrel }}
+      run: |
+        if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct 2>/dev/null || date +%s)"
+        fi
+        export SOURCE_DATE_EPOCH
+
+        if command -v makepkg >/dev/null; then
+          "$GITHUB_ACTION_PATH/arch-package.sh" "$TARBALL" "$TARGET_ARCH" "$OUTPUT_DIR"
+        elif command -v docker >/dev/null; then
+          docker run --rm \
+            -e TARBALL="$TARBALL" \
+            -e TARGET_ARCH="$TARGET_ARCH" \
+            -e OUTPUT_DIR="$OUTPUT_DIR" \
+            -e ARCH_LICENSE="$ARCH_LICENSE" \
+            -e PKGREL="$PKGREL" \
+            -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$GITHUB_ACTION_PATH:/action:ro" \
+            -w /workspace \
+            archlinux:base-devel \
+            bash /action/docker-entrypoint.sh
+        else
+          echo "::error::Neither makepkg nor docker was found to build the Arch package"
+          exit 1
+        fi
