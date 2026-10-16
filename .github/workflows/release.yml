@@ -557,11 +557,15 @@ jobs:
           if-no-files-found: error
 
   freebsd:
-    name: FreeBSD x86_64
+    name: FreeBSD ${{ matrix.arch }}
     if: inputs.has-freebsd
     needs: version
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -623,6 +627,7 @@ jobs:
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
+          arch: ${{ matrix.arch }}
           usesh: true
           cpu: 4
           mem: 12288
@@ -641,7 +646,7 @@ jobs:
               bash packaging/freebsd/package.sh
             else
               cargo build --release --locked -p ${{ inputs.app-name }} $(cargo metadata --format-version 1 --no-deps | grep -q '"${{ inputs.app-name }}-cli"' && echo "-p ${{ inputs.app-name }}-cli" || true)
-              name="${{ inputs.app-name }}-$VERSION-freebsd-x86_64"
+              name="${{ inputs.app-name }}-$VERSION-freebsd-${{ matrix.arch }}"
               mkdir -p "dist/release/$name"
               cp target/release/${{ inputs.app-name }} "dist/release/$name/" 2>/dev/null || cp /var/tmp/craft-target/release/${{ inputs.app-name }} "dist/release/$name/"
               if [ -f target/release/${{ inputs.app-name }}-cli ]; then
@@ -660,7 +665,7 @@ jobs:
             fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-freebsd-x86_64
+          name: release-freebsd-${{ matrix.arch }}
           path: dist/release/*
           if-no-files-found: error
 

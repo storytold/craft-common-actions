@@ -49,9 +49,13 @@ permissions:
 
 jobs:
   freebsd:
-    name: FreeBSD 15 (build + test)
+    name: FreeBSD 15 ${{ matrix.arch }} (build + test)
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check out craft-fonts
@@ -63,6 +67,7 @@ jobs:
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
+          arch: ${{ matrix.arch }}
           usesh: true
           cpu: 4
           mem: 12288
@@ -105,9 +110,9 @@ jobs:
               CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
               # Check every produced archive; an unmatched glob or unreadable tarball
               # must fail instead of turning a requested package check into a no-op.
-              for archive in dist/release/*-freebsd-x86_64.tar.gz; do
+              for archive in dist/release/*-freebsd-${{ matrix.arch }}.tar.gz; do
                 if [ ! -f "$archive" ]; then
-                  echo "error: no FreeBSD x86_64 package was produced" >&2
+                  echo "error: no FreeBSD ${{ matrix.arch }} package was produced" >&2
                   exit 1
                 fi
                 tar -tzf "$archive"

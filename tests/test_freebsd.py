@@ -23,7 +23,7 @@ TEMPLATE = next(step["with"]["run"] for step in DATA["jobs"]["freebsd"]["steps"]
 
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
-               skip_tests=False, fonts=False, require_fonts=False, fail_build=False):
+               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64"):
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
             "custom-test-command": command,
@@ -39,6 +39,7 @@ class FreeBSDRunTests(unittest.TestCase):
             return inputs[key]
 
         script = re.sub(r"\$\{\{ inputs\.(.*?) \}\}", replace, TEMPLATE)
+        script = script.replace("${{ matrix.arch }}", arch)
         # The host rustup environment is irrelevant: keep all commands inside the fixture.
         script = script.replace('. "$HOME/.cargo/env"', ': # isolated cargo/rustc shims')
         with tempfile.TemporaryDirectory(prefix="shared-freebsd-test-") as directory:
@@ -78,20 +79,22 @@ case "$PACKAGE_MODE" in
 esac
 mkdir -p dist/release stage/bin
 echo fixture > stage/bin/app
-tar -czf dist/release/app-freebsd-x86_64.tar.gz stage
+target_arch="${TARGET_ARCH:-x86_64}"
+tar -czf "dist/release/app-freebsd-$target_arch.tar.gz" stage
 if [ "$PACKAGE_MODE" = corrupt ]; then
-  echo corrupt > dist/release/app-freebsd-x86_64.tar.gz
+  echo corrupt > "dist/release/app-freebsd-$target_arch.tar.gz"
 elif [ "$PACKAGE_MODE" = second-corrupt ]; then
-  echo corrupt > dist/release/other-freebsd-x86_64.tar.gz
+  echo corrupt > "dist/release/other-freebsd-$target_arch.tar.gz"
 elif [ "$PACKAGE_MODE" = multiple ]; then
-  cp dist/release/app-freebsd-x86_64.tar.gz dist/release/other-freebsd-x86_64.tar.gz
+  cp "dist/release/app-freebsd-$target_arch.tar.gz" "dist/release/other-freebsd-$target_arch.tar.gz"
 fi
 """)
             env = os.environ.copy()
             for key in ("CRAFT_FONTS_DIR", "CRAFT_FONTS_REQUIRED"):
                 env.pop(key, None)
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
-                       PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower())
+                       PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
+                       TARGET_ARCH=arch)
             result = subprocess.run(["/bin/sh", "-eu", "-c", script], cwd=work, env=env,
                                     text=True, capture_output=True, timeout=15)
             log = (work / "cargo.log").read_text().splitlines() if (work / "cargo.log").exists() else []
@@ -180,6 +183,25 @@ fi
                     _, directory, required, _ = line.split("|", 3)
                     self.assertEqual(bool(directory), fonts, result)
                     self.assertEqual(required, "", result)
+
+    def test_matrix_defined_in_workflow(self):
+        matrix = DATA["jobs"]["freebsd"].get("strategy", {}).get("matrix", {})
+        self.assertIn("arch", matrix)
+        self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
+
+    def test_packaging_works_for_all_matrix_architectures(self):
+        for arch in ("x86_64", "aarch64"):
+            with self.subTest(arch=arch):
+                result = self.run_vm(package="multiple", arch=arch)
+                self.assertEqual(result["code"], 0, result)
+                self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
+
+    def test_release_workflow_freebsd_matrix(self):
+        release_path = ROOT / ".github/workflows/release.yml"
+        release_data = yaml.load(release_path.read_text(), Loader=yaml.BaseLoader)
+        matrix = release_data["jobs"]["freebsd"].get("strategy", {}).get("matrix", {})
+        self.assertIn("arch", matrix)
+        self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
 
 
 if __name__ == "__main__":

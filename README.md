@@ -12,7 +12,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
-- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging)
+- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm)
 - **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
@@ -142,7 +142,7 @@ jobs:
 ```
 
 ### 4. `freebsd.yml`
-Builds and runs workspace tests inside a FreeBSD 15 VM on a Linux runner.
+Builds and runs workspace tests across a matrix (x86_64, aarch64) inside a FreeBSD 15 VM on a Linux runner.
 
 `craft-fonts-ref` makes the checkout available to builds, default tests and custom
 tests through `CRAFT_FONTS_DIR`. Set `require-craft-fonts: true` to also export
@@ -155,8 +155,8 @@ Do not rely on `errexit` to catch nonfinal commands of an `&&` list followed by
 other commands; write each required test command on its own line.
 
 `run-package-check: true` requires `packaging/freebsd/package.sh` to exist and
-succeed, then requires at least one readable `*-freebsd-x86_64.tar.gz` in
-`dist/release`. Each archive is checked separately. The app's package script
+succeed, then requires at least one readable `*-freebsd-<arch>.tar.gz` in
+`dist/release` for each matrix architecture. Each archive is checked separately. The app's package script
 retains responsibility for its required binaries, metadata and licence files.
 
 #### Caller Example:
