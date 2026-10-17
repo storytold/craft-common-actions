@@ -217,6 +217,30 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/nix.yml@main
 ```
 
+### 6. `check-signed-commits.yml`
+
+Fails a pull request that contains commits GitHub does not mark **Verified** (unsigned, unknown signing key, or an unverified author email). It reads commit verification from the GitHub API, so it needs no checkout and no secrets, and runs with read-only `contents` and `pull-requests` permissions. Squash-merges made in the GitHub UI are signed by GitHub and are not affected; this checks the commits on the PR branch.
+
+It is an early-feedback check for contributors. Enforcement belongs in an org or repo ruleset that requires signed commits.
+
+Note that it checks every commit on the PR branch, not just the squash result. Only adopt it in repos where contributors and agents sign their branch commits; where PRs are squash-merged in the UI and branch commits stay unsigned, rely on the ruleset alone.
+
+#### Caller Example:
+```yaml
+name: Signed commits
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  signed-commits:
+    uses: storytold/craft-common-actions/.github/workflows/check-signed-commits.yml@main
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
