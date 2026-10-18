@@ -13,6 +13,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
 - **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64)
+- **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm)
 - **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
