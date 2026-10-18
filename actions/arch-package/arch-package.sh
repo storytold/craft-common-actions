@@ -28,10 +28,10 @@ for tool in makepkg bsdtar zstd tar; do
 done
 
 case "$target_arch" in
-x86_64) arch=x86_64 ;;
-aarch64 | arm64) arch=aarch64 ;;
-riscv64) arch=riscv64 ;;
-*) arch="$target_arch" ;;
+  x86_64) arch=x86_64 ;;
+  aarch64 | arm64) arch=aarch64 ;;
+  riscv64) arch=riscv64 ;;
+  *) arch="$target_arch" ;;
 esac
 
 work="$(mktemp -d /tmp/arch-build.XXXXXX)"
