@@ -21,6 +21,11 @@ on:
         type: boolean
         required: false
         default: false
+      macos-resvg:
+        description: "Install resvg for the macOS job; needed by apps whose packaging/macos/package.sh renders the DMG background from SVG. Off by default: it is a multi-minute cargo install"
+        type: boolean
+        required: false
+        default: false
       version:
         description: "Version override for a test run (empty: read from Cargo.toml)"
         type: string
@@ -219,6 +224,11 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: packaging/macos/import-cert.sh
+      # packaging/macos/package.sh renders the DMG background from an SVG where an app ships one,
+      # and exits 1 if resvg is missing. Pinned: the version decides how the artwork rasterises.
+      - name: Install resvg
+        if: inputs.macos-resvg
+        run: cargo install resvg --locked --version 0.48.1
       - name: Build, sign, notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
