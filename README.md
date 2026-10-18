@@ -9,7 +9,9 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ## Workflows Included
 
 ### 1. `release.yml`
+
 Full multi-platform release pipeline for Craft apps:
+
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
@@ -20,7 +22,8 @@ Full multi-platform release pipeline for Craft apps:
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm)
 - **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Release
 
@@ -75,7 +78,9 @@ too only with `web-craft-fonts: true`: each app's `build.rs` decides which fonts
 embeds (craft-fonts `docs/integration.md`), so opt in once that list fits the app's web size budget.
 
 ### 2. `packaging-lint.yml`
+
 Lints all packaging configurations and metadata:
+
 - `actionlint` for workflow syntax
 - `shellcheck` for shell scripts and AppRun
 - PowerShell parser validation for WiX helper scripts
@@ -85,7 +90,8 @@ Lints all packaging configurations and metadata:
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Packaging lint
 
@@ -110,9 +116,11 @@ jobs:
 ```
 
 ### 3. `windows-arm64.yml`
+
 Cross-compiles ARM64 MSI on x64 Windows runner, then installs, verifies native ARM64 architecture (`0xAA64`), smoke tests the CLI, and uninstalls on a Windows 11 ARM64 runner.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Windows ARM64
 
@@ -147,6 +155,7 @@ jobs:
 ```
 
 ### 4. `freebsd.yml`
+
 Builds and runs workspace tests inside a FreeBSD 15 VM on a Linux runner.
 Pull requests default to `x86_64`; pushes, schedules and manual runs retain both
 `x86_64` and `aarch64`. ARM64 is software-emulated on the x86 Linux runner and can
@@ -212,7 +221,8 @@ succeed, then requires at least one readable `*-freebsd-<arch>.tar.gz` in
 `dist/release` for each matrix architecture. Each archive is checked separately. The app's package script
 retains responsibility for its required binaries, metadata and licence files.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: FreeBSD
 
@@ -245,7 +255,7 @@ jobs:
 
 Evaluates the repository's Nix flake across supported systems without building, validating flake evaluation and `Cargo.lock` synchronization.
 
-#### Caller Example:
+#### Caller Example
 
 ```yaml
 name: Nix

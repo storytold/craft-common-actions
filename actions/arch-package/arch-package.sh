@@ -16,7 +16,10 @@ license="${ARCH_LICENSE:-MIT OR Apache-2.0}"
 pkgrel="${PKGREL:-1}"
 epoch="${SOURCE_DATE_EPOCH:-$(date +%s)}"
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
 
 [[ -f "$tarball" ]] || die "$tarball not found"
 
@@ -25,10 +28,10 @@ for tool in makepkg bsdtar zstd tar; do
 done
 
 case "$target_arch" in
-  x86_64) arch=x86_64 ;;
-  aarch64|arm64) arch=aarch64 ;;
-  riscv64) arch=riscv64 ;;
-  *) arch="$target_arch" ;;
+x86_64) arch=x86_64 ;;
+aarch64 | arm64) arch=aarch64 ;;
+riscv64) arch=riscv64 ;;
+*) arch="$target_arch" ;;
 esac
 
 work="$(mktemp -d /tmp/arch-build.XXXXXX)"
@@ -58,8 +61,8 @@ if [[ "${#subdirs[@]}" -eq 1 && ! -L "${subdirs[0]}" && -d "${subdirs[0]}" ]]; t
   stage_real="$(realpath -- "$stage")"
   root_real="$(realpath -- "$root")"
   case "$root_real" in
-    "$stage_real"/*) ;;
-    *) die "refusing to flatten: wrapper directory resolves outside staging" ;;
+  "$stage_real"/*) ;;
+  *) die "refusing to flatten: wrapper directory resolves outside staging" ;;
   esac
   if [[ -d "$root/bin" || -d "$root/share" ]]; then
     shopt -s dotglob
@@ -145,7 +148,7 @@ fi
 
 # Format SPDX license expression into Arch license array
 license_formatted=()
-IFS='|' read -ra parts <<< "$(sed -E 's/ (OR|AND) /|/g' <<< "$license")"
+IFS='|' read -ra parts <<<"$(sed -E 's/ (OR|AND) /|/g' <<<"$license")"
 for part in "${parts[@]}"; do
   part="$(echo "$part" | xargs)"
   [[ -n "$part" ]] && license_formatted+=("'$part'")
@@ -153,7 +156,7 @@ done
 license_str="${license_formatted[*]}"
 
 # Create makepkg.conf override
-cat > "$work/makepkg.conf" <<EOF
+cat >"$work/makepkg.conf" <<EOF
 if [[ -f /etc/makepkg.conf ]]; then
   source /etc/makepkg.conf
 fi
@@ -164,7 +167,7 @@ COMPRESSZST=(zstd -c -T0 --ultra -20 -)
 EOF
 
 # Write PKGBUILD
-cat > "$work/PKGBUILD" <<EOF
+cat >"$work/PKGBUILD" <<EOF
 # Maintainer: Storyteller Authors
 pkgname=$(printf '%q' "$pkgname")
 pkgver='$pkgver'

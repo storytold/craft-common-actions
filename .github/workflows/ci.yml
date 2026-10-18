@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+# A newer push to a PR branch cancels its older run. Runs on main are never cancelled: a merge
+# that lands while main's run is in progress waits for it, so every main state that gets a run is
+# checked to the end. (Cancelling here left main unverified whenever merges came close together.)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions: {}
+
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1  # latest only
+
+      - name: Run prek pre-commit
+        uses: j178/prek-action@1382ad72dea72f9d53832f2bcb65b3e87a947204  # v3.0.1
+        with:
+          extra-args: '--all-files --quiet'
