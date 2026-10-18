@@ -203,6 +203,36 @@ fi
         self.assertIn("arch", matrix)
         self.assertEqual(matrix["arch"], ["x86_64", "aarch64"])
 
+    def vm_steps(self):
+        release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        for name, job in (("freebsd.yml", DATA["jobs"]["freebsd"]), ("release.yml", release["jobs"]["freebsd"])):
+            yield name, next(step["with"] for step in job["steps"] if "with" in step and "prepare" in step["with"])
+
+    def test_aarch64_installs_rust_from_packages_and_x86_64_uses_rustup(self):
+        # rustup has no aarch64-unknown-freebsd toolchain: the VM must not ask it for one.
+        for name, vm in self.vm_steps():
+            for arch, chosen, other in (("aarch64", "pkg-install -y rust", "sh.rustup.rs"),
+                                        ("x86_64", "sh.rustup.rs", "pkg-install -y rust")):
+                with self.subTest(workflow=name, arch=arch):
+                    # Print the commands instead of installing anything.
+                    script = (vm["prepare"].replace("${{ matrix.arch }}", arch)
+                              .replace("pkg install", "echo pkg-install").replace("curl -", "echo curl -")
+                              .replace("| sh -s --", "#"))
+                    result = subprocess.run(["/bin/sh", "-eu", "-c", script], text=True, capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result)
+                    self.assertIn(chosen, result.stdout, result)
+                    self.assertNotIn(other, result.stdout, result)
+
+    def test_run_step_works_without_a_rustup_environment(self):
+        # The lang/rust package writes no $HOME/.cargo/env, so sourcing it must be optional.
+        for name, vm in self.vm_steps():
+            line = next(line.strip() for line in vm["run"].splitlines()
+                        if ".cargo/env" in line and not line.strip().startswith("#"))
+            with self.subTest(workflow=name), tempfile.TemporaryDirectory() as home:
+                result = subprocess.run(["/bin/sh", "-eu", "-c", line], env={**os.environ, "HOME": home},
+                                        text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result)
+
 
 if __name__ == "__main__":
     unittest.main()

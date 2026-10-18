@@ -74,9 +74,16 @@ jobs:
           copyback: false
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
-            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
+            # for it ("installer for platform not found"), so use FreeBSD's lang/rust package.
+            if [ "${{ matrix.arch }}" = aarch64 ]; then
+              pkg install -y rust
+            else
+              curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+            fi
           run: |
-            . "$HOME/.cargo/env"
+            # Only rustup writes this; the lang/rust package installs into /usr/local/bin.
+            [ ! -f "$HOME/.cargo/env" ] || . "$HOME/.cargo/env"
             git config --global --add safe.directory "*"
             rustc --version
             if [ -d craft-fonts ]; then
