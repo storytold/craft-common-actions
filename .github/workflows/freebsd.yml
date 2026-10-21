@@ -205,7 +205,7 @@ jobs:
             mkdir -p "dist/release/$NAME"
             mkdir -p "dist/release/$NAME/icons"
             
-            find target/${{ matrix.arch }}-unknown-freebsd/debug -maxdepth 1 -type f -executable -name "${{ inputs.app-name }}*" -exec cp {} "dist/release/$NAME/" \;
+            find target/${{ matrix.arch }}-unknown-freebsd/release -maxdepth 1 -type f -executable -name "${{ inputs.app-name }}*" -exec cp {} "dist/release/$NAME/" \;
             cp README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/release/$NAME/" 2>/dev/null || true
             cp packaging/linux/ai.storyteller.${{ inputs.app-name }}.desktop "dist/release/$NAME/" 2>/dev/null || true
             cp -R assets/app-icon/hicolor "dist/release/$NAME/icons/" 2>/dev/null || true
