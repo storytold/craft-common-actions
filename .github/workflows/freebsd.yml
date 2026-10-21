@@ -83,6 +83,17 @@ jobs:
           sudo apt-get install -y clang lld pkg-config
           rustup target add x86_64-unknown-freebsd
 
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - name: Cross Compile Workspace (Build Only)
         run: |
           set -eu
@@ -97,7 +108,6 @@ jobs:
           export CFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
           export CXXFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
           
-          # Set target-specific linker and RUSTFLAGS
           export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
           export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
           
@@ -114,11 +124,15 @@ jobs:
             export CRAFT_FONTS_REQUIRED=1
           fi
           
-          cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
+          # Use release profile and strip debug info to save disk space
+          export CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_PROFILE_TEST_DEBUG=0
+          
+          cargo build --release --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
           
           # Compile tests but do not execute
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            cargo test --workspace --locked --no-run ${{ inputs.cargo-test-extra-args }}
+            cargo test --release --workspace --locked --no-run ${{ inputs.cargo-test-extra-args }}
           fi
 
       - name: Run Tests in FreeBSD VM
