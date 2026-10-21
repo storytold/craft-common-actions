@@ -34,8 +34,8 @@ runs:
             expected="27419eb382695a7942be8ad52259f3ec1854fad001b3ae4baed34ce39a223b97"
             ;;
           *)
-            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/checksums.txt" "https://github.com/goreleaser/nfpm/releases/download/v${{ inputs.nfpm-version }}/checksums.txt"
-            expected=$(grep -E "nfpm_${{ inputs.nfpm-version }}_${{ inputs.deb-arch }}\.deb" "$RUNNER_TEMP/checksums.txt" | awk '{print $1}')
+            echo "::error::no reviewed SHA256 for nfpm ${{ inputs.nfpm-version }} (${{ inputs.deb-arch }}). Add the hash to this action before using that version."
+            exit 1
             ;;
         esac
 

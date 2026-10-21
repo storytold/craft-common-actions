@@ -20,8 +20,8 @@ runs:
             expected="f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
             ;;
           *)
-            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/trunk.sha256" "$tar_url.sha256"
-            expected=$(awk '{print $1}' "$RUNNER_TEMP/trunk.sha256")
+            echo "::error::no reviewed SHA256 for trunk ${{ inputs.trunk-version }}. Add the hash to this action before using that version."
+            exit 1
             ;;
         esac
         echo "$expected  $RUNNER_TEMP/trunk.tar.gz" | sha256sum -c -

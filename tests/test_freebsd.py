@@ -27,7 +27,7 @@ PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Bu
 
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
-               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False):
+               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False, build_extra=""):
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
             "custom-test-command": command,
@@ -60,7 +60,7 @@ class FreeBSDRunTests(unittest.TestCase):
             cargo = tools / "cargo"
             cargo.write_text("""#!/bin/sh
 set -eu
-printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$*" >> "$PWD/cargo.log"
+printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$(printf '%s\\037' "$@")" >> "$PWD/cargo.log"
 if [ "$1" = build ]; then
   [ "$FAIL_BUILD" = false ] || exit 31
 else
@@ -104,7 +104,8 @@ fi
                 env.pop(key, None)
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
-                       TARGET_ARCH=arch)
+                       TARGET_ARCH=arch, CRAFT_CUSTOM_TEST_COMMAND=command,
+                       CARGO_BUILD_EXTRA_ARGS=build_extra, CARGO_TEST_EXTRA_ARGS="")
             for profile in ("debug", "release"):
                 path = work / "guest/craft-target" / profile
                 path.mkdir(parents=True)
@@ -150,6 +151,44 @@ fi
         self.assertEqual(result["code"], 31, result)
         self.assertEqual(len(result["log"]), 1, result)
         self.assertFalse(result["packaged"], result)
+
+    def test_custom_command_cannot_close_the_runner_script(self):
+        command = "CRAFT_CUSTOM_TESTS\nexit 0\n"
+        result = self.run_vm(command=command)
+        self.assertNotEqual(result["code"], 0, result)
+        self.assertFalse(result["packaged"], result)
+
+    def test_argument_parsers_are_not_indented(self):
+        # python3 -c rejects a leading indent on the GitHub-hosted runner.
+        for path, marker in (
+            (WORKFLOW, "os.environ.get(sys.argv[1], \"\")"),
+            (ROOT / ".github/workflows/nix.yml", "os.environ.get(\"EXTRA_ARGS\", \"\")"),
+        ):
+            data = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+            if path == WORKFLOW:
+                script = TEMPLATE
+            else:
+                script = data["jobs"]["eval"]["steps"][-1]["run"]
+            start = script.index("python3 -c '") + len("python3 -c '")
+            body = script[start:script.index("'", start)].lstrip("\n")
+            self.assertFalse(body[:1].isspace(), body[:80])
+            self.assertIn(marker, body)
+
+    def test_quoted_cargo_extra_args_stay_one_argument(self):
+        result = self.run_vm(build_extra='--features "alpha beta"')
+        self.assertEqual(result["code"], 0, result)
+        args = result["log"][0].split("|", 3)[3].split("\037")
+        self.assertIn("alpha beta", args, result)
+
+    def test_argument_parsers_are_not_indented(self):
+        start = BUILD_TEMPLATE.index("python3 -c '") + len("python3 -c '")
+        body = BUILD_TEMPLATE[start:BUILD_TEMPLATE.index("'", start)].lstrip("\n")
+        self.assertFalse(body[:1].isspace(), body[:80])
+        nix = yaml.load((ROOT / ".github/workflows/nix.yml").read_text(), Loader=yaml.BaseLoader)
+        nix_script = nix["jobs"]["eval"]["steps"][-1]["run"]
+        nix_start = nix_script.index("python3 -c '") + len("python3 -c '")
+        nix_body = nix_script[nix_start:nix_script.index("'", nix_start)].lstrip("\n")
+        self.assertFalse(nix_body[:1].isspace(), nix_body[:80])
 
     def test_successful_custom_tests_reach_packaging(self):
         result = self.run_vm(command="cargo test --lib\ncargo test --doc")

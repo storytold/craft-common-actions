@@ -68,12 +68,18 @@ jobs:
       CARGO_BUILD_JOBS: 4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Start the FreeBSD VM
+        env:
+          CRAFT_CUSTOM_TEST_COMMAND: ${{ inputs.custom-test-command }}
+          CARGO_BUILD_EXTRA_ARGS: ${{ inputs.cargo-build-extra-args }}
+          CARGO_TEST_EXTRA_ARGS: ${{ inputs.cargo-test-extra-args }}
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
@@ -82,7 +88,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS"
+          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CRAFT_CUSTOM_TEST_COMMAND CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
@@ -124,16 +130,22 @@ jobs:
             fi
             export CRAFT_FONTS_REQUIRED=1
           fi
-          CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
+          # Extra arguments and the custom test script are environment values, so
+          # their text cannot close this script and keep running after it.
+          # Keep the parser on one line: an indented python3 -c program fails on the runner.
+          cargo_with_extra() {
+            extra_name=$1
+            shift
+            CARGO_PROFILE_DEV_DEBUG=0 python3 -c 'import os,shlex,subprocess,sys; extra=shlex.split(os.environ.get(sys.argv[1], "")); raise SystemExit(subprocess.call(sys.argv[2:]+extra))' "$extra_name" "$@"
+          }
+          cargo_with_extra CARGO_BUILD_EXTRA_ARGS cargo build --workspace --all-targets --locked
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            if [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
+            if [ -n "${CRAFT_CUSTOM_TEST_COMMAND:-}" ]; then
               # Isolate the command list: an early failure in an && chain must not
               # be hidden by a later successful packaging command in this script.
-              sh -eu <<'CRAFT_CUSTOM_TESTS' || exit "$?"
-          ${{ inputs.custom-test-command }}
-          CRAFT_CUSTOM_TESTS
+              printf '%s\n' "$CRAFT_CUSTOM_TEST_COMMAND" | sh -eu || exit "$?"
             else
-              CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
+              cargo_with_extra CARGO_TEST_EXTRA_ARGS cargo test --workspace --locked
             fi
           fi
       - name: Checkpoint tests and restore the release profile

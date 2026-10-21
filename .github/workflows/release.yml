@@ -105,6 +105,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: craft-release-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   version:
     timeout-minutes: 10
@@ -116,6 +120,8 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: v
         name: Resolve version
         uses: storytold/craft-common-actions/actions/resolve-version@main
@@ -203,6 +209,8 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -338,6 +346,8 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -441,6 +451,8 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -466,13 +478,13 @@ jobs:
         run: packaging/linux/package.sh
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*.deb || true
-          dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications' || true
+          shopt -s nullglob
+          for deb in dist/release/*.deb; do
+            dpkg-deb --info "$deb" >/dev/null
+            dpkg-deb --contents "$deb" >/dev/null
+          done
           for appimage in dist/release/*.AppImage; do
-            if [ -f "$appimage" ]; then
-              chmod +x "$appimage"
-              APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version || true
-            fi
+            test -s "$appimage"
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -542,6 +554,8 @@ jobs:
       FIGCRAFT_BUILD_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-linux-${{ matrix.arch }}
@@ -587,6 +601,8 @@ jobs:
         arch: [x86_64, aarch64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-linux-${{ matrix.arch }}
@@ -686,6 +702,8 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -837,6 +855,8 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -928,6 +948,8 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -965,8 +987,11 @@ jobs:
         run: packaging/linux/package.sh --formats "deb rpm tar"
       - name: Check the packages
         run: |
-          dpkg-deb --info dist/release/*-linux-riscv64.deb 2>/dev/null || true
-          dpkg-deb --contents dist/release/*-linux-riscv64.deb 2>/dev/null | grep -E 'usr/bin/|metainfo|applications' || true
+          shopt -s nullglob
+          for deb in dist/release/*-linux-riscv64.deb; do
+            dpkg-deb --info "$deb" >/dev/null
+            dpkg-deb --contents "$deb" >/dev/null
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-riscv64
@@ -997,6 +1022,8 @@ jobs:
       FIGCRAFT_BUILD_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -1005,13 +1032,13 @@ jobs:
           key: release-server-${{ matrix.arch }}
       - name: Apply version override
         if: inputs.version != ''
-        run: cargo xtask version set "$VERSION" || cargo run --locked -q -p xtask -- version set "$VERSION" || true
+        run: cargo xtask version set "$VERSION" || cargo run --locked -q -p xtask -- version set "$VERSION"
       - name: Build and package (tar.gz)
         run: packaging/server/package.sh
       - name: Check the archive
         shell: bash
         run: |
-          tar -tzf "dist/release/${{ inputs.app-name }}-server-$VERSION-linux-${{ matrix.arch }}.tar.gz" || true
+          tar -tzf "dist/release/${{ inputs.app-name }}-server-$VERSION-linux-${{ matrix.arch }}.tar.gz" >/dev/null
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-server-linux-${{ matrix.arch }}
@@ -1021,7 +1048,7 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
+    if: github.ref == 'refs/heads/release' && !cancelled() && !contains(needs.*.result, 'failure')
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-latest
     environment: release

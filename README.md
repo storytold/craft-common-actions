@@ -66,6 +66,10 @@ jobs:
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
+A draft GitHub Release is published only when the caller runs on the `release` branch. A manual run from another branch still builds artifacts and does not create or replace the draft. Build jobs use `contents: read`. Only the draft job has `contents: write`.
+
+nfpm, Trunk, and actionlint install only versions whose SHA256 is stored in the corresponding action. Adding a version means adding that hash in the same change. Third-party actions are pinned to a commit; Dependabot opens one grouped pull request when those pins can move. Callers keep tracking these workflows at `@main`, so that pull request reaches every app when it merges.
+
 `craft-fonts-ref` feeds the desktop builds. The web build gets craft-fonts too only with
 `web-craft-fonts: true`: each app's `build.rs` decides which fonts its web build embeds (craft-fonts
 `docs/integration.md`), so opt in once that list fits the app's web size budget.

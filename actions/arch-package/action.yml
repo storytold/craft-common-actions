@@ -54,7 +54,7 @@ runs:
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_ACTION_PATH:/action:ro" \
             -w /workspace \
-            archlinux:base-devel \
+            archlinux:base-devel@sha256:061679925e5d5028f2df9395d441ce6c4b9accf0157ff3486c06b6962e014ef1 \
             bash /action/docker-entrypoint.sh
         else
           echo "::error::Neither makepkg nor a container runtime (docker/podman) was found to build the Arch package"

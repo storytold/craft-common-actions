@@ -21,3 +21,4 @@ runs:
         repository: storytold/craft-fonts
         ref: ${{ inputs.ref }}
         path: ${{ inputs.path }}
+        persist-credentials: false
