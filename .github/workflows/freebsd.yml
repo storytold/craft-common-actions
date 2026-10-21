@@ -54,9 +54,13 @@ permissions:
 
 jobs:
   freebsd:
-    name: FreeBSD x86_64 (Cross-Compile)
+    name: FreeBSD ${{ matrix.arch }} (Cross-Compile)
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
     
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -69,7 +73,12 @@ jobs:
 
       - name: Extract FreeBSD Sysroot
         run: |
-          wget -q --max-redirect=0 https://download.freebsd.org/releases/amd64/15.0-RELEASE/base.txz
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            URL="https://download.freebsd.org/releases/amd64/15.0-RELEASE/base.txz"
+          else
+            URL="https://download.freebsd.org/releases/arm64/aarch64/15.0-RELEASE/base.txz"
+          fi
+          wget -q --max-redirect=0 "$URL"
           mkdir -p freebsd-sysroot
           tar -xf base.txz -C freebsd-sysroot ./lib/ ./usr/lib/ ./usr/include/ ./libexec/ 2>/dev/null || true
           rm -f base.txz
@@ -81,7 +90,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config
-          rustup target add x86_64-unknown-freebsd
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            rustup toolchain install nightly
+            rustup component add rust-src --toolchain nightly
+            rustup target add aarch64-unknown-freebsd --toolchain nightly
+          else
+            rustup target add x86_64-unknown-freebsd
+          fi
 
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -108,18 +123,29 @@ jobs:
         run: |
           set -eu
           SYSROOT_PATH="${{ github.workspace }}/freebsd-sysroot"
+          TARGET_TRIPLE="${{ matrix.arch }}-unknown-freebsd"
           
           export PKG_CONFIG_ALLOW_CROSS=1
           export PKG_CONFIG_SYSROOT_DIR="$SYSROOT_PATH"
           
-          export CC_x86_64_unknown_freebsd=clang
-          export CXX_x86_64_unknown_freebsd=clang++
+          if [ "${{ matrix.arch }}" = "aarch64" ]; then
+            export CC_aarch64_unknown_freebsd=clang
+            export CXX_aarch64_unknown_freebsd=clang++
+            export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=clang
+            export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=$TARGET_TRIPLE -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
+            export BUILD_STD_ARGS="-Zbuild-std=std,panic_abort"
+            export CARGO_CMD="cargo +nightly"
+          else
+            export CC_x86_64_unknown_freebsd=clang
+            export CXX_x86_64_unknown_freebsd=clang++
+            export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
+            export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=$TARGET_TRIPLE -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
+            export BUILD_STD_ARGS=""
+            export CARGO_CMD="cargo"
+          fi
           
-          export CFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
-          export CXXFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
-          
-          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
-          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
+          export CFLAGS="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
+          export CXXFLAGS="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
           
           # Dynamically check if craft-fonts exists
           if [ -d craft-fonts ]; then
@@ -138,16 +164,24 @@ jobs:
           export CARGO_PROFILE_DEV_DEBUG=0
           export CARGO_PROFILE_TEST_DEBUG=0
           
-          cargo build --release --workspace --locked ${{ inputs.cargo-build-extra-args }}
+          # Limit concurrent jobs to prevent OOM on 2-core runners when linking
+          export CARGO_BUILD_JOBS=1
+          
+          $CARGO_CMD build --release --workspace --target=$TARGET_TRIPLE --locked $BUILD_STD_ARGS ${{ inputs.cargo-build-extra-args }}
+          
+          # Compile tests but do not execute
+          if [ "${{ inputs.skip-tests }}" != "true" ]; then
+            $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+          fi
 
       - name: Run Tests in FreeBSD VM
-        if: inputs.skip-tests != true
+        if: matrix.arch == 'x86_64' && inputs.skip-tests != true
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: '15.1'
           usesh: true
           prepare: |
-            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu rust
           run: |
             set -eu
             # Because vmactions syncs the workspace, the target directory is already here
@@ -155,7 +189,7 @@ jobs:
             if [ "${{ inputs.custom-test-command }}" != "" ]; then
               ${{ inputs.custom-test-command }}
             else
-              cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
+              cargo test --release --workspace --target=${{ matrix.arch }}-unknown-freebsd --locked ${{ inputs.cargo-test-extra-args }}
             fi
 
       - name: Package
@@ -167,11 +201,11 @@ jobs:
           else
             # If no packaging script exists, execute the original default manual packaging logic
             VERSION=$(grep -m 1 '^version' Cargo.toml | awk -F'"' '{print $2}' || echo "0.10.0")
-            NAME="${{ inputs.app-name }}-${VERSION}-freebsd-x86_64"
+            NAME="${{ inputs.app-name }}-${VERSION}-freebsd-${{ matrix.arch }}"
             mkdir -p "dist/release/$NAME"
             mkdir -p "dist/release/$NAME/icons"
             
-            find target/x86_64-unknown-freebsd/debug -maxdepth 1 -type f -executable -name "${{ inputs.app-name }}*" -exec cp {} "dist/release/$NAME/" \;
+            find target/${{ matrix.arch }}-unknown-freebsd/debug -maxdepth 1 -type f -executable -name "${{ inputs.app-name }}*" -exec cp {} "dist/release/$NAME/" \;
             cp README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/release/$NAME/" 2>/dev/null || true
             cp packaging/linux/ai.storyteller.${{ inputs.app-name }}.desktop "dist/release/$NAME/" 2>/dev/null || true
             cp -R assets/app-icon/hicolor "dist/release/$NAME/icons/" 2>/dev/null || true
