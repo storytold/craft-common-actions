@@ -83,7 +83,7 @@ jobs:
           sudo apt-get install -y clang lld pkg-config
           rustup target add x86_64-unknown-freebsd
 
-      - name: Cross Compile Workspace
+      - name: Cross Compile Workspace (Build Only)
         env:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: ${{ inputs.require-craft-fonts && '1' || '' }}
@@ -98,24 +98,40 @@ jobs:
           
           export CFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
           export CXXFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
-          export RUSTFLAGS="-Clinker=clang -Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
+          
+          # 核心修改：针对目标平台设置专属的 Linker 和 RUSTFLAGS，不污染宿主机的宏编译
+          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
+          export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
           
           cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
           
-          # Run tests
+          # Compile tests but do not run them
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
+            cargo test --workspace --locked --no-run ${{ inputs.cargo-test-extra-args }}
+          fi
+
+      - name: Run Tests in FreeBSD VM
+        if: inputs.skip-tests != true
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.1'
+          usesh: true
+          prepare: |
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+          run: |
+            set -eu
+            # Because vmactions syncs the workspace, the target directory is already here
+            # We only need to run the tests, not rebuild
             if [ "${{ inputs.custom-test-command }}" != "" ]; then
-              sh -eu <<'CRAFT_CUSTOM_TESTS'
-          ${{ inputs.custom-test-command }}
-          CRAFT_CUSTOM_TESTS
+              ${{ inputs.custom-test-command }}
             else
               cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
             fi
-          fi
 
       - name: Package
         if: inputs.run-package-check
         run: |
+          # Match the official packaging logic
           if [ -f packaging/freebsd/package.sh ]; then
             CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
           else
