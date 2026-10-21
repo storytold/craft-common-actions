@@ -69,7 +69,7 @@ jobs:
 
       - name: Extract FreeBSD Sysroot
         run: |
-          wget -q https://download.freebsd.org/releases/amd64/15.0-RELEASE/base.txz
+          wget -q --max-redirect=0 https://download.freebsd.org/releases/amd64/15.0-RELEASE/base.txz
           mkdir -p freebsd-sysroot
           tar -xf base.txz -C freebsd-sysroot ./lib/ ./usr/lib/ ./usr/include/ ./libexec/ 2>/dev/null || true
           rm -f base.txz
@@ -84,7 +84,7 @@ jobs:
           rustup target add x86_64-unknown-freebsd
 
       - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
           tool-cache: false
           android: true
@@ -137,7 +137,7 @@ jobs:
 
       - name: Run Tests in FreeBSD VM
         if: inputs.skip-tests != true
-        uses: vmactions/freebsd-vm@v1
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: '15.1'
           usesh: true
