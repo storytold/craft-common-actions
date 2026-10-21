@@ -109,6 +109,23 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         self.assertEqual(first["prefix"], updated["prefix"])
         self.assertNotEqual(first["key"], updated["key"])
 
+    def test_only_the_source_hash_pins_an_exact_revision(self):
+        first = self.identity()
+        self.assertTrue(first["key"].startswith(first["prefix"]))
+        self.assertTrue(first["prefix"].startswith(first["fallback-prefix"]))
+        # A revision whose manifests moved (every release bumps a version) still
+        # falls back to the previous revision's compiled dependencies.
+        changed = self.identity(CACHE_SOURCE_HASH="different-lock-or-build-script")
+        self.assertEqual(first["fallback-prefix"], changed["fallback-prefix"])
+        self.assertNotEqual(first["key"], changed["key"])
+        # Anything that changes artifact compatibility must not fall back.
+        for env in ({"FIXTURE_COMPILER": "rustc 1.98.1"}, {"FIXTURE_ARCH": "aarch64"},
+                    {"FIXTURE_PACKAGES": "gtk3-2\nrust-1\n"}, {"FIXTURE_FREEBSD": "15.0-RELEASE"},
+                    {"CACHE_CONFIGURATION": '{"features":"heif","fonts":"def"}'},
+                    {"CACHE_PROFILE": "release"}):
+            with self.subTest(env=env):
+                self.assertNotEqual(first["fallback-prefix"], self.identity(**env)["fallback-prefix"])
+
     def test_cold_restore_is_valid_and_warm_restore_loads_only_selected_profile(self):
         self.transfer("restore")
         self.write(self.cache, "registry/src/dependency/lib.rs", "source")
@@ -224,6 +241,17 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
 
 
 class WorkflowCacheIntegrationTests(unittest.TestCase):
+    def test_restore_tries_the_exact_revision_then_a_compatible_one(self):
+        restore = next(step for step in ACTION["runs"]["steps"]
+                       if step.get("uses", "").startswith("actions/cache/restore@"))
+        keys = [line.strip() for line in restore["with"]["restore-keys"].splitlines() if line.strip()]
+        self.assertEqual(keys, ["${{ steps.identity.outputs.prefix }}",
+                                "${{ steps.identity.outputs.fallback-prefix }}"])
+        save = next(step for step in ACTION["runs"]["steps"]
+                    if step.get("uses", "").startswith("actions/cache/save@"))
+        # Saving always writes the exact-revision entry the caller passed back in.
+        self.assertEqual(save["with"]["key"], "${{ inputs.key }}")
+
     def test_host_cache_stays_outside_the_vm_shells_synced_work_tree(self):
         # vmactions syncs ~/work, not just GITHUB_WORKSPACE; RUNNER_TEMP lives
         # inside it, so placing a cache there would double-copy the artifacts.

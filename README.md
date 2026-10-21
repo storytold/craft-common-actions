@@ -163,12 +163,16 @@ data and compiled targets through `actions/freebsd-cargo-cache`. The VM starts
 first; the action fingerprints its actual Rust compiler, FreeBSD kernel/userland,
 architecture and installed package versions. Inputs (including font refs and
 feature/test options), manifests, lockfiles, build scripts, Cargo configuration,
-toolchain files and packaging scripts also partition the cache. New commits may
-restore a compatible earlier commit; toolchain/configuration/lockfile changes
-start a new cache. Build metadata changes still go through Cargo's normal
-invalidation. The test and release workflows use separate profile namespaces. The workflow-file
-pattern fingerprints the caller's configuration; changes to the shared workflow
-that need a new namespace must bump the cache action's version prefix.
+toolchain files and packaging scripts decide which cache is an exact match. When
+there is no exact match, the action falls back to the most recent cache with the
+same toolchain, configuration and profile, so a release that only bumps a version,
+or a PR that touches a manifest, still restores compiled dependencies instead of
+rebuilding them cold; Cargo's own fingerprints decide which of those artifacts
+are still valid. Toolchain, configuration and profile changes start a new cache
+without a fallback. The test and release workflows use separate profile
+namespaces. The workflow-file pattern fingerprints the caller's configuration;
+changes to the shared workflow that need a new namespace must bump the cache
+action's version prefix.
 
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and

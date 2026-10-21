@@ -48,9 +48,19 @@ runs:
         pkg info -qa | sort
         GUEST
         )
-        fingerprint=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$CACHE_SOURCE_HASH" "$CACHE_PROFILE" | sha256sum | cut -d ' ' -f 1)
-        prefix="freebsd-cargo-v2-$fingerprint-"
+        # Which artifacts may be reused depends on the guest toolchain, the
+        # build configuration and the profile. Which revision produced them
+        # only pins an exact match. Keying every entry on the source hash too
+        # left every release (the manifests carry the version) and every PR
+        # that touches a manifest with nothing to restore, so the fallback
+        # prefix below deliberately omits it and lets Cargo invalidate the
+        # stale parts. See issues #33 and #39.
+        compatible=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$CACHE_PROFILE" | sha256sum | cut -d ' ' -f 1)
+        fingerprint=$(printf '%s\n' "$compatible" "$CACHE_SOURCE_HASH" | sha256sum | cut -d ' ' -f 1)
+        fallback_prefix="freebsd-cargo-v3-$compatible-"
+        prefix="$fallback_prefix$fingerprint-"
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "fallback-prefix=$fallback_prefix" >> "$GITHUB_OUTPUT"
         echo "key=$prefix$GITHUB_SHA" >> "$GITHUB_OUTPUT"
     - name: Restore guest Cargo data on the host
       if: inputs.phase == 'restore'
@@ -59,7 +69,9 @@ runs:
       with:
         path: ~/.cache/craft-freebsd-cargo
         key: ${{ steps.identity.outputs.key }}
-        restore-keys: ${{ steps.identity.outputs.prefix }}
+        restore-keys: |
+          ${{ steps.identity.outputs.prefix }}
+          ${{ steps.identity.outputs.fallback-prefix }}
     - name: Transfer Cargo data across the VM boundary
       shell: bash
       env:
