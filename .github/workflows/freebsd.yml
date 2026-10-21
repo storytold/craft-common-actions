@@ -84,10 +84,8 @@ jobs:
           rustup target add x86_64-unknown-freebsd
 
       - name: Cross Compile Workspace (Build Only)
-        env:
-          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-          CRAFT_FONTS_REQUIRED: ${{ inputs.require-craft-fonts && '1' || '' }}
         run: |
+          set -eu
           SYSROOT_PATH="${{ github.workspace }}/freebsd-sysroot"
           
           export PKG_CONFIG_ALLOW_CROSS=1
@@ -99,13 +97,26 @@ jobs:
           export CFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
           export CXXFLAGS="--target=x86_64-unknown-freebsd --sysroot=$SYSROOT_PATH"
           
-          # 核心修改：针对目标平台设置专属的 Linker 和 RUSTFLAGS，不污染宿主机的宏编译
+          # Set target-specific linker and RUSTFLAGS
           export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_LINKER=clang
           export CARGO_TARGET_X86_64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=x86_64-unknown-freebsd -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
           
+          # Dynamically check if craft-fonts exists
+          if [ -d craft-fonts ]; then
+            export CRAFT_FONTS_DIR="$PWD/craft-fonts"
+          fi
+          
+          if [ "${{ inputs.require-craft-fonts }}" = "true" ]; then
+            if [ ! -d craft-fonts ]; then
+              echo "error: required craft-fonts checkout is missing" >&2
+              exit 1
+            fi
+            export CRAFT_FONTS_REQUIRED=1
+          fi
+          
           cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
           
-          # Compile tests but do not run them
+          # Compile tests but do not execute
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
             cargo test --workspace --locked --no-run ${{ inputs.cargo-test-extra-args }}
           fi
