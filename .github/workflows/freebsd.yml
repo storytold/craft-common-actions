@@ -59,7 +59,7 @@ jobs:
     timeout-minutes: 60
     
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
@@ -93,6 +93,16 @@ jobs:
           large-packages: true
           docker-images: false
           swap-storage: true
+
+      # Host (proc-macros, build scripts) and FreeBSD target artifacts share this cache.
+      # The prefix encodes the sysroot release so a base.txz bump invalidates it.
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          prefix-key: v1-freebsd-15.0-x86_64
+          shared-key: cross-compile
+          workspaces: . -> target
+          cache-on-failure: true
 
       - name: Cross Compile Workspace (Build Only)
         run: |
