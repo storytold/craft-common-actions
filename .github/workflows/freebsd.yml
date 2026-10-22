@@ -56,7 +56,7 @@ jobs:
   freebsd:
     name: FreeBSD ${{ matrix.arch }} (Cross-Compile)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -181,8 +181,6 @@ jobs:
             if [ "${{ inputs.custom-test-command }}" != "" ]; then
               ${{ inputs.custom-test-command }}
             else
-              # Limit concurrency in the VM to prevent OOM during test compilation
-              export CARGO_BUILD_JOBS=2
               cargo test --release --workspace --target=${{ matrix.arch }}-unknown-freebsd --locked ${{ inputs.cargo-test-extra-args }}
             fi
 
