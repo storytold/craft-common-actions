@@ -54,13 +54,14 @@ permissions:
 
 jobs:
   freebsd:
-    name: FreeBSD ${{ matrix.arch }} (Cross-Compile)
+    name: FreeBSD ${{ matrix.arch }} ${{ matrix.profile }} (Cross-Compile)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
         arch: [x86_64, aarch64]
+        profile: [debug, release]
     
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -114,7 +115,7 @@ jobs:
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
-          prefix-key: v1-freebsd-15.0-${{ matrix.arch }}-nocache
+          prefix-key: v1-freebsd-15.0-${{ matrix.arch }}-${{ matrix.profile }}
           shared-key: cross-compile
           workspaces: . -> target
           cache-on-failure: true
@@ -167,10 +168,14 @@ jobs:
           # Build main workspace
           $CARGO_CMD build --release --workspace --target=$TARGET_TRIPLE --locked $BUILD_STD_ARGS ${{ inputs.cargo-build-extra-args }}
           
-          # Precompile tests in debug mode to drastically reduce link time and memory usage
+          # Precompile tests using matrix.profile to test both debug and release parallelly
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
             export CARGO_BUILD_JOBS=3
-            $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+            if [ "${{ matrix.profile }}" = "release" ]; then
+              $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+            else
+              $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+            fi
           fi
 
       - name: Run Tests in FreeBSD VM
@@ -191,7 +196,7 @@ jobs:
             else
               # Execute precompiled test binaries directly to avoid recompilation in VM
               export PATH="$HOME/.cargo/bin:$PATH"
-              for test_bin in target/${{ matrix.arch }}-unknown-freebsd/debug/deps/*; do
+              for test_bin in target/${{ matrix.arch }}-unknown-freebsd/${{ matrix.profile }}/deps/*; do
                 if [ -x "$test_bin" ] && [ -f "$test_bin" ]; then
                   case "$test_bin" in
                     *.so|*.rlib|*.rmeta|*.d) ;;
