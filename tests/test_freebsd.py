@@ -22,12 +22,14 @@ WORKFLOW = Path(os.environ.get("FREEBSD_WORKFLOW", ROOT / ".github/workflows/fre
 DATA = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
 STEPS = DATA["jobs"]["freebsd"]["steps"]
 BUILD_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Build and test")
+CROSS_STEP = next(step for step in STEPS if step.get("name") == "Set up the aarch64 cross toolchain")
 PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Build and validate the FreeBSD package")
 
 
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
-               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False):
+               skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False,
+               cross_env=False):
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
             "custom-test-command": command,
@@ -61,6 +63,7 @@ class FreeBSDRunTests(unittest.TestCase):
             cargo.write_text("""#!/bin/sh
 set -eu
 printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$*" >> "$PWD/cargo.log"
+printf '%s\\n' "${CARGO_BUILD_TARGET-}" >> "$PWD/target.log"
 if [ "$1" = build ]; then
   [ "$FAIL_BUILD" = false ] || exit 31
 else
@@ -105,6 +108,9 @@ fi
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
                        TARGET_ARCH=arch)
+            if cross_env:
+                (work / "guest/craft-cross").mkdir(parents=True)
+                (work / "guest/craft-cross/env").write_text("export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n")
             for profile in ("debug", "release"):
                 path = work / "guest/craft-target" / profile
                 path.mkdir(parents=True)
@@ -116,9 +122,10 @@ fi
                 result = subprocess.run(["/bin/sh", "-c", render(PACKAGE_TEMPLATE)], cwd=work, env=env.copy(),
                                         text=True, capture_output=True, timeout=15)
             log = (work / "cargo.log").read_text().splitlines() if (work / "cargo.log").exists() else []
+            targets = (work / "target.log").read_text().splitlines() if (work / "target.log").exists() else []
             package_log = (work / "package.log").read_text().splitlines() if (work / "package.log").exists() else []
             remaining = [p.parent.name for p in (work / "guest/craft-target").glob("*/partial")]
-            outcome = dict(package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
+            outcome = dict(targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
                            log=log, output=result.stdout + result.stderr)
             return outcome
 
@@ -230,12 +237,48 @@ fi
                     expected = json.loads(override) if override else (["x86_64"] if event.startswith("pull_request") else ["x86_64", "aarch64"])
                     self.assertEqual(result, expected)
 
-    def test_packaging_works_for_all_matrix_architectures(self):
-        for arch in ("x86_64", "aarch64"):
-            with self.subTest(arch=arch):
-                result = self.run_vm(package="multiple", arch=arch)
+    def test_packaging_works_for_x86_64(self):
+        result = self.run_vm(package="multiple")
+        self.assertEqual(result["code"], 0, result)
+        self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
+
+    def test_packaging_is_skipped_for_cross_compiled_aarch64(self):
+        # package.sh builds for the guest's own architecture, which is always x86_64.
+        for name in ("Checkpoint tests and restore the release profile", "Build and validate the FreeBSD package"):
+            with self.subTest(step=name):
+                step = next(step for step in STEPS if step.get("name") == name)
+                self.assertEqual(step["if"], "inputs.run-package-check && matrix.arch != 'aarch64'")
+
+    def test_vm_is_always_x86_64(self):
+        # An emulated aarch64 guest compiles about 23 times slower than the KVM-accelerated x86_64 one (#33).
+        vm = next(step["with"] for step in STEPS if "with" in step and "prepare" in step["with"])
+        self.assertNotIn("arch", vm)
+
+    def test_aarch64_builds_for_the_cross_target_and_runs_no_tests(self):
+        for command in ("", "cargo test --lib\ncargo test --doc"):
+            with self.subTest(command=command):
+                result = self.run_vm(command=command, arch="aarch64", cross_env=True, package_check=False)
                 self.assertEqual(result["code"], 0, result)
-                self.assertEqual(result["output"].count("stage/bin/app"), 2, result)
+                self.assertEqual([line.split("|")[0] for line in result["log"]], ["build"], result)
+                self.assertEqual(result["targets"], ["aarch64-unknown-freebsd"], result)
+                self.assertIn("tests built, not run", result["output"], result)
+
+    def test_x86_64_builds_natively_and_runs_tests(self):
+        result = self.run_vm(package_check=False)
+        self.assertEqual(result["code"], 0, result)
+        self.assertEqual([line.split("|")[0] for line in result["log"]], ["build", "test"], result)
+        self.assertEqual(result["targets"], ["", ""], result)
+
+    def test_cross_toolchain_is_only_set_up_for_aarch64(self):
+        self.assertEqual(CROSS_STEP["if"], "matrix.arch == 'aarch64'")
+        self.assertEqual(CROSS_STEP["shell"], "freebsd {0}")
+        script = CROSS_STEP["run"]
+        # The copied standard library must match the host compiler exactly.
+        self.assertIn('if [ "$host" != "$cross" ]; then', script)
+        self.assertIn("sha256 -q", script)
+        self.assertIn("CARGO_BUILD_TARGET=$target", script)
+        result = subprocess.run(["/bin/sh", "-n", "-c", script], text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result)
 
     def test_release_workflow_freebsd_matrix(self):
         release_path = ROOT / ".github/workflows/release.yml"
@@ -249,7 +292,8 @@ fi
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         for name, job in (("freebsd.yml", DATA["jobs"]["freebsd"]), ("release.yml", release["jobs"]["freebsd"])):
             vm = dict(next(step["with"] for step in job["steps"] if "with" in step and "prepare" in step["with"]))
-            vm["run"] = next(step["run"] for step in job["steps"] if step.get("shell") == "freebsd {0}")
+            vm["run"] = next(step["run"] for step in job["steps"]
+                             if step.get("shell") == "freebsd {0}" and ".cargo/env" in step["run"])
             yield name, vm
 
     def test_aarch64_installs_rust_from_packages_and_x86_64_uses_rustup(self):
@@ -259,13 +303,19 @@ fi
                                         ("x86_64", "sh.rustup.rs", "pkg-install -y rust")):
                 with self.subTest(workflow=name, arch=arch):
                     # Print the commands instead of installing anything.
-                    script = (vm["prepare"].replace("${{ matrix.arch }}", arch)
-                              .replace("pkg install", "echo pkg-install").replace("curl -", "echo curl -")
-                              .replace("| sh -s --", "#"))
-                    result = subprocess.run(["/bin/sh", "-eu", "-c", script], text=True, capture_output=True, timeout=15)
+                    with tempfile.TemporaryDirectory() as etc:
+                        script = (vm["prepare"].replace("${{ matrix.arch }}", arch)
+                                  .replace("pkg install", "echo pkg-install").replace("pkg update", "echo pkg-update")
+                                  .replace("curl -", "echo curl -").replace("| sh -s --", "#")
+                                  .replace("/usr/local/etc/pkg/repos", etc))
+                        result = subprocess.run(["/bin/sh", "-eu", "-c", script], text=True, capture_output=True, timeout=15)
+                        repos = sorted(p.name for p in Path(etc).iterdir())
                     self.assertEqual(result.returncode, 0, result)
                     self.assertIn(chosen, result.stdout, result)
                     self.assertNotIn(other, result.stdout, result)
+                    # Only the cross-compiling aarch64 leg pins the quarterly package branch.
+                    pinned = name == "freebsd.yml" and arch == "aarch64"
+                    self.assertEqual(repos, ["FreeBSD.conf"] if pinned else [], result)
 
     def test_run_step_works_without_a_rustup_environment(self):
         # The lang/rust package writes no $HOME/.cargo/env, so sourcing it must be optional.

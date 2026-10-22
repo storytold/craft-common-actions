@@ -1,0 +1,26 @@
+name: SonarCloud Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarcloud-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sonarcloud:
+    # SonarCloud needs the SONAR_TOKEN secret, which GitHub does not expose to
+    # pull requests from forks. Skip the scan for fork PRs so they report a
+    # neutral "skipped" status instead of a hard failure; it still runs on pushes
+    # to main and on same-repo pull requests.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/sonarcloud.yml
+    secrets: inherit

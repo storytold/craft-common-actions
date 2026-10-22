@@ -1,0 +1,48 @@
+name: SonarCloud
+
+on:
+  workflow_call:
+    inputs:
+      project-key:
+        description: "SonarCloud project key (defaults to storytold_<repo>)"
+        type: string
+        required: false
+        default: ""
+    secrets:
+      SONAR_TOKEN:
+        description: "SonarCloud analysis token"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sonarcloud:
+    name: SonarCloud Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check for SonarCloud token
+        id: token
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [ -n "$SONAR_TOKEN" ]; then
+            echo "available=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "available=false" >>"$GITHUB_OUTPUT"
+            echo "::notice::SONAR_TOKEN is not available (e.g. a fork pull request); skipping SonarCloud scan."
+          fi
+      - name: SonarCloud Scan
+        if: steps.token.outputs.available == 'true'
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: https://sonarcloud.io
+        with:
+          args: >
+            -Dsonar.projectKey=${{ inputs.project-key != '' && inputs.project-key || format('storytold_{0}', github.event.repository.name) }}
+            -Dsonar.organization=storytold

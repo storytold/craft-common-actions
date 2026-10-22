@@ -1,5 +1,7 @@
 # artcraft-common-actions
 
+<a href="https://sonarcloud.io/project/overview?id=storytold_craft-common-actions"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+
 Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCraft desktop and web applications.
 
 This repository unifies and eliminates duplicate CI/CD and release workflow definitions across the ArtCraft ecosystem into DRY, reusable GitHub Actions.
