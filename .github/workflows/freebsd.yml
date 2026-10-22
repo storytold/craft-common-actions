@@ -93,6 +93,43 @@ jobs:
           ln -sf ../usr/lib/libcxxrt.so.1 freebsd-sysroot/lib/libcxxrt.so.1 2>/dev/null || true
           ln -sf ../usr/lib/libc++.so.1 freebsd-sysroot/lib/libc++.so.1 2>/dev/null || true
 
+          # Securely fetch and extract third-party FreeBSD packages (ALSA, Wayland, etc.)
+          # Versions are resolved dynamically from the official MANIFEST, and SHA256 is verified to prevent supply chain attacks.
+          if [ "${{ matrix.arch }}" = "x86_64" ]; then
+            PKG_ABI="FreeBSD:15:amd64"
+          else
+            PKG_ABI="FreeBSD:15:aarch64"
+          fi
+          PKG_BASE_URL="https://pkg.freebsd.org/${PKG_ABI}/quarterly"
+          PKG_NAMES="alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2"
+          
+          echo "Fetching MANIFEST for $PKG_ABI..."
+          curl -sL "${PKG_BASE_URL}/MANIFEST" -o MANIFEST
+          
+          for name in $PKG_NAMES; do
+            pkg_info=$(grep -E "^${name}-[0-9]" MANIFEST | head -n 1)
+            if [ -z "$pkg_info" ]; then
+              echo "Warning: $name not found in MANIFEST"
+              continue
+            fi
+            pkg_file=$(echo "$pkg_info" | awk '{print $1}')
+            expected_hash=$(echo "$pkg_info" | awk '{print $5}' | sed 's/sha256://')
+            
+            echo "Downloading $pkg_file..."
+            curl -fsSL "${PKG_BASE_URL}/All/${pkg_file}" -o pkg.tmp
+            
+            actual_hash=$(sha256sum pkg.tmp | awk '{print $1}')
+            if [ "$actual_hash" != "$expected_hash" ]; then
+              echo "Error: SHA256 mismatch for $pkg_file. Potential supply chain attack!"
+              rm -f pkg.tmp MANIFEST
+              exit 1
+            fi
+            
+            tar -xf pkg.tmp -C freebsd-sysroot 2>/dev/null || true
+            rm -f pkg.tmp
+          done
+          rm -f MANIFEST
+
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
         with:
@@ -134,6 +171,8 @@ jobs:
           
           export PKG_CONFIG_ALLOW_CROSS=1
           export PKG_CONFIG_SYSROOT_DIR="$SYSROOT_PATH"
+          export PKG_CONFIG_LIBDIR="$SYSROOT_PATH/usr/local/libdata/pkgconfig:$SYSROOT_PATH/usr/libdata/pkgconfig:$SYSROOT_PATH/usr/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$SYSROOT_PATH/usr/local/libdata/pkgconfig:$SYSROOT_PATH/usr/libdata/pkgconfig:$SYSROOT_PATH/usr/lib/pkgconfig"
           
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
             export CC_aarch64_unknown_freebsd=clang
