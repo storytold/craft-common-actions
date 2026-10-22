@@ -158,9 +158,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang lld pkg-config
           if [ "${{ matrix.arch }}" = "aarch64" ]; then
-            rustup toolchain install nightly
-            rustup component add rust-src --toolchain nightly
-            rustup target add aarch64-unknown-freebsd --toolchain nightly
+            rustup target add aarch64-unknown-freebsd
           else
             rustup target add x86_64-unknown-freebsd
           fi
@@ -191,8 +189,8 @@ jobs:
             export CXX_aarch64_unknown_freebsd=clang++
             export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=clang
             export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_RUSTFLAGS="-Clink-arg=--target=$TARGET_TRIPLE -Clink-arg=--sysroot=$SYSROOT_PATH -Clink-arg=-fuse-ld=lld -Clink-arg=-L$SYSROOT_PATH/lib -Clink-arg=-L$SYSROOT_PATH/usr/lib"
-            export BUILD_STD_ARGS="-Zbuild-std=std,panic_abort"
-            export CARGO_CMD="cargo +nightly"
+            export BUILD_STD_ARGS=""
+            export CARGO_CMD="cargo"
           else
             export CC_x86_64_unknown_freebsd=clang
             export CXX_x86_64_unknown_freebsd=clang++
