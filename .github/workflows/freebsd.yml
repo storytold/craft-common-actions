@@ -140,7 +140,7 @@ jobs:
               ABI="FreeBSD:15:aarch64"
             fi
             # Fetch packages and all dependencies
-            env ABI=$ABI pkg fetch -y -d alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2
+            env ABI=$ABI pkg fetch -y -d alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 || { echo 'Error: pkg fetch failed'; exit 1; }
             mkdir -p $GITHUB_WORKSPACE/packages
             cp /var/cache/pkg/*.pkg $GITHUB_WORKSPACE/packages/
 

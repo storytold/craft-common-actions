@@ -24,6 +24,7 @@ STEPS = DATA["jobs"]["freebsd"]["steps"]
 BUILD_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Cross Compile Workspace (Build Only)")
 CROSS_STEP = next(step for step in STEPS if step.get("name") == "Cross Compile Workspace (Build Only)")
 PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Package")
+TEST_STEP = next(step for step in STEPS if step.get("name") == "Run Tests in FreeBSD VM")
 
 
 class FreeBSDRunTests(unittest.TestCase):
