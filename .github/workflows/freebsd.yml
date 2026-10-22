@@ -164,15 +164,7 @@ jobs:
           export CARGO_PROFILE_DEV_DEBUG=0
           export CARGO_PROFILE_TEST_DEBUG=0
           
-          # Limit concurrent jobs to prevent OOM on 2-core runners when linking
-          export CARGO_BUILD_JOBS=1
-          
           $CARGO_CMD build --release --workspace --target=$TARGET_TRIPLE --locked $BUILD_STD_ARGS ${{ inputs.cargo-build-extra-args }}
-          
-          # Compile tests but do not execute
-          if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
-          fi
 
       - name: Run Tests in FreeBSD VM
         if: matrix.arch == 'x86_64' && inputs.skip-tests != true
@@ -189,6 +181,8 @@ jobs:
             if [ "${{ inputs.custom-test-command }}" != "" ]; then
               ${{ inputs.custom-test-command }}
             else
+              # Limit concurrency in the VM to prevent OOM during test compilation
+              export CARGO_BUILD_JOBS=2
               cargo test --release --workspace --target=${{ matrix.arch }}-unknown-freebsd --locked ${{ inputs.cargo-test-extra-args }}
             fi
 
