@@ -56,7 +56,7 @@ jobs:
   freebsd:
     name: FreeBSD ${{ matrix.arch }} (Cross-Compile)
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -167,10 +167,11 @@ jobs:
           $CARGO_CMD build --release --workspace --target=$TARGET_TRIPLE --locked $BUILD_STD_ARGS ${{ inputs.cargo-build-extra-args }}
 
       - name: Run Tests in FreeBSD VM
-        if: matrix.arch == 'x86_64' && inputs.skip-tests != true
+        if: inputs.skip-tests != true
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: '15.1'
+          arch: ${{ matrix.arch }}
           usesh: true
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu rust
