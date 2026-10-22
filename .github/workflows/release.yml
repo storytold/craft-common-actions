@@ -635,6 +635,7 @@ jobs:
         # takes over 5 hours for most apps. See storytold/craft-common-actions#39.
         arch: [x86_64]
     env:
+      APP_NAME: ${{ inputs.app-name }}
       CARGO_HOME: /var/tmp/craft-cargo
       CARGO_TARGET_DIR: /var/tmp/craft-target
       CARGO_BUILD_JOBS: 4
@@ -703,7 +704,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION CADCRAFT_VERSION CADCRAFT_BUILD_DATE CADCRAFT_BUILD_SHA ARTCRAFT_LAUNCHER_VERSION ARTCRAFT_LAUNCHER_BUILD_DATE ARTCRAFT_LAUNCHER_BUILD_SHA DECKCRAFT_VERSION DECKCRAFT_BUILD_DATE DECKCRAFT_BUILD_SHA DESIGNCRAFT_VERSION DESIGNCRAFT_BUILD_DATE DESIGNCRAFT_BUILD_SHA EFFECTCRAFT_VERSION EFFECTCRAFT_BUILD_DATE EFFECTCRAFT_BUILD_SHA FILMCRAFT_VERSION FILMCRAFT_BUILD_DATE FILMCRAFT_BUILD_SHA GRIDCRAFT_VERSION GRIDCRAFT_BUILD_DATE GRIDCRAFT_BUILD_SHA LIGHTCRAFT_VERSION LIGHTCRAFT_BUILD_DATE LIGHTCRAFT_BUILD_SHA PDFCRAFT_VERSION PDFCRAFT_BUILD_DATE PDFCRAFT_BUILD_SHA PHOTOCRAFT_VERSION PHOTOCRAFT_BUILD_DATE PHOTOCRAFT_BUILD_SHA SOUNDCRAFT_VERSION SOUNDCRAFT_BUILD_DATE SOUNDCRAFT_BUILD_SHA VECTORCRAFT_VERSION VECTORCRAFT_BUILD_DATE VECTORCRAFT_BUILD_SHA WORDCRAFT_VERSION WORDCRAFT_BUILD_DATE WORDCRAFT_BUILD_SHA FIGCRAFT_VERSION FIGCRAFT_BUILD_DATE FIGCRAFT_BUILD_SHA"
+          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION CADCRAFT_VERSION CADCRAFT_BUILD_DATE CADCRAFT_BUILD_SHA ARTCRAFT_LAUNCHER_VERSION ARTCRAFT_LAUNCHER_BUILD_DATE ARTCRAFT_LAUNCHER_BUILD_SHA DECKCRAFT_VERSION DECKCRAFT_BUILD_DATE DECKCRAFT_BUILD_SHA DESIGNCRAFT_VERSION DESIGNCRAFT_BUILD_DATE DESIGNCRAFT_BUILD_SHA EFFECTCRAFT_VERSION EFFECTCRAFT_BUILD_DATE EFFECTCRAFT_BUILD_SHA FILMCRAFT_VERSION FILMCRAFT_BUILD_DATE FILMCRAFT_BUILD_SHA GRIDCRAFT_VERSION GRIDCRAFT_BUILD_DATE GRIDCRAFT_BUILD_SHA LIGHTCRAFT_VERSION LIGHTCRAFT_BUILD_DATE LIGHTCRAFT_BUILD_SHA PDFCRAFT_VERSION PDFCRAFT_BUILD_DATE PDFCRAFT_BUILD_SHA PHOTOCRAFT_VERSION PHOTOCRAFT_BUILD_DATE PHOTOCRAFT_BUILD_SHA SOUNDCRAFT_VERSION SOUNDCRAFT_BUILD_DATE SOUNDCRAFT_BUILD_SHA VECTORCRAFT_VERSION VECTORCRAFT_BUILD_DATE VECTORCRAFT_BUILD_SHA WORDCRAFT_VERSION WORDCRAFT_BUILD_DATE WORDCRAFT_BUILD_SHA FIGCRAFT_VERSION FIGCRAFT_BUILD_DATE FIGCRAFT_BUILD_SHA"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
@@ -740,18 +741,22 @@ jobs:
           if [ -f packaging/freebsd/package.sh ]; then
             bash packaging/freebsd/package.sh
           else
-            cargo build --release --locked -p ${{ inputs.app-name }} $(cargo metadata --format-version 1 --no-deps | grep -q '"${{ inputs.app-name }}-cli"' && echo "-p ${{ inputs.app-name }}-cli" || true)
-            name="${{ inputs.app-name }}-$VERSION-freebsd-${{ matrix.arch }}"
+            set -- -p "$APP_NAME"
+            if cargo metadata --format-version 1 --no-deps | python3 -c 'import json, sys; sys.exit(not any(p["name"] == sys.argv[1] for p in json.load(sys.stdin)["packages"]))' "$APP_NAME-cli"; then
+              set -- "$@" -p "$APP_NAME-cli"
+            fi
+            cargo build --release --locked "$@"
+            name="$APP_NAME-$VERSION-freebsd-${{ matrix.arch }}"
             mkdir -p "dist/release/$name"
-            cp target/release/${{ inputs.app-name }} "dist/release/$name/" 2>/dev/null || cp /var/tmp/craft-target/release/${{ inputs.app-name }} "dist/release/$name/"
-            if [ -f target/release/${{ inputs.app-name }}-cli ]; then
-              cp target/release/${{ inputs.app-name }}-cli "dist/release/$name/"
-            elif [ -f /var/tmp/craft-target/release/${{ inputs.app-name }}-cli ]; then
-              cp /var/tmp/craft-target/release/${{ inputs.app-name }}-cli "dist/release/$name/"
+            cp "target/release/$APP_NAME" "dist/release/$name/" 2>/dev/null || cp "/var/tmp/craft-target/release/$APP_NAME" "dist/release/$name/"
+            if [ -f "target/release/$APP_NAME-cli" ]; then
+              cp "target/release/$APP_NAME-cli" "dist/release/$name/"
+            elif [ -f "/var/tmp/craft-target/release/$APP_NAME-cli" ]; then
+              cp "/var/tmp/craft-target/release/$APP_NAME-cli" "dist/release/$name/"
             fi
             cp README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md "dist/release/$name/" 2>/dev/null || true
-            if [ -f packaging/linux/ai.storyteller.${{ inputs.app-name }}.desktop ]; then
-              cp packaging/linux/ai.storyteller.${{ inputs.app-name }}.desktop "dist/release/$name/"
+            if [ -f "packaging/linux/ai.storyteller.$APP_NAME.desktop" ]; then
+              cp "packaging/linux/ai.storyteller.$APP_NAME.desktop" "dist/release/$name/"
             fi
             mkdir -p "dist/release/$name/icons"
             cp -R assets/app-icon/hicolor "dist/release/$name/icons/" 2>/dev/null || true
@@ -1013,8 +1018,10 @@ jobs:
         run: packaging/server/package.sh
       - name: Check the archive
         shell: bash
+        env:
+          APP_NAME: ${{ inputs.app-name }}
         run: |
-          tar -tzf "dist/release/${{ inputs.app-name }}-server-$VERSION-linux-${{ matrix.arch }}.tar.gz" || true
+          tar -tzf "dist/release/$APP_NAME-server-$VERSION-linux-${{ matrix.arch }}.tar.gz" || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-server-linux-${{ matrix.arch }}
