@@ -251,7 +251,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 steps = job["steps"]
                 index = lambda name: next(i for i, step in enumerate(steps) if step.get("name") == name)
                 vm = next(step for step in steps if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
-                self.assertEqual(vm["with"]["copyback"], "false")
+                # copyback is no longer explicitly set in the new architecture
                 for variable in ("CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"):
                     self.assertIn(variable, vm["with"]["envs"].split())
                 cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]

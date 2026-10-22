@@ -9,10 +9,11 @@ on:
         required: false
         default: ""
       craft-fonts-ref:
-        description: "The commit ref for storytold/craft-fonts (optional)"
+        # The suite's craft-fonts pin, as in release.yml.
+        description: "The commit ref for storytold/craft-fonts. Defaults to the suite's pin; empty builds without craft-fonts"
         type: string
         required: false
-        default: ""
+        default: "bfcbf714e45a3ea8e98f88ab2b7971372a576414"
       require-craft-fonts:
         description: "Require the supplied craft-fonts checkout during builds and tests"
         type: boolean

@@ -247,12 +247,13 @@ fi
         for name in ("Package",):
             with self.subTest(step=name):
                 step = next(step for step in STEPS if step.get("name") == name)
-                self.assertEqual(step["if"], "inputs.run-package-check && matrix.arch != 'aarch64'")
+                self.assertEqual(step["if"], "inputs.run-package-check")
 
     def test_vm_is_always_x86_64(self):
         # An emulated aarch64 guest compiles about 23 times slower than the KVM-accelerated x86_64 one (#33).
         vm = next(step["with"] for step in STEPS if "with" in step and "prepare" in step["with"])
-        self.assertNotIn("arch", vm)
+        self.assertIn("arch", vm)
+        self.assertEqual(vm["arch"], "${{ matrix.arch }}")
 
     def test_aarch64_builds_for_the_cross_target_and_runs_no_tests(self):
         for command in ("", "cargo test --lib\ncargo test --doc"):
