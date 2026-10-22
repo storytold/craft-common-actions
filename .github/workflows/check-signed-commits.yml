@@ -1,0 +1,33 @@
+# Reusable workflow: fail a pull request that contains commits GitHub does not mark Verified.
+# Usage in a repo:
+#   jobs:
+#     signed:
+#       uses: storytold/craft-common-actions/.github/workflows/check-signed-commits.yml@<sha>
+name: check-signed-commits
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require Verified commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          bad=$(gh api --paginate "repos/$REPO/pulls/$PR/commits" \
+            --jq '.[] | select(.commit.verification.verified != true)
+                  | "\(.sha[0:8]) \(.commit.verification.reason)"')
+          if [ -n "$bad" ]; then
+            echo "Unverified commits:"; echo "$bad"
+            echo "See docs/commit-signing.md in storytold/.github."
+            exit 1
+          fi
