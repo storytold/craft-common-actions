@@ -236,7 +236,7 @@ jobs:
             else
               $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }} > test-output.json
             fi
-            jq -r 'select(.executable != null) | .executable' test-output.json > test-binaries.txt
+            jq -r 'select(.reason == "compiler-artifact" and .executable != null and .profile.test == true) | .executable' test-output.json > test-binaries.txt
           fi
 
       - name: Run Tests in FreeBSD VM
