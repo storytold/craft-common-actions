@@ -60,8 +60,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64]
-        profile: [debug]
+        arch: [x86_64, aarch64]
+        profile: [debug, release]
     
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
