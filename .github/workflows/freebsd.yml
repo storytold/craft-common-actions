@@ -48,6 +48,11 @@ on:
         type: string
         required: false
         default: ""
+      app-name:
+        description: "App name for packaging"
+        type: string
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -60,7 +65,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        arch: ${{ fromJSON(inputs.architectures != '' && inputs.architectures || ((github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && '["x86_64"]' || '["x86_64","aarch64"]')) }}
         profile: [debug]
     
     steps:
@@ -146,6 +151,11 @@ jobs:
             export CARGO_CMD="cargo"
           fi
           
+          # Scope CFLAGS to the target triple so host-side C builds (e.g., build scripts) aren't polluted
+          TRIPLE_UPPER=$(echo $TARGET_TRIPLE | tr 'a-z-' 'A-Z_')
+          export CFLAGS_$TRIPLE_UPPER="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
+          export CXXFLAGS_$TRIPLE_UPPER="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
+          # Set generic ones for C dependencies that don't respect suffixed variables
           export CFLAGS="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
           export CXXFLAGS="--target=$TARGET_TRIPLE --sysroot=$SYSROOT_PATH"
           
@@ -183,7 +193,7 @@ jobs:
         if: inputs.skip-tests != true
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
-          release: '15.1'
+          release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
           arch: ${{ matrix.arch }}
           usesh: true
           prepare: |
