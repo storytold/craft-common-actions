@@ -298,6 +298,18 @@ fi
         names = [step.get("name") for step in steps]
         self.assertLess(names.index(CROSS_STEP["name"]), names.index("Build and package"))
 
+    def test_release_workflow_rejects_unsupported_architectures_before_the_vm(self):
+        release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        steps = release["jobs"]["freebsd"]["steps"]
+        check = steps[0]
+        self.assertEqual(check["name"], "Check the FreeBSD architecture")
+        self.assertEqual(check["env"]["ARCH"], "${{ matrix.arch }}")
+        for arch, code in (("x86_64", 0), ("aarch64", 0), ("riscv64", 1), ("amd64", 1), ("", 1)):
+            with self.subTest(arch=arch):
+                result = subprocess.run(["bash", "-e", "-c", check["run"]], env={**os.environ, "ARCH": arch},
+                                        text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, code, result)
+
     def vm_steps(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         for name, job in (("freebsd.yml", DATA["jobs"]["freebsd"]), ("release.yml", release["jobs"]["freebsd"])):

@@ -694,6 +694,19 @@ jobs:
       FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Check the FreeBSD architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # The guest is always x86_64 and only aarch64 is cross-compiled: any other value
+          # would build x86_64 binaries and package them under its own name.
+          case "$ARCH" in
+            x86_64 | aarch64) ;;
+            *)
+              echo "::error::unsupported FreeBSD architecture '$ARCH' in freebsd-architectures; use x86_64 or aarch64"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
