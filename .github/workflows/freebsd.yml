@@ -109,8 +109,9 @@ jobs:
           for name in $PKG_NAMES; do
             pkg_info=$(grep -E "^${name}-[0-9]" MANIFEST | head -n 1)
             if [ -z "$pkg_info" ]; then
-              echo "Warning: $name not found in MANIFEST"
-              continue
+              echo "Error: $name not found in MANIFEST"
+              rm -f MANIFEST
+              exit 1
             fi
             pkg_file=$(echo "$pkg_info" | awk '{print $1}')
             expected_hash=$(echo "$pkg_info" | awk '{print $5}' | sed 's/sha256://')
@@ -125,7 +126,7 @@ jobs:
               exit 1
             fi
             
-            tar -xf pkg.tmp -C freebsd-sysroot 2>/dev/null || true
+            tar -xf pkg.tmp -C freebsd-sysroot || { echo "Error extracting $pkg_file"; rm -f pkg.tmp MANIFEST; exit 1; }
             rm -f pkg.tmp
           done
           rm -f MANIFEST

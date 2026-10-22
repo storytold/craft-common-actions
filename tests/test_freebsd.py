@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = Path(os.environ.get("FREEBSD_WORKFLOW", ROOT / ".github/workflows/freebsd.yml"))
 DATA = yaml.load(WORKFLOW.read_text(), Loader=yaml.BaseLoader)
 STEPS = DATA["jobs"]["freebsd"]["steps"]
-BUILD_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Build and test")
-CROSS_STEP = next(step for step in STEPS if step.get("name") == "Set up the aarch64 cross toolchain")
-PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Build and validate the FreeBSD package")
+BUILD_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Cross Compile Workspace (Build Only)")
+CROSS_STEP = next(step for step in STEPS if step.get("name") == "Cross Compile Workspace (Build Only)")
+PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Package")
 
 
 class FreeBSDRunTests(unittest.TestCase):
@@ -244,7 +244,7 @@ fi
 
     def test_packaging_is_skipped_for_cross_compiled_aarch64(self):
         # package.sh builds for the guest's own architecture, which is always x86_64.
-        for name in ("Checkpoint tests and restore the release profile", "Build and validate the FreeBSD package"):
+        for name in ("Package",):
             with self.subTest(step=name):
                 step = next(step for step in STEPS if step.get("name") == name)
                 self.assertEqual(step["if"], "inputs.run-package-check && matrix.arch != 'aarch64'")
