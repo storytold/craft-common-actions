@@ -79,7 +79,8 @@ jobs:
           else
             URL="https://download.freebsd.org/releases/arm64/aarch64/15.0-RELEASE/base.txz"
           fi
-          wget -q --max-redirect=0 "$URL"
+          echo "Downloading sysroot from $URL..."
+          curl -fL --retry 3 --connect-timeout 30 --max-time 600 -o base.txz "$URL"
           mkdir -p freebsd-sysroot
           tar -xf base.txz -C freebsd-sysroot ./lib/ ./usr/lib/ ./usr/include/ ./libexec/ 2>/dev/null || true
           rm -f base.txz
