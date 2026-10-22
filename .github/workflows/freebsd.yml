@@ -78,7 +78,8 @@ jobs:
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
-          arch: ${{ matrix.arch }}
+          # Always an x86_64 guest, which KVM accelerates: aarch64 is cross-compiled in it,
+          # because an emulated aarch64 guest compiles about 23 times slower (#33).
           usesh: true
           cpu: 4
           mem: 12288
@@ -87,14 +88,75 @@ jobs:
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
+            if [ "${{ matrix.arch }}" = aarch64 ]; then
+              # The host compiler and the aarch64 standard library come from the amd64 and
+              # aarch64 lang/rust packages, which must be the same build. "latest" can build
+              # them days apart; the quarterly branch keeps them in step.
+              mkdir -p /usr/local/etc/pkg/repos
+              printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
+              pkg update -f -q
+            fi
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
             # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
-            # for it ("installer for platform not found"), so use FreeBSD's lang/rust package.
+            # or standard library for it ("installer for platform not found"), so use
+            # FreeBSD's lang/rust package.
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               pkg install -y rust
             else
               curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
             fi
+      - name: Set up the aarch64 cross toolchain
+        if: matrix.arch == 'aarch64'
+        shell: freebsd {0}
+        run: |
+          set -eu
+          # Stable Rust, no -Zbuild-std: the aarch64 standard library is copied from FreeBSD's
+          # aarch64 lang/rust package, and C code links with base clang and lld against an
+          # arm64 sysroot (base.txz plus the libraries the prepare step installs).
+          target=aarch64-unknown-freebsd
+          X=/var/tmp/craft-cross
+          S=$X/sysroot
+          mkdir -p "$X/db" "$X/cache" "$S"
+          release=$(freebsd-version -u | sed 's/-p[0-9]*$//')
+          P="-o ABI=FreeBSD:${release%%.*}:aarch64 -o OSVERSION=$(uname -U) -o PKG_DBDIR=$X/db -o PKG_CACHEDIR=$X/cache -o IGNORE_OSVERSION=yes"
+          pkg $P update -q
+          host=$(pkg query %v rust)
+          cross=$(pkg $P rquery %v rust)
+          if [ "$host" != "$cross" ]; then
+            echo "error: lang/rust is $host for amd64 but $cross for aarch64; the standard library must match the compiler" >&2
+            exit 1
+          fi
+          pkg $P fetch -y -q rust
+          # pkg links each name-version.pkg to its hashed file.
+          tar -xf "$X/cache/rust-$cross.pkg" -C "$X" --include "*usr/local/lib/rustlib/$target/*"
+          cp -R "$X/usr/local/lib/rustlib/$target" /usr/local/lib/rustlib/
+          base=https://download.freebsd.org/releases/arm64/aarch64/$release
+          fetch -q -o "$X/MANIFEST" "$base/MANIFEST"
+          fetch -q -o "$X/base.txz" "$base/base.txz"
+          if [ "$(awk '$1 == "base.txz" { print $2 }' "$X/MANIFEST")" != "$(sha256 -q "$X/base.txz")" ]; then
+            echo "error: arm64 base.txz does not match its MANIFEST" >&2
+            exit 1
+          fi
+          tar -xf "$X/base.txz" -C "$S" ./lib ./usr/lib ./usr/include ./usr/libdata
+          # The libraries the prepare step installs; the build tools and fonts stay host-only.
+          pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib
+          for p in "$X"/cache/*.pkg; do
+            [ ! -L "$p" ] || continue
+            case "$p" in */rust-*) continue ;; esac
+            tar -xf "$p" -C "$S" --exclude '+*'
+          done
+          for tool in cc c++; do
+            printf '#!/bin/sh\nexec %s --target=%s%s --sysroot=%s -fuse-ld=lld -I%s/usr/local/include -L%s/usr/local/lib -Wl,-rpath-link,%s/usr/local/lib "$@"\n' \
+              "$tool" "$target" "${release%%-*}" "$S" "$S" "$S" "$S" > "$X/$tool"
+            chmod +x "$X/$tool"
+          done
+          cat > "$X/env" <<EOF
+          export CARGO_BUILD_TARGET=$target
+          export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=$X/cc
+          export CC_aarch64_unknown_freebsd=$X/cc CXX_aarch64_unknown_freebsd=$X/c++ AR_aarch64_unknown_freebsd=/usr/bin/ar
+          export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/libdata/pkgconfig
+          EOF
+          rustc --print target-libdir --target "$target"
       - name: Restore FreeBSD Cargo cache
         id: cargo-cache
         continue-on-error: true
@@ -125,9 +187,14 @@ jobs:
             fi
             export CRAFT_FONTS_REQUIRED=1
           fi
+          # Written by "Set up the aarch64 cross toolchain": cargo then builds for aarch64.
+          [ ! -f /var/tmp/craft-cross/env ] || . /var/tmp/craft-cross/env
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            if [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
+            if [ "${{ matrix.arch }}" = aarch64 ]; then
+              # The build above compiled every test target; an x86_64 guest cannot run them.
+              echo "::notice title=FreeBSD aarch64::cross-compiled on x86_64: tests built, not run"
+            elif [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
               # Isolate the command list: an early failure in an && chain must not
               # be hidden by a later successful packaging command in this script.
               sh -eu <<'CRAFT_CUSTOM_TESTS' || exit "$?"
@@ -137,18 +204,20 @@ jobs:
               CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
             fi
           fi
+      # package.sh builds for the guest's own architecture, so the cross-compiled aarch64
+      # leg stops after the build.
       - name: Checkpoint tests and restore the release profile
         id: package-cache
         continue-on-error: true
         timeout-minutes: 10
-        if: inputs.run-package-check
+        if: inputs.run-package-check && matrix.arch != 'aarch64'
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           phase: package
           configuration: ${{ toJSON(inputs) }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
       - name: Build and validate the FreeBSD package
-        if: inputs.run-package-check
+        if: inputs.run-package-check && matrix.arch != 'aarch64'
         shell: freebsd {0}
         run: |
           set -eu

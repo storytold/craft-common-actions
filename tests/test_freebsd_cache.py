@@ -237,7 +237,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
             with self.subTest(workflow=filename):
                 data = yaml.load((ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader)
                 vm = next(step["with"] for step in data["jobs"]["freebsd"]["steps"] if "prepare" in step.get("with", {}))
-                before_install = vm["prepare"].split("pkg install", 1)[0]
+                before_install = vm["prepare"].replace("${{ matrix.arch }}", "x86_64").split("pkg install", 1)[0]
                 result = subprocess.run(["sh", "-eu", "-c", before_install + '\ntest "${CARGO_HOME+x}" != x\ntest "${CARGO_TARGET_DIR+x}" != x'],
                                         env=dict(os.environ, CARGO_HOME="/var/tmp/craft-cargo", CARGO_TARGET_DIR="/var/tmp/craft-target"),
                                         text=True, capture_output=True, timeout=10)
@@ -257,7 +257,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]
                 restore = next(step for step in cache_steps if step.get("id") == "cargo-cache")
                 save = next(step for step in cache_steps if step["with"].get("phase") == "save")
-                build = next(step for step in steps if step.get("shell") == "freebsd {0}")
+                build = next(step for step in steps if step.get("shell") == "freebsd {0}" and ".cargo/env" in step["run"])
                 self.assertLess(steps.index(vm), steps.index(restore))
                 self.assertLess(steps.index(restore), steps.index(build))
                 self.assertLess(steps.index(build), steps.index(save))
