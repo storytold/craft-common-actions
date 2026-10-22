@@ -260,7 +260,7 @@ jobs:
               if [ -f test-binaries.txt ]; then
                 while IFS= read -r test_bin; do
                   if [ -x "$test_bin" ]; then
-                    if file "$test_bin" | grep -q "${{ matrix.arch }}"; then
+                    if file "$test_bin" | grep -q "FreeBSD" && file "$test_bin" | grep -q "${{ matrix.arch }}"; then
                       echo "Running test binary: $test_bin"
                       "$test_bin" || exit 1
                     else
