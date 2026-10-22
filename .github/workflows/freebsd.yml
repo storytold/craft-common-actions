@@ -86,6 +86,17 @@ jobs:
           ln -sf ../usr/lib/libcxxrt.so.1 freebsd-sysroot/lib/libcxxrt.so.1 2>/dev/null || true
           ln -sf ../usr/lib/libc++.so.1 freebsd-sysroot/lib/libc++.so.1 2>/dev/null || true
 
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - name: Setup Toolchain
         run: |
           sudo apt-get update
@@ -97,17 +108,6 @@ jobs:
           else
             rustup target add x86_64-unknown-freebsd
           fi
-
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: false
-          swap-storage: true
 
       # Host (proc-macros, build scripts) and FreeBSD target artifacts share this cache.
       # The prefix encodes the sysroot release so a base.txz bump invalidates it.
