@@ -163,15 +163,15 @@ jobs:
             rustup target add x86_64-unknown-freebsd
           fi
 
-      # Host (proc-macros, build scripts) and FreeBSD target artifacts share this cache.
-      # The prefix encodes the sysroot release so a base.txz bump invalidates it.
-      - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      # Use actions/cache with explicit restore/save to ensure the target directory is cached even on failure.
+      - name: Restore Cargo artifacts
+        id: cache-cargo
+        uses: actions/cache/restore@v4
         with:
-          prefix-key: v1-freebsd-15.0-${{ matrix.arch }}-${{ matrix.profile }}
-          shared-key: cross-compile
-          workspaces: . -> target
-          cache-on-failure: true
+          path: target
+          key: v1-cargo-${{ matrix.arch }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            v1-cargo-${{ matrix.arch }}-${{ matrix.profile }}-
 
       - name: Cross Compile Workspace (Build Only)
         run: |
@@ -273,6 +273,13 @@ jobs:
                 exit 1
               fi
             fi
+
+      - name: Save Cargo artifacts
+        if: always() && steps.cache-cargo.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target
+          key: v1-cargo-${{ matrix.arch }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Package
         if: inputs.run-package-check
