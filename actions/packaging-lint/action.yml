@@ -12,18 +12,25 @@ runs:
   steps:
     - name: Install tools
       shell: bash
+      env:
+        ACTIONLINT_VERSION: ${{ inputs.actionlint-version }}
       run: |
+        version="$ACTIONLINT_VERSION"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::invalid actionlint-version '$version'"
+          exit 1
+        fi
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends shellcheck desktop-file-utils appstream libxml2-utils python3-yaml
-        tar_url="https://github.com/rhysd/actionlint/releases/download/v${{ inputs.actionlint-version }}/actionlint_${{ inputs.actionlint-version }}_linux_amd64.tar.gz"
+        tar_url="https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
         curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/actionlint.tar.gz" "$tar_url"
-        case "${{ inputs.actionlint-version }}" in
+        case "$version" in
           "1.7.12")
             expected="8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
             ;;
           *)
-            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/checksums.txt" "https://github.com/rhysd/actionlint/releases/download/v${{ inputs.actionlint-version }}/actionlint_${{ inputs.actionlint-version }}_checksums.txt"
-            expected=$(grep -E "actionlint_${{ inputs.actionlint-version }}_linux_amd64\.tar\.gz" "$RUNNER_TEMP/checksums.txt" | awk '{print $1}')
+            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/checksums.txt" "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_checksums.txt"
+            expected=$(grep -E "actionlint_${version}_linux_amd64\.tar\.gz" "$RUNNER_TEMP/checksums.txt" | awk '{print $1}')
             ;;
         esac
         echo "$expected  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -

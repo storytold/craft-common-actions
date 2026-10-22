@@ -36,6 +36,20 @@ jobs:
             echo "available=false" >>"$GITHUB_OUTPUT"
             echo "::notice::SONAR_TOKEN is not available (e.g. a fork pull request); skipping SonarCloud scan."
           fi
+      - name: Validate SonarCloud project key
+        id: project
+        if: steps.token.outputs.available == 'true'
+        shell: bash
+        env:
+          PROJECT_KEY: ${{ inputs.project-key != '' && inputs.project-key || format('storytold_{0}', github.event.repository.name) }}
+          LC_ALL: C
+        run: |
+          # The scan action splits args; reject characters that could introduce properties.
+          if [[ ! "$PROJECT_KEY" =~ ^[a-zA-Z0-9_.:-]+$ ]]; then
+            echo "::error::Invalid SonarCloud project key: use only letters, digits, dash, underscore, period or colon."
+            exit 1
+          fi
+          printf 'key=%s\n' "$PROJECT_KEY" >>"$GITHUB_OUTPUT"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
         uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
@@ -44,5 +58,5 @@ jobs:
           SONAR_HOST_URL: https://sonarcloud.io
         with:
           args: >
-            -Dsonar.projectKey=${{ inputs.project-key != '' && inputs.project-key || format('storytold_{0}', github.event.repository.name) }}
+            "-Dsonar.projectKey=${{ steps.project.outputs.key }}"
             -Dsonar.organization=storytold

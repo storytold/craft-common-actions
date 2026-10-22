@@ -189,6 +189,17 @@ jobs:
           fi
           # Written by "Set up the aarch64 cross toolchain": cargo then builds for aarch64.
           [ ! -f /var/tmp/craft-cross/env ] || . /var/tmp/craft-cross/env
+          # Tests run as an ordinary user: root is never refused a file, so a test that expects
+          # "permission denied" fails as root, and a permission bug root would hide goes unseen.
+          as_tester() {
+            if [ "$(id -u)" -ne 0 ]; then sh -eu; return; fi
+            id craft-test >/dev/null 2>&1 || pw useradd craft-test -m -s /bin/sh
+            # rustup's toolchains stay under /root; tests write the target, Cargo's cache and the checkout.
+            rustup_home=${RUSTUP_HOME:-$HOME/.rustup}
+            chmod 755 /root
+            chown -R craft-test "$CARGO_TARGET_DIR" "$CARGO_HOME" "$PWD"
+            HOME=/home/craft-test RUSTUP_HOME=$rustup_home su -m craft-test -c 'sh -eu'
+          }
           CARGO_PROFILE_DEV_DEBUG=0 cargo build --workspace --all-targets --locked ${{ inputs.cargo-build-extra-args }}
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
             if [ "${{ matrix.arch }}" = aarch64 ]; then
@@ -197,11 +208,13 @@ jobs:
             elif [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
               # Isolate the command list: an early failure in an && chain must not
               # be hidden by a later successful packaging command in this script.
-              sh -eu <<'CRAFT_CUSTOM_TESTS' || exit "$?"
+              as_tester <<'CRAFT_CUSTOM_TESTS' || exit "$?"
           ${{ inputs.custom-test-command }}
           CRAFT_CUSTOM_TESTS
             else
-              CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
+              as_tester <<'CRAFT_TESTS'
+          CARGO_PROFILE_DEV_DEBUG=0 cargo test --workspace --locked ${{ inputs.cargo-test-extra-args }}
+          CRAFT_TESTS
             fi
           fi
       # package.sh builds for the guest's own architecture, so the cross-compiled aarch64

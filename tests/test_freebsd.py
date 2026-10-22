@@ -29,7 +29,7 @@ PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Bu
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
                skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False,
-               cross_env=False):
+               cross_env=False, root=False):
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
             "custom-test-command": command,
@@ -79,6 +79,16 @@ fi
                 path = tools / tool
                 path.write_text("#!/bin/sh\nexit 0\n")
                 path.chmod(0o755)
+            if root:
+                # A root guest: record the user switch, then run the tests as before.
+                shims = {"id": '[ "$1" = -u ] && echo 0 || exit 1',
+                         "su": 'echo "su|$*|$HOME" >> "$PWD/admin.log"; exec /bin/sh -c "$4"'}
+                for tool in ("pw", "chmod", "chown"):
+                    shims[tool] = 'echo "%s|$*" >> "$PWD/admin.log"' % tool
+                for tool, body in shims.items():
+                    path = tools / tool
+                    path.write_text("#!/bin/sh\n" + body + "\n")
+                    path.chmod(0o755)
             if package != "missing-script":
                 path = work / "packaging/freebsd/package.sh"
                 path.parent.mkdir(parents=True)
@@ -107,7 +117,7 @@ fi
                 env.pop(key, None)
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
-                       TARGET_ARCH=arch)
+                       TARGET_ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
             if cross_env:
                 (work / "guest/craft-cross").mkdir(parents=True)
                 (work / "guest/craft-cross/env").write_text("export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n")
@@ -123,9 +133,10 @@ fi
                                         text=True, capture_output=True, timeout=15)
             log = (work / "cargo.log").read_text().splitlines() if (work / "cargo.log").exists() else []
             targets = (work / "target.log").read_text().splitlines() if (work / "target.log").exists() else []
+            admin = (work / "admin.log").read_text().splitlines() if (work / "admin.log").exists() else []
             package_log = (work / "package.log").read_text().splitlines() if (work / "package.log").exists() else []
             remaining = [p.parent.name for p in (work / "guest/craft-target").glob("*/partial")]
-            outcome = dict(targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
+            outcome = dict(admin=admin, work=str(work), targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
                            log=log, output=result.stdout + result.stderr)
             return outcome
 
@@ -151,6 +162,20 @@ fi
         result = self.run_vm(fail_test=1)
         self.assertEqual(result["code"], 42, result)
         self.assertFalse(result["packaged"], result)
+
+    def test_root_guest_runs_tests_as_an_ordinary_user(self):
+        for command in ("", "cargo test --lib\ncargo test --doc"):
+            with self.subTest(command=command):
+                result = self.run_vm(command=command, root=True, package_check=False)
+                self.assertEqual(result["code"], 0, result)
+                self.assertIn("pw|useradd craft-test -m -s /bin/sh", result["admin"], result)
+                self.assertIn("chown|-R craft-test /target /cargo " + result["work"], result["admin"], result)
+                self.assertIn("su|-m craft-test -c sh -eu|/home/craft-test", result["admin"], result)
+                self.assertEqual(result["log"][0].split("|")[0], "build", result)
+                self.assertGreater(len(result["log"]), 1, result)
+                failed = self.run_vm(command=command, root=True, fail_test=1)
+                self.assertEqual(failed["code"], 42, failed)
+                self.assertFalse(failed["packaged"], failed)
 
     def test_build_failure_is_fatal_before_tests(self):
         result = self.run_vm(fail_build=True)

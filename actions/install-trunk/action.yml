@@ -12,10 +12,22 @@ runs:
   steps:
     - name: Install trunk
       shell: bash
+      env:
+        TRUNK_VERSION: ${{ inputs.trunk-version }}
       run: |
-        tar_url="https://github.com/trunk-rs/trunk/releases/download/v${{ inputs.trunk-version }}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+        version="$TRUNK_VERSION"
+        # Restrict the version to a single safe release-tag component. This keeps
+        # the value from carrying slashes or other URL path-traversal segments
+        # that could redirect downloads to an attacker-controlled repository. The
+        # bash regex anchors the whole string, so values containing a newline are
+        # rejected (unlike a line-oriented grep check).
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::invalid trunk-version '$version'"
+          exit 1
+        fi
+        tar_url="https://github.com/trunk-rs/trunk/releases/download/v${version}/trunk-x86_64-unknown-linux-gnu.tar.gz"
         curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/trunk.tar.gz" "$tar_url"
-        case "${{ inputs.trunk-version }}" in
+        case "$version" in
           "0.21.14")
             expected="f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
             ;;

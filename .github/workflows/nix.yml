@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       extra-args:
-        description: "Extra arguments to pass to nix flake check"
+        description: "Extra arguments to pass to nix flake check (shell-style quoting, no shell expansion)"
         type: string
         required: false
         default: "--no-build --all-systems"
@@ -22,9 +22,16 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - name: Check flake evaluation
         shell: bash
+        env:
+          NIX_EXTRA_ARGS: ${{ inputs.extra-args }}
         run: |
           if [ -f flake.nix ]; then
-            nix flake check ${{ inputs.extra-args }}
+            python3 - <<'PY'
+          import os
+          import shlex
+
+          os.execvp("nix", ["nix", "flake", "check", *shlex.split(os.environ["NIX_EXTRA_ARGS"])])
+          PY
           else
             echo "No flake.nix present in this repository; skipping check."
           fi

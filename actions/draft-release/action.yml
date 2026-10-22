@@ -37,12 +37,13 @@ runs:
       working-directory: artifacts
       env:
         VERSION: ${{ inputs.version }}
+        APP_TITLE: ${{ inputs.app-title }}
         PRERELEASE: ${{ inputs.prerelease }}
         GH_TOKEN: ${{ inputs.github-token }}
         GH_REPO: ${{ github.repository }}
       run: |
         tag="v$VERSION"
-        title="${{ inputs.app-title }} v$VERSION"
+        title="$APP_TITLE v$VERSION"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
         if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then

@@ -16,11 +16,25 @@ runs:
   steps:
     - name: Download and verify nfpm
       shell: bash
+      env:
+        NFPM_VERSION: ${{ inputs.nfpm-version }}
+        DEB_ARCH: ${{ inputs.deb-arch }}
       run: |
-        deb_url="https://github.com/goreleaser/nfpm/releases/download/v${{ inputs.nfpm-version }}/nfpm_${{ inputs.nfpm-version }}_${{ inputs.deb-arch }}.deb"
+        version="$NFPM_VERSION"
+        arch="$DEB_ARCH"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::invalid nfpm-version '$version'"
+          exit 1
+        fi
+        case "$arch" in
+          amd64 | arm64) ;;
+          *) echo "::error::invalid deb-arch '$arch'"; exit 1 ;;
+        esac
+
+        deb_url="https://github.com/goreleaser/nfpm/releases/download/v${version}/nfpm_${version}_${arch}.deb"
         curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/nfpm.deb" "$deb_url"
 
-        case "${{ inputs.nfpm-version }}:${{ inputs.deb-arch }}" in
+        case "${version}:${arch}" in
           "2.48.0:amd64")
             expected="787af76e172dd5fc7cedf4d7c5a090a2f62be9001557a4db1103e270f90ddefd"
             ;;
@@ -34,8 +48,8 @@ runs:
             expected="27419eb382695a7942be8ad52259f3ec1854fad001b3ae4baed34ce39a223b97"
             ;;
           *)
-            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/checksums.txt" "https://github.com/goreleaser/nfpm/releases/download/v${{ inputs.nfpm-version }}/checksums.txt"
-            expected=$(grep -E "nfpm_${{ inputs.nfpm-version }}_${{ inputs.deb-arch }}\.deb" "$RUNNER_TEMP/checksums.txt" | awk '{print $1}')
+            curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/checksums.txt" "https://github.com/goreleaser/nfpm/releases/download/v${version}/checksums.txt"
+            expected=$(grep -E "nfpm_${version}_${arch}\.deb" "$RUNNER_TEMP/checksums.txt" | awk '{print $1}')
             ;;
         esac
 

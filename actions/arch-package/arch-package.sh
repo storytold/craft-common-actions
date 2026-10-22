@@ -40,15 +40,33 @@ mkdir -p "$stage"
 # Extract the tarball
 tar -xzf "$tarball" -C "$stage"
 
-# If the archive wrapped the files in a single root directory, flatten it
+# If the archive wrapped the files in a single root directory, flatten it.
+# Reject a symlinked root and confirm the directory resolves inside the staging
+# area before moving its children, so an archive-created link cannot redirect
+# the move to files outside staging.
 shopt -s nullglob
 subdirs=("$stage"/*)
 shopt -u nullglob
-if [[ "${#subdirs[@]}" -eq 1 && -d "${subdirs[0]}" && ( -d "${subdirs[0]}/bin" || -d "${subdirs[0]}/share" ) ]]; then
-  shopt -s dotglob
-  mv "${subdirs[0]}"/* "$stage/"
-  shopt -u dotglob
-  rmdir "${subdirs[0]}"
+# A single symlinked entry would otherwise skip the flatten branch entirely and
+# be left in staging, where package() could copy it and later directory creation
+# (e.g. the licenses dir) could follow it to write outside $pkgdir. Reject it.
+if [[ "${#subdirs[@]}" -eq 1 && -L "${subdirs[0]}" ]]; then
+  die "refusing to flatten: wrapper entry is a symlink"
+fi
+if [[ "${#subdirs[@]}" -eq 1 && ! -L "${subdirs[0]}" && -d "${subdirs[0]}" ]]; then
+  root="${subdirs[0]}"
+  stage_real="$(realpath -- "$stage")"
+  root_real="$(realpath -- "$root")"
+  case "$root_real" in
+    "$stage_real"/*) ;;
+    *) die "refusing to flatten: wrapper directory resolves outside staging" ;;
+  esac
+  if [[ -d "$root/bin" || -d "$root/share" ]]; then
+    shopt -s dotglob
+    mv "$root"/* "$stage/"
+    shopt -u dotglob
+    rmdir "$root"
+  fi
 fi
 
 # Detect application name and version
@@ -64,6 +82,13 @@ else
   app="$(basename "${bins[0]}")"
   app="${app%-cli}"
   raw_version="0.0.0"
+fi
+
+# The app name is archive-derived (from the tarball name or a bundled executable
+# basename) and is written into PKGBUILD provides/conflicts fields. Constrain it to
+# a safe identifier so a crafted executable name cannot inject shell code.
+if [[ ! "$app" =~ ^[a-zA-Z0-9][a-zA-Z0-9_+.-]*$ ]]; then
+  die "invalid application name derived from archive: '$app'"
 fi
 
 # Format Arch pkgver (no hyphens or tildes allowed in pkgver)
@@ -85,6 +110,17 @@ if [[ "${#desktops[@]}" -gt 0 ]]; then
   pkgname="$(basename "${desktops[0]}" .desktop)"
 else
   pkgname="ai.storyteller.$app"
+fi
+
+# The package name is derived from an archive-controlled .desktop basename and is
+# written into PKGBUILD (evaluated by makepkg as Bash). Validate it against a safe
+# identifier grammar so a crafted filename cannot inject shell code. Freedesktop
+# application IDs may contain uppercase letters (e.g. org.gnome.Nautilus), which
+# makepkg also accepts, so uppercase is permitted; the value may not start with a
+# hyphen or a dot. The restricted character set plus printf %q below keeps the
+# value safe regardless of case.
+if [[ ! "$pkgname" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ ]]; then
+  die "invalid package name derived from .desktop file: '$pkgname'"
 fi
 
 # Determine description from AppStream metainfo if available
@@ -130,7 +166,7 @@ EOF
 # Write PKGBUILD
 cat > "$work/PKGBUILD" <<EOF
 # Maintainer: Storyteller Authors
-pkgname='$pkgname'
+pkgname=$(printf '%q' "$pkgname")
 pkgver='$pkgver'
 pkgrel='$pkgrel'
 pkgdesc=$(printf '%q' "$pkgdesc")
@@ -153,8 +189,8 @@ optdepends=(
   'xdg-desktop-portal: native desktop integration and file dialogs'
   'cups: printing support'
 )
-provides=("$app=\$pkgver-\$pkgrel")
-conflicts=('$app' '$app-bin' '$app-git')
+provides=("$(printf '%q' "$app")=\$pkgver-\$pkgrel")
+conflicts=($(printf '%q' "$app") $(printf '%q' "$app-bin") $(printf '%q' "$app-git"))
 options=('!strip' '!debug')
 
 package() {

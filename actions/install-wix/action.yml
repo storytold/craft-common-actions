@@ -16,9 +16,16 @@ runs:
   steps:
     - name: Install WiX
       shell: pwsh
+      env:
+        WIX_VERSION: ${{ inputs.wix-version }}
+        INSTALL_EXTENSIONS: ${{ inputs.install-extensions }}
       run: |
-        $version = "${{ inputs.wix-version }}"
+        $version = $env:WIX_VERSION
+        if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\z') {
+          Write-Output "::error::invalid wix-version '$version'"
+          exit 1
+        }
         dotnet tool install --global wix --version $version
-        if ("${{ inputs.install-extensions }}" -eq "true") {
+        if ($env:INSTALL_EXTENSIONS -eq "true") {
           wix extension add -g "WixToolset.UI.wixext/$version" "WixToolset.Util.wixext/$version"
         }
