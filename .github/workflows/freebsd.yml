@@ -88,7 +88,7 @@ jobs:
           echo "Downloading sysroot from $URL..."
           curl -fL --retry 3 --connect-timeout 30 --max-time 600 -o base.txz "$URL"
           mkdir -p freebsd-sysroot
-          tar -xf base.txz -C freebsd-sysroot ./lib/ ./usr/lib/ ./usr/include/ ./libexec/ 2>/dev/null || true
+          tar -xf base.txz -C freebsd-sysroot ./lib/ ./usr/lib/ ./usr/include/ ./libexec/
           rm -f base.txz
           # Create symlinks for C++ dynamic libraries to prevent linking failures
           ln -sf ../usr/lib/libcxxrt.so.1 freebsd-sysroot/lib/libcxxrt.so.1 2>/dev/null || true
