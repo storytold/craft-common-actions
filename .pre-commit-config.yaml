@@ -10,8 +10,6 @@
 exclude: >-
   (?x)^(
     \.vscode/.*
-    |pnpm-lock.yaml
-    |renovate.json
   )$
 repos:
   - repo: builtin

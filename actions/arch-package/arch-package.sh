@@ -61,8 +61,8 @@ if [[ "${#subdirs[@]}" -eq 1 && ! -L "${subdirs[0]}" && -d "${subdirs[0]}" ]]; t
   stage_real="$(realpath -- "$stage")"
   root_real="$(realpath -- "$root")"
   case "$root_real" in
-  "$stage_real"/*) ;;
-  *) die "refusing to flatten: wrapper directory resolves outside staging" ;;
+    "$stage_real"/*) ;;
+    *) die "refusing to flatten: wrapper directory resolves outside staging" ;;
   esac
   if [[ -d "$root/bin" || -d "$root/share" ]]; then
     shopt -s dotglob

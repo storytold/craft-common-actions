@@ -1,6 +1,6 @@
 # artcraft-common-actions
 
-<a href="https://sonarcloud.io/project/overview?id=storytold_craft-common-actions"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+<a href="https://sonarcloud.io/project/overview?id=storytold_craft-common-actions"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a> <!-- rumdl-disable-line no-inline-html -->
 
 Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCraft desktop and web applications.
 
