@@ -170,7 +170,7 @@ jobs:
           
           # Precompile tests using matrix.profile to test both debug and release parallelly
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            export CARGO_BUILD_JOBS=2
+            export CARGO_BUILD_JOBS=3
             if [ "${{ matrix.profile }}" = "release" ]; then
               $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
             else
