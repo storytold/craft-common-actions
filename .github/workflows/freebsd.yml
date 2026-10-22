@@ -178,7 +178,7 @@ jobs:
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: '15.1'
-          arch: ${{ matrix.arch }}
+          architecture: ${{ matrix.arch }}
           usesh: true
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu rust
@@ -193,7 +193,10 @@ jobs:
               export PATH="$HOME/.cargo/bin:$PATH"
               for test_bin in target/${{ matrix.arch }}-unknown-freebsd/release/deps/*; do
                 if [ -x "$test_bin" ] && [ -f "$test_bin" ]; then
-                  $test_bin
+                  case "$test_bin" in
+                    *.so|*.rlib|*.rmeta|*.d) ;;
+                    *) echo "Running test binary: $test_bin"; $test_bin || exit 1 ;;
+                  esac
                 fi
               done
             fi
