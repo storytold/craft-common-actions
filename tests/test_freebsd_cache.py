@@ -270,7 +270,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 self.assertIn("pull_request", save["if"])
                 self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
                 if filename == "release.yml":
-                    self.assertEqual(job["strategy"]["matrix"]["arch"], ["x86_64"])
+                    self.assertEqual(job["strategy"]["matrix"]["arch"], "${{ fromJSON(inputs.freebsd-architectures) }}")
                     self.assertEqual(restore["with"]["profile"], "release")
                     self.assertNotIn('rm -rf "dist/release/$name" /var/tmp/craft-target', build["run"])
                     self.assertLess(index("Build and package"), index("Copy release archives from the VM"))

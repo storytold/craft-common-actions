@@ -14,7 +14,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
-- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64; aarch64 releases are paused, see #39)
+- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64; aarch64 is cross-compiled in the same x86_64 VM and opt-in through `freebsd-architectures`, see #39)
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm)
@@ -149,9 +149,19 @@ jobs:
 ### 4. `freebsd.yml`
 Builds and runs workspace tests inside a FreeBSD 15 VM on a Linux runner.
 Pull requests default to `x86_64`; pushes, schedules and manual runs retain both
-`x86_64` and `aarch64`. ARM64 is software-emulated on the x86 Linux runner and can
-take several hours. The release workflow continues to build **both** FreeBSD
-architectures, including their release artifacts.
+`x86_64` and `aarch64`. Both boot a KVM-accelerated x86_64 VM; `aarch64` is
+cross-compiled in it with stable Rust (the standard library comes from FreeBSD's
+aarch64 `lang/rust` package, against an arm64 sysroot built from `base.txz`). Its
+tests are built but not run, and its package check is skipped.
+
+The release workflow builds FreeBSD aarch64 the same way, but only when the caller
+sets `freebsd-architectures: '["x86_64","aarch64"]'` (the default is `'["x86_64"]'`).
+Opt in only once the app's `packaging/freebsd/package.sh` builds with
+`CARGO_BUILD_TARGET`, reads binaries from
+`$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release` and names its archive
+`*-freebsd-aarch64.tar.gz`: the guest's `uname -m` is always `amd64`. The release
+job fails if an archive does not match its matrix architecture. Apps without a
+`package.sh` use the built-in packager, which already handles the cross target.
 
 The optional `architectures` input overrides the check matrix with a JSON array,
 for example `'["aarch64"]'` for a dedicated ARM check or
