@@ -60,7 +60,7 @@ permissions:
 
 jobs:
   freebsd:
-    name: FreeBSD ${{ matrix.arch }} ${{ matrix.profile }} (Cross-Compile)
+    name: FreeBSD ${{ matrix.arch }} (Cross-Compile)
     runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
