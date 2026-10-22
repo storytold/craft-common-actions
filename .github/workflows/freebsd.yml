@@ -236,18 +236,7 @@ jobs:
             else
               $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }} > test-output.json
             fi
-            cat << 'PYEOF' > extract_tests.py
-import json
-with open("test-output.json") as f:
-    for line in f:
-        try:
-            obj = json.loads(line)
-            if "executable" in obj and obj["executable"]:
-                print(obj["executable"])
-        except Exception:
-            pass
-PYEOF
-            python3 extract_tests.py > test-binaries.txt
+            jq -r 'select(.executable != null) | .executable' test-output.json > test-binaries.txt
           fi
 
       - name: Run Tests in FreeBSD VM
