@@ -54,6 +54,11 @@ on:
         type: string
         required: false
         default: ""
+      fetch-extra-libs:
+        description: "Fetch ALSA/Wayland/etc. packages for apps needing them"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -106,7 +111,16 @@ jobs:
           docker-images: false
           swap-storage: true
 
+      - name: Restore FreeBSD Extra Packages
+        if: inputs.fetch-extra-libs
+        id: cache-pkgs
+        uses: actions/cache@v4
+        with:
+          path: packages
+          key: freebsd-pkgs-${{ matrix.arch }}-v1
+
       - name: Fetch FreeBSD Third-party Packages via VM
+        if: inputs.fetch-extra-libs && steps.cache-pkgs.outputs.cache-hit != 'true'
         uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: '15.1'
@@ -127,6 +141,7 @@ jobs:
             cp /var/cache/pkg/*.pkg $GITHUB_WORKSPACE/packages/
 
       - name: Extract Packages into Sysroot
+        if: inputs.fetch-extra-libs
         run: |
           if [ -d packages ]; then
             for pkg in packages/*.pkg; do
