@@ -260,8 +260,12 @@ jobs:
               if [ -f test-binaries.txt ]; then
                 while IFS= read -r test_bin; do
                   if [ -x "$test_bin" ]; then
-                    echo "Running test binary: $test_bin"
-                    "$test_bin" || exit 1
+                    if file "$test_bin" | grep -q "${{ matrix.arch }}"; then
+                      echo "Running test binary: $test_bin"
+                      "$test_bin" || exit 1
+                    else
+                      echo "Skipping incompatible binary: $test_bin"
+                    fi
                   fi
                 done < test-binaries.txt
               else
