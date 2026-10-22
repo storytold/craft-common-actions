@@ -232,10 +232,21 @@ jobs:
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
             export CARGO_BUILD_JOBS=3
             if [ "${{ matrix.profile }}" = "release" ]; then
-              $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+              $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }} > test-output.json
             else
-              $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+              $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }} > test-output.json
             fi
+            python3 -c '
+import json
+with open("test-output.json") as f:
+    for line in f:
+        try:
+            obj = json.loads(line)
+            if "executable" in obj and obj["executable"]:
+                print(obj["executable"])
+        except:
+            pass
+            ' > test-binaries.txt
           fi
 
       - name: Run Tests in FreeBSD VM
@@ -256,19 +267,17 @@ jobs:
             else
               # Execute precompiled test binaries directly to avoid recompilation in VM
               export PATH="$HOME/.cargo/bin:$PATH"
-              for test_bin in target/${{ matrix.arch }}-unknown-freebsd/${{ matrix.profile }}/deps/*; do
-                if [ -x "$test_bin" ] && [ -f "$test_bin" ]; then
-                  case "$test_bin" in
-                    *.so|*.rlib|*.rmeta|*.d) ;;
-                    *) 
-                      if [[ "$test_bin" == *"-"* ]]; then
-                        echo "Running test binary: $test_bin"
-                        $test_bin || exit 1
-                      fi
-                      ;;
-                  esac
-                fi
-              done
+              if [ -f test-binaries.txt ]; then
+                while IFS= read -r test_bin; do
+                  if [ -x "$test_bin" ]; then
+                    echo "Running test binary: $test_bin"
+                    "$test_bin" || exit 1
+                  fi
+                done < test-binaries.txt
+              else
+                echo "Error: test-binaries.txt not found!" >&2
+                exit 1
+              fi
             fi
 
       - name: Package
