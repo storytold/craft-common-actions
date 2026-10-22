@@ -167,10 +167,10 @@ jobs:
           # Build main workspace
           $CARGO_CMD build --release --workspace --target=$TARGET_TRIPLE --locked $BUILD_STD_ARGS ${{ inputs.cargo-build-extra-args }}
           
-          # Precompile tests in debug mode with 2 threads to balance speed and memory
+          # Precompile tests in release mode with 2 threads to balance speed and memory
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
             export CARGO_BUILD_JOBS=2
-            $CARGO_CMD test --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
+            $CARGO_CMD test --release --workspace --target=$TARGET_TRIPLE --locked --no-run $BUILD_STD_ARGS ${{ inputs.cargo-test-extra-args }}
           fi
 
       - name: Run Tests in FreeBSD VM
@@ -191,7 +191,7 @@ jobs:
             else
               # Execute precompiled test binaries directly to avoid recompilation in VM
               export PATH="$HOME/.cargo/bin:$PATH"
-              for test_bin in target/${{ matrix.arch }}-unknown-freebsd/debug/deps/*; do
+              for test_bin in target/${{ matrix.arch }}-unknown-freebsd/release/deps/*; do
                 if [ -x "$test_bin" ] && [ -f "$test_bin" ]; then
                   $test_bin
                 fi
