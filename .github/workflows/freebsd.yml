@@ -94,43 +94,6 @@ jobs:
           ln -sf ../usr/lib/libcxxrt.so.1 freebsd-sysroot/lib/libcxxrt.so.1 2>/dev/null || true
           ln -sf ../usr/lib/libc++.so.1 freebsd-sysroot/lib/libc++.so.1 2>/dev/null || true
 
-          # Securely fetch and extract third-party FreeBSD packages (ALSA, Wayland, etc.)
-          # Versions are resolved dynamically from the official MANIFEST, and SHA256 is verified to prevent supply chain attacks.
-          if [ "${{ matrix.arch }}" = "x86_64" ]; then
-            PKG_ABI="FreeBSD:15:amd64"
-          else
-            PKG_ABI="FreeBSD:15:aarch64"
-          fi
-          PKG_BASE_URL="https://pkg.freebsd.org/${PKG_ABI}/quarterly"
-          PKG_NAMES="alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2"
-          
-          echo "Fetching MANIFEST for $PKG_ABI..."
-          curl -sL "${PKG_BASE_URL}/MANIFEST" -o MANIFEST
-          
-          for name in $PKG_NAMES; do
-            pkg_info=$(grep -E "^${name}-[0-9]" MANIFEST | head -n 1)
-            if [ -z "$pkg_info" ]; then
-              echo "Error: $name not found in MANIFEST"
-              rm -f MANIFEST
-              exit 1
-            fi
-            pkg_file=$(echo "$pkg_info" | awk '{print $1}')
-            expected_hash=$(echo "$pkg_info" | awk '{print $5}' | sed 's/sha256://')
-            
-            echo "Downloading $pkg_file..."
-            curl -fsSL "${PKG_BASE_URL}/All/${pkg_file}" -o pkg.tmp
-            
-            actual_hash=$(sha256sum pkg.tmp | awk '{print $1}')
-            if [ "$actual_hash" != "$expected_hash" ]; then
-              echo "Error: SHA256 mismatch for $pkg_file. Potential supply chain attack!"
-              rm -f pkg.tmp MANIFEST
-              exit 1
-            fi
-            
-            tar -xf pkg.tmp -C freebsd-sysroot || { echo "Error extracting $pkg_file"; rm -f pkg.tmp MANIFEST; exit 1; }
-            rm -f pkg.tmp
-          done
-          rm -f MANIFEST
 
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -142,6 +105,34 @@ jobs:
           large-packages: true
           docker-images: false
           swap-storage: true
+
+      - name: Fetch FreeBSD Third-party Packages via VM
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: '15.1'
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg update -f
+          run: |
+            set -eu
+            if [ "${{ matrix.arch }}" = "x86_64" ]; then
+              ABI="FreeBSD:15:amd64"
+            else
+              ABI="FreeBSD:15:aarch64"
+            fi
+            # Fetch packages and all dependencies
+            env ABI=$ABI pkg fetch -y -d alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2
+            mkdir -p $GITHUB_WORKSPACE/packages
+            cp /var/cache/pkg/*.pkg $GITHUB_WORKSPACE/packages/
+
+      - name: Extract Packages into Sysroot
+        run: |
+          if [ -d packages ]; then
+            for pkg in packages/*.pkg; do
+              tar -xf "$pkg" -C freebsd-sysroot --exclude '+*'
+            done
+          fi
 
       - name: Setup Toolchain
         run: |
