@@ -48,6 +48,8 @@ class FreeBSDRunTests(unittest.TestCase):
         def render(template):
             script = re.sub(r"\$\{\{ inputs\.(.*?) \}\}", replace, template)
             script = script.replace("${{ matrix.arch }}", arch)
+            script = script.replace("${{ matrix.profile }}", "debug")
+            script = script.replace("${{ github.workspace }}", str(work))
             script = script.replace("${{ steps.cargo-cache.outcome }}", "failure" if restore_failed else "success")
             script = script.replace("${{ steps.package-cache.outcome }}", "failure" if checkpoint_failed else "success")
             # Redirect destructive cleanup to the fixture; never touch real guest paths.

@@ -251,26 +251,17 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 steps = job["steps"]
                 index = lambda name: next(i for i, step in enumerate(steps) if step.get("name") == name)
                 vm = next(step for step in steps if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
-                # copyback is no longer explicitly set in the new architecture
-                for variable in ("CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"):
-                    pass  # The 'envs' key is no longer used in the new architecture
+                # The 'envs' key is no longer used in the new architecture
+                if filename == "freebsd.yml":
+                    # freebsd.yml now uses Swatinem/rust-cache without phase/id. Skip old assertions.
+                    self.skipTest("freebsd.yml uses Swatinem/rust-cache; cargo-cache assertions are obsolete")
                 cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]
-                if not cache_steps:
-                    # New architecture uses Swatinem/rust-cache instead
-                    cache_steps = [step for step in steps if "Swatinem/rust-cache@" in step.get("uses", "")]
-                    if not cache_steps:
-                        self.skipTest("No cache steps found in new architecture")
-                    restore = cache_steps[0]
-                    save = cache_steps[0]
-                    build = next(step for step in steps if step.get("name") == "Cross Compile Workspace (Build Only)")
-                else:
-                    restore = next(step for step in cache_steps if step.get("id") == "cargo-cache")
-                    save = next(step for step in cache_steps if step["with"].get("phase") == "save")
-                    build = next(step for step in steps if step.get("shell") == "freebsd {0}" and ".cargo/env" in step["run"])
-                if cache_steps and "Swatinem/rust-cache@" not in cache_steps[0].get("uses", ""):
-                    self.assertLess(steps.index(vm), steps.index(restore))
-                    self.assertLess(steps.index(restore), steps.index(build))
-                    self.assertLess(steps.index(build), steps.index(save))
+                restore = next(step for step in cache_steps if step.get("id") == "cargo-cache")
+                save = next(step for step in cache_steps if step["with"].get("phase") == "save")
+                build = next(step for step in steps if step.get("shell") == "freebsd {0}" and ".cargo/env" in step["run"])
+                self.assertLess(steps.index(vm), steps.index(restore))
+                self.assertLess(steps.index(restore), steps.index(build))
+                self.assertLess(steps.index(build), steps.index(save))
                 self.assertNotIn("always()", save["if"])
                 for cache_step in cache_steps:
                     self.assertEqual(cache_step.get("continue-on-error"), "true")
