@@ -71,8 +71,16 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(self.scan['env']['SONAR_TOKEN'], '${{ secrets.SONAR_TOKEN }}')
         self.assertEqual(
             self.scan['with']['args'].splitlines()[0],
-            '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold',
+            '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold '
+            '-Dsonar.rust.lcov.reportPaths=lcov.info',
         )
+
+    def test_coverage_is_generated_before_the_scan_imports_it(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        self.assertLess(self.steps.index(coverage), self.steps.index(self.scan))
+        self.assertIn('cargo llvm-cov', coverage['run'])
+        self.assertIn('--output-path lcov.info', coverage['run'])
+        self.assertEqual(coverage['continue-on-error'], 'true')
 
     def test_token_availability_still_controls_the_scan(self):
         token_step = next(step for step in self.steps if step.get('id') == 'token')
