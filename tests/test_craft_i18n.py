@@ -1,4 +1,4 @@
-"""The per-app craft-i18n pin (craft-i18n.rev) and the i18n gate that releases wait for."""
+"""The per-app craft-i18n pin (craft-i18n.rev) and the i18n gate that reports missing translations."""
 from pathlib import Path
 import os
 import subprocess
@@ -104,17 +104,21 @@ class GateTests(unittest.TestCase):
             cargo = tools / 'cargo'
             cargo.write_text(f'#!/bin/sh\ncat <<"OUT"\n{cargo_output}\nOUT\nexit {status}\n')
             cargo.chmod(0o755)
-            return bash(self.RUN, directory, {'PATH': f'{tools}:{os.environ["PATH"]}',
-                                              'RUNNER_TEMP': directory}).returncode
+            return bash(self.RUN, directory, {'PATH': f'{tools}:{os.environ["PATH"]}'})
 
-    def test_a_filter_matching_no_test_fails(self):
-        self.assertEqual(self.gate('running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 12 filtered out'), 1)
+    def test_a_filter_matching_no_test_passes(self):
+        result = self.gate('running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 12 filtered out')
+        self.assertEqual(result.returncode, 0)
 
     def test_passing_gate_tests_pass(self):
-        self.assertEqual(self.gate('running 1 test\ntest audit::i18n_gate_all_strings ... ok\n\ntest result: ok. 1 passed'), 0)
+        result = self.gate('running 1 test\ntest audit::i18n_gate_all_strings ... ok\n\ntest result: ok. 1 passed')
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('::warning::', result.stdout)
 
-    def test_failing_gate_tests_fail(self):
-        self.assertNotEqual(self.gate('test i18n_gate_x ... FAILED', status=101), 0)
+    def test_failing_gate_tests_warn_and_pass(self):
+        result = self.gate('test i18n_gate_x ... FAILED', status=101)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('::warning::', result.stdout)
 
 
 if __name__ == '__main__':

@@ -333,10 +333,10 @@ jobs:
 
 ### 6. `i18n-gate.yml`
 
-Runs the app's completeness tests, `cargo test --workspace i18n_gate` with `CRAFT_I18N_GATE=1`,
-against the craft-i18n commit in `craft-i18n.rev`. It fails if no test ran, since a filter that
-matches nothing passes: a pinned app needs at least one `i18n_gate_*` test. Without
-`craft-i18n.rev` it succeeds doing nothing, so jobs that `needs:` it still run.
+Runs the app's `i18n_gate_*` tests, `cargo test --workspace i18n_gate -- --nocapture` with
+`CRAFT_I18N_GATE=1`, against the craft-i18n commit in `craft-i18n.rev`, and prints their output as
+the missing-translations report. It always succeeds: a missing translation shows in English, and a
+failing `i18n_gate_*` test only adds a warning. Without `craft-i18n.rev` it does nothing.
 
 `release.yml` runs it before packaging. `freebsd.yml` runs it with `pin-changes-only: true`: only
 on a pull request whose diff touches `craft-i18n.rev`, whether or not `skip-tests` is set. An app
