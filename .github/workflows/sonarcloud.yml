@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Check for SonarCloud token
         id: token
         env:
@@ -90,7 +91,7 @@ jobs:
           CARGO_TERM_COLOR: always
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
         run: >
-          cargo llvm-cov --workspace --no-fail-fast --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
           --ignore-filename-regex '(^|/)(vendor|xtask)/'
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
