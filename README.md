@@ -376,6 +376,20 @@ Individual actions are also available for composing custom pipelines:
 
 This repository is hosted at `storytold/craft-common-actions` for all Storytold / ArtCraft craftapps.
 
+## Repository checks
+
+`.github/workflows/ci.yml` runs two checks on pull requests and pushes to `main`:
+
+- **Pinned refs**: every external `uses:` in `.github/workflows/` and `actions/` must name
+  a full commit SHA or an immutable Docker `sha256:` digest. The repository's own actions
+  and workflows at `@main` are the documented exception (issue #6); they are allowlisted in
+  `scripts/check_pinned_refs.py`.
+- **actionlint**: validates the workflow syntax and runs shellcheck on the `run:` blocks.
+
+The checks only block a merge when the repository ruleset requires them. Requiring these
+checks, code-owner review from `.github/CODEOWNERS`, and no force-pushes or deletions are
+repository settings (owner action), not files in this repository.
+
 ## App-specific packaging checks
 
 Keep app-specific packaging assertions in the caller repository and pass their
