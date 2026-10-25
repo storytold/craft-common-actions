@@ -17,7 +17,7 @@ on:
         description: "Maximum job runtime, including coverage generation and the scan"
         type: number
         required: false
-        default: 60
+        default: 90
     secrets:
       SONAR_TOKEN:
         description: "SonarCloud analysis token"

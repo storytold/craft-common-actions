@@ -486,13 +486,13 @@ using `uses` cannot set `timeout-minutes`.
 | Standalone FreeBSD build, test and optional package | 300 |
 | Windows ARM64 package / install | 90 / 30 |
 | CI gate, per leg (`timeout-minutes` input) | 60 |
-| SonarCloud, including coverage (`timeout-minutes` input) | 60 |
+| SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
-SonarCloud callers whose instrumented workspace tests exceed an hour can pass
-`timeout-minutes: 120` under the calling job's `with`. This changes the job's time
-budget without dropping tests or coverage; other callers retain the 60-minute
-default. Pass `fonts-ref` at the app's tested craft-fonts commit when its tests
-need those fonts. The scan still needs to finish and pass its quality gate.
+SonarCloud callers whose instrumented workspace tests exceed the 90-minute
+default can pass `timeout-minutes: 120` under the calling job's `with`. This
+changes the job's time budget without dropping tests or coverage. Pass
+`fonts-ref` at the app's tested craft-fonts commit when its tests need those
+fonts. The scan still needs to finish and pass its quality gate.
 
 The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
