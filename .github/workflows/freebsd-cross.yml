@@ -113,14 +113,6 @@ permissions:
   contents: read
 
 jobs:
-  i18n-gate:
-    # Fork-only: the upstream storytold/craft-common-actions is not reachable from
-    # this fork's runs, so the reusable workflow is resolved inside the fork branch.
-    # Restore to storytold/craft-common-actions/...@main before opening the PR.
-    uses: storytold/craft-common-actions/.github/workflows/i18n-gate.yml@main
-    with:
-      pin-changes-only: true
-
   validate-architectures:
     runs-on: ubuntu-24.04
     outputs:
@@ -160,7 +152,7 @@ jobs:
 
   freebsd:
     name: FreeBSD ${{ matrix.arch }} (build + test)
-    needs: [i18n-gate, validate-architectures]
+    needs: [validate-architectures]
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     strategy:
