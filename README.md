@@ -67,6 +67,8 @@ jobs:
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
+A draft GitHub Release is published only when the caller runs on the `release` branch. A run from another branch still builds artifacts and does not create or replace the draft. Overlapping runs for the same repository and ref wait. Build jobs use `contents: read`. Only the draft job has `contents: write`.
+
 macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
 
 Build provenance, a CycloneDX SBOM, and a Sigstore signature of the published files are a second job. Add it only in an app that is ready to grant those permissions. `release.yml` does not call `supply-chain.yml`.
@@ -444,7 +446,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/checkout-craft-i18n`: Checks out `storytold/craft-i18n` at the caller's `craft-i18n.rev`, if any, and sets `CRAFT_I18N_DIR` and `CRAFT_I18N_REQUIRED=1`.
 - `actions/resolve-version`: Slices version from `packaging/env.sh` and validates format.
 - `actions/install-wix`: Installs WiX toolset and UI/Util extensions.
-- `actions/install-nfpm`: Installs `nfpm` with strict SHA256 checksum verification.
+- `actions/install-nfpm`: Installs `nfpm` only for a version whose SHA256 is stored in the action.
 - `actions/install-linux-deps`: Installs Linux system build libraries and nfpm.
 - `actions/install-apt-packages`: Installs the given Ubuntu packages and keeps the downloaded `.deb` files in the Actions cache, so later runs install without the mirror download. By default only pushes to the default branch save the cache; PRs restore it. For an app's CI:
 
@@ -454,9 +456,9 @@ Individual actions are also available for composing custom pipelines:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
-- `actions/install-trunk`: Installs Trunk for WebAssembly builds.
+- `actions/install-trunk`: Installs Trunk for WebAssembly builds only for a version whose SHA256 is stored in the action.
 - `actions/draft-release`: Collects artifacts, calculates SHA256 checksums, and publishes/updates draft GitHub release.
-- `actions/packaging-lint`: Steps for packaging linter.
+- `actions/packaging-lint`: Steps for packaging linter. actionlint installs only for a version whose SHA256 is stored in the action.
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
 ## Storytold Organization Hosting
@@ -468,8 +470,9 @@ This repository is hosted at `storytold/craft-common-actions` for all Storytold 
 Keep app-specific packaging assertions in the caller repository and pass their
 Bash script to `packaging-lint.yml` with
 `extra-checks-script: packaging/check-app-specific.sh`. It runs after the shared
-lint action, with the checkout and lint tools available. A missing or failing
-requested script fails the job. Native Windows installer probes remain separate
+lint action, with the checkout and lint tools available. The script path has to
+stay inside the repository: an absolute path or a `..` segment is rejected. A
+missing or failing requested script fails the job. Native Windows installer probes remain separate
 caller jobs; Linux static lint does not replace them.
 
 ## Job time limits

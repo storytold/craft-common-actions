@@ -14,12 +14,17 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Run packaging lint
         uses: storytold/craft-common-actions/actions/packaging-lint@main
         with:
@@ -28,4 +33,15 @@ jobs:
         if: inputs.extra-checks-script != ''
         env:
           CHECKS_SCRIPT: ${{ inputs.extra-checks-script }}
-        run: bash -- "$CHECKS_SCRIPT"
+        run: |
+          case "$CHECKS_SCRIPT" in
+            ""|/*|../*|*/../*|*/..)
+              echo "::error::extra-checks-script must be a relative path inside the repository"
+              exit 1
+              ;;
+          esac
+          if [ ! -f "$CHECKS_SCRIPT" ]; then
+            echo "::error::extra-checks-script was not found: $CHECKS_SCRIPT"
+            exit 1
+          fi
+          bash -- "$CHECKS_SCRIPT"

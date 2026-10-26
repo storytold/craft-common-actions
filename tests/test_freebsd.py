@@ -203,6 +203,12 @@ fi
                 self.assertEqual(result["code"], 0, result)
                 self.assertFalse(result["injected"], result)
 
+    def test_custom_command_delimiter_cannot_exit_the_outer_script(self):
+        result = self.run_vm(command="CRAFT_TESTS\ntouch injected\nexit 0\n", package_check=False)
+        self.assertNotEqual(result["code"], 0, result)
+        self.assertFalse(result["injected"], result)
+        self.assertFalse(result["packaged"], result)
+
     def test_each_failure_in_custom_chain_is_fatal_before_packaging(self):
         command = " && ".join("cargo test --group " + str(n) for n in range(1, 5))
         for group in range(1, 5):
