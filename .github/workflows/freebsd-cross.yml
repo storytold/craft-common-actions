@@ -89,7 +89,7 @@ on:
         required: false
         default: false
       test-timeout-seconds:
-        description: "Timeout in seconds for each test binary. Default 300s: the value is tuned for timeout profiling across the craft suite, so a binary that exceeds it is a finding, not an accident."
+        description: "Timeout in seconds for each test binary. Default 1800s: the value is tuned for timeout profiling across the craft suite, so a binary that exceeds it is a finding, not an accident."
         type: number
         required: false
         default: 1800
@@ -227,12 +227,10 @@ jobs:
 
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
-        # Fork-only reference; restore to storytold/craft-common-actions/...@main for the PR.
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
-        # Fork-only reference; restore to storytold/craft-common-actions/...@main for the PR.
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       
       - name: Resolve FreeBSD release
