@@ -16,7 +16,10 @@ license="${ARCH_LICENSE:-MIT OR Apache-2.0}"
 pkgrel="${PKGREL:-1}"
 epoch="${SOURCE_DATE_EPOCH:-$(date +%s)}"
 
-die() { echo "error: $*" >&2; exit 1; }
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
 
 [[ -f "$tarball" ]] || die "$tarball not found"
 
@@ -26,7 +29,7 @@ done
 
 case "$target_arch" in
   x86_64) arch=x86_64 ;;
-  aarch64|arm64) arch=aarch64 ;;
+  aarch64 | arm64) arch=aarch64 ;;
   riscv64) arch=riscv64 ;;
   *) die "unsupported architecture: '$target_arch'" ;;
 esac
@@ -156,7 +159,7 @@ license_bad_chars='[|;&`$<>()]'
 [[ ! "$license" =~ (OR|AND)[[:space:]]+(OR|AND) ]] || die "consecutive operators in license expression: '$license'"
 
 license_formatted=()
-IFS='|' read -ra parts <<< "$(sed -E 's/ (OR|AND) /|/g' <<< "$license")"
+IFS='|' read -ra parts <<<"$(sed -E 's/ (OR|AND) /|/g' <<<"$license")"
 for part in "${parts[@]}"; do
   part="$(echo "$part" | xargs)"
   [[ -n "$part" ]] || die "empty license component in '$license'"
@@ -170,7 +173,7 @@ license_expr="$(sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:space:]]+/ /g
 license_str="$(printf '%q' "$license_expr")"
 
 # Create makepkg.conf override
-cat > "$work/makepkg.conf" <<EOF
+cat >"$work/makepkg.conf" <<EOF
 if [[ -f /etc/makepkg.conf ]]; then
   source /etc/makepkg.conf
 fi
@@ -181,7 +184,7 @@ COMPRESSZST=(zstd -c -T0 --ultra -20 -)
 EOF
 
 # Write PKGBUILD
-cat > "$work/PKGBUILD" <<EOF
+cat >"$work/PKGBUILD" <<EOF
 # Maintainer: Storyteller Authors
 pkgname=$(printf '%q' "$pkgname")
 pkgver=$(printf '%q' "$pkgver")

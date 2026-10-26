@@ -1,6 +1,6 @@
 # artcraft-common-actions
 
-<a href="https://sonarcloud.io/project/overview?id=storytold_craft-common-actions"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+<a href="https://sonarcloud.io/project/overview?id=storytold_craft-common-actions"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a> <!-- rumdl-disable-line no-inline-html -->
 
 Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCraft desktop and web applications.
 
@@ -9,7 +9,9 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ## Workflows Included
 
 ### 1. `release.yml`
+
 Full multi-platform release pipeline for Craft apps:
+
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
@@ -20,7 +22,8 @@ Full multi-platform release pipeline for Craft apps:
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
 - **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Release
 
@@ -108,7 +111,9 @@ invalid craft-i18n checkout; a missing translation never blocks a build, pin bum
 (storytold/craft-i18n#20). An app without `craft-i18n.rev` builds as before.
 
 ### 2. `packaging-lint.yml`
+
 Lints all packaging configurations and metadata:
+
 - `actionlint` for workflow syntax
 - `shellcheck` for shell scripts and AppRun
 - PowerShell parser validation for WiX helper scripts
@@ -118,7 +123,8 @@ Lints all packaging configurations and metadata:
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Packaging lint
 
@@ -143,9 +149,11 @@ jobs:
 ```
 
 ### 3. `windows-arm64.yml`
+
 Cross-compiles ARM64 MSI on x64 Windows runner, then installs, verifies native ARM64 architecture (`0xAA64`), smoke tests the CLI, and uninstalls on a Windows 11 ARM64 runner.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: Windows ARM64
 
@@ -180,6 +188,7 @@ jobs:
 ```
 
 ### 4. `freebsd.yml`
+
 Builds and runs workspace tests inside a FreeBSD 15 VM on a Linux runner.
 Pull requests default to `x86_64`; pushes, schedules and manual runs retain both
 `x86_64` and `aarch64`. Both boot a KVM-accelerated x86_64 VM; `aarch64` is
@@ -268,7 +277,8 @@ succeed, then requires at least one readable `*-freebsd-<arch>.tar.gz` in
 `dist/release` for each matrix architecture. Each archive is checked separately. The app's package script
 retains responsibility for its required binaries, metadata and licence files.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: FreeBSD
 
@@ -306,7 +316,7 @@ arguments with shell-style quotes and escapes for values containing spaces.
 Arguments are passed literally: shell commands, variable expansion and globbing
 are not evaluated. Malformed quoting fails the check.
 
-#### Caller Example:
+#### Caller Example
 
 ```yaml
 name: Nix
@@ -351,7 +361,8 @@ After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast:
 `timeout-minutes` (default 60). Jobs only some apps need, such as fuzzing or web builds, stay in
 the app's own workflow next to the call.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 name: CI
 
@@ -418,7 +429,8 @@ Findings show up as annotations on the pull request; a failing scan also lists e
 error-severity finding fails the job. ast-grep is pinned and its download checked against a
 SHA256 kept in the action, since its releases publish none; pass `sha256` with another `version`.
 
-#### Caller Example:
+#### Caller Example
+
 ```yaml
 jobs:
   ast-grep:
@@ -453,6 +465,7 @@ Individual actions are also available for composing custom pipelines:
     with:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
+
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, calculates SHA256 checksums, and publishes/updates draft GitHub release.

@@ -1,0 +1,87 @@
+# install prek package
+#  cargo binstall prek
+# register as git commit-hook to run automatically
+#  prek install
+# run manually
+#  prek run --all-files
+# update hooks to latest version
+#  prek autoupdate
+
+exclude: >-
+  (?x)^(
+    \.vscode/.*
+  )$
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-illegal-windows-names
+      - id: check-json
+      - id: check-json5
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-vcs-permalinks
+      - id: check-xml
+      - id: check-yaml
+      - id: destroyed-symlinks
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: file-contents-sorter
+        files: '^(\.gitignore)$'
+        args: ["--ignore-case"]
+      - id: fix-byte-order-marker
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: requirements-txt-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/rvben/rumdl-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: rumdl-fmt
+      - id: rumdl
+        # "--fix"
+        args: ["--disable", "MD013"]  # line-length
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.14.1-1
+    hooks:
+      - id: shfmt
+        args: ["-w", "-i", "2", "-ci"]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+
+  # TODO: deactivated until findings are fixed
+  # - repo: https://github.com/owenlamont/ryl-pre-commit
+  #   rev: v0.25.1
+  #   hooks:
+  #     - id: ryl-check
+  #       args: ["--fix", "-d", "{extends: default, rules: {line-length: disable, truthy: disable, document-start: disable}}"]
+  #     - id: ryl-format
+
+  # TODO: deactivated until findings are fixed
+  # - repo: https://github.com/zizmorcore/zizmor-pre-commit
+  #   rev: v1.31.1
+  #   hooks:
+  #     - id: zizmor
+
+  # TODO: deactivated until findings are fixed
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: v0.17.1
+  #   hooks:
+  #     - id: ruff-format
+  #     - id: ruff-check
+  #       args: [ --fix ]
