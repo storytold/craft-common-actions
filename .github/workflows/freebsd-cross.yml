@@ -93,11 +93,6 @@ on:
         type: number
         required: false
         default: 1800
-      per-case-trace:
-        description: "Run each libtest case in its own process with --exact and --test-threads=1. Much slower than one run per binary; use it for timeout profiling only. In this mode test-timeout-seconds applies to each case, not to the binary."
-        type: boolean
-        required: false
-        default: false
       only-test-binaries:
         description: "Space-separated glob patterns. When set, only matching test binaries are packed and run; the rest are not transferred. Matched against the recorded path, e.g. 'target/*/debug/deps/clap_e2e-*'."
         type: string
@@ -175,42 +170,10 @@ jobs:
       SKIP_TEST_CASES_AARCH64: ${{ inputs.skip-test-cases-aarch64 }}
       STUB_CARGO: ${{ inputs.stub-cargo }}
       TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds }}
-      PER_CASE_TRACE: ${{ inputs.per-case-trace }}
       ONLY_TEST_BINARIES: ${{ inputs.only-test-binaries }}
       ONLY_TEST_CASES: ${{ inputs.only-test-cases }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Check KVM availability
-        id: kvm-check
-        shell: bash
-        run: |
-          host_arch=$(uname -m)
-          guest_arch="$MATRIX_ARCH"
-          case "$host_arch" in
-            x86_64|amd64) host_norm="x86_64" ;;
-            aarch64|arm64) host_norm="aarch64" ;;
-            *) host_norm="$host_arch" ;;
-          esac
-          if [ "$host_norm" != "$guest_arch" ]; then
-            # Host KVM cannot accelerate a cross-architecture guest.
-            echo "has_kvm=false" >> "$GITHUB_OUTPUT"
-            echo "Cross-architecture guest ($guest_arch on $host_norm): KVM unusable, guest will run under TCG"
-            exit 0
-          fi
-          if [ -c /dev/kvm ]; then
-            sudo chmod 666 /dev/kvm 2>/dev/null || true
-            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-              echo "has_kvm=true" >> "$GITHUB_OUTPUT"
-              echo "KVM device exists and is accessible"
-            else
-              echo "has_kvm=false" >> "$GITHUB_OUTPUT"
-              echo "KVM device exists but is not accessible"
-            fi
-          else
-            echo "has_kvm=false" >> "$GITHUB_OUTPUT"
-            echo "KVM device is absent"
-          fi
 
       - name: Pre-install QEMU dependencies
         run: |
@@ -759,7 +722,7 @@ jobs:
           # scp copies each part as an opaque file, which is the granularity
           # the checksum list already verifies.
           sync: scp
-          envs: 'MATRIX_ARCH REQUIRE_CRAFT_FONTS STUB_CARGO SKIP_TEST_BINARIES_X86_64 SKIP_TEST_BINARIES_AARCH64 SKIP_TEST_CASES_X86_64 SKIP_TEST_CASES_AARCH64 TEST_TIMEOUT_SECONDS PER_CASE_TRACE ONLY_TEST_CASES INSTALL_RUST'
+          envs: 'MATRIX_ARCH REQUIRE_CRAFT_FONTS STUB_CARGO SKIP_TEST_BINARIES_X86_64 SKIP_TEST_BINARIES_AARCH64 SKIP_TEST_CASES_X86_64 SKIP_TEST_CASES_AARCH64 TEST_TIMEOUT_SECONDS ONLY_TEST_CASES INSTALL_RUST'
           prepare: |
             pkg update -f
             pkg install -y bash file git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu zstd
@@ -1024,116 +987,6 @@ jobs:
                 done
 
                 echo "Running test binary: $test_bin in $crate_dir"
-
-                # Per-case tracing is opt-in (per-case-trace input). Off by default,
-                # every binary runs once, so test-timeout-seconds is a per-binary limit.
-                is_libtest=false
-                if [ "${PER_CASE_TRACE:-false}" = "true" ] \
-                   && timeout 60 "$root/$test_bin" --list >/dev/null 2>&1; then
-                  is_libtest=true
-                fi
-
-                if [ "$is_libtest" = "true" ]; then
-                  # ========== Per-case trace mode (libtest only) ==========
-                                    # List all test cases from this binary
-                  case_list=$(timeout 60 "$root/$test_bin" --list 2>/dev/null | sed -n 's/: test$//p' || true)
-
-                  if [ -z "$case_list" ]; then
-                    echo "  (--list returned empty, falling back to direct run)"
-                    is_libtest=false
-                  fi
-
-                  if [ "$is_libtest" = "true" ]; then
-                    if [ -n "${ONLY_TEST_CASES:-}" ]; then
-                      only_args=""
-                      set -f
-                      for p in $ONLY_TEST_CASES; do only_args="$only_args -e $p"; done
-                      set +f
-                      case_list=$(printf '%s\n' "$case_list" | grep -F $only_args || true)
-                      if [ -z "$case_list" ]; then
-                        echo "  (no case in this binary matches only-test-cases, skipping)"
-                        continue
-                      fi
-                    fi
-
-                    case_total=$(echo "$case_list" | wc -l | tr -d ' ')
-                    case_list_file="$root/case-list.txt"
-                    printf '%s\n' "$case_list" > "$case_list_file"
-                    echo "  (libtest: $case_total cases, running individually)"
-                    echo "  ------------------------------------------------"
-
-                    case_passed=0
-                    case_failed=0
-                    case_skipped=0
-
-                    while IFS= read -r single_case; do
-                      [ -z "$single_case" ] && continue
-
-                      # Check if this case matches the skip patterns
-                      should_skip=false
-                      if [ -n "$case_skip" ]; then
-                        for pattern in $case_skip; do
-                          if printf '%s\n' "$single_case" | grep -qF -- "$pattern"; then
-                            should_skip=true
-                            break
-                          fi
-                        done
-                      fi
-
-                      if [ "$should_skip" = "true" ]; then
-                        case_skipped=$((case_skipped + 1))
-                        continue
-                      fi
-
-                      echo "  >> RUN $single_case"
-
-                      case_log="case-log-$(printf '%s' "$single_case" | sha256 -q).log"
-                      set +e
-                      if [ "$(id -u)" -eq 0 ]; then
-                        su -m craft-test -c "set -f; HOME=/home/craft-test XDG_CACHE_HOME=/home/craft-test/.cache PATH='$PATH' && export HOME XDG_CACHE_HOME PATH && cd '$root/$crate_dir' && CARGO_MANIFEST_DIR='$root/$crate_dir' && export CARGO_MANIFEST_DIR && timeout ${TEST_TIMEOUT_SECONDS:-1800} '$root/$test_bin' '$single_case' --exact --test-threads=1" < /dev/null > "$root/$case_log" 2>&1
-                      else
-                        (set -f; cd "$root/$crate_dir" && CARGO_MANIFEST_DIR="$root/$crate_dir" timeout "${TEST_TIMEOUT_SECONDS:-1800}" "$root/$test_bin" "$single_case" --test-threads=1 < /dev/null > "$root/$case_log" 2>&1)
-                      fi
-                      case_rc=$?
-                      set -e
-
-                      if [ "$case_rc" -eq 124 ]; then
-                        echo "  >> TIMEOUT $single_case"
-                        echo "$test_bin :: $single_case" >> timed-out-tests.txt
-                        case_failed=$((case_failed + 1))
-                      elif [ "$case_rc" -ne 0 ]; then
-                        echo "  >> FAIL $single_case (exit $case_rc)"
-                        # Print last few lines of output for context
-                        tail -5 "$root/$case_log" 2>/dev/null || true
-                        case_failed=$((case_failed + 1))
-                      else
-                        echo "  >> PASS $single_case"
-                        case_passed=$((case_passed + 1))
-                      fi
-                      rm -f "$root/$case_log"
-                    done < "$case_list_file"
-                    rm -f "$case_list_file"
-
-                    echo "  ------------------------------------------------"
-                    echo "  >> CASE SUMMARY: $case_passed passed, $case_skipped skipped, $case_failed failed (out of $case_total)"
-
-                    # Count binaries, not cases, so Summary stays consistent with the
-                    # direct-run path. A binary whose cases were all skipped did not run.
-                    if [ "$((case_passed + case_failed))" -gt 0 ]; then
-                      attempted=$((attempted + 1))
-                    else
-                      skipped=$((skipped + 1))
-                    fi
-                    if [ "$case_failed" -gt 0 ]; then
-                      failed="$failed $test_bin(failed)"
-                    else
-                      passed=$((passed + 1))
-                    fi
-
-                    # Skip the original execution block below
-                    continue
-                  fi
-                fi
 
                 # ========== Original direct-run path (non-libtest or fallback) ==========
                 test_log="test-log-$(printf '%s' "$test_bin" | sha256 -q).log"
