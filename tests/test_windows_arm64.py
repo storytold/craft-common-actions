@@ -26,15 +26,21 @@ with open('processes.jsonl', 'a') as log:
     log.write(json.dumps(args) + '\n')
 if args[0] == '/i':
     Path('install.log').touch()
-    per_user = os.environ['TEST_PER_USER'] == 'true'
-    directory = Path(os.environ['LOCALAPPDATA']) / 'Programs' if per_user else Path(os.environ['ProgramFiles'])
-    directory /= os.environ['TEST_APP_DIR']
+    launcher = os.environ['TEST_PER_USER'] == 'true'
+    scope = os.environ['TEST_SCOPE']
+    per_user = scope == 'perUser' or (not scope and launcher)
+    expected = ['ALLUSERS=2', 'MSIINSTALLPERUSER=1'] if scope == 'perUser' else ['ALLUSERS=1', 'MSIINSTALLPERUSER=""'] if scope else []
+    if any(value not in args for value in expected):
+        raise SystemExit('explicit install scope was not passed to msiexec')
+    relative = os.environ['TEST_INSTALL_PATH'] or ('Programs/' if per_user else '') + os.environ['TEST_APP_DIR']
+    directory = Path(os.environ['LOCALAPPDATA'] if per_user else os.environ['ProgramFiles'])
+    directory = directory.joinpath(*relative.replace(chr(92), '/').split('/'))
     custom = next((arg for arg in args if arg.startswith('INSTALLFOLDER=')), None)
     if custom:
         directory = Path(custom[len('INSTALLFOLDER='):].strip('"').rstrip('\\'))
     directory.mkdir(parents=True)
     names = [os.environ['TEST_MAIN_BINARY']]
-    if not per_user:
+    if not launcher:
         names.append(os.environ['TEST_CLI_BINARY'])
     files = [directory / name for name in set(names)]
     for path in files:
@@ -43,7 +49,7 @@ if args[0] == '/i':
         data[68:70] = (0xaa64).to_bytes(2, 'little')
         path.write_bytes(data)
         path.chmod(0o755)
-    if per_user:
+    if launcher:
         for folder in ('programs', 'desktop'):
             if folder == 'desktop' and 'INSTALLDESKTOPSHORTCUT=0' in args:
                 continue
@@ -81,6 +87,7 @@ class WindowsArm64Tests(unittest.TestCase):
     def run_install(self, per_user=False, **overrides):
         inputs = {'app-name': 'pdfcraft', 'app-dir': 'PDFCraft',
                   'main-binary': '', 'cli-binary': '', 'is-per-user': str(per_user).lower(),
+                  'install-relative-path': '', 'install-scope': '',
                   **overrides}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -91,6 +98,7 @@ class WindowsArm64Tests(unittest.TestCase):
             env = {**os.environ, 'LOCALAPPDATA': str(root / 'local'),
                    'ProgramFiles': str(root / 'program-files'), 'TEST_PYTHON': sys.executable,
                    'TEST_PER_USER': inputs['is-per-user'], 'TEST_APP_DIR': inputs['app-dir'],
+                   'TEST_SCOPE': inputs['install-scope'], 'TEST_INSTALL_PATH': inputs['install-relative-path'],
                    'TEST_MAIN_BINARY': inputs['main-binary'] or inputs['app-name'] + '.exe',
                    'TEST_CLI_BINARY': inputs['cli-binary'] or inputs['app-name'] + '-cli.exe'}
             script = STEP['run']
@@ -126,6 +134,21 @@ class WindowsArm64Tests(unittest.TestCase):
                                      ['/i', '/x', '/i', '/x'] if per_user else ['/i', '/x'])
                     self.assertFalse(injected)
                     self.assertEqual(cli_ran, not per_user)
+
+    def test_explicit_context_and_nested_path_reach_the_installer(self):
+        for launcher, scope, relative in (
+            (False, 'perUser', 'Programs/ArtCraft/PhotoCraft'),
+            (False, 'perMachine', 'ArtCraft/PhotoCraft'),
+            (True, 'perUser', 'Programs/ArtCraft/Launcher'),
+        ):
+            with self.subTest(launcher=launcher, scope=scope):
+                result, processes, injected, cli_ran = self.run_install(
+                    launcher, **{'install-scope': scope, 'install-relative-path': relative})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual([args[0] for args in processes],
+                                 ['/i', '/x', '/i', '/x'] if launcher else ['/i', '/x'])
+                self.assertEqual(cli_ran, not launcher)
+                self.assertFalse(injected)
 
     def test_powershell_syntax_in_names_stays_literal(self):
         for value in ("Craft'; New-Item injected; #", 'Craft$(New-Item injected)',

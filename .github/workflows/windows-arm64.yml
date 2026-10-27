@@ -11,6 +11,16 @@ on:
         description: "Installation folder name inside ProgramFiles or LocalAppData (e.g. PhotoCraft)"
         type: string
         required: true
+      install-relative-path:
+        description: "Install path below LocalAppData (per-user) or ProgramFiles (per-machine), independent of app-dir"
+        type: string
+        required: false
+        default: ""
+      install-scope:
+        description: "Explicit perUser or perMachine context; empty preserves legacy installer defaults"
+        type: string
+        required: false
+        default: ""
       main-binary:
         description: "Name of the main executable file"
         type: string
@@ -89,6 +99,8 @@ jobs:
           MAIN_BINARY: ${{ inputs.main-binary }}
           CLI_BINARY: ${{ inputs.cli-binary }}
           IS_PER_USER: ${{ inputs.is-per-user }}
+          INSTALL_RELATIVE_PATH: ${{ inputs.install-relative-path }}
+          INSTALL_SCOPE: ${{ inputs.install-scope }}
         run: |
           $ErrorActionPreference = 'Stop'
           $mainExeName = if ($env:MAIN_BINARY -ne '') { $env:MAIN_BINARY } else { "$env:APP_NAME.exe" }
@@ -99,6 +111,25 @@ jobs:
               throw 'app-dir and executable names must be nonempty names without paths, invalid Windows filename characters, or trailing dots/spaces'
             }
           }
+          # Keep display/registry/shortcut names separate from the nested install path.
+          $scope = [string]$env:INSTALL_SCOPE
+          if ($scope -notin '', 'perUser', 'perMachine') { throw 'install-scope must be perUser or perMachine' }
+          if ($env:IS_PER_USER -eq 'true' -and $scope -eq 'perMachine') { throw 'A per-user-only installer cannot request machine scope' }
+          $perUser = $scope -eq 'perUser' -or ($scope -eq '' -and $env:IS_PER_USER -eq 'true')
+          $relativePath = [string]$env:INSTALL_RELATIVE_PATH
+          if (-not $relativePath) { $relativePath = if ($perUser) { "Programs\$env:APP_DIR" } else { $env:APP_DIR } }
+          # Split with StringSplitOptions.None so leading, trailing and doubled separators fail.
+          $parts = $relativePath.Split([char[]]@('/', '\'), [StringSplitOptions]::None)
+          foreach ($part in $parts) {
+            if ([string]::IsNullOrEmpty($part) -or $part -in '.', '..' -or $part -match '[<>:"|?*\x00-\x1F]' -or $part -match '[. ]\z') {
+              throw 'install-relative-path must contain only safe relative Windows path components'
+            }
+          }
+          $installDirectory = if ($perUser) { $env:LOCALAPPDATA } else { $env:ProgramFiles }
+          foreach ($part in $parts) { $installDirectory = Join-Path $installDirectory $part }
+          $scopeProperties = @()
+          if ($scope -eq 'perUser') { $scopeProperties = @('ALLUSERS=2', 'MSIINSTALLPERUSER=1') }
+          if ($scope -eq 'perMachine') { $scopeProperties = @('ALLUSERS=1', 'MSIINSTALLPERUSER=""') }
           $msi = (Get-ChildItem dist/*.msi | Select-Object -First 1).FullName
 
           if ($env:IS_PER_USER -eq "true") {
@@ -106,7 +137,7 @@ jobs:
             $deskLnk = Join-Path ([Environment]::GetFolderPath('Desktop')) "$env:APP_DIR.lnk"
             $key = "HKCU:\Software\Learning Machines LLC\$env:APP_DIR"
             function Install([string[]] $props) {
-              $p = Start-Process msiexec.exe -ArgumentList (@('/i', "`"$msi`"", '/qn', '/l*v', 'install.log') + $props) -Wait -PassThru
+              $p = Start-Process msiexec.exe -ArgumentList (@('/i', "`"$msi`"", '/qn', '/l*v', 'install.log') + $scopeProperties + $props) -Wait -PassThru
               if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "msiexec /i exited $($p.ExitCode)" }
             }
             function Uninstall([string] $exe) {
@@ -119,7 +150,7 @@ jobs:
             function Expect([bool] $ok, [string] $what) { if (-not $ok) { Get-Content install.log -Tail 60; throw $what }; Write-Output "ok $what" }
 
             Install @()
-            $exe = Join-Path $env:LOCALAPPDATA "Programs\$env:APP_DIR\$mainExeName"
+            $exe = Join-Path $installDirectory $mainExeName
             Expect (Test-Path -LiteralPath $exe) "installed in default folder: $exe"
             $bytes = [System.IO.File]::ReadAllBytes($exe)
             $machine = [BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 4)
@@ -137,9 +168,9 @@ jobs:
             Uninstall $exe
             Expect (-not (Test-Path -LiteralPath $dir)) 'uninstall removed chosen folder'
           } else {
-            $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/l*v', 'install.log' -Wait -PassThru
+            $p = Start-Process msiexec.exe -ArgumentList (@('/i', "`"$msi`"", '/qn', '/l*v', 'install.log') + $scopeProperties) -Wait -PassThru
             if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 60; throw "msiexec /i exited $($p.ExitCode)" }
-            $dir = Join-Path $env:ProgramFiles $env:APP_DIR
+            $dir = $installDirectory
 
             $exeList = @($mainExeName)
             if ($cliExeName -ne '' -and $cliExeName -ne $mainExeName) {

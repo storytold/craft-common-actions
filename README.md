@@ -145,6 +145,15 @@ jobs:
 ### 3. `windows-arm64.yml`
 Cross-compiles ARM64 MSI on x64 Windows runner, then installs, verifies native ARM64 architecture (`0xAA64`), smoke tests the CLI, and uninstalls on a Windows 11 ARM64 runner.
 
+`app-dir` stays a single display/shortcut/registration name. Set `install-relative-path`
+separately for nested folders, for example `Programs/ArtCraft/PhotoCraft` below LocalAppData
+with `install-scope: perUser`, or `ArtCraft/PhotoCraft` below ProgramFiles with
+`install-scope: perMachine`. An empty scope retains the legacy installer defaults and
+`is-per-user` behaviour. Explicit scope is passed to msiexec as well as used for path checks.
+For the launcher's per-user-only installer, keep `is-per-user: true` to retain its shortcut,
+registry and custom-folder checks. Path components are validated before starting msiexec.
+
+
 #### Caller Example:
 ```yaml
 name: Windows ARM64
