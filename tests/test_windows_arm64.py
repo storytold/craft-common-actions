@@ -21,19 +21,19 @@ STEP = next(step for step in DATA['jobs']['install']['steps'] if 'run' in step)
 INSTALLER = r'''
 import json, os, sys
 from pathlib import Path
-args = sys.argv[1:]
+args = json.loads(Path('process-arguments.json').read_text(encoding='utf-8-sig'))
 with open('processes.jsonl', 'a') as log:
     log.write(json.dumps(args) + '\n')
 if args[0] == '/i':
     Path('install.log').touch()
     launcher = os.environ['TEST_PER_USER'] == 'true'
-    scope = os.environ['TEST_SCOPE']
+    scope = os.environ.get('TEST_SCOPE', '')
     per_user = scope == 'perUser' or (not scope and launcher)
     expected = ['ALLUSERS=2', 'MSIINSTALLPERUSER=1'] if scope == 'perUser' else ['ALLUSERS=1', 'MSIINSTALLPERUSER=""'] if scope else []
     if any(value not in args for value in expected):
         raise SystemExit('explicit install scope was not passed to msiexec')
-    relative = os.environ['TEST_INSTALL_PATH'] or ('Programs/' if per_user else '') + os.environ['TEST_APP_DIR']
-    directory = Path(os.environ['LOCALAPPDATA'] if per_user else os.environ['ProgramFiles'])
+    relative = os.environ.get('TEST_INSTALL_PATH', '') or ('Programs/' if per_user else '') + os.environ['TEST_APP_DIR']
+    directory = Path.cwd() / ('local' if per_user else 'program-files')
     directory = directory.joinpath(*relative.replace(chr(92), '/').split('/'))
     custom = next((arg for arg in args if arg.startswith('INSTALLFOLDER=')), None)
     if custom:
@@ -65,10 +65,14 @@ else:
 '''
 
 PRELUDE = r'''
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
 function Start-Process {
   param($FilePath, [string[]] $ArgumentList, [switch] $Wait, [switch] $PassThru)
   if ($FilePath -ne 'msiexec.exe') { throw "unexpected process $FilePath" }
-  & $env:TEST_PYTHON fixture.py @ArgumentList
+  # Preserve the Start-Process argument array across the Python fixture boundary.
+  ConvertTo-Json -InputObject @($ArgumentList) -Compress | Set-Content process-arguments.json -Encoding UTF8
+  & $env:TEST_PYTHON fixture.py
   if ($LASTEXITCODE -ne 0) { throw 'fixture installer failed' }
   [pscustomobject]@{ ExitCode = 0 }
 }
@@ -82,9 +86,13 @@ function Get-ItemProperty {
 '''
 
 
-@unittest.skipUnless(shutil.which('pwsh') and os.name == 'posix', 'requires PowerShell on POSIX')
+SHELL = shutil.which('pwsh') or shutil.which('powershell')
+
+
+@unittest.skipUnless(SHELL, 'requires PowerShell')
 class WindowsArm64Tests(unittest.TestCase):
     def run_install(self, per_user=False, **overrides):
+        """Exercise the workflow with fixture process and filesystem boundaries."""
         inputs = {'app-name': 'pdfcraft', 'app-dir': 'PDFCraft',
                   'main-binary': '', 'cli-binary': '', 'is-per-user': str(per_user).lower(),
                   'install-relative-path': '', 'install-scope': '',
@@ -115,14 +123,30 @@ class WindowsArm64Tests(unittest.TestCase):
             for folder in ('Programs', 'Desktop'):
                 script = script.replace(f"([Environment]::GetFolderPath('{folder}'))",
                                         f"'{root / folder.lower()}'")
-            (root / 'install.ps1').write_text(PRELUDE + script)
-            result = subprocess.run(['pwsh', '-NoLogo', '-NoProfile', '-File', 'install.ps1'],
+            # The POSIX fixture is a shell executable. On Windows mock only that
+            # native CLI boundary; retain path checks, invocation and exit handling.
+            prelude = PRELUDE
+            if os.name == 'nt':
+                prelude += r"""
+$env:ProgramFiles = Join-Path $PWD 'program-files'
+function Invoke-FixtureCli([string] $Path, [string] $Argument) {
+  if (-not (Test-Path -LiteralPath $Path) -or $Argument -ne '--version') { throw 'invalid fixture CLI call' }
+  Set-Content cli-ran 'called'
+  $global:LASTEXITCODE = 0
+  'fixture 1.0'
+}
+"""
+                script = script.replace('$out = & $cli --version 2>&1 | Out-String',
+                                        "$out = Invoke-FixtureCli $cli '--version' | Out-String")
+            (root / 'install.ps1').write_text(prelude + script, encoding='utf-8-sig')
+            result = subprocess.run([SHELL, '-NoLogo', '-NoProfile', '-File', 'install.ps1'],
                                     cwd=root, env=env, capture_output=True, text=True, timeout=20)
             log = root / 'processes.jsonl'
             processes = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, processes, (root / 'injected').exists(), (root / 'cli-ran').exists()
 
     def test_defaults_and_custom_names_in_both_branches(self):
+        """Defaults and custom names in both branches."""
         for per_user in (False, True):
             for inputs in ({}, {'app-name': 'craft-launcher', 'app-dir': 'ArtCraft Launcher',
                                'main-binary': 'artcraft-launcher.exe', 'cli-binary': 'artcraft-cli.exe'},
@@ -136,6 +160,7 @@ class WindowsArm64Tests(unittest.TestCase):
                     self.assertEqual(cli_ran, not per_user)
 
     def test_explicit_context_and_nested_path_reach_the_installer(self):
+        """Explicit context and nested path reach the installer."""
         for launcher, scope, relative in (
             (False, 'perUser', 'Programs/ArtCraft/PhotoCraft'),
             (False, 'perMachine', 'ArtCraft/PhotoCraft'),
@@ -151,6 +176,7 @@ class WindowsArm64Tests(unittest.TestCase):
                 self.assertFalse(injected)
 
     def test_powershell_syntax_in_names_stays_literal(self):
+        """Powershell syntax in names stays literal."""
         for value in ("Craft'; New-Item injected; #", 'Craft$(New-Item injected)',
                       'Craft`$(New-Item injected)', "Craft's [ARM64] é"):
             for name in ('app-name', 'app-dir', 'main-binary', 'cli-binary'):
@@ -161,6 +187,7 @@ class WindowsArm64Tests(unittest.TestCase):
                         self.assertFalse(injected)
 
     def test_invalid_names_fail_before_installing(self):
+        """Invalid names fail before installing."""
         for value in ('../outside', '..\\outside', 'C:outside', 'C:\\outside', '\\\\host\\share',
                       '.', '..', 'trailing.', 'trailing ', 'bad*', 'bad?', 'bad|', 'bad<', 'bad>',
                       'bad\x01', 'bad\nNew-Item injected', 'bad"; New-Item injected; #'):

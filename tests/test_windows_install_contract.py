@@ -18,6 +18,7 @@ SHELL = shutil.which('pwsh') or shutil.which('powershell')
 @unittest.skipUnless(SHELL, 'requires PowerShell')
 class InstallContractTests(unittest.TestCase):
     def resolve(self, relative='', scope='', launcher=False, app='PhotoCraft'):
+        """Resolve only the workflow input contract without invoking msiexec."""
         inputs = {'app-name': 'photocraft', 'app-dir': app, 'main-binary': 'photocraft.exe',
                   'cli-binary': 'photocraft-cli.exe', 'is-per-user': str(launcher).lower(),
                   'install-relative-path': relative, 'install-scope': scope}
@@ -42,6 +43,7 @@ class InstallContractTests(unittest.TestCase):
             return result, data, env
 
     def test_nested_per_user_path_and_explicit_scope(self):
+        """Nested per user path and explicit scope."""
         result, data, env = self.resolve('Programs/ArtCraft/PhotoCraft', 'perUser')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIsInstance(data['directory'], str, 'The workflow must resolve the requested install directory.')
@@ -50,6 +52,7 @@ class InstallContractTests(unittest.TestCase):
         self.assertEqual(data['properties'], ['ALLUSERS=2', 'MSIINSTALLPERUSER=1'])
 
     def test_machine_scope_and_legacy_defaults(self):
+        """Machine scope and legacy defaults."""
         for launcher, scope, relative, suffix, user in (
             (False, '', '', 'PhotoCraft', False),
             (True, '', '', 'Programs/PhotoCraft', True),
@@ -63,6 +66,7 @@ class InstallContractTests(unittest.TestCase):
                 self.assertEqual(data['properties'], [] if not scope else ['ALLUSERS=1', 'MSIINSTALLPERUSER=""'])
 
     def test_invalid_relative_paths_and_scope_fail_before_install(self):
+        """Invalid relative paths and scope fail before install."""
         for relative in ('../outside', 'ArtCraft/../outside', '/absolute', 'C:relative',
                          'C:/absolute', '//host/share', 'ArtCraft//PhotoCraft',
                          'ArtCraft/./PhotoCraft', 'ArtCraft/trailing.', 'ArtCraft/trailing ',
@@ -76,6 +80,7 @@ class InstallContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_path_metacharacters_stay_literal(self):
+        """Path metacharacters stay literal."""
         for name in ("Craft's [ARM64]", 'Craft$(Write-Output injected)', 'Craft`name'):
             with self.subTest(name=name):
                 result, data, env = self.resolve('Programs/ArtCraft/' + name, 'perUser')
