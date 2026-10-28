@@ -241,6 +241,7 @@ jobs:
       # key. Only the header is fetched: the catalogue is close to 10 MB.
       - name: Resolve the pkg catalogue identity
         id: pkg-epoch
+        if: steps.detect-libs.outputs.needs_extra_libs == 'true'
         env:
           MAJOR_VER: ${{ steps.freebsd-release.outputs.major }}
         run: |
@@ -261,7 +262,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
         with:
           path: ~/freebsd-sysroot
-          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.pkg-epoch.outputs.epoch }}
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
 
       - name: Extract FreeBSD Sysroot
         if: steps.sysroot-cache.outputs.cache-hit != 'true'
@@ -366,7 +367,7 @@ jobs:
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
         with:
           path: ~/freebsd-sysroot
-          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.pkg-epoch.outputs.epoch }}
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
 
       - name: Setup Toolchain
         run: |
@@ -449,9 +450,9 @@ jobs:
               fi
               # shellcheck disable=SC2086
               cargo build --manifest-path "$manifest" --target=$TARGET_TRIPLE --target-dir "$FIXTURE_TMPDIR" $fixture_locked
+              mkdir -p "$FIXTURE_TMPDIR/debug"
               for so in "$FIXTURE_TMPDIR/$TARGET_TRIPLE/debug"/*.so; do
                 [ -f "$so" ] || continue
-                mkdir -p "$FIXTURE_TMPDIR/debug"
                 cp "$so" "$FIXTURE_TMPDIR/debug/"
               done
             done
@@ -634,11 +635,23 @@ jobs:
             done < <(find "target/$TARGET_TRIPLE/debug" -maxdepth 1 -type f -executable)
           fi
 
-          if [ -d "target/$TARGET_TRIPLE/tmp/clap-fixture-target" ]; then
-            cp -r "target/$TARGET_TRIPLE/tmp/clap-fixture-target" "target-slim/target/$TARGET_TRIPLE/tmp/"
-          fi
-          if [ -d "target/$TARGET_TRIPLE/tmp/vst3-fixture-target" ]; then
-            cp -r "target/$TARGET_TRIPLE/tmp/vst3-fixture-target" "target-slim/target/$TARGET_TRIPLE/tmp/"
+          if [ -n "${FIXTURE_MANIFESTS:-}" ]; then
+            for manifest in $FIXTURE_MANIFESTS; do
+              fixture_name=$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")" | sed 's/-host$//')
+              src="target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target"
+              if [ ! -d "$src" ]; then
+                echo "Error: fixture target not found for manifest $manifest (expected $src)" >&2
+                exit 1
+              fi
+              dest="target-slim/target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target"
+              mkdir -p "$dest"
+              if [ -d "$src/debug" ]; then
+                cp -r "$src/debug" "$dest/"
+              else
+                cp -r "$src" "$dest"
+                rm -rf "$dest/$TARGET_TRIPLE" "$dest/debug/incremental"
+              fi
+            done
           fi
 
           if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
@@ -659,17 +672,23 @@ jobs:
             grep -Fx './test-binaries.sha256' payload-files.txt
           fi
           
-          if [ -f "target/$TARGET_TRIPLE/tmp/clap-fixture-target/debug/libclap_fixture.so" ]; then
-            grep -Fxq "./target/$TARGET_TRIPLE/tmp/clap-fixture-target/debug/libclap_fixture.so" payload-files.txt || { 
-              echo "Error: clap fixture .so missing from archive" >&2
-              exit 1
-            }
-          fi
-          if [ -f "target/$TARGET_TRIPLE/tmp/vst3-fixture-target/debug/libvst3_fixture.so" ]; then
-            grep -Fxq "./target/$TARGET_TRIPLE/tmp/vst3-fixture-target/debug/libvst3_fixture.so" payload-files.txt || { 
-              echo "Error: vst3 fixture .so missing from archive" >&2
-              exit 1
-            }
+          if [ -n "${FIXTURE_MANIFESTS:-}" ]; then
+            for manifest in $FIXTURE_MANIFESTS; do
+              fixture_name=$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")" | sed 's/-host$//')
+              found_so=false
+              for so in "target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target/debug"/*.so; do
+                [ -f "$so" ] || continue
+                found_so=true
+                if ! grep -Fxq "./$so" payload-files.txt; then
+                  echo "Error: fixture .so missing from archive: $so" >&2
+                  exit 1
+                fi
+              done
+              if [ "$found_so" = "false" ]; then
+                echo "Error: no .so produced for fixture $manifest" >&2
+                exit 1
+              fi
+            done
           fi
 
           if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
@@ -901,6 +920,7 @@ jobs:
               attempted=0
               passed=0
               skipped=0
+              executed_cases=0
               failed=""
               root=$(pwd)
               : > excluded-tests.txt
@@ -961,12 +981,20 @@ jobs:
                   x86_64)  case_skip="${SKIP_TEST_CASES_X86_64:-}" ;;
                   *)       case_skip="" ;;
                 esac
+                # Only libtest harnesses understand --skip and positional filters.
+                # Probe with --list so a harness = false binary is not handed a
+                # flag it rejects; the probe is bounded because a custom main()
+                # could block.
+                is_libtest_harness=false
+                if [ -n "$case_skip" ] || [ -n "${ONLY_TEST_CASES:-}" ]; then
+                  if timeout 60 "$root/$test_bin" --list >/dev/null 2>&1; then
+                    is_libtest_harness=true
+                  fi
+                fi
+
                 case_skip_flags=""
                 if [ -n "$case_skip" ]; then
-                  # Only libtest harnesses understand --skip. Probe with --list so a
-                  # harness = false binary is not handed a flag it rejects; the
-                  # probe is bounded because a custom main() could block.
-                  if timeout 60 "$root/$test_bin" --list >/dev/null 2>&1; then
+                  if [ "$is_libtest_harness" = "true" ]; then
                     for pattern in $case_skip; do
                       # Single-quoted so '::' and '*' reach libtest verbatim; the
                       # root path re-parses this string in the su shell, which
@@ -982,9 +1010,15 @@ jobs:
                 # Plain words are safe here: patterns contain no whitespace and
                 # globbing is off (set -f) in both the su and non-root branches.
                 case_only_flags=""
-                for pattern in ${ONLY_TEST_CASES:-}; do
-                  case_only_flags="$case_only_flags $pattern"
-                done
+                if [ -n "${ONLY_TEST_CASES:-}" ]; then
+                  if [ "$is_libtest_harness" = "true" ]; then
+                    for pattern in ${ONLY_TEST_CASES:-}; do
+                      case_only_flags="$case_only_flags $pattern"
+                    done
+                  else
+                    echo "::warning::only-test-cases ignored for $test_bin: not a libtest harness"
+                  fi
+                fi
 
                 echo "Running test binary: $test_bin in $crate_dir"
 
@@ -1024,6 +1058,14 @@ jobs:
                   echo "======================================================"
                   failed="$failed $test_bin(failed)"
                 else
+                  if [ "$rc" -eq 0 ]; then
+                    n=$(sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$root/$test_log" | tail -n 1)
+                    n=${n:-0}
+                    executed_cases=$((executed_cases + n))
+                    if [ -n "${ONLY_TEST_CASES:-}" ] && [ "$n" -eq 0 ]; then
+                      echo "::warning::$test_bin matched zero cases for only-test-cases" >&2
+                    fi
+                  fi
                   passed=$((passed + 1))
                 fi
                 rm -f "$root/$test_log"
@@ -1047,7 +1089,7 @@ jobs:
                 echo '```'
               fi
 
-              echo "Summary: Checked $checked, Attempted $attempted, Passed $passed, Skipped $skipped, Failed ${failed:-0}"
+              echo "Summary: Checked $checked, Attempted $attempted, Passed $passed, Skipped $skipped, Failed ${failed:-0}, ExecutedCases $executed_cases"
               
               if [ "$checked" -eq 0 ]; then
                 echo "Error: no test binaries were checked" >&2
@@ -1062,9 +1104,14 @@ jobs:
                 echo "Error: no test binary was executed (checked $checked, skipped $skipped)." >&2
                 exit 1
               fi
-              
+
               if [ -n "$failed" ]; then
                 echo "Error: The following test binaries failed:$failed" >&2
+                exit 1
+              fi
+
+              if [ -n "${ONLY_TEST_CASES:-}" ] && [ "$executed_cases" -eq 0 ]; then
+                echo "Error: only-test-cases was set but no libtest case executed (checked $checked, attempted $attempted)." >&2
                 exit 1
               fi
               
