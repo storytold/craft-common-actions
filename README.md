@@ -14,7 +14,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
-- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64; aarch64 is cross-compiled in the same x86_64 VM and opt-in through `freebsd-architectures`, see #39)
+- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
@@ -196,14 +196,14 @@ cross-compiled in it with stable Rust (the standard library comes from FreeBSD's
 aarch64 `lang/rust` package, against an arm64 sysroot built from `base.txz`). Its
 tests are built but not run, and its package check is skipped.
 
-The release workflow builds FreeBSD aarch64 the same way, but only when the caller
-sets `freebsd-architectures: '["x86_64","aarch64"]'` (the default is `'["x86_64"]'`).
-Opt in only once the app's `packaging/freebsd/package.sh` builds with
-`CARGO_BUILD_TARGET`, reads binaries from
-`$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release` and names its archive
-`*-freebsd-aarch64.tar.gz`: the guest's `uname -m` is always `amd64`. The release
-job fails if an archive does not match its matrix architecture. Apps without a
-`package.sh` use the built-in packager, which already handles the cross target.
+The release workflow builds FreeBSD for `freebsd-architectures`, which defaults to
+`'["x86_64","aarch64"]'`; callers can narrow it, for example `'["x86_64"]'`. An app's
+`packaging/freebsd/package.sh` must build with `CARGO_BUILD_TARGET`, read binaries
+from `$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release` and name its archive
+`*-freebsd-<arch>.tar.gz` for each listed architecture: the guest's `uname -m` is
+always `amd64`. The release job fails if an archive does not match its matrix
+architecture. Apps without a `package.sh` use the built-in packager, which already
+handles the cross target.
 
 The optional `architectures` input overrides the check matrix with a JSON array,
 for example `'["aarch64"]'` for a dedicated ARM check or
