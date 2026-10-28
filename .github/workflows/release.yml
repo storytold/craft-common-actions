@@ -70,10 +70,10 @@ on:
       freebsd-architectures:
         # aarch64 is cross-compiled in the x86_64 VM, so packaging/freebsd/package.sh must build
         # with CARGO_BUILD_TARGET and name its archive after it, not after uname -m (#39).
-        description: 'JSON array of FreeBSD release architectures; add "aarch64" once packaging/freebsd/package.sh honors CARGO_BUILD_TARGET'
+        description: 'JSON array of FreeBSD release architectures; packaging/freebsd/package.sh must honor CARGO_BUILD_TARGET for each listed architecture'
         type: string
         required: false
-        default: '["x86_64"]'
+        default: '["x86_64","aarch64"]'
       has-server:
         description: "Whether to build and release the headless Linux server"
         type: boolean
@@ -700,7 +700,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # aarch64 is opt-in until each app's package.sh can package a cross build (#39).
+        # aarch64 is in the default freebsd-architectures; callers can narrow it (#39).
         arch: ${{ fromJSON(inputs.freebsd-architectures) }}
     env:
       APP_NAME: ${{ inputs.app-name }}

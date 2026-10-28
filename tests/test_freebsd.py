@@ -373,9 +373,9 @@ fi
         release_data = yaml.load(release_path.read_text(), Loader=yaml.BaseLoader)
         job = release_data["jobs"]["freebsd"]
         self.assertEqual(job["strategy"]["matrix"]["arch"], "${{ fromJSON(inputs.freebsd-architectures) }}")
-        # aarch64 is opt-in until each app's package.sh can package a cross build (#39).
+        # aarch64 is in the default now that app package.sh scripts honor CARGO_BUILD_TARGET (#39).
         default = release_data["on"]["workflow_call"]["inputs"]["freebsd-architectures"]["default"]
-        self.assertEqual(json.loads(default), ["x86_64"])
+        self.assertEqual(json.loads(default), ["x86_64", "aarch64"])
 
     def test_release_workflow_cross_compiles_aarch64_like_ci(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
