@@ -1,28 +1,17 @@
 name: Shared FreeBSD workflow tests
 
+# The suite covers every workflow and action, not only FreeBSD, so a change to any of them runs it.
 on:
   pull_request:
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   push:
     branches: [main]
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   workflow_dispatch:
 
