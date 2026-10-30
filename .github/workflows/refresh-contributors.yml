@@ -1,0 +1,50 @@
+name: Refresh release contributors
+
+on:
+  workflow_call:
+    outputs:
+      artifact-name:
+        description: Contributor snapshot to pass to the release workflow
+        value: ${{ jobs.refresh.outputs.artifact-name }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      artifact-name: release-contributors-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refresh contributor credits for this release commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/refresh-contributors.py --repo "$GITHUB_REPOSITORY"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          credits = json.loads(Path("contributors/contributors.json").read_text())
+          if credits.get("head") != os.environ["GITHUB_SHA"]:
+              raise SystemExit("Contributor snapshot does not match the release commit")
+          if credits.get("repo") != os.environ["GITHUB_REPOSITORY"]:
+              raise SystemExit("Contributor snapshot does not match the release repository")
+          if not credits.get("contributors"):
+              raise SystemExit("Contributor snapshot is empty")
+          PY
+      - name: Save the refreshed snapshot for all release builds
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-contributors-${{ github.run_id }}-${{ github.run_attempt }}
+          path: contributors/contributors.json
+          if-no-files-found: error
+          retention-days: 7
