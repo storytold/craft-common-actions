@@ -27,6 +27,11 @@ on:
         type: string
         required: false
         default: ""
+      contributors-artifact:
+        description: "Optional contributor snapshot artifact from refresh-contributors.yml in this workflow run; installed before every source build"
+        type: string
+        required: false
+        default: ""
       has-web:
         description: "Whether to build the WebAssembly (wasm) release"
         type: boolean
@@ -264,6 +269,12 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -404,6 +415,12 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -509,6 +526,12 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -771,6 +794,12 @@ jobs:
               ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -1014,6 +1043,12 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
@@ -1112,6 +1147,12 @@ jobs:
       INPUT_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -1183,6 +1224,12 @@ jobs:
       FIGCRAFT_BUILD_SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1

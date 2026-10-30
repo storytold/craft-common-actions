@@ -65,6 +65,48 @@ jobs:
       AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
 ```
 
+#### Automatic contributor credits (opt-in)
+
+Apps with `scripts/refresh-contributors.py` can refresh bundled credits once before a release.
+Grant the caller workflow `contents: write` for release publishing, and keep the preparatory
+`credits` job read-only with its job-level override. A called workflow cannot increase the
+token permissions granted by its caller; see [reusable-workflow permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#supported-keywords-for-jobs-that-call-a-reusable-workflow).
+Call the preparatory workflow, then pass its output to the release workflow:
+
+```yaml
+permissions:
+  contents: write
+
+jobs:
+  credits:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: storytold/craft-common-actions/.github/workflows/refresh-contributors.yml@main
+  release:
+    needs: credits
+    permissions:
+      contents: write
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    with:
+      app-name: effectcraft
+      app-title: EffectCraft
+      contributors-artifact: ${{ needs.credits.outputs.artifact-name }}
+    # Include the app's existing signing secrets here.
+```
+
+The preparatory workflow checks out full history, runs the app's script with `--repo` set to
+`github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
+`contributors/contributors.json` belongs to `github.sha`. It uploads that file only after a
+successful refresh. The intermediate `contributor-snapshot-*` artifact stays outside the
+`release-*` collection used for release assets and checksums, including on reruns.
+Every source-build job installs the same artifact after checkout, including
+FreeBSD before copying the workspace to its VM. Flatpak and Arch inherit the refreshed credits
+from the Linux binaries. The generated snapshot is not committed or pushed back to the app.
+
+An unsuccessful refresh or missing artifact blocks the release. Existing callers that omit
+`contributors-artifact` keep their current behavior, permissions, and build paths.
+
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
 macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
