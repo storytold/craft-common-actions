@@ -59,6 +59,13 @@ runs:
           bash packaging/linux/apprun-test.sh
         fi
 
+    - name: AppImage bundled CLI and MCP entry point
+      shell: bash
+      run: |
+        if [ -f packaging/linux/apprun-cli-test.sh ]; then
+          bash packaging/linux/apprun-cli-test.sh
+        fi
+
     - name: Linux tarball installer test
       shell: bash
       run: |
