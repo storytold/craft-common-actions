@@ -210,6 +210,33 @@ exit 0
             )
             self.assertIn("provides=(myapp=1.2.3-2)", pkgbuild)
 
+    def test_prerelease_version_from_the_tarball_name(self):
+        # release.yml names the tarball after the resolved version, so a prerelease such as a
+        # 0.2.0-rc.1 test run reaches here with a hyphen in it. Arch pkgver has no hyphens; each
+        # form below still sorts before its release in pacman.
+        for version, pkgver in (("0.2.0-rc.1", "0.2.0rc.1"), ("1.2.3-1", "1.2.3pre1"), ("1.2.3--1", "1.2.3pre1")):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                tarball = self._create_fixture_tarball(tmp_path, filename=f"myapp-{version}-linux-x86_64.tar.gz")
+                tools = self._setup_mock_tools(tmp_path)
+                # Extract for real: an unmatched name falls back to the archive's executable.
+                (tools / "tar").unlink()
+                capture = tmp_path / "capture"
+                capture.mkdir()
+                res = subprocess.run(
+                    [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+                )
+                self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+                pkgbuild = (capture / "PKGBUILD").read_text()
+                self.assertIn(f"pkgver={pkgver}\n", pkgbuild)
+                self.assertIn("pkgrel=1\n", pkgbuild)
+                self.assertIn(f"provides=(myapp={pkgver}-1)", pkgbuild)
+                self.assertEqual([p.name for p in (tmp_path / "out").iterdir()],
+                                 [f"myapp-{version}-linux-x86_64.pkg.tar.zst"])
+
     def test_package_function_rejects_symlinked_license_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

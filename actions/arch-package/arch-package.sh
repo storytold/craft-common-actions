@@ -71,7 +71,8 @@ fi
 
 # Detect application name and version
 tar_basename="$(basename "$tarball" .tar.gz)"
-if [[ "$tar_basename" =~ ^([a-zA-Z0-9_-]+)-([0-9]+\.[0-9]+\.[0-9]+[^-_]*)-linux-([a-zA-Z0-9_]+)$ ]]; then
+# The version may carry a prerelease (1.2.3-rc.1): the hyphens are dropped from pkgver below.
+if [[ "$tar_basename" =~ ^([a-zA-Z0-9_-]+)-([0-9]+\.[0-9]+\.[0-9]+[^_]*)-linux-([a-zA-Z0-9_]+)$ ]]; then
   app="${BASH_REMATCH[1]}"
   raw_version="${BASH_REMATCH[2]}"
 else
@@ -91,15 +92,14 @@ if [[ ! "$app" =~ ^[a-zA-Z0-9][a-zA-Z0-9_+.-]*$ ]]; then
   die "invalid application name derived from archive: '$app'"
 fi
 
-# Format Arch pkgver (no hyphens or tildes allowed in pkgver)
-upstream="${raw_version%-*}"
-if [[ "$upstream" != "$raw_version" ]]; then
-  rel="${raw_version##*-}"
-  if [[ "$rel" =~ ^[0-9]+$ ]]; then
-    pkgrel="$rel"
-  fi
+# Format Arch pkgver (no hyphens or tildes allowed in pkgver). The version is semver, so a
+# hyphen starts a prerelease, not a package release; joined on, it still sorts before the
+# release in pacman (1.2.3rc.1 < 1.2.3).
+pkgver="${raw_version//\~/}"
+# A numeric prerelease needs a letter in front: 1.2.3-1 as 1.2.31 would sort after 1.2.4.
+if [[ "$pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+-+[0-9] ]]; then
+  pkgver="${pkgver/-/pre}"
 fi
-pkgver="${upstream//\~/}"
 pkgver="${pkgver//-/}"
 # pkgver, pkgrel and the license words are written into PKGBUILD, which makepkg sources as
 # Bash; the tarball name and the environment are not trusted to be shell-safe.
