@@ -18,7 +18,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
-- **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
+- **Draft Release** (computes `SHA256SUMS.txt` then generates a table of assets with architecture choices combined in each row and publishes/updates draft GitHub Release)
 
 #### Caller Example:
 ```yaml

@@ -1,5 +1,5 @@
 name: "Draft GitHub Release"
-description: "Collects release artifacts, computes sha256 checksums, and creates or updates a draft GitHub Release"
+description: "Collects release artifacts, computes sha256 checksums, generates a table of downloads, and creates or updates a draft GitHub Release"
 
 inputs:
   version:
@@ -44,6 +44,8 @@ runs:
       run: |
         tag="v$VERSION"
         title="$APP_TITLE v$VERSION"
+        notes_file="$RUNNER_TEMP/release-notes.md"
+        table_file="$RUNNER_TEMP/download-table.md"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
         if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
@@ -55,14 +57,122 @@ runs:
           gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
             gh release delete-asset "$tag" "$asset" --yes
           done
-          gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE"
+          gh release view "$tag" --json body --jq .body > "$notes_file"
           gh release upload "$tag" --clobber -- *
         else
           echo "Creating draft $tag"
           gh release create "$tag" --draft --title "$title" --target "$GITHUB_SHA" --generate-notes "${pre[@]}" -- *
+          gh release view "$tag" --json body --jq .body > "$notes_file"
         fi
         {
           echo "Draft release **$title** at \`${GITHUB_SHA::9}\`:"
           echo
           sed 's/^/    /' SHA256SUMS.txt
         } >>"$GITHUB_STEP_SUMMARY"
+        
+        # Generate a table of downloads for the release notes
+        python3 - <<'PY' > "$table_file"
+        import html
+        import os
+        from pathlib import Path
+        import re
+        from urllib.parse import quote
+
+        architectures = (
+            (r"riscv64", "RISC-V"),
+            (r"aarch64|arm64", "ARM"),
+            (r"x86_64|amd64|x64", "64 Bit"),
+            (r"i686|i386|(?<![a-z0-9])x86(?![a-z0-9])", "32 Bit"),
+        )
+
+        def artifact_architecture(name):
+            lower = name.lower()
+            return next(
+                (label for pattern, label in architectures if re.search(pattern, lower)),
+                None,
+            )
+
+        def is_cli(name):
+            return re.search(r"(?<![a-z0-9])cli(?![a-z0-9])", name, re.IGNORECASE) is not None
+
+        files = [
+            path.name for path in Path(".").iterdir()
+            if path.is_file()
+            and path.name != "SHA256SUMS.txt"
+            and not path.name.lower().endswith(".zsync")
+        ]
+        categories = (
+            ("MacOS Installer", lambda name: name.lower().endswith(".dmg") and ("macos" in name.lower() or "darwin" in name.lower())),
+            ("MacOS CLI", lambda name: is_cli(name) and ("macos" in name.lower() or "darwin" in name.lower()) and name.lower().endswith(".zip")),
+            ("Windows Installer", lambda name: not is_cli(name) and name.lower().endswith((".msi", ".exe"))),
+            ("Windows CLI", lambda name: is_cli(name) and "windows" in name.lower() and not ("portable" in name.lower() and name.lower().endswith(".zip"))),
+            ("Windows Portable", lambda name: not is_cli(name) and "windows" in name.lower() and "portable" in name.lower() and name.lower().endswith(".zip")),
+            ("Windows Portable CLI", lambda name: is_cli(name) and "windows" in name.lower() and "portable" in name.lower() and name.lower().endswith(".zip")),
+            ("Linux AppImage", lambda name: name.lower().endswith(".appimage")),
+            ("Arch Linux", lambda name: not is_cli(name) and name.lower().endswith(".pkg.tar.zst")),
+            ("Arch CLI", lambda name: is_cli(name) and "linux" in name.lower() and name.lower().endswith(".pkg.tar.zst")),
+            ("Debian (.deb)", lambda name: not is_cli(name) and name.lower().endswith(".deb")),
+            ("Debian CLI", lambda name: is_cli(name) and "linux" in name.lower() and name.lower().endswith(".deb")),
+            ("Fedora (.rpm)", lambda name: not is_cli(name) and name.lower().endswith(".rpm")),
+            ("Fedora CLI", lambda name: is_cli(name) and "linux" in name.lower() and name.lower().endswith(".rpm")),
+            ("Flatpak", lambda name: name.lower().endswith(".flatpak")),
+            ("Tarball", lambda name: not is_cli(name) and name.lower().endswith(".tar.gz") and "linux" in name.lower()),
+            ("CLI Tarball", lambda name: is_cli(name) and "linux" in name.lower() and name.lower().endswith(".tar.gz")),
+            ("FreeBSD", lambda name: not is_cli(name) and "freebsd" in name.lower()),
+            ("FreeBSD CLI", lambda name: is_cli(name) and "freebsd" in name.lower() and name.lower().endswith(".tar.gz")),
+            ("WebAssembly", lambda name: ("web" in name.lower() or "wasm" in name.lower()) and name.lower().endswith(".zip")),
+        )
+        repository = os.environ["GH_REPO"]
+        tag = f"v{os.environ['VERSION']}"
+        download_base = f"https://github.com/{repository}/releases/download/{quote(tag, safe='')}"
+        print(f"## {html.escape(os.environ['APP_TITLE'])} {html.escape(os.environ['VERSION'])}")
+        print()
+        print(f"|  | Download |")
+        print("| --- | --- |")
+        for label, matches in categories:
+            assets = sorted(
+                (name for name in files if matches(name)),
+                key=lambda name: (
+                    {"64 Bit": 0, "32 Bit": 1, "ARM": 2, "RISC-V": 3}.get(
+                        artifact_architecture(name), 4
+                    ),
+                    name.casefold(),
+                ),
+            )
+            if not assets:
+                continue
+            downloads = []
+            for name in assets:
+                architecture = artifact_architecture(name)
+                if label == "MacOS Installer":
+                    display = re.sub(
+                        rf"-{re.escape(os.environ['VERSION'])}-(?:macos|darwin)-universal(?=\.dmg$)",
+                        "",
+                        name,
+                        flags=re.IGNORECASE,
+                    )
+                elif label == "MacOS CLI":
+                    display = re.sub(
+                        rf"-{re.escape(os.environ['VERSION'])}-(?:macos|darwin)-universal(?=\.zip$)",
+                        "",
+                        name,
+                        flags=re.IGNORECASE,
+                    )
+                elif label == "WebAssembly":
+                    display = re.sub(
+                        rf"-{re.escape(os.environ['VERSION'])}(?=\.zip$)",
+                        "",
+                        name,
+                        flags=re.IGNORECASE,
+                    )
+                else:
+                    display = architecture or Path(name).name
+                link = f"{download_base}/{quote(name, safe='')}"
+                downloads.append(f"[{display}]({link})")
+            print(f"| {label} | {' • '.join(downloads)} |")
+        print()
+        PY
+        cat "$table_file" >>"$GITHUB_STEP_SUMMARY"
+        printf '\n' >> "$notes_file"
+        cat "$table_file" >> "$notes_file"
+        gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE" --notes-file "$notes_file"
