@@ -49,7 +49,10 @@ permissions:
   contents: read
 
 env:
-  COVERAGE_IGNORE: '(^|/)(vendor|xtask)/'
+  # Vendored code and xtask, plus the test code cargo llvm-cov leaves out on its own (tests/,
+  # examples/, benches/, tests.rs, *_tests.rs): the sharded merge calls llvm-cov export directly,
+  # which would otherwise report that test code as covered source.
+  COVERAGE_IGNORE: '(^|/)(vendor|xtask|tests|examples|benches)/|/(tests\.rs|[0-9a-zA-Z_-]+[_-]tests\.rs)$'
 
 jobs:
   plan:
