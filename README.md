@@ -92,7 +92,9 @@ jobs:
 The preparatory workflow checks out full history, runs the app's script with `--repo` set to
 `github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
 `contributors/contributors.json` belongs to `github.sha`. It uploads that file only after a
-successful refresh. Every source-build job installs the same artifact after checkout, including
+successful refresh. The intermediate `contributor-snapshot-*` artifact stays outside the
+`release-*` collection used for release assets and checksums, including on reruns.
+Every source-build job installs the same artifact after checkout, including
 FreeBSD before copying the workspace to its VM. Flatpak and Arch inherit the refreshed credits
 from the Linux binaries. The generated snapshot is not committed or pushed back to the app.
 
