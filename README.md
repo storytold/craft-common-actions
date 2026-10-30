@@ -68,9 +68,15 @@ jobs:
 #### Automatic contributor credits (opt-in)
 
 Apps with `scripts/refresh-contributors.py` can refresh bundled credits once before a release.
-Call the read-only preparatory workflow, then pass its output to the release workflow:
+Grant the caller workflow `contents: write` for release publishing, and keep the preparatory
+`credits` job read-only with its job-level override. A called workflow cannot increase the
+token permissions granted by its caller; see [reusable-workflow permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#supported-keywords-for-jobs-that-call-a-reusable-workflow).
+Call the preparatory workflow, then pass its output to the release workflow:
 
 ```yaml
+permissions:
+  contents: write
+
 jobs:
   credits:
     permissions:
