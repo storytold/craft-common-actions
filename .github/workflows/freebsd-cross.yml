@@ -1,0 +1,436 @@
+name: "FreeBSD Cross-Compile"
+
+on:
+  workflow_call:
+    inputs:
+      architectures:
+        description: 'JSON architecture array; empty selects x86_64 for PRs and both architectures otherwise'
+        type: string
+        required: false
+        default: ""
+      craft-fonts-ref:
+        description: "The commit ref for storytold/craft-fonts. Defaults to the suite's pin; empty builds without craft-fonts"
+        type: string
+        required: false
+        default: "bfcbf714e45a3ea8e98f88ab2b7971372a576414"
+      require-craft-fonts:
+        description: "Require the supplied craft-fonts checkout during builds and tests"
+        type: boolean
+        required: false
+        default: false
+      freebsd-release:
+        description: "FreeBSD OS release version (STABLE inputs are normalized to RELEASE for sysroot matching)"
+        type: string
+        required: false
+        default: "15.1-STABLE"
+      cargo-test-extra-args:
+        description: "Extra arguments to append to cargo test compilation"
+        type: string
+        required: false
+        default: ""
+      cargo-build-extra-args:
+        description: "Extra arguments to append to cargo build"
+        type: string
+        required: false
+        default: ""
+      skip-tests:
+        description: "Skip running tests (e.g. if the VM lacks GPU/oracle dependencies)"
+        type: boolean
+        required: false
+        default: false
+      run-package-check:
+        description: "Run the fallback packaging logic and verify produced tarball"
+        type: boolean
+        required: false
+        default: false
+      custom-test-command:
+        description: "Custom test commands to run instead of default cargo test. This completely bypasses the default architecture checks and timeouts."
+        type: string
+        required: false
+        default: ""
+      app-name:
+        description: "Name of the application for packaging"
+        type: string
+        required: false
+        default: ""
+      cold-start:
+        description: "Skip the FreeBSD sysroot cache restore, so the run downloads base.txz and fetches the pkg archives again. The sysroot is still saved. Use false to measure the cached path."
+        type: boolean
+        required: false
+        default: false
+      fixture-manifests:
+        description: "Space-separated Cargo.toml paths for plugin fixtures to pre-build for the target triple"
+        type: string
+        required: false
+        default: ""
+      skip-test-binaries-x86-64:
+        description: "Space-separated glob patterns of x86_64 test binaries to skip. Applied on the x86_64 leg only, whether or not KVM is available: even an accelerated guest has a single vCPU here, which can break the same timing assumptions QEMU TCG breaks."
+        type: string
+        required: false
+        default: ""
+      skip-test-binaries-aarch64:
+        description: "Space-separated glob patterns of aarch64 test binaries to skip. Applied on the aarch64 leg only."
+        type: string
+        required: false
+        default: ""
+      skip-test-cases-x86-64:
+        description: "Space-separated libtest name filters. Each pattern is passed to x86_64 test binaries as --skip <pattern>, so the binary still runs and only the matching cases are skipped. Ignored for harness = false binaries."
+        type: string
+        required: false
+        default: ""
+      skip-test-cases-aarch64:
+        description: "Space-separated libtest name filters. Each pattern is passed to aarch64 test binaries as --skip <pattern>. Ignored for harness = false binaries."
+        type: string
+        required: false
+        default: ""
+      stub-cargo:
+        description: "Install a stub cargo on PATH inside the VM for tests that shell out to cargo"
+        type: boolean
+        required: false
+        default: false
+      test-timeout-seconds:
+        description: "Timeout in seconds for each test binary. Default 1800s: the value is tuned for timeout profiling across the craft suite, so a binary that exceeds it is a finding, not an accident."
+        type: number
+        required: false
+        default: 1800
+      only-test-binaries:
+        description: "Space-separated glob patterns. When set, only matching test binaries are packed and run; the rest are not transferred. Matched against the recorded path, e.g. 'target/*/debug/deps/clap_e2e-*'."
+        type: string
+        required: false
+        default: ""
+      only-test-cases:
+        description: "Space-separated libtest name filters (substring match). When set, only matching cases run inside the selected binaries."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate-architectures:
+    runs-on: ubuntu-24.04
+    outputs:
+      arch_matrix: ${{ steps.compute.outputs.arch_matrix }}
+    steps:
+      - name: Validate and normalize architectures
+        id: compute
+        shell: bash
+        env:
+          RAW_ARCHITECTURES: ${{ inputs.architectures }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          raw="$RAW_ARCHITECTURES"
+          if [ -z "$raw" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "pull_request_target" ]; then
+              archs='["x86_64"]'
+            else
+              archs='["x86_64","aarch64"]'
+            fi
+          else
+            archs="$raw"
+          fi
+          
+          if ! printf '%s' "$archs" | jq -e 'type == "array" and length > 0' >/dev/null; then
+            echo "Error: architectures must be a non-empty JSON array of strings." >&2
+            exit 1
+          fi
+          
+          if ! printf '%s' "$archs" | jq -e 'all(.[]; . == "x86_64" or . == "aarch64")' >/dev/null; then
+            echo "Error: architectures must only contain \"x86_64\" or \"aarch64\"." >&2
+            exit 1
+          fi
+          
+          archs=$(printf '%s' "$archs" | jq -c .)
+          echo "arch_matrix=$archs" >> "$GITHUB_OUTPUT"
+
+  freebsd:
+    name: FreeBSD ${{ matrix.arch }} (build + test)
+    needs: [validate-architectures]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.validate-architectures.outputs.arch_matrix) }}
+    env:
+      MATRIX_ARCH: ${{ matrix.arch }}
+      CARGO_BUILD_EXTRA_ARGS: ${{ inputs.cargo-build-extra-args }}
+      CARGO_TEST_EXTRA_ARGS: ${{ inputs.cargo-test-extra-args }}
+      CUSTOM_TEST_COMMAND: ${{ inputs.custom-test-command }}
+      FREEBSD_RELEASE: ${{ inputs.freebsd-release }}
+      REQUIRE_CRAFT_FONTS: ${{ inputs.require-craft-fonts }}
+      RUN_PACKAGE_CHECK: ${{ inputs.run-package-check }}
+      APP_NAME: ${{ inputs.app-name }}
+      FIXTURE_MANIFESTS: ${{ inputs.fixture-manifests }}
+      SKIP_TEST_BINARIES_X86_64: ${{ inputs.skip-test-binaries-x86-64 }}
+      SKIP_TEST_BINARIES_AARCH64: ${{ inputs.skip-test-binaries-aarch64 }}
+      SKIP_TEST_CASES_X86_64: ${{ inputs.skip-test-cases-x86-64 }}
+      SKIP_TEST_CASES_AARCH64: ${{ inputs.skip-test-cases-aarch64 }}
+      STUB_CARGO: ${{ inputs.stub-cargo }}
+      TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds }}
+      ONLY_TEST_BINARIES: ${{ inputs.only-test-binaries }}
+      ONLY_TEST_CASES: ${{ inputs.only-test-cases }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Pre-install QEMU dependencies
+        run: |
+          sudo apt-get update
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then
+            echo "Installing x86_64 QEMU dependencies..."
+            sudo apt-get install -y --no-install-recommends \
+              qemu-system-x86 qemu-utils ovmf zstd
+          else
+            echo "Installing aarch64 QEMU dependencies..."
+            sudo apt-get install -y --no-install-recommends \
+              qemu-system-arm qemu-efi-aarch64 qemu-utils zstd
+          fi
+
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      
+      - name: Resolve FreeBSD release
+        id: freebsd-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="${FREEBSD_RELEASE}"
+          release="${release%-STABLE}"
+          release="${release%-RELEASE}"
+          
+          if [[ ! "$release" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Invalid FreeBSD release format: $FREEBSD_RELEASE" >&2
+            exit 1
+          fi
+          
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          major="${release%%.*}"
+          echo "major=${major}" >> "$GITHUB_OUTPUT"
+
+      # Runs before the sysroot so the cache key can encode whether the third-party
+      # libraries belong to this repository's dependency tree at all.
+      - name: Detect required extra libs
+        id: detect-libs
+        run: |
+          if grep -qiE 'name = "(alsa|alsa-sys|libpulse|libpulse-sys|libpulse-binding|wayland|wayland-client|wayland-sys|x11|x11-sys|libxcb)"' Cargo.lock; then
+            echo "needs_extra_libs=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_extra_libs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set sysroot path
+        run: echo "SYSROOT=$HOME/freebsd-sysroot" >> "$GITHUB_ENV"
+
+      # The sysroot comes from the official FreeBSD release image and the official
+      # pkg archives. Neither depends on this repository, so the key carries no
+      # Cargo.lock hash and survives a version bump, unlike the Cargo cache. A
+      # cold-start run skips the restore, because measuring the uncached path is
+      # the whole point of that run.
+      # The sysroot also holds packages from the pkg repository's latest branch,
+      # which is rebuilt without changing the FreeBSD release. meta.conf is
+      # static (version, packing format, file names), so its content never
+      # moves. packagesite.pkg is the catalogue itself and is rewritten on every
+      # repository update; its ETag identifies that state, so it joins the cache
+      # key. Only the header is fetched: the catalogue is close to 10 MB.
+      - name: Resolve the pkg catalogue identity
+        id: pkg-epoch
+        if: steps.detect-libs.outputs.needs_extra_libs == 'true'
+        env:
+          MAJOR_VER: ${{ steps.freebsd-release.outputs.major }}
+        run: |
+          set -eu
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then abi="amd64"; else abi="aarch64"; fi
+          url="https://pkg.FreeBSD.org/FreeBSD:${MAJOR_VER}:${abi}/latest/packagesite.pkg"
+          etag=$(curl -fsSI --retry 3 --connect-timeout 20 --max-time 60 "$url" \
+            | awk -F": " 'tolower($1) == "etag" { gsub(/"/, "", $2); gsub(/\r/, "", $2); print $2; exit }')
+          if [ -z "$etag" ]; then
+            echo "Error: could not read the pkg catalogue ETag from $url" >&2
+            exit 1
+          fi
+          echo "epoch=${etag}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore FreeBSD sysroot
+        id: sysroot-cache
+        if: inputs.cold-start != true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
+        with:
+          path: ~/freebsd-sysroot
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
+
+      - name: Extract FreeBSD Sysroot
+        if: steps.sysroot-cache.outputs.cache-hit != 'true'
+        env:
+          RELEASE_VER: ${{ steps.freebsd-release.outputs.release }}
+        run: |
+          set -eu
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then
+            url="https://download.freebsd.org/releases/amd64/${RELEASE_VER}-RELEASE/base.txz"
+          else
+            url="https://download.freebsd.org/releases/arm64/aarch64/${RELEASE_VER}-RELEASE/base.txz"
+          fi
+          echo "Downloading sysroot from: $url"
+          
+          mkdir -p "$SYSROOT"
+          
+          curl -fL --retry 3 --connect-timeout 30 --max-time 600 -o base.txz "$url"
+          curl -fL --retry 3 --connect-timeout 30 --max-time 60 -o MANIFEST "${url%/*}/MANIFEST"
+          
+          expected=$(awk '$1=="base.txz"{print $2}' MANIFEST)
+          if [ -z "$expected" ]; then
+            echo "Error: base.txz checksum not found in MANIFEST" >&2
+            exit 1
+          fi
+          echo "$expected  base.txz" | sha256sum -c -
+          rm -f MANIFEST
+          
+          tar -xf base.txz -C "$SYSROOT" ./lib/ ./usr/lib/ ./usr/include/ ./libexec/
+          rm -f base.txz
+          
+          ln -sf ../usr/lib/libcxxrt.so.1 "$SYSROOT/lib/libcxxrt.so.1" 2>/dev/null || true
+          ln -sf ../usr/lib/libc++.so.1 "$SYSROOT/lib/libc++.so.1" 2>/dev/null || true
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      - name: Fetch FreeBSD Third-party Packages via VM
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        env:
+          MAJOR_VER: ${{ steps.freebsd-release.outputs.major }}
+        with:
+          release: ${{ steps.freebsd-release.outputs.release }}
+          usesh: true
+          copyback: true
+          envs: 'MATRIX_ARCH MAJOR_VER'
+          run: |
+            set -eu
+            if [ "$MATRIX_ARCH" = "x86_64" ]; then
+              ABI="FreeBSD:${MAJOR_VER}:amd64"
+            else
+              ABI="FreeBSD:${MAJOR_VER}:aarch64"
+            fi
+            OSVERSION=$(sysctl -n kern.osreldate)
+            env ABI=$ABI OSVERSION=$OSVERSION pkg update -f
+            env ABI=$ABI OSVERSION=$OSVERSION pkg fetch -y -d alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 || { echo 'Error: pkg fetch failed'; exit 1; }
+            mkdir -p packages
+            find /var/cache/pkg -maxdepth 1 -type f -name '*.pkg' -exec cp {} packages/ \;
+
+      - name: Clean up leftover VM from fetch step
+        if: always() && steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        run: |
+          pkill -f 'qemu-system-x86_64.*freebsd' || true
+          pkill -f 'qemu-system-aarch64.*freebsd' || true
+          sleep 2
+          pgrep -af qemu-system || true
+
+      - name: Extract Packages into Sysroot
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        run: |
+          set -eu
+          if [ ! -d packages ] || [ "$(find packages -name '*.pkg' | wc -l)" -eq 0 ]; then
+            echo "Error: packages directory is empty, but extra libs are required." >&2
+            exit 1
+          fi
+          
+          for pkg in packages/*.pkg; do
+            echo "Extracting $pkg"
+            if tar -tf "$pkg" | grep -qx 'data.tar'; then
+              tar -xf "$pkg" -O data.tar | tar -xf - -C "$SYSROOT"
+            else
+              tar -xf "$pkg" -C "$SYSROOT" --exclude '+*'
+            fi
+          done
+          
+          echo "Verifying sysroot contents:"
+          ls -la "$SYSROOT/usr/local/lib" 2>/dev/null || echo "Warning: usr/local/lib not populated"
+          ls -la "$SYSROOT/usr/local/libdata/pkgconfig" 2>/dev/null || echo "Warning: pkgconfig dir not populated"
+          rm -rf packages
+
+      - name: Save FreeBSD sysroot
+        # Only on a miss; re-saving an existing key fails for no benefit.
+        if: steps.sysroot-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
+        with:
+          path: ~/freebsd-sysroot
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
+
+      - name: Setup Toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld pkg-config mold
+          if [ "$MATRIX_ARCH" = "aarch64" ]; then
+            rustup target add aarch64-unknown-freebsd
+          else
+            rustup target add x86_64-unknown-freebsd
+          fi
+
+      # No target/ cache. Its key would carry the Cargo.lock hash, which changes on
+      # every version bump, and Cargo invalidates the fingerprints anyway once the
+      # workspace version moves. For a release-driven workflow that entry would never
+      # hit, so the compile always starts from an empty target/.
+      - name: Cross Compile Workspace
+        run: |
+          set -eu
+          TARGET_TRIPLE="${MATRIX_ARCH}-unknown-freebsd"
+          
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+          export PKG_CONFIG_LIBDIR="$SYSROOT/usr/local/libdata/pkgconfig:$SYSROOT/usr/libdata/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$SYSROOT/usr/local/libdata/pkgconfig:$SYSROOT/usr/libdata/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+          
+          target_key="${TARGET_TRIPLE//-/_}"
+          target_key_upper="${target_key^^}"
+          
+          printf -v "CC_${target_key}" '%s' "clang"
+          printf -v "CXX_${target_key}" '%s' "clang++"
+          printf -v "CFLAGS_${target_key}" '%s' "--target=$TARGET_TRIPLE --sysroot=$SYSROOT"
+          printf -v "CXXFLAGS_${target_key}" '%s' "--target=$TARGET_TRIPLE --sysroot=$SYSROOT"
+          export "CC_${target_key}" "CXX_${target_key}" "CFLAGS_${target_key}" "CXXFLAGS_${target_key}"
+          
+          printf -v "CARGO_TARGET_${target_key_upper}_LINKER" '%s' "clang"
+          printf -v "CARGO_TARGET_${target_key_upper}_RUSTFLAGS" '%s' "-Clink-arg=--target=$TARGET_TRIPLE -Clink-arg=--sysroot=$SYSROOT -Clink-arg=-fuse-ld=mold -Clink-arg=-L$SYSROOT/lib -Clink-arg=-L$SYSROOT/usr/lib -Clink-arg=-L$SYSROOT/usr/local/lib"
+          export "CARGO_TARGET_${target_key_upper}_LINKER" "CARGO_TARGET_${target_key_upper}_RUSTFLAGS"
+          
+          export CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_PROFILE_TEST_DEBUG=0
+          export CARGO_BUILD_JOBS=3
+          
+          if [ -d craft-fonts ]; then
+            export CRAFT_FONTS_DIR="$PWD/craft-fonts"
+          fi
+          if [ "$REQUIRE_CRAFT_FONTS" = "true" ]; then
+            if [ ! -d craft-fonts ]; then
+              echo "error: required craft-fonts checkout is missing" >&2
+              exit 1
+            fi
+            export CRAFT_FONTS_REQUIRED=1
+          fi
+          
+          if [ "$RUN_PACKAGE_CHECK" = "true" ]; then
+            # shellcheck disable=SC2086
+            cargo build --release --workspace --target=$TARGET_TRIPLE --locked $CARGO_BUILD_EXTRA_ARGS
+          fi
+          
+          # shellcheck disable=SC2086
+          # json-render-diagnostics keeps the JSON in test-output.json for the jq filter below,
+          # while the rendered diagnostics go to stderr and therefore into the job log. With
+          # plain --message-format=json the errors exist only inside test-output.json, which
+          # this script deletes, so a failed build left no compiler message behind.
+          if ! cargo test --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json-render-diagnostics $CARGO_TEST_EXTRA_ARGS > test-output.json; then
+            echo '=== compiler diagnostics ===' >&2
+            jq -r 'select(.reason=="compiler-message" and .message.level=="error") | .message.rendered' test-output.json 2>/dev/null >&2 || true
