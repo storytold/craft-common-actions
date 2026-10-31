@@ -619,7 +619,9 @@ jobs:
       - name: Install flatpak-builder
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+          # elfutils is only a Recommends of flatpak-builder, but flatpak-builder runs its eu-strip
+          # on every module it builds with debuginfo, such as the apps' cups-client.
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build the Flatpak bundle
         env:
