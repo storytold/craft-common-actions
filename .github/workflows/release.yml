@@ -555,6 +555,9 @@ jobs:
     name: Flatpak ${{ matrix.arch }}
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -619,7 +622,7 @@ jobs:
       - name: Install flatpak-builder
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common skopeo
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build the Flatpak bundle
         env:
@@ -640,6 +643,17 @@ jobs:
           fi
           tarball="${tarballs[0]}"
           packaging/linux/flatpak-bundle.sh "$tarball"
+      - name: Publish Flatpak OCI layout to GHCR
+        if: github.event_name != 'pull_request'
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -x packaging/linux/flatpak-oci.sh ]; then
+            packaging/linux/flatpak-oci.sh --push "$tarball"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-flatpak-${{ matrix.arch }}
