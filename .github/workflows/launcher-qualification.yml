@@ -1,0 +1,104 @@
+name: Launcher candidate qualification
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Install and exercise (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: macos-arm64, runner: macos-15, artifact: release-macos }
+          - { target: macos-x64, runner: macos-15-intel, artifact: release-macos }
+          - { target: windows-x64, runner: windows-2025, artifact: release-windows-x64 }
+          - { target: windows-x86, runner: windows-2025, artifact: release-windows-x86 }
+          - { target: windows-arm64, runner: windows-11-arm, artifact: release-windows-arm64 }
+          - { target: linux-x86_64, runner: ubuntu-24.04, artifact: release-linux-x86_64 }
+          - { target: linux-aarch64, runner: ubuntu-24.04-arm, artifact: release-linux-aarch64 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Download from THIS run. Never rebuild, download a published latest release, or check out
+      # a moving branch. These are exactly the immutable artifacts the draft action collects.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: candidate
+      - name: Install Linux runtime and virtual desktop
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xauth dbus-x11 policykit-1 libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 \
+            libx11-6 libx11-xcb1 libxcursor1 libxi6 libvulkan1 mesa-vulkan-drivers libegl1 libgl1
+      - name: Qualify the packaged launcher and real application releases
+        shell: bash
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+          CANDIDATE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [ "$RUNNER_OS" = Linux ]; then
+            dbus-run-session -- xvfb-run -a python3 packaging/e2e/runner.py \
+              --artifacts candidate --output qualification --version "$CANDIDATE_VERSION" --target "$CANDIDATE_TARGET"
+          elif [ "$RUNNER_OS" = Windows ]; then
+            python packaging/e2e/runner.py --artifacts candidate --output qualification \
+              --version "$CANDIDATE_VERSION" --target "$CANDIDATE_TARGET"
+          else
+            python3 packaging/e2e/runner.py --artifacts candidate --output qualification \
+              --version "$CANDIDATE_VERSION" --target "$CANDIDATE_TARGET"
+          fi
+      - name: Retain qualification evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-qualification-${{ matrix.target }}
+          path: qualification/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: Bind qualification evidence to candidate bytes
+    needs: qualify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          path: candidate
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: launcher-qualification-*
+          path: qualification
+          merge-multiple: false
+      - name: Validate without release credentials or mutations
+        env:
+          CANDIDATE_VERSION: ${{ inputs.version }}
+        run: |
+          python3 packaging/e2e/verify_release.py --artifacts candidate --reports qualification \
+            --version "$CANDIDATE_VERSION" --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: launcher-candidate-evidence
+          path: candidate/launcher-qualification.json
+          if-no-files-found: error
+          retention-days: 14
