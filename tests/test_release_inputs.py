@@ -54,14 +54,18 @@ Path('args.json').write_text(json.dumps(sys.argv[1:]))
                           if item.get('uses', '').startswith('vmactions/freebsd-vm@'))
                 forwarded = vm['with']['envs'].split()
                 configured = {key: value for key, value in configured.items() if key in forwarded}
-            env.update({key: value.replace(EXPRESSION, app_name)
-                        for key, value in configured.items()})
+
+            def github(value):
+                # Expressions are resolved before the shell starts, including env values.
+                return (value.replace(EXPRESSION, app_name)
+                        .replace('${{ matrix.arch }}', 'x86_64')
+                        .replace('${{ steps.cargo-cache.outcome }}', 'success'))
+
+            env.update({key: github(value) for key, value in configured.items()})
             env.update(VERSION='1.2.3', INPUT_VERSION='')
             # Model GitHub expression replacement in source as well as env so a
             # regression to interpolation executes the payload in this fixture.
-            script = step['run'].replace(EXPRESSION, app_name)
-            script = script.replace('${{ matrix.arch }}', 'x86_64')
-            script = script.replace('${{ steps.cargo-cache.outcome }}', 'success')
+            script = github(step['run'])
             script = script.replace('/var/tmp/', str(root) + '/')
             shell = 'sh' if job_name == 'freebsd' else 'bash'
             result = subprocess.run([shell, '-eu', '-c', script], cwd=root, env=env,
