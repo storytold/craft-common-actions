@@ -496,8 +496,14 @@ Keep app-specific packaging assertions in the caller repository and pass their
 Bash script to `packaging-lint.yml` with
 `extra-checks-script: packaging/check-app-specific.sh`. It runs after the shared
 lint action, with the checkout and lint tools available. A missing or failing
-requested script fails the job. Native Windows installer probes remain separate
-caller jobs; Linux static lint does not replace them.
+requested script fails the job. Linux static lint does not replace native Windows
+installer probes; those belong in a shared workflow here as well.
+
+An app's `.github/workflows/` only calls this repository's workflows at `@main`,
+with inputs and secrets: no caller jobs with their own `runs-on`/`steps`. App-specific
+checks (fuzzing, corpora, web builds, installer probes) become shared workflows or
+inputs here. Jobs that apps still run themselves move here without being dropped:
+an app removes one only once a shared workflow runs it.
 
 ## Job time limits
 
