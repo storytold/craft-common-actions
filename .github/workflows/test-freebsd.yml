@@ -11,6 +11,7 @@ on:
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**
+      - actions/packaging-lint/**
       - tests/**
   push:
     branches: [main]
@@ -23,6 +24,7 @@ on:
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**
+      - actions/packaging-lint/**
       - tests/**
   workflow_dispatch:
 

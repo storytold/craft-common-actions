@@ -117,6 +117,9 @@ Lints all packaging configurations and metadata:
 - `appstreamcli validate`
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
+- AppImage desktop integration and bundled CLI/MCP tests, when the caller provides
+  `packaging/linux/apprun-test.sh` or `packaging/linux/apprun-cli-test.sh`. No app-local
+  workflow job is needed; a failing script fails the shared lint job.
 
 #### Caller Example:
 ```yaml
