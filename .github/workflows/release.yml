@@ -122,19 +122,19 @@ permissions:
   contents: read
 
 jobs:
-  # Fails fast before any build: git dependencies must come from github.com/storytold, and the
+  # Fails fast before any build: git dependencies follow the repository's source policy, and the
   # lock file must not declare source replacement, patches or path overrides that could silently
   # swap one. Lives here (not in each app's release.yml) so every craftapp gets the gate at @main.
   # Every build job needs `version`, so these builds are gated transitively.
   git-sources:
-    name: Git dependencies come from storytold
+    name: Git dependencies match source policy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Git dependencies come from storytold
+      - name: Git dependencies match source policy
         run: |
           set -euo pipefail
           test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
@@ -156,13 +156,22 @@ jobs:
           # Fails when Cargo.lock is out of date with the manifests.
           cargo metadata --locked --format-version 1 > /dev/null
           python3 - <<'PY'
-          import sys, tomllib
+          import os, sys, tomllib
           lock = tomllib.load(open("Cargo.lock", "rb"))
+          # One repository-scoped pilot pin. New callers, packages, versions or revisions
+          # require the supply-chain policy owner's review in this shared workflow.
+          edit_session = (
+              "edit-session", "0.1.0-alpha.2",
+              "git+https://github.com/PerchAnton/edit-session?rev=033f7c3a67b825b8f222288788cc61234c0c945d"
+              "#033f7c3a67b825b8f222288788cc61234c0c945d",
+          )
+          exceptions = {edit_session} if os.environ.get("GITHUB_REPOSITORY") == "storytold/pdfcraft" else set()
           bad = sorted({p["source"] for p in lock.get("package", [])
                         if p.get("source", "").startswith("git+")
-                        and not p["source"].startswith("git+https://github.com/storytold/")})
+                        and not p["source"].startswith("git+https://github.com/storytold/")
+                        and (p["name"], p["version"], p["source"]) not in exceptions})
           if bad:
-              print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
+              print("Git dependencies outside the repository's source policy:", *bad, sep="\n")
               sys.exit(1)
           PY
 
