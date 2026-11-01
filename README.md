@@ -402,9 +402,10 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
 - optionally, a cache of files the gate downloads (`file-cache-paths`, e.g. test models), keyed
   on `hashFiles(file-cache-key-files)` (e.g. the manifest that pins their SHA-256 hashes) and
-  saved under the same rule as the dependency cache. The gate's own command still fetches and
-  checks the files; the cache only lets it skip a download when they're already there. A key
-  glob that matches no file fails the job.
+  saved under the same rule as the dependency cache. When the key files change, the newest older
+  cache is restored instead. The gate's own command must still fetch and check the files; the
+  cache only lets it skip downloading the ones already there. A key glob that matches no file
+  fails the job.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only

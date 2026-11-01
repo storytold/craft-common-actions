@@ -260,8 +260,12 @@ jobs:
             echo "::error::file-cache-paths needs file-cache-key-files to match at least one file (got '$GLOB')"
             exit 1
           fi
+          echo "prefix=$PREFIX-" >> "$GITHUB_OUTPUT"
           echo "key=$PREFIX-$HASH" >> "$GITHUB_OUTPUT"
 
+      # Falls back to the newest cache under the prefix when the key files changed (a pull request
+      # editing them never has an exact hit): the caller's command re-verifies every file and only
+      # downloads the ones that differ, so an older cache is safe and saves the unchanged files.
       - name: Restore cached files
         id: file-cache-restore
         if: inputs.file-cache-paths != ''
@@ -269,6 +273,7 @@ jobs:
         with:
           path: ${{ inputs.file-cache-paths }}
           key: ${{ steps.file-cache.outputs.key }}
+          restore-keys: ${{ steps.file-cache.outputs.prefix }}
 
       - name: Gate
         shell: bash

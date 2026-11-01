@@ -133,7 +133,13 @@ class FileCacheTests(unittest.TestCase):
     def test_restores_before_the_gate_and_saves_after(self):
         self.assertLess(self.NAMES.index('Restore cached files'), self.NAMES.index('Gate'))
         self.assertGreater(self.NAMES.index('Save cached files'), self.NAMES.index('Gate'))
-        self.assertEqual(step('Restore cached files')['with'], step('Save cached files')['with'])
+        restore, save = step('Restore cached files')['with'], step('Save cached files')['with']
+        self.assertEqual((restore['path'], restore['key']), (save['path'], save['key']))
+        self.assertNotIn('restore-keys', save)
+
+    def test_falls_back_to_an_older_cache_under_the_prefix(self):
+        self.assertEqual(step('Restore cached files')['with']['restore-keys'],
+                         '${{ steps.file-cache.outputs.prefix }}')
 
     def test_saves_under_the_dependency_cache_rule(self):
         condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
@@ -143,7 +149,8 @@ class FileCacheTests(unittest.TestCase):
         self.assertIn("steps.file-cache-restore.outputs.cache-hit != 'true'", condition)
 
     def test_key_is_the_prefix_and_hash(self):
-        self.assertEqual(self.key('ATTRIBUTION.toml', 'ab' * 32), (0, f"key=v1-files-Linux-{'ab' * 32}\n"))
+        self.assertEqual(self.key('ATTRIBUTION.toml', 'ab' * 32),
+                         (0, f"prefix=v1-files-Linux-\nkey=v1-files-Linux-{'ab' * 32}\n"))
 
     def test_a_glob_that_matches_nothing_fails(self):
         self.assertEqual(self.key('missing.toml', '')[0], 1)
