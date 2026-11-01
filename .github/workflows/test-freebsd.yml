@@ -9,6 +9,7 @@ on:
       - .github/workflows/gate.yml
       - actions/freebsd-cargo-cache/**
       - actions/checkout-craft-i18n/**
+      - actions/refresh-contributors/**
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**
@@ -22,6 +23,7 @@ on:
       - .github/workflows/gate.yml
       - actions/freebsd-cargo-cache/**
       - actions/checkout-craft-i18n/**
+      - actions/refresh-contributors/**
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**

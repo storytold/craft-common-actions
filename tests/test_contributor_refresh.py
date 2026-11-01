@@ -19,18 +19,24 @@ def load(name):
     return yaml.load((ROOT / '.github/workflows' / name).read_text(), Loader=yaml.BaseLoader)
 
 
+def shared_action():
+    """Read the composite action selected by the shared refresh workflow."""
+    return yaml.load((ROOT / 'actions/refresh-contributors/action.yml').read_text(), Loader=yaml.BaseLoader)
+
+
 class ContributorRefreshTests(unittest.TestCase):
     def run_refresh(self, mode):
         """Execute the real validation step with a fixture refresh script."""
-        workflow = load('refresh-contributors.yml')
-        step = next(s for s in workflow['jobs']['refresh']['steps'] if 'run' in s)
+        step = shared_action()['runs']['steps'][0]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'scripts').mkdir()
+            action = root / 'shared action'
+            action.mkdir()
             (root / 'contributors').mkdir()
-            (root / 'scripts/refresh-contributors.py').write_text('''import json, os, sys
+            generator = action / 'refresh_contributors.py'
+            generator.write_text('''import json, os, sys
 from pathlib import Path
-assert sys.argv[1:] == ['--repo', 'owner/app']
+assert sys.argv[1:] == ['--repo', 'owner/app', '--directory', os.getcwd()]
 mode = os.environ['TEST_MODE']
 if mode == 'failed':
     raise SystemExit(23)
@@ -45,7 +51,8 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
 ''')
             result = subprocess.run(['bash', '-c', step['run']], cwd=root,
                                     env=dict(os.environ, GITHUB_REPOSITORY='owner/app',
-                                             GITHUB_SHA='release-commit', TEST_MODE=mode),
+                                             GITHUB_SHA='release-commit', TEST_MODE=mode,
+                                             GITHUB_WORKSPACE=str(root), GENERATOR_PATH=str(generator)),
                                     text=True, capture_output=True, timeout=10)
             snapshot = root / 'contributors/contributors.json'
             return result, json.loads(snapshot.read_text()) if snapshot.exists() else None
@@ -78,7 +85,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
         checkout = steps[0]
         self.assertEqual(checkout['with']['fetch-depth'], '0')
         self.assertEqual(checkout['with']['persist-credentials'], 'false')
-        refresh = next(s for s in steps if 'run' in s)
+        refresh = next(s for s in steps if s.get('uses') == '$/actions/refresh-contributors')
         self.assertEqual(refresh['env']['GH_TOKEN'], '${{ github.token }}')
         upload = steps[-1]
         self.assertIn('actions/upload-artifact@', upload['uses'])
@@ -87,6 +94,18 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
         self.assertNotIn('continue-on-error', refresh)
         self.assertNotIn('continue-on-error', upload)
         self.assertEqual(upload['with']['name'], workflow['jobs']['refresh']['outputs']['artifact-name'])
+
+    def test_generator_is_shared_and_paired_with_the_workflow_revision(self):
+        """Pinned and forked workflows select their own generator, with literal path arguments."""
+        steps = load('refresh-contributors.yml')['jobs']['refresh']['steps']
+        self.assertEqual(steps[1]['uses'], '$/actions/refresh-contributors')
+        action = shared_action()['runs']['steps'][0]
+        self.assertEqual(action['env']['GENERATOR_PATH'], '${{ github.action_path }}/refresh_contributors.py')
+        self.assertNotIn('${{', action['run'])
+        self.assertNotIn('scripts/refresh-contributors.py', action['run'])
+        for event in ('pull_request', 'push'):
+            paths = load('test-freebsd.yml')['on'][event]['paths']
+            self.assertIn('actions/refresh-contributors/**', paths)
 
     def test_old_callers_keep_the_same_permissions_and_skip_artifact_download(self):
         """Leave permissions and checked-in credits unchanged unless callers opt in."""

@@ -1,0 +1,26 @@
+name: Refresh contributor credits
+description: Generate and validate a contributor snapshot for the caller's exact checkout
+
+runs:
+  using: composite
+  steps:
+    - name: Generate and validate contributor credits
+      shell: bash
+      env:
+        GENERATOR_PATH: ${{ github.action_path }}/refresh_contributors.py
+      run: |
+        set -euo pipefail
+        python3 "$GENERATOR_PATH" --repo "$GITHUB_REPOSITORY" --directory "$GITHUB_WORKSPACE"
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        credits = json.loads((Path(os.environ["GITHUB_WORKSPACE"]) / "contributors/contributors.json").read_text())
+        if credits.get("head") != os.environ["GITHUB_SHA"]:
+            raise SystemExit("Contributor snapshot does not match the release commit")
+        if credits.get("repo") != os.environ["GITHUB_REPOSITORY"]:
+            raise SystemExit("Contributor snapshot does not match the release repository")
+        if not credits.get("contributors"):
+            raise SystemExit("Contributor snapshot is empty")
+        PY

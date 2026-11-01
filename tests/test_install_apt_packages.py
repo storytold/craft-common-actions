@@ -114,7 +114,13 @@ class StalledMirrorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = Path(tmpdir) / 'bin'
             bin_dir.mkdir()
-            for name, body in [('apt-get', FAKE_APT), ('sudo', '#!/bin/bash\nexec "$@"\n'), ('sleep', '#!/bin/bash\n')]:
+            # Keep the action's system-only man-db cleanup inside the fixture too.
+            for name, body in [
+                ('apt-get', FAKE_APT),
+                ('sudo', '#!/bin/bash\nexec "$@"\n'),
+                ('sleep', '#!/bin/bash\n'),
+                ('rm', '#!/bin/bash\n[[ "$*" == "-f /var/lib/man-db/auto-update" ]]\n'),
+            ]:
                 (bin_dir / name).write_text(body, newline='\n')
                 (bin_dir / name).chmod(0o755)
             log = Path(tmpdir) / 'apt.log'
