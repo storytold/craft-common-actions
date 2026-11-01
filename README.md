@@ -347,7 +347,7 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
-- `packages` installed through `actions/install-apt-packages` on Linux legs;
+- `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -360,8 +360,21 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
-`timeout-minutes` (default 60). Jobs only some apps need, such as fuzzing or web builds, stay in
-the app's own workflow next to the call.
+`timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
+check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
+`cache-version` so its cache (another profile or target) doesn't share the main gate's key:
+
+```yaml
+  web:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      cache-version: v1-web
+      os: '["ubuntu-24.04"]'
+      targets: wasm32-unknown-unknown
+      craft-fonts-ref: ""
+      tools: trunk@0.21.14
+      command: packaging/web/package.sh
+```
 
 #### Caller Example:
 ```yaml
