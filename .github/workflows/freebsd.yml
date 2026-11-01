@@ -110,7 +110,7 @@ jobs:
               printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
               pkg update -f -q
             fi
-            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
             # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
             # or standard library for it ("installer for platform not found"), so use
             # FreeBSD's lang/rust package.
