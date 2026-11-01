@@ -109,5 +109,46 @@ class ProfileCacheTests(unittest.TestCase):
         self.assertRegex(self.key('[workspace]\nmembers = []'), r'^key=[a-f0-9]{64}\n$')
 
 
+
+class FileCacheTests(unittest.TestCase):
+    NAMES = [s.get('name') for s in STEPS]
+
+    def key(self, glob, hash_):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'output')
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-c', step('File cache key')['run']],
+                cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'GLOB': glob, 'HASH': hash_, 'PREFIX': 'v1-files-Linux',
+                     'GITHUB_OUTPUT': str(output)})
+            return result.returncode, output.read_text() if output.exists() else ''
+
+    def test_is_off_by_default(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['file-cache-paths']['default'], '')
+        for name in ('File cache key', 'Restore cached files', 'Save cached files'):
+            with self.subTest(step=name):
+                self.assertIn("inputs.file-cache-paths != ''", step(name)['if'])
+
+    def test_restores_before_the_gate_and_saves_after(self):
+        self.assertLess(self.NAMES.index('Restore cached files'), self.NAMES.index('Gate'))
+        self.assertGreater(self.NAMES.index('Save cached files'), self.NAMES.index('Gate'))
+        self.assertEqual(step('Restore cached files')['with'], step('Save cached files')['with'])
+
+    def test_saves_under_the_dependency_cache_rule(self):
+        condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
+        self.assertIn("github.event_name != 'pull_request'", condition)
+        self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
+        self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
+        self.assertIn("steps.file-cache-restore.outputs.cache-hit != 'true'", condition)
+
+    def test_key_is_the_prefix_and_hash(self):
+        self.assertEqual(self.key('ATTRIBUTION.toml', 'ab' * 32), (0, f"key=v1-files-Linux-{'ab' * 32}\n"))
+
+    def test_a_glob_that_matches_nothing_fails(self):
+        self.assertEqual(self.key('missing.toml', '')[0], 1)
+        self.assertEqual(self.key('', '')[0], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

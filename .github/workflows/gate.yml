@@ -88,6 +88,16 @@ on:
         type: boolean
         required: false
         default: false
+      file-cache-paths:
+        description: "Files the gate downloads that are worth keeping between runs (e.g. test models), one path or glob per line, as actions/cache takes them. Empty caches none. Needs file-cache-key-files"
+        type: string
+        required: false
+        default: ""
+      file-cache-key-files:
+        description: "A hashFiles() glob of the files that pin what file-cache-paths holds (e.g. a manifest of SHA-256 hashes); a change to them starts the file cache afresh"
+        type: string
+        required: false
+        default: ""
       timeout-minutes:
         description: "Timeout of each leg"
         type: number
@@ -234,6 +244,32 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: true
 
+      # A key glob that matches nothing would give every run the same key and keep stale files
+      # forever, so it fails here instead.
+      - name: File cache key
+        id: file-cache
+        if: inputs.file-cache-paths != ''
+        shell: bash
+        env:
+          GLOB: ${{ inputs.file-cache-key-files }}
+          HASH: ${{ hashFiles(inputs.file-cache-key-files) }}
+          PREFIX: ${{ inputs.cache-version }}-files-${{ runner.os }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GLOB" ] || [ -z "$HASH" ]; then
+            echo "::error::file-cache-paths needs file-cache-key-files to match at least one file (got '$GLOB')"
+            exit 1
+          fi
+          echo "key=$PREFIX-$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Restore cached files
+        id: file-cache-restore
+        if: inputs.file-cache-paths != ''
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.file-cache-paths }}
+          key: ${{ steps.file-cache.outputs.key }}
+
       - name: Gate
         shell: bash
         env:
@@ -241,6 +277,21 @@ jobs:
         run: |
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
           bash -euo pipefail "$RUNNER_TEMP/gate.sh"
+
+      # Saved under the same rule as the dependency cache: pull requests only restore. After a
+      # failed gate too, as rust-cache does: the files were fetched before the tests ran.
+      - name: Save cached files
+        if: >-
+          !cancelled()
+          && inputs.file-cache-paths != ''
+          && steps.file-cache-restore.outputs.cache-hit != 'true'
+          && github.event_name != 'pull_request'
+          && (github.ref_name == github.event.repository.default_branch
+              || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.file-cache-paths }}
+          key: ${{ steps.file-cache.outputs.key }}
 
       # A gate that changed Cargo.lock ran against a lockfile that is not the one in the repository.
       - name: Lockfile unchanged
