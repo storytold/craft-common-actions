@@ -79,6 +79,16 @@ on:
         type: boolean
         required: false
         default: false
+      launcher-qualification:
+        description: "Qualify the exact launcher candidate on native macOS/Linux/Windows runners before creating a draft (craft-launcher only)"
+        type: boolean
+        required: false
+        default: false
+      create-draft:
+        description: "Create or update a draft release after checks; false retains build/qualification artifacts only"
+        type: boolean
+        required: false
+        default: true
 
     secrets:
       APPLE_CERTIFICATE:
@@ -1235,11 +1245,18 @@ jobs:
           path: dist/release/*.tar.gz
           if-no-files-found: error
 
+  launcher-qualification:
+    if: inputs.launcher-qualification
+    needs: [version, macos, windows, linux]
+    uses: ./.github/workflows/launcher-qualification.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
-    needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
+    if: "inputs.create-draft && !cancelled() && !contains(needs.*.result, 'failure') && (!inputs.launcher-qualification || needs.launcher-qualification.result == 'success')"
+    needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server, launcher-qualification]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -1251,3 +1268,4 @@ jobs:
           app-title: ${{ inputs.app-title }}
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          launcher-qualification: ${{ inputs.launcher-qualification }}
