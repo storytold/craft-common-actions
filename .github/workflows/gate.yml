@@ -1,8 +1,9 @@
 name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
-# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup. App-only
-# jobs (fuzzing, corpora, web builds) stay in the app's own workflow next to the call.
+# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup.
+# App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
+# inputs: an app's workflows only call this repository's workflows.
 on:
   workflow_call:
     inputs:
