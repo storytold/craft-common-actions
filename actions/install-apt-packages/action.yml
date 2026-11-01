@@ -54,6 +54,9 @@ runs:
       shell: bash
       env:
         PACKAGE_LIST: ${{ steps.key.outputs.list }}
+        # Seconds one attempt at a mirror download may take, and how many attempts are made.
+        APT_NETWORK_TIMEOUT: "300"
+        APT_NETWORK_ATTEMPTS: "3"
       run: |
         set -euo pipefail
         debs="$HOME/.cache/craft-apt-debs"
@@ -63,10 +66,38 @@ runs:
         # A slow or stalled mirror connection is retried instead of holding the job for minutes.
         # The cache directory belongs to the runner user, so downloads run as root rather than as
         # apt's _apt sandbox user, which could not write there.
-        opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o "Dir::Cache::Archives=$debs"
-              -o APT::Keep-Downloaded-Packages=true -o APT::Sandbox::User=root)
-        sudo apt-get "${opts[@]}" update
+        opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30
+              -o "Dir::Cache::Archives=$debs" -o APT::Keep-Downloaded-Packages=true
+              -o APT::Sandbox::User=root)
+        # Acquire timeouts don't end a connection that stays open and sends nothing: one such
+        # stall held a job for 58 minutes until its own timeout. So each mirror download also has
+        # a wall-clock limit and is retried. Only downloads are limited; dpkg is never killed.
+        network() {
+          local attempt status
+          for ((attempt = 1; ; attempt++)); do
+            status=0
+            sudo timeout --kill-after=30 "$APT_NETWORK_TIMEOUT" apt-get "${opts[@]}" "$@" || status=$?
+            if [ "$status" -eq 0 ] || [ "$attempt" -ge "$APT_NETWORK_ATTEMPTS" ]; then
+              return "$status"
+            fi
+            echo "::warning::install-apt-packages: apt-get $1 attempt $attempt exited $status (124: over ${APT_NETWORK_TIMEOUT}s); retrying"
+            sleep 5
+          done
+        }
+        # Error-Mode=any: an index that failed to download fails the update, so it is retried
+        # (apt-get update otherwise warns and exits 0). Indexes still missing after the last
+        # attempt are only a warning, as before: often they belong to a repository the packages
+        # don't need, and a package that does need one fails the download below.
+        if ! network update -o APT::Update::Error-Mode=any; then
+          echo "::warning::install-apt-packages: apt-get update failed $APT_NETWORK_ATTEMPTS times; continuing with the indexes it has"
+        fi
         # shellcheck disable=SC2086 # the list is split into package names on purpose
+        if ! network install -y --no-install-recommends --download-only -- $PACKAGE_LIST; then
+          echo "::error::install-apt-packages: downloading the packages failed $APT_NETWORK_ATTEMPTS times"
+          exit 1
+        fi
+        # Everything is downloaded: this only unpacks and configures, with no mirror to wait on.
+        # shellcheck disable=SC2086
         sudo apt-get "${opts[@]}" install -y --no-install-recommends -- $PACKAGE_LIST
         sudo apt-get "${opts[@]}" autoclean
         sudo chown -R "$(id -u):$(id -g)" "$debs"

@@ -7,9 +7,10 @@ on:
   workflow_call:
     inputs:
       packages:
-        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action"
+        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action. Empty installs none (Windows-only calls, wasm builds)"
         type: string
-        required: true
+        required: false
+        default: ""
       command:
         description: "The gate, run with bash from the repository root"
         type: string
@@ -172,7 +173,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL </dev/null >/dev/null 2>&1 &
 
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.packages != ''
         uses: storytold/craft-common-actions/actions/install-apt-packages@main
         with:
           packages: ${{ inputs.packages }}
@@ -198,7 +199,7 @@ jobs:
 
       - name: Install cargo tools
         if: inputs.tools != ''
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: ${{ inputs.tools }}
 
