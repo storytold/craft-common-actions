@@ -123,7 +123,7 @@ jobs:
           set -euo pipefail
           raw="$RAW_ARCHITECTURES"
           if [ -z "$raw" ]; then
-            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "pull_request_target" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ]; then
               archs='["x86_64"]'
             else
               archs='["x86_64","aarch64"]'
@@ -190,11 +190,11 @@ jobs:
 
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
-        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@5d4336931c0b690c73444391c5de2e95389186a0
         with:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
-        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@9587bf235d3d96532d6e5f2d7180355ed96bc667
       
       - name: Resolve FreeBSD release
         id: freebsd-release
@@ -247,7 +247,7 @@ jobs:
         run: |
           set -eu
           if [ "$MATRIX_ARCH" = "x86_64" ]; then abi="amd64"; else abi="aarch64"; fi
-          url="https://pkg.FreeBSD.org/FreeBSD:${MAJOR_VER}:${abi}/latest/packagesite.pkg"
+          url="https://pkg.FreeBSD.org/FreeBSD:${MAJOR_VER}:${abi}/quarterly/packagesite.pkg"
           etag=$(curl -fsSI --retry 3 --connect-timeout 20 --max-time 60 "$url" \
             | awk -F": " 'tolower($1) == "etag" { gsub(/"/, "", $2); gsub(/\r/, "", $2); print $2; exit }')
           if [ -z "$etag" ]; then
@@ -287,7 +287,10 @@ jobs:
             echo "Error: base.txz checksum not found in MANIFEST" >&2
             exit 1
           fi
+          echo "base.txz sha256: $(sha256sum base.txz | awk '{print $1}')"
+          echo "expected sha256 from MANIFEST: $expected"
           echo "$expected  base.txz" | sha256sum -c -
+          echo "✓ base.txz checksum verified"
           rm -f MANIFEST
           
           tar -xf base.txz -C "$SYSROOT" ./lib/ ./usr/lib/ ./usr/include/ ./libexec/
@@ -363,16 +366,36 @@ jobs:
 
       - name: Save FreeBSD sysroot
         # Only on a miss; re-saving an existing key fails for no benefit.
-        if: steps.sysroot-cache.outputs.cache-hit != 'true'
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
         with:
           path: ~/freebsd-sysroot
           key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
 
       - name: Setup Toolchain
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          # Pinned to ubuntu-24.04 (noble) candidate versions as of 2026-11-01.
+          # If these versions are removed from the Ubuntu archives in the future,
+          # maintainers should update them by querying the latest available versions 
+          # via: `apt-cache madison <pkg>` (e.g., apt-cache madison clang).
+          CLANG_VER: "1:18.0-59~exp2"
+          CLANG_18_VER: "1:18.1.3-1ubuntu1"
+          LLD_VER: "1:18.0-59~exp2"
+          LLD_18_VER: "1:18.1.3-1ubuntu1"
+          PKG_CONFIG_VER: "1.8.1-2build1"
+          MOLD_VER: "2.30.0+dfsg-1build1"
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld pkg-config mold
+          sudo apt-get install -y --no-install-recommends \
+            "clang=${CLANG_VER}" \
+            "clang-18=${CLANG_18_VER}" \
+            "lld=${LLD_VER}" \
+            "lld-18=${LLD_18_VER}" \
+            "pkg-config=${PKG_CONFIG_VER}" \
+            "mold=${MOLD_VER}"
+
           if [ "$MATRIX_ARCH" = "aarch64" ]; then
             rustup target add aarch64-unknown-freebsd
           else
@@ -987,7 +1010,16 @@ jobs:
                 # could block.
                 is_libtest_harness=false
                 if [ -n "$case_skip" ] || [ -n "${ONLY_TEST_CASES:-}" ]; then
-                  if timeout 60 "$root/$test_bin" --list >/dev/null 2>&1; then
+                  # The probe is bounded because a custom main() could block.
+                  set +e
+                  timeout 60 "$root/$test_bin" --list >/dev/null 2>&1
+                  probe_rc=$?
+                  set -e
+                  if [ "$probe_rc" -eq 124 ]; then
+                    echo "Error: --list probe timed out after 60s for $test_bin" >&2
+                    failed="$failed $test_bin(probe-timeout)"
+                    continue
+                  elif [ "$probe_rc" -eq 0 ]; then
                     is_libtest_harness=true
                   fi
                 fi
