@@ -210,6 +210,32 @@ exit 0
             )
             self.assertIn("provides=(myapp=1.2.3-2)", pkgbuild)
 
+    def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
+        """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
+
+        winit's X11 backend loads libxkbcommon-x11 at startup and panics without it, and Arch
+        ships it apart from libxkbcommon: a package without it could not open its window on
+        X11 or XWayland.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tarball = self._create_fixture_tarball(tmp_path)
+            tools = self._setup_mock_tools(tmp_path)
+            capture = tmp_path / "capture"
+            capture.mkdir()
+            res = subprocess.run(
+                [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+            )
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            depends = next(
+                line for line in (capture / "PKGBUILD").read_text().splitlines() if line.startswith("depends=(")
+            )
+            for package in ("'libxkbcommon'", "'libxkbcommon-x11'"):
+                self.assertIn(package, depends)
+
     def test_package_function_rejects_symlinked_license_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
