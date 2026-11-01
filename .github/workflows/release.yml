@@ -301,7 +301,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: packaging/macos/verify.sh --arch universal
+        run: |
+          for attempt in 1 2 3 4; do
+            if packaging/macos/verify.sh --arch universal; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              exit 1
+            fi
+            echo "macOS verification failed (attempt $attempt of 4); retrying in 20 seconds" >&2
+            sleep 20
+          done
       - name: Note missing macOS verification
         if: github.ref == 'refs/heads/release' && hashFiles('packaging/macos/verify.sh') == ''
         run: echo "::warning::packaging/macos/verify.sh is missing, so this release was not checked for a signature or notarization ticket."
