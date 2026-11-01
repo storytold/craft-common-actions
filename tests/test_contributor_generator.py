@@ -83,6 +83,24 @@ class ContributorRefreshTests(unittest.TestCase):
         self.assertEqual(rows["bob"]["commits"], 1)
         self.assertFalse(rows["bob"]["people_entry"])
 
+    def test_name_preferences_stay_bound_to_the_captured_commit(self):
+        """Concurrent working-tree edits cannot change the release's consent preferences."""
+        original_api = self.api
+        original_head = self.git("rev-parse", "HEAD")
+
+        def edit_during_collection(root, endpoint, query, paginate=False):
+            if "/pulls?" in endpoint:
+                self.people.write_text('[people.alice]\nsync_github_name = false\n')
+            return original_api(root, endpoint, query, paginate)
+
+        with patch.object(self, "api", side_effect=edit_during_collection):
+            result = self.collect()
+        row = result["contributors"][0]
+        self.assertEqual(result["head"], original_head)
+        self.assertTrue(row["people_entry"])
+        self.assertEqual(row["github_name"], "Alice Public")
+        self.assertIn("false", self.people.read_text())
+
     def test_author_history_pagination_preserves_primary_and_coauthor_identities(self):
         """Follow every cursor and retain GitHub-linked co-authors separately from editors."""
         pages = []
@@ -103,6 +121,7 @@ class ContributorRefreshTests(unittest.TestCase):
     def test_invalid_people_field_is_an_actionable_error(self):
         """Reject a malformed opt-in instead of guessing its intended value."""
         self.people.write_text('[people.alice]\nsync_github_name = "false"\n')
+        self.commit("Malformed preference", "alice")
         with self.assertRaisesRegex(ValueError, "must be a boolean"):
             credits.load_people(self.root)
 
@@ -144,8 +163,25 @@ class ContributorRefreshTests(unittest.TestCase):
         """Do not silently choose between conflicting preferences for one account."""
         self.people.write_text('[people.alice]\ndisplay_name = "One"\n'
                                '[people.ALICE]\ndisplay_name = "Two"\n')
+        self.commit("Conflicting preferences", "alice")
         with self.assertRaisesRegex(ValueError, "duplicate account casing"):
             credits.load_people(self.root)
+
+    def test_head_change_during_collection_aborts(self):
+        """Reject a moved checkout rather than describing it with stale commit metadata."""
+        original_api = self.api
+        original_snapshot = self.output.read_bytes()
+
+        def commit_during_collection(root, endpoint, query, paginate=False):
+            if "/pulls?" in endpoint:
+                (self.root / "text.txt").write_text("concurrent commit\n")
+                self.commit("Concurrent change", "alice")
+            return original_api(root, endpoint, query, paginate)
+
+        with patch.object(self, "api", side_effect=commit_during_collection):
+            with self.assertRaisesRegex(ValueError, "HEAD changed"):
+                self.collect()
+        self.assertEqual(self.output.read_bytes(), original_snapshot)
 
     def test_statistics_models_and_no_inferred_human_names(self):
         """Attribute text/binary changes and deduplicate explicit model co-authors."""
@@ -169,6 +205,22 @@ class ContributorRefreshTests(unittest.TestCase):
                          {"anthropic/claude-opus/5.5": 1, "openai/codex": 1})
         self.assertNotIn("Private Git Author", json.dumps(result))
         self.assertNotIn("private@example.test", json.dumps(result))
+
+    def test_supported_model_formats_and_unknown_providers(self):
+        """Keep the documented model families aligned with accepted explicit trailers."""
+        accepted = {
+            "Claude Sonnet 5.5 <noreply@anthropic.com>": "anthropic/claude-sonnet/5.5",
+            "Codex <codex@openai.com>": "openai/codex",
+            "ChatGPT <noreply@openai.com>": "openai/chatgpt",
+            "GPT-5.1 <noreply@openai.com>": "openai/gpt/5.1",
+        }
+        for trailer, expected in accepted.items():
+            with self.subTest(trailer=trailer):
+                self.assertEqual(credits.model(trailer)["id"], expected)
+        for trailer in ("Another Model <noreply@other.example>",
+                        "Claude Opus 5.5 <unrelated@example.test>", "not a trailer"):
+            with self.subTest(trailer=trailer):
+                self.assertIsNone(credits.model(trailer))
 
     def test_profiles_are_requested_only_for_verified_opt_in_entries(self):
         """A copied people entry never enables name synchronization."""
@@ -227,6 +279,16 @@ class ContributorRefreshTests(unittest.TestCase):
         self.identities.clear()
         with self.assertRaisesRegex(ValueError, "missing 1 reachable commits"):
             self.collect()
+
+    def test_uncommitted_preferences_fail_clearly_before_api_reads(self):
+        """Explain how to resolve dirty preferences without logging their private values."""
+        original = self.output.read_bytes()
+        self.people.write_text('[people.alice]\ndisplay_name = "Private local preference"\n')
+        with self.assertRaisesRegex(ValueError, "commit or restore") as error:
+            self.collect()
+        self.assertNotIn("Private local preference", str(error.exception))
+        self.assertEqual(self.api_calls, [])
+        self.assertEqual(self.output.read_bytes(), original)
 
     def test_atomic_write_retains_previous_snapshot_on_replace_failure(self):
         """Preserve the last good file when disk replacement fails."""

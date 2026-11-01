@@ -82,9 +82,9 @@ def single_value(root, endpoint, query):
     return records[0]["value"]
 
 
-def load_people(root):
-    """Reject malformed name preferences before trying to verify consent."""
-    people = tomllib.loads((root / "contributors/people.toml").read_text(encoding="utf-8")).get("people", {})
+def load_people(root, head="HEAD"):
+    """Read and validate name preferences from the selected immutable commit."""
+    people = tomllib.loads(run(["git", "show", f"{head}:contributors/people.toml"], root)).get("people", {})
     if not isinstance(people, dict):
         raise ValueError("people.toml must contain people tables")
     seen = set()
@@ -162,9 +162,9 @@ def model(trailer):
     return None
 
 
-def people_authors(root):
+def people_authors(root, head="HEAD"):
     """Find the commits responsible for each table's content, not Git author names/emails."""
-    text = run(["git", "blame", "--line-porcelain", "--", "contributors/people.toml"], root)
+    text = run(["git", "blame", "--line-porcelain", head, "--", "contributors/people.toml"], root)
     result, sha, active = {}, None, None
     for line in text.splitlines():
         if re.match(r"^[0-9a-f]{40,64} \d+ \d+", line):
@@ -180,9 +180,9 @@ def people_authors(root):
     return result
 
 
-def verified_people(root, repo, people, identities, pull_authors):
+def verified_people(root, repo, people, identities, pull_authors, head="HEAD"):
     """Verify self-authored entries or recorded consent committed by a repository writer."""
-    blame = people_authors(root)
+    blame = people_authors(root, head)
     permissions = {}
     verified = {}
     for login, entry in people.items():
@@ -208,8 +208,12 @@ def collect(root, repo):
     """Collect a complete, head-bound snapshot; fail before writing on API/history errors."""
     if run(["git", "rev-parse", "--is-shallow-repository"], root).strip() != "false":
         raise ValueError("Contributor refresh requires full Git history (fetch-depth: 0)")
-    run(["git", "diff", "--exit-code", "HEAD", "--", "contributors/people.toml"], root)
     head = run(["git", "rev-parse", "HEAD"], root).strip()
+    try:
+        run(["git", "diff", "--quiet", head, "--", "contributors/people.toml"], root)
+    except RuntimeError as error:
+        raise ValueError("Contributor preferences must match the release commit; "
+                         f"commit or restore contributors/people.toml ({error})") from error
     commits = history(root, head)
     identities, authors = commit_authors(root, repo, head)
     missing = commits.keys() - identities.keys()
@@ -224,8 +228,8 @@ def collect(root, repo):
             pull_authors.setdefault(pull["sha"], set()).add(pull["login"])
     # Only an unambiguous merged PR can supply an otherwise unknown commit identity.
     pull_authors = {sha: next(iter(logins)) for sha, logins in pull_authors.items() if len(logins) == 1}
-    people = load_people(root)
-    verified = verified_people(root, repo, people, identities, pull_authors)
+    people = load_people(root, head)
+    verified = verified_people(root, repo, people, identities, pull_authors, head)
     people_logins = {login.casefold(): login for login in people}
     people = {login.casefold(): entry for login, entry in people.items()}
     contributors, models = {}, {}

@@ -119,10 +119,14 @@ The shared generator uses local Git text/binary statistics and GitHub-linked aut
 identities and merged PRs. Unlinked commits are counted as unattributed. Name preferences are
 verified against the commits that introduced their values; a maintainer override also requires
 a recorded `consent_source` and repository write access. Public profile names are fetched only
-for verified entries opting into synchronization. Explicit model Co-Authored-By trailers supply
-model credits. Co-authored commits count for each linked contributor/model, so row totals can
+for verified entries opting into synchronization. Recognized Anthropic Claude and OpenAI
+Codex/ChatGPT/GPT Co-Authored-By trailers supply model credits; other providers and unrecognized
+trailer formats are skipped. Co-authored commits count for each linked contributor/model, so row totals can
 exceed repository totals. Generation replaces only the snapshot, atomically after collection
 succeeds, and never edits `people.toml` or commits/pushes changes.
+Name preferences and their consent checks use the captured Git commit, so concurrent local
+edits cannot change the release snapshot. Uncommitted preferences are rejected before API
+access with an instruction to commit or restore them, without logging their contents.
 
 For a manual refresh, use Python 3.11+, Git and an authenticated `gh` CLI from a checkout of
 this repository:
