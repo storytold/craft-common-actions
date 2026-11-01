@@ -369,6 +369,8 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
     uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
     with:
       cache-version: v1-web
+      os: '["ubuntu-24.04"]'
+      targets: wasm32-unknown-unknown
       craft-fonts-ref: ""
       tools: trunk@0.21.14
       command: packaging/web/package.sh
