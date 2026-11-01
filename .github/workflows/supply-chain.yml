@@ -72,6 +72,8 @@ jobs:
       - name: Attach the SBOM to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout here, so gh has no git remote to find the repository from.
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
         run: |
           tag="v${VERSION#v}"

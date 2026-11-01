@@ -14,7 +14,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
-- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64; aarch64 is cross-compiled in the same x86_64 VM and opt-in through `freebsd-architectures`, see #39)
+- **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
@@ -64,6 +64,48 @@ jobs:
       AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
       AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
 ```
+
+#### Automatic contributor credits (opt-in)
+
+Apps with `scripts/refresh-contributors.py` can refresh bundled credits once before a release.
+Grant the caller workflow `contents: write` for release publishing, and keep the preparatory
+`credits` job read-only with its job-level override. A called workflow cannot increase the
+token permissions granted by its caller; see [reusable-workflow permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#supported-keywords-for-jobs-that-call-a-reusable-workflow).
+Call the preparatory workflow, then pass its output to the release workflow:
+
+```yaml
+permissions:
+  contents: write
+
+jobs:
+  credits:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: storytold/craft-common-actions/.github/workflows/refresh-contributors.yml@main
+  release:
+    needs: credits
+    permissions:
+      contents: write
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    with:
+      app-name: effectcraft
+      app-title: EffectCraft
+      contributors-artifact: ${{ needs.credits.outputs.artifact-name }}
+    # Include the app's existing signing secrets here.
+```
+
+The preparatory workflow checks out full history, runs the app's script with `--repo` set to
+`github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
+`contributors/contributors.json` belongs to `github.sha`. It uploads that file only after a
+successful refresh. The intermediate `contributor-snapshot-*` artifact stays outside the
+`release-*` collection used for release assets and checksums, including on reruns.
+Every source-build job installs the same artifact after checkout, including
+FreeBSD before copying the workspace to its VM. Flatpak and Arch inherit the refreshed credits
+from the Linux binaries. The generated snapshot is not committed or pushed back to the app.
+
+An unsuccessful refresh or missing artifact blocks the release. Existing callers that omit
+`contributors-artifact` keep their current behavior, permissions, and build paths.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
@@ -145,6 +187,15 @@ jobs:
 ### 3. `windows-arm64.yml`
 Cross-compiles ARM64 MSI on x64 Windows runner, then installs, verifies native ARM64 architecture (`0xAA64`), smoke tests the CLI, and uninstalls on a Windows 11 ARM64 runner.
 
+`app-dir` stays a single display/shortcut/registration name. Set `install-relative-path`
+separately for nested folders, for example `Programs/ArtCraft/PhotoCraft` below LocalAppData
+with `install-scope: perUser`, or `ArtCraft/PhotoCraft` below ProgramFiles with
+`install-scope: perMachine`. An empty scope retains the legacy installer defaults and
+`is-per-user` behaviour. Explicit scope is passed to msiexec as well as used for path checks.
+For the launcher's per-user-only installer, keep `is-per-user: true` to retain its shortcut,
+registry and custom-folder checks. Path components are validated before starting msiexec.
+
+
 #### Caller Example:
 ```yaml
 name: Windows ARM64
@@ -187,14 +238,14 @@ cross-compiled in it with stable Rust (the standard library comes from FreeBSD's
 aarch64 `lang/rust` package, against an arm64 sysroot built from `base.txz`). Its
 tests are built but not run, and its package check is skipped.
 
-The release workflow builds FreeBSD aarch64 the same way, but only when the caller
-sets `freebsd-architectures: '["x86_64","aarch64"]'` (the default is `'["x86_64"]'`).
-Opt in only once the app's `packaging/freebsd/package.sh` builds with
-`CARGO_BUILD_TARGET`, reads binaries from
-`$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release` and names its archive
-`*-freebsd-aarch64.tar.gz`: the guest's `uname -m` is always `amd64`. The release
-job fails if an archive does not match its matrix architecture. Apps without a
-`package.sh` use the built-in packager, which already handles the cross target.
+The release workflow builds FreeBSD for `freebsd-architectures`, which defaults to
+`'["x86_64","aarch64"]'`; callers can narrow it, for example `'["x86_64"]'`. An app's
+`packaging/freebsd/package.sh` must build with `CARGO_BUILD_TARGET`, read binaries
+from `$CARGO_TARGET_DIR/$CARGO_BUILD_TARGET/release` and name its archive
+`*-freebsd-<arch>.tar.gz` for each listed architecture: the guest's `uname -m` is
+always `amd64`. The release job fails if an archive does not match its matrix
+architecture. Apps without a `package.sh` use the built-in packager, which already
+handles the cross target.
 
 The optional `architectures` input overrides the check matrix with a JSON array,
 for example `'["aarch64"]'` for a dedicated ARM check or
@@ -338,18 +389,34 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
-- `packages` installed through `actions/install-apt-packages` on Linux legs;
+- `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
   profile) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
-- a rust-cache dependency cache that only the default branch saves, so pull requests restore
-  main's entry and never evict it. The key includes the root `Cargo.toml`, since rust-cache hashes
-  only the members' manifests. Bump `cache-version` to start afresh.
+- a rust-cache dependency cache saved by the default branch by default. Pull requests only
+  restore caches; callers may opt manual branch runs into branch-scoped writes with
+  `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
+  table; dependency, version and comment edits do not discard reusable dependency artifacts.
+  rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
-`timeout-minutes` (default 60). Jobs only some apps need, such as fuzzing or web builds, stay in
-the app's own workflow next to the call.
+`timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
+check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
+`cache-version` so its cache (another profile or target) doesn't share the main gate's key:
+
+```yaml
+  web:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      cache-version: v1-web
+      os: '["ubuntu-24.04"]'
+      targets: wasm32-unknown-unknown
+      craft-fonts-ref: ""
+      tools: trunk@0.21.14
+      command: packaging/web/package.sh
+```
 
 #### Caller Example:
 ```yaml
@@ -484,8 +551,14 @@ Keep app-specific packaging assertions in the caller repository and pass their
 Bash script to `packaging-lint.yml` with
 `extra-checks-script: packaging/check-app-specific.sh`. It runs after the shared
 lint action, with the checkout and lint tools available. A missing or failing
-requested script fails the job. Native Windows installer probes remain separate
-caller jobs; Linux static lint does not replace them.
+requested script fails the job. Linux static lint does not replace native Windows
+installer probes; those belong in a shared workflow here as well.
+
+An app's `.github/workflows/` only calls this repository's workflows at `@main`,
+with inputs and secrets: no caller jobs with their own `runs-on`/`steps`. App-specific
+checks (fuzzing, corpora, web builds, installer probes) become shared workflows or
+inputs here. Jobs that apps still run themselves move here without being dropped:
+an app removes one only once a shared workflow runs it.
 
 ## Job time limits
 
@@ -550,3 +623,17 @@ The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
 custom test group, default build/test failures, missing/corrupt packages and font
 environment propagation. They do not replace native FreeBSD caller runs.
+
+### Gate cache reuse
+
+The gate cache key includes the canonical root `[profile]` table, including per-package
+profile overrides. Dependency and version edits no longer change the restore prefix;
+`rust-cache` still keys on the lockfile, toolchain, environment and member manifests,
+and Cargo validates restored fingerprints. The first run after adopting this key
+is cold.
+
+Only the default branch saves by default. A caller may set
+`cache-save-on-dispatch: true` for repeated manual integration testing. This permits
+`workflow_dispatch` runs to save a cache scoped by GitHub to that branch, never a
+pull-request run. Use this selectively to avoid storage churn; sibling branches cannot
+restore each other's caches. Do not pass the input until this workflow change has landed.

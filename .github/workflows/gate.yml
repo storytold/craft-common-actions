@@ -1,15 +1,17 @@
 name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
-# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup. App-only
-# jobs (fuzzing, corpora, web builds) stay in the app's own workflow next to the call.
+# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup.
+# App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
+# inputs: an app's workflows only call this repository's workflows.
 on:
   workflow_call:
     inputs:
       packages:
-        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action"
+        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action. Empty installs none (Windows-only calls, wasm builds)"
         type: string
-        required: true
+        required: false
+        default: ""
       command:
         description: "The gate, run with bash from the repository root"
         type: string
@@ -81,6 +83,11 @@ on:
         type: string
         required: false
         default: "v1"
+      cache-save-on-dispatch:
+        description: "Allow manually dispatched branch runs to save their branch-scoped dependency cache; pull requests never write"
+        type: boolean
+        required: false
+        default: false
       timeout-minutes:
         description: "Timeout of each leg"
         type: number
@@ -167,7 +174,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL </dev/null >/dev/null 2>&1 &
 
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.packages != ''
         uses: storytold/craft-common-actions/actions/install-apt-packages@main
         with:
           packages: ${{ inputs.packages }}
@@ -193,18 +200,38 @@ jobs:
 
       - name: Install cargo tools
         if: inputs.tools != ''
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: ${{ inputs.tools }}
 
-      # Only the default branch writes, so PR caches never evict its entry; a failing gate still
-      # saves. rust-cache hashes only the members' manifests, so the root Cargo.toml goes in the key
-      # or a profile change in a virtual root keeps restoring the old cache.
+      # Root workspace profiles are not among rust-cache's member manifests. Hash only
+      # those profiles here: a dependency/version/comment change must not discard the
+      # fallback cache for every other dependency. rust-cache still hashes the lockfile,
+      # toolchain, member manifests and build environment, and Cargo checks fingerprints.
+      - name: Cache profile key
+        id: cache-profile
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
+          key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"key={key}\n")
+          PYTHON
+
+      # Default-branch writes remain the default. Maintainers can explicitly opt manual
+      # branch runs into branch-scoped writes; pull-request runs never save a cache.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: ${{ inputs.cache-version }}-rust
-          key: ${{ hashFiles('Cargo.toml') }}
-          save-if: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
+          key: ${{ steps.cache-profile.outputs.key }}
+          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: true
 
       - name: Gate

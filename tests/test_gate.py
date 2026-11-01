@@ -1,4 +1,4 @@
-"""The shared gate workflow: pinned actions, a cache only the default branch writes, and caller
+"""The shared gate workflow: pinned actions, a cache with explicit manual-branch opt-in, and caller
 input that reaches the shell only through the environment."""
 from pathlib import Path
 import os
@@ -27,12 +27,21 @@ class GateWorkflowTests(unittest.TestCase):
                     if not OWN_ACTION.match(s['uses']):
                         self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
-    def test_only_pushes_to_the_default_branch_save_the_cache(self):
+    def test_manual_branch_saves_require_explicit_opt_in(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
         condition = re.sub(r'\s+', ' ', cache['with']['save-if'])
         self.assertIn("github.event_name != 'pull_request'", condition)
         self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
-        self.assertNotIn('||', condition)
+        self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
+        self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-save-on-dispatch']['default'], 'false')
+
+    def test_packages_are_optional_and_empty_installs_none(self):
+        packages = WORKFLOW['on']['workflow_call']['inputs']['packages']
+        self.assertEqual(packages['required'], 'false')
+        self.assertEqual(packages['default'], '')
+        condition = step('Install Linux build dependencies')['if']
+        self.assertIn("runner.os == 'Linux'", condition)
+        self.assertIn("inputs.packages != ''", condition)
 
     def test_inputs_reach_scripts_only_through_env(self):
         for s in STEPS:
@@ -69,6 +78,35 @@ class CallerEnvironmentTests(unittest.TestCase):
         for line in ('NOT AN ASSIGNMENT', '1X=1', 'X<<EOF'):
             with self.subTest(line=line):
                 self.assertEqual(self.run_step(ALL=f'GOOD=1\n{line}')[0], 1)
+
+
+class ProfileCacheTests(unittest.TestCase):
+    def key(self, manifest):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'Cargo.toml').write_text(manifest)
+            output = Path(directory, 'output')
+            subprocess.run(['bash', '-euo', 'pipefail', '-c', step('Cache profile key')['run']],
+                           cwd=directory, check=True, capture_output=True,
+                           env={**os.environ, 'GITHUB_OUTPUT': str(output)})
+            return output.read_text()
+
+    def test_dependency_revision_does_not_discard_fallback(self):
+        profile = '[profile.dev]\nopt-level = 1\n'
+        self.assertEqual(self.key('[workspace.dependencies]\na = "1"\n' + profile),
+                         self.key('[workspace.dependencies]\na = "2"\n' + profile))
+
+    def test_profile_changes_invalidate(self):
+        self.assertNotEqual(self.key('[profile.dev]\nopt-level = 1'),
+                            self.key('[profile.dev]\nopt-level = 2'))
+        self.assertNotEqual(self.key('[profile.dev.package.foo]\nopt-level = 1'),
+                            self.key('[profile.dev.package.foo]\nopt-level = 2'))
+
+    def test_order_and_comments_do_not_invalidate(self):
+        self.assertEqual(self.key('[profile.dev]\ndebug = false\nopt-level = 1'),
+                         self.key('# comment\n[profile.dev]\nopt-level = 1\ndebug = false'))
+
+    def test_no_profiles_is_supported(self):
+        self.assertRegex(self.key('[workspace]\nmembers = []'), r'^key=[a-f0-9]{64}\n$')
 
 
 if __name__ == '__main__':
