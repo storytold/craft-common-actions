@@ -148,6 +148,12 @@ class FileCacheTests(unittest.TestCase):
         self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
         self.assertIn("steps.file-cache-restore.outputs.cache-hit != 'true'", condition)
 
+    def test_saves_only_after_a_passing_gate(self):
+        condition = step('Save cached files')['if'].strip()
+        self.assertTrue(condition.startswith('success()'), condition)
+        self.assertNotIn('always()', condition)
+        self.assertNotIn('cancelled()', condition)
+
     def test_key_is_the_prefix_and_hash(self):
         self.assertEqual(self.key('ATTRIBUTION.toml', 'ab' * 32),
                          (0, f"prefix=v1-files-Linux-\nkey=v1-files-Linux-{'ab' * 32}\n"))

@@ -283,11 +283,12 @@ jobs:
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
           bash -euo pipefail "$RUNNER_TEMP/gate.sh"
 
-      # Saved under the same rule as the dependency cache: pull requests only restore. After a
-      # failed gate too, as rust-cache does: the files were fetched before the tests ran.
+      # Saved under the same rule as the dependency cache: pull requests only restore. Only after
+      # a passing gate, unlike rust-cache: a gate that failed partway may have fetched only some
+      # files, and an exact key hit never saves again, so a partial set would stay cached.
       - name: Save cached files
         if: >-
-          !cancelled()
+          success()
           && inputs.file-cache-paths != ''
           && steps.file-cache-restore.outputs.cache-hit != 'true'
           && github.event_name != 'pull_request'
