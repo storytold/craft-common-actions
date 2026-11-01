@@ -94,5 +94,69 @@ class InstallAptPackagesTests(unittest.TestCase):
                 self.assertIn("::error::install-apt-packages:", res.stdout + res.stderr)
 
 
+
+# apt-get that logs its operation and stalls (sends nothing, never exits) while STALLS says so.
+FAKE_APT = """#!/bin/bash
+op=update
+for arg in "$@"; do case "$arg" in update|install|autoclean) op=$arg ;; --download-only) op=download ;; esac; done
+echo "$op" >> "$APT_LOG"
+n=$(grep -c "^$op$" "$APT_LOG")
+if [ "$op" = "${STALL_OP:-}" ] && [ "$n" -le "${STALLS:-0}" ]; then exec /usr/bin/sleep 60; fi
+"""
+
+
+class StalledMirrorTests(unittest.TestCase):
+    """The install step against a fake apt-get, with a one-second limit per mirror download."""
+
+    def run_install(self, stall_op='', stalls=0):
+        install_step = next(s for s in steps() if s.get('name') == 'Install packages')
+        self.assertEqual(install_step['env']['APT_NETWORK_TIMEOUT'], '300')
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bin_dir = Path(tmpdir) / 'bin'
+            bin_dir.mkdir()
+            for name, body in [('apt-get', FAKE_APT), ('sudo', '#!/bin/bash\nexec "$@"\n'), ('sleep', '#!/bin/bash\n')]:
+                (bin_dir / name).write_text(body, newline='\n')
+                (bin_dir / name).chmod(0o755)
+            log = Path(tmpdir) / 'apt.log'
+            log.touch()
+            res = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', install_step['run']],
+                env={**os.environ, 'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}", 'HOME': tmpdir,
+                     'PACKAGE_LIST': 'curl git ', 'APT_NETWORK_TIMEOUT': '1', 'APT_NETWORK_ATTEMPTS': '3',
+                     'APT_LOG': str(log), 'STALL_OP': stall_op, 'STALLS': str(stalls)},
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            return res, log.read_text().split()
+
+    def test_a_stalled_update_is_retried(self):
+        res, ops = self.run_install('update', stalls=1)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(ops, ['update', 'update', 'download', 'install', 'autoclean'])
+        self.assertIn('apt-get update attempt 1 exited 124', res.stdout)
+
+    def test_a_stalled_download_is_retried(self):
+        res, ops = self.run_install('download', stalls=2)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(ops, ['update', 'download', 'download', 'download', 'install', 'autoclean'])
+
+    def test_an_update_that_keeps_failing_continues_with_a_warning(self):
+        res, ops = self.run_install('update', stalls=99)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(ops, ['update', 'update', 'update', 'download', 'install', 'autoclean'])
+        self.assertIn('::warning::install-apt-packages: apt-get update failed 3 times', res.stdout)
+
+    def test_a_download_that_keeps_stalling_fails_before_installing(self):
+        res, ops = self.run_install('download', stalls=99)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(ops, ['update', 'download', 'download', 'download'])
+        self.assertIn('::error::install-apt-packages: downloading the packages failed 3 times', res.stdout)
+
+    def test_a_partly_failed_update_is_an_error_so_it_is_retried(self):
+        install_step = next(s for s in steps() if s.get('name') == 'Install packages')
+        self.assertIn('network update -o APT::Update::Error-Mode=any', install_step['run'])
+
+
 if __name__ == '__main__':
     unittest.main()
