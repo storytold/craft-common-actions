@@ -542,7 +542,7 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   `env` sets the cache's version instead;
 - optionally, a cache of files the gate downloads (`file-cache-paths`, e.g. test models), keyed
   on `hashFiles(file-cache-key-files)` (e.g. the manifest that pins their SHA-256 hashes) and
-  saved under the same rule as the dependency cache. When the key files change, the newest older
+  saved under the same rule as the dependency cache, but only after a passing gate. When the key files change, the newest older
   cache is restored instead. The gate's own command must still fetch and check the files; the
   cache only lets it skip downloading the ones already there. A key glob that matches no file
   fails the job.
