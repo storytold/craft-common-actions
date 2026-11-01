@@ -77,18 +77,25 @@ runs:
           for ((attempt = 1; ; attempt++)); do
             status=0
             sudo timeout --kill-after=30 "$APT_NETWORK_TIMEOUT" apt-get "${opts[@]}" "$@" || status=$?
-            [ "$status" -eq 0 ] && return 0
-            if [ "$attempt" -ge "$APT_NETWORK_ATTEMPTS" ]; then
-              echo "::error::install-apt-packages: apt-get $1 failed $attempt times (last exit $status)"
+            if [ "$status" -eq 0 ] || [ "$attempt" -ge "$APT_NETWORK_ATTEMPTS" ]; then
               return "$status"
             fi
             echo "::warning::install-apt-packages: apt-get $1 attempt $attempt exited $status (124: over ${APT_NETWORK_TIMEOUT}s); retrying"
             sleep 5
           done
         }
-        network update
+        # Error-Mode=any: an index that failed to download fails the update, so it is retried
+        # (apt-get update otherwise warns and exits 0). Indexes still missing after the last
+        # attempt are only a warning, as before: often they belong to a repository the packages
+        # don't need, and a package that does need one fails the download below.
+        if ! network update -o APT::Update::Error-Mode=any; then
+          echo "::warning::install-apt-packages: apt-get update failed $APT_NETWORK_ATTEMPTS times; continuing with the indexes it has"
+        fi
         # shellcheck disable=SC2086 # the list is split into package names on purpose
-        network install -y --no-install-recommends --download-only -- $PACKAGE_LIST
+        if ! network install -y --no-install-recommends --download-only -- $PACKAGE_LIST; then
+          echo "::error::install-apt-packages: downloading the packages failed $APT_NETWORK_ATTEMPTS times"
+          exit 1
+        fi
         # Everything is downloaded: this only unpacks and configures, with no mirror to wait on.
         # shellcheck disable=SC2086
         sudo apt-get "${opts[@]}" install -y --no-install-recommends -- $PACKAGE_LIST

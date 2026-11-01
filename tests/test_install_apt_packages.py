@@ -141,11 +141,21 @@ class StalledMirrorTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertEqual(ops, ['update', 'download', 'download', 'download', 'install', 'autoclean'])
 
-    def test_a_mirror_that_keeps_stalling_fails_before_installing(self):
+    def test_an_update_that_keeps_failing_continues_with_a_warning(self):
         res, ops = self.run_install('update', stalls=99)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertEqual(ops, ['update', 'update', 'update', 'download', 'install', 'autoclean'])
+        self.assertIn('::warning::install-apt-packages: apt-get update failed 3 times', res.stdout)
+
+    def test_a_download_that_keeps_stalling_fails_before_installing(self):
+        res, ops = self.run_install('download', stalls=99)
         self.assertNotEqual(res.returncode, 0)
-        self.assertEqual(ops, ['update', 'update', 'update'])
-        self.assertIn('::error::install-apt-packages: apt-get update failed 3 times (last exit 124)', res.stdout)
+        self.assertEqual(ops, ['update', 'download', 'download', 'download'])
+        self.assertIn('::error::install-apt-packages: downloading the packages failed 3 times', res.stdout)
+
+    def test_a_partly_failed_update_is_an_error_so_it_is_retried(self):
+        install_step = next(s for s in steps() if s.get('name') == 'Install packages')
+        self.assertIn('network update -o APT::Update::Error-Mode=any', install_step['run'])
 
 
 if __name__ == '__main__':
