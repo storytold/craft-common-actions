@@ -36,6 +36,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -67,8 +68,11 @@ jobs:
 
 #### Automatic contributor credits (opt-in)
 
-Apps with `scripts/refresh-contributors.py` can refresh bundled credits once before a release.
-Grant the caller workflow `contents: write` for release publishing, and keep the preparatory
+Apps using `contributors/contributors.json` and `contributors/people.toml` can refresh bundled
+credits once before a release. The generator is supplied by this repository; apps do not need
+their own refresh script or an application runtime dependency on Python.
+Grant the caller workflow `contents: write` for release publishing and `packages: write` for
+the shared packaging jobs, and keep the preparatory
 `credits` job read-only with its job-level override. A called workflow cannot increase the
 token permissions granted by its caller; see [reusable-workflow permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#supported-keywords-for-jobs-that-call-a-reusable-workflow).
 Call the preparatory workflow, then pass its output to the release workflow:
@@ -76,6 +80,7 @@ Call the preparatory workflow, then pass its output to the release workflow:
 ```yaml
 permissions:
   contents: write
+  packages: write
 
 jobs:
   credits:
@@ -87,6 +92,7 @@ jobs:
     needs: credits
     permissions:
       contents: write
+      packages: write
     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
     with:
       app-name: effectcraft
@@ -95,8 +101,10 @@ jobs:
     # Include the app's existing signing secrets here.
 ```
 
-The preparatory workflow checks out full history, runs the app's script with `--repo` set to
-`github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
+The preparatory workflow checks out the app's full history and invokes
+`$/actions/refresh-contributors`, so the generator comes from the same repository and commit
+as the reusable workflow even when it is pinned or called from a fork. The generator runs
+with `--repo` set to `github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
 `contributors/contributors.json` belongs to `github.sha`. It uploads that file only after a
 successful refresh. The intermediate `contributor-snapshot-*` artifact stays outside the
 `release-*` collection used for release assets and checksums, including on reruns.
@@ -106,6 +114,26 @@ from the Linux binaries. The generated snapshot is not committed or pushed back 
 
 An unsuccessful refresh or missing artifact blocks the release. Existing callers that omit
 `contributors-artifact` keep their current behavior, permissions, and build paths.
+
+The shared generator uses local Git text/binary statistics and GitHub-linked author/co-author
+identities and merged PRs. Unlinked commits are counted as unattributed. Name preferences are
+verified against the commits that introduced their values; a maintainer override also requires
+a recorded `consent_source` and repository write access. Public profile names are fetched only
+for verified entries opting into synchronization. Explicit model Co-Authored-By trailers supply
+model credits. Co-authored commits count for each linked contributor/model, so row totals can
+exceed repository totals. Generation replaces only the snapshot, atomically after collection
+succeeds, and never edits `people.toml` or commits/pushes changes.
+
+For a manual refresh, use Python 3.11+, Git and an authenticated `gh` CLI from a checkout of
+this repository:
+
+```sh
+python3 actions/refresh-contributors/refresh_contributors.py --repo storytold/effectcraft --directory ../effectcraft
+```
+
+The target app checkout must contain full history and the intended release commit. Python
+runs on the build machine; the app continues to embed the resulting JSON through its existing
+Rust build code.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
