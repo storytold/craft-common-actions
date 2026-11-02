@@ -2,6 +2,7 @@
 
 `release.yml` accepts `launcher-qualification: true` for `storytold/craft-launcher`. Other apps
 keep the default `false`, so this adds no builds, runner usage or new gate to their releases.
+The existing pre-build gate rejects an opt-in from any other repository or app name before checkout or build setup.
 
 The opt-in reusable job depends on the existing macOS, Windows and Linux packaging jobs. It
 downloads their immutable artifacts from the same run and executes the launcher's
@@ -26,7 +27,14 @@ the previous `create-draft: true` default. No job here publishes a draft.
 The companion `launcher-qualification-contract.yml` is a cheap PR gate for the launcher's
 Python evidence-contract tests. The ordinary launcher Rust jobs already compile/test its native
 qualification module, so no extra full PR matrix is added. Full qualification runs only when
-the existing candidate/release workflow is invoked. No scheduled workflow is added.
+the existing candidate/release workflow is invoked. macOS runners are used only by that
+candidate/release path, never by the PR contract gate. No scheduled workflow is added.
+
+Ubuntu runtime and desktop packages come from the runner image's configured apt repositories.
+They are infrastructure dependencies, not pinned application fixtures: a missing package or
+mirror outage fails qualification and blocks draft creation. Rerun after resolving the runner
+or mirror problem; do not skip the failed target. Pinning their versions would require a
+maintained apt snapshot, which this change does not introduce.
 
 This repository owns the existing build fan-out and sole draft-release collector; therefore the
 dependency/gate and pre-upload byte comparison belong here. Product-specific fixtures, native

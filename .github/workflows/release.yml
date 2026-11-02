@@ -143,6 +143,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate launcher qualification caller
+        if: inputs.launcher-qualification
+        env:
+          QUALIFICATION_APP_NAME: ${{ inputs.app-name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != 'storytold/craft-launcher' || "$QUALIFICATION_APP_NAME" != 'craft-launcher' ]]; then
+            echo '::error::Launcher qualification requires storytold/craft-launcher and app-name craft-launcher'
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Git dependencies come from storytold
         run: |

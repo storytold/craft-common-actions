@@ -1,6 +1,8 @@
 """The launcher opt-in must gate draft mutations, including skipped/cancelled test jobs."""
 
 from pathlib import Path
+import os
+import subprocess
 import unittest
 import yaml
 
@@ -8,10 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load(path):
+    """Read workflow expressions literally for structural contract assertions."""
     return yaml.load((ROOT / path).read_text(), Loader=yaml.BaseLoader)
 
 
 class QualificationWorkflowTests(unittest.TestCase):
+    """Keep opt-in qualification and draft mutation dependencies fail-closed."""
     def test_opt_in_does_not_expand_every_apps_release(self):
         release = load(".github/workflows/release.yml")
         self.assertEqual(release["on"]["workflow_call"]["inputs"]["launcher-qualification"]["default"], "false")
@@ -19,6 +23,33 @@ class QualificationWorkflowTests(unittest.TestCase):
         self.assertEqual(job["if"], "inputs.launcher-qualification")
         self.assertEqual(set(job["needs"]), {"version", "macos", "windows", "linux"})
         self.assertEqual(job["uses"], "./.github/workflows/launcher-qualification.yml")
+
+    def test_wrong_caller_is_rejected_before_checkout_and_builds(self):
+        """Execute the real guard shell against caller identities, without running a build."""
+        workflow = load(".github/workflows/release.yml")
+        job = workflow["jobs"]["git-sources"]
+        guard = job["steps"][0]
+        self.assertEqual(guard["if"], "inputs.launcher-qualification")
+        self.assertNotIn("continue-on-error", guard)
+        self.assertIn("actions/checkout@", job["steps"][1]["uses"])
+        self.assertEqual(workflow["jobs"]["version"]["needs"], "git-sources")
+        for repo, app, success in (("storytold/craft-launcher", "craft-launcher", True),
+                                   ("other/craft-launcher", "craft-launcher", False),
+                                   ("storytold/figcraft", "craft-launcher", False),
+                                   ("storytold/craft-launcher", "figcraft", False)):
+            with self.subTest(repo=repo, app=app):
+                result = subprocess.run(["bash", "-c", guard["run"]], capture_output=True,
+                                        env=dict(os.environ, GITHUB_REPOSITORY=repo, QUALIFICATION_APP_NAME=app))
+                self.assertEqual(result.returncode == 0, success)
+
+    def test_contract_checks_out_exact_caller_on_linux_only(self):
+        """Keep the inexpensive PR check explicit about source and runner selection."""
+        job = load(".github/workflows/launcher-qualification-contract.yml")["jobs"]["contract"]
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        checkout = job["steps"][0]["with"]
+        self.assertEqual(checkout["repository"], "${{ github.repository }}")
+        self.assertEqual(checkout["ref"], "${{ github.sha }}")
+        self.assertEqual(checkout["persist-credentials"], "false")
 
     def test_only_success_allows_draft(self):
         job = load(".github/workflows/release.yml")["jobs"]["release"]

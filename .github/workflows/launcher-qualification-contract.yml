@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Reject incomplete or stale qualification evidence
         run: python3 -m unittest discover -s packaging/e2e -p 'test_*.py' -v
