@@ -79,6 +79,12 @@ on:
         type: string
         required: false
         default: '["x86_64","aarch64"]'
+      freebsd-runner:
+        # A private repo's ubuntu-latest has about 7 GB, too little for the FreeBSD VM's 12 GB.
+        description: "Runner for the FreeBSD jobs; private repos need a larger runner, such as github-ubuntu-16core"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       has-server:
         description: "Whether to build and release the headless Linux server"
         type: boolean
@@ -747,7 +753,7 @@ jobs:
     name: FreeBSD ${{ matrix.arch }}
     if: inputs.has-freebsd
     needs: [version]
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.freebsd-runner }}
     timeout-minutes: 300
     strategy:
       fail-fast: false

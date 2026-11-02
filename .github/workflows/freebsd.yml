@@ -24,6 +24,12 @@ on:
         type: string
         required: false
         default: "15.1-STABLE"
+      runner:
+        # A private repo's ubuntu-latest has about 7 GB, too little for the FreeBSD VM's 12 GB.
+        description: "Runner for the FreeBSD job; private repos need a larger runner, such as github-ubuntu-16core"
+        type: string
+        required: false
+        default: "ubuntu-latest"
       cargo-test-extra-args:
         description: "Extra arguments to append to cargo test (shell-style quoting, no shell expansion)"
         type: string
@@ -56,7 +62,7 @@ permissions:
 jobs:
   freebsd:
     name: FreeBSD 15 ${{ matrix.arch }} (build + test)
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 300
     strategy:
       fail-fast: false
