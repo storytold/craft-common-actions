@@ -35,6 +35,14 @@ class GateWorkflowTests(unittest.TestCase):
         self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
         self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-save-on-dispatch']['default'], 'false')
 
+    def test_packages_are_optional_and_empty_installs_none(self):
+        packages = WORKFLOW['on']['workflow_call']['inputs']['packages']
+        self.assertEqual(packages['required'], 'false')
+        self.assertEqual(packages['default'], '')
+        condition = step('Install Linux build dependencies')['if']
+        self.assertIn("runner.os == 'Linux'", condition)
+        self.assertIn("inputs.packages != ''", condition)
+
     def test_inputs_reach_scripts_only_through_env(self):
         for s in STEPS:
             if 'run' in s:

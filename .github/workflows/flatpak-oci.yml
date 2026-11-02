@@ -1,0 +1,74 @@
+name: "Flatpak OCI"
+
+# Reusable workflow to package and publish a Flatpak application as an OCI image to GHCR.
+# Pairs with the Flatpak Registry Index Protocol implemented in artcraft-services.
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "Application repository name (e.g. pdfcraft, cadcraft)"
+        type: string
+        required: true
+      version:
+        description: "Release version string (e.g. 0.16.1)"
+        type: string
+        required: true
+      registry:
+        description: "Target container registry repository (defaults to ghcr.io/<repository>)"
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-oci:
+    name: Publish OCI ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/linux
+
+      - name: Install Flatpak and Skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common skopeo
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Add Flathub Remote
+        run: flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Publish Flatpak OCI layout to GHCR
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          ARCH: ${{ matrix.arch }}
+          REGISTRY: ${{ inputs.registry || format('ghcr.io/{0}', github.repository) }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/linux/*-"${RELEASE_VERSION}"-linux-"${ARCH}".tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one app tarball for ${RELEASE_VERSION} in release-linux-${ARCH}, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          tarball="${tarballs[0]}"
+          if [ -x packaging/linux/flatpak-oci.sh ]; then
+            packaging/linux/flatpak-oci.sh --push "$tarball"
+          else
+            echo "::warning::packaging/linux/flatpak-oci.sh not found or not executable"
+          fi

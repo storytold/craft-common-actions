@@ -1,6 +1,7 @@
 """Exercise the reusable SonarCloud workflow's project-key trust boundary."""
 
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -227,6 +228,26 @@ class SonarCloudTests(unittest.TestCase):
         build = workflow['jobs']['build']['steps']
         self.assertTrue(any('rustc-release.txt' in step.get('with', {}).get('path', '')
                             for step in build))
+
+    def test_sharded_export_leaves_out_the_test_code_cargo_llvm_cov_does(self):
+        # cargo llvm-cov adds these exclusions to --ignore-filename-regex on its own; the sharded
+        # merge calls llvm-cov export directly, so the shared regex has to carry them.
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        ignore = re.compile(workflow['env']['COVERAGE_IGNORE'])
+        combine = next(step for step in workflow['jobs']['sonarcloud']['steps']
+                       if step.get('name') == 'Combine shard coverage')
+        self.assertIn('-ignore-filename-regex="$COVERAGE_IGNORE"', combine['run'])
+        ws = '/home/runner/work/app/app'
+        for path in ('tests/it.rs', 'crates/fonts-tests/tests/fonts.rs', 'crates/ui/src/i18n/tests.rs',
+                     'crates/ui/src/parser_tests.rs', 'crates/ui/src/io-tests.rs',
+                     'examples/demo.rs', 'benches/render.rs', 'vendor/zlib/lib.rs', 'xtask/src/main.rs'):
+            with self.subTest(excluded=path):
+                self.assertTrue(ignore.search(f'{ws}/{path}'))
+        for path in ('src/lib.rs', 'crates/fonts-tests/src/lib.rs', 'crates/ui/src/contests.rs',
+                     'crates/ui/src/testsuite.rs', 'apps/app-cli/src/main.rs'):
+            with self.subTest(kept=path):
+                self.assertFalse(ignore.search(f'{ws}/{path}'))
 
     def test_shard_masks_only_test_failures(self):
         workflow = yaml.load(

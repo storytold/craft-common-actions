@@ -1,5 +1,6 @@
 """The supply-chain workflow stays opt-in so current release callers keep working."""
 
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -106,6 +107,34 @@ class SupplyChainOptInTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result)
         self.assertIn("::error::no release files were downloaded", result.stdout)
         self.assertEqual(subjects, {})
+
+    def test_sbom_upload_names_the_repository_without_a_checkout(self):
+        # The job has no checkout, so gh cannot read the repository from a git remote; like the
+        # real gh, the fixture fails unless GH_REPO or --repo names it.
+        steps = self.supply["jobs"]["attest"]["steps"]
+        self.assertFalse(any(step.get("uses", "").startswith("actions/checkout@") for step in steps))
+        attach = next(step for step in steps if step.get("name") == "Attach the SBOM to the draft release")
+        context = {"${{ github.token }}": "token", "${{ github.repository }}": "storytold/photocraft",
+                   "${{ inputs.version }}": "1.2.3"}
+        with tempfile.TemporaryDirectory(prefix="supply-chain-test-") as directory:
+            work = Path(directory)
+            (work / "bin").mkdir()
+            gh = work / "bin/gh"
+            gh.write_text('#!/bin/sh\n'
+                          'repo="${GH_REPO:-}"\n'
+                          'for arg; do case "$prev" in --repo|-R) repo="$arg" ;; esac; prev="$arg"; done\n'
+                          'if [ -z "$repo" ]; then\n'
+                          '  echo "failed to run git: fatal: not a git repository" >&2; exit 1\n'
+                          'fi\n'
+                          'echo "$repo $*" > "$GH_LOG"\n')
+            gh.chmod(0o755)
+            env = {name: context[value] for name, value in attach["env"].items()}
+            env.update(PATH=f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}", GH_LOG=str(work / "gh.log"))
+            result = subprocess.run(["bash", "-e", "-c", attach["run"]], cwd=work, env=env,
+                                    text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result)
+            self.assertEqual((work / "gh.log").read_text().split(),
+                             ["storytold/photocraft", "release", "upload", "v1.2.3", "sbom.cyclonedx.json", "--clobber"])
 
 
 if __name__ == "__main__":

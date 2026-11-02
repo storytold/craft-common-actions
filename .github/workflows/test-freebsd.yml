@@ -5,6 +5,7 @@ on:
     paths:
       - .github/workflows/freebsd.yml
       - .github/workflows/release.yml
+      - .github/workflows/refresh-contributors.yml
       - .github/workflows/gate.yml
       - actions/freebsd-cargo-cache/**
       - actions/checkout-craft-i18n/**
@@ -17,6 +18,7 @@ on:
     paths:
       - .github/workflows/freebsd.yml
       - .github/workflows/release.yml
+      - .github/workflows/refresh-contributors.yml
       - .github/workflows/gate.yml
       - actions/freebsd-cargo-cache/**
       - actions/checkout-craft-i18n/**
