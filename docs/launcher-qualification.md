@@ -17,7 +17,9 @@ cannot pass. Before creating, editing, deleting or uploading any GitHub release 
 source SHA, workflow run, version, cleanup/restart evidence and artifact hashes. The generated
 `launcher-qualification.json` joins the candidate's release assets/checksums.
 
-`create-draft: false` skips the release job entirely. The qualification workflow's separate
+`create-draft: false` skips the release job and Flatpak OCI registry publication.
+For the launcher, Flatpak packaging/publication also waits for successful qualification;
+other apps retain their existing version/Linux prerequisites through the explicit condition. The qualification workflow's separate
 read-only verification job still checks the native result files, GUI records, updater record,
 summary, and artifact hashes, then uploads `launcher-candidate-evidence`. It has no release action
 or write token. The launcher caller defaults manual dispatch to this mode; an explicit opt-in or

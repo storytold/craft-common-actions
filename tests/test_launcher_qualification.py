@@ -73,6 +73,16 @@ class QualificationWorkflowTests(unittest.TestCase):
         release = load(".github/workflows/release.yml")
         self.assertEqual(release["on"]["workflow_call"]["inputs"]["create-draft"]["default"], "true")
 
+    def test_flatpak_registry_publication_cannot_bypass_qualification_or_dry_run(self):
+        """Gate the upstream OCI publisher as well as GitHub release mutations."""
+        job = load(".github/workflows/release.yml")["jobs"]["flatpak"]
+        self.assertIn("launcher-qualification", job["needs"])
+        self.assertIn("needs.version.result == 'success'", job["if"])
+        self.assertIn("needs.linux.result == 'success'", job["if"])
+        self.assertIn("(!inputs.launcher-qualification || needs.launcher-qualification.result == 'success')", job["if"])
+        publisher = next(step for step in job["steps"] if "--push" in step.get("run", ""))
+        self.assertEqual(publisher["if"], "inputs.create-draft && github.event_name != 'pull_request'")
+
     def test_native_architectures_no_rebuilds_no_secrets(self):
         job = load(".github/workflows/launcher-qualification.yml")["jobs"]["qualify"]
         matrix = job["strategy"]["matrix"]["include"]

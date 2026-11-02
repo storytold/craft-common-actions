@@ -606,7 +606,8 @@ jobs:
   flatpak:
     timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
-    needs: [version, linux]
+    if: "!cancelled() && needs.version.result == 'success' && needs.linux.result == 'success' && (!inputs.launcher-qualification || needs.launcher-qualification.result == 'success')"
+    needs: [version, linux, launcher-qualification]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -701,7 +702,7 @@ jobs:
           packaging/linux/flatpak-bundle.sh "$tarball"
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish Flatpak OCI layout to GHCR
-        if: github.event_name != 'pull_request'
+        if: inputs.create-draft && github.event_name != 'pull_request'
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
