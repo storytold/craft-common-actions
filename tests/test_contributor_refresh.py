@@ -177,6 +177,11 @@ elif args[:2] in (['release', 'create'], ['release', 'upload']):
                            GITHUB_SHA='release-commit', GITHUB_STEP_SUMMARY=str(root / 'summary'),
                            EXISTING_DRAFT=str(is_draft).lower(), UPLOAD_LOG=str(root / 'upload.json'))
                 for step in steps:
+                    # This fixture exercises the default non-launcher caller. Honor the new
+                    # opt-in condition instead of executing launcher-only steps unconditionally.
+                    if step.get('if'):
+                        self.assertEqual(step['if'], "inputs.launcher-qualification == 'true'")
+                        continue
                     if 'run' in step:
                         result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']],
                                                 cwd=root / step.get('working-directory', '.'),

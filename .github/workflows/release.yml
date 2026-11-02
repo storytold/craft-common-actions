@@ -84,6 +84,16 @@ on:
         type: boolean
         required: false
         default: false
+      launcher-qualification:
+        description: "Qualify the exact launcher candidate on native macOS/Linux/Windows runners before creating a draft (craft-launcher only)"
+        type: boolean
+        required: false
+        default: false
+      create-draft:
+        description: "Create or update a draft release after checks; false retains build/qualification artifacts only"
+        type: boolean
+        required: false
+        default: true
 
     secrets:
       APPLE_CERTIFICATE:
@@ -138,6 +148,16 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate launcher qualification caller
+        if: inputs.launcher-qualification
+        env:
+          QUALIFICATION_APP_NAME: ${{ inputs.app-name }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != 'storytold/craft-launcher' || "$QUALIFICATION_APP_NAME" != 'craft-launcher' ]]; then
+            echo '::error::Launcher qualification requires storytold/craft-launcher and app-name craft-launcher'
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Git dependencies come from storytold
         run: |
@@ -586,7 +606,8 @@ jobs:
   flatpak:
     timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
-    needs: [version, linux]
+    if: "!cancelled() && needs.version.result == 'success' && needs.linux.result == 'success' && (!inputs.launcher-qualification || needs.launcher-qualification.result == 'success')"
+    needs: [version, linux, launcher-qualification]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -681,7 +702,7 @@ jobs:
           packaging/linux/flatpak-bundle.sh "$tarball"
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish Flatpak OCI layout to GHCR
-        if: github.event_name != 'pull_request'
+        if: inputs.create-draft && github.event_name != 'pull_request'
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -1284,11 +1305,18 @@ jobs:
           path: dist/release/*.tar.gz
           if-no-files-found: error
 
+  launcher-qualification:
+    if: inputs.launcher-qualification
+    needs: [version, macos, windows, linux]
+    uses: ./.github/workflows/launcher-qualification.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
-    needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
+    if: "inputs.create-draft && !cancelled() && !contains(needs.*.result, 'failure') && (!inputs.launcher-qualification || needs.launcher-qualification.result == 'success')"
+    needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server, launcher-qualification]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -1300,3 +1328,4 @@ jobs:
           app-title: ${{ inputs.app-title }}
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          launcher-qualification: ${{ inputs.launcher-qualification }}
