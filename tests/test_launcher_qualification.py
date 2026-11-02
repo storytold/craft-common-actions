@@ -98,6 +98,8 @@ class QualificationWorkflowTests(unittest.TestCase):
 
     def test_evidence_checks_precede_any_release_mutation(self):
         steps = load("actions/draft-release/action.yml")["runs"]["steps"]
+        self.assertEqual(steps[0]["with"]["repository"], "${{ github.repository }}")
+        self.assertEqual(steps[0]["with"]["ref"], "${{ github.sha }}")
         verifier = next(i for i, step in enumerate(steps) if "verify_release.py" in step.get("run", ""))
         mutation = next(i for i, step in enumerate(steps) if "gh release create" in step.get("run", ""))
         checksums = next(i for i, step in enumerate(steps) if "sha256sum" in step.get("run", ""))
