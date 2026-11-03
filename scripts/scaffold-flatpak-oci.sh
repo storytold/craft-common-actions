@@ -96,9 +96,13 @@ scaffold_repo() {
     has_oci_script=1
   fi
 
-  # The .flatpak bundle's origin updates from the ArtCraft OCI repository, whose index points at GHCR.
+  # The .flatpak bundle's origin updates from the ArtCraft OCI repository, whose index points at GHCR:
+  # the exact URL, the prerelease guard, and the option on the active (uncommented) bundle command.
   local has_repo_url=0
-  if grep -F -q -- '--repo-url=' "$bundle_sh"; then
+  # shellcheck disable=SC2016 # the patterns match the script's literal $VERSION, $FLATHUB and $OCI_REPO
+  if grep -qxF 'OCI_REPO=oci+https://getartcraft.com' "$bundle_sh" \
+    && grep -qxF 'if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi' "$bundle_sh" \
+    && grep -qE '^[[:space:]]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} ' "$bundle_sh"; then
     has_repo_url=1
   fi
 
@@ -238,6 +242,7 @@ EOF
   if [[ "$has_repo_url" -eq 0 ]]; then
     echo "[+] $(basename "$repo"): adding --repo-url to the bundle in flatpak-bundle.sh"
     python3 - "$bundle_sh" << 'EOF'
+import re
 import sys
 
 path = sys.argv[1]
@@ -245,15 +250,28 @@ with open(path, 'r', encoding='utf-8') as f:
     content = f.read()
 
 flathub = 'FLATHUB=https://dl.flathub.org/repo/flathub.flatpakrepo\n'
-bundle = 'flatpak build-bundle --runtime-repo="$FLATHUB" '
-if flathub not in content or bundle not in content:
+# The active command only: a commented-out build-bundle line never matches.
+bundle = re.compile(r'^([ \t]*)flatpak build-bundle --runtime-repo="\$FLATHUB" (.*)$', re.M)
+found = bundle.search(content)
+if flathub not in content or found is None:
     sys.exit(f"error: {path} has no FLATHUB line or Flathub build-bundle command to extend")
-content = content.replace(flathub, flathub + 'OCI_REPO=oci+https://getartcraft.com\n', 1)
+if 'OCI_REPO=' in content or '--repo-url' in found.group(2):
+    sys.exit(f"error: {path} already sets OCI_REPO or --repo-url; make it match the scaffold by hand")
 content = content.replace(
-    bundle,
-    '# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n'
-    + bundle + '--repo-url="$OCI_REPO" ',
+    flathub,
+    flathub
+    + '# The OCI repository serves only the latest stable release, so a prerelease bundle gets no update\n'
+    + '# source: Flatpak would otherwise replace it with that older stable build.\n'
+    + 'OCI_REPO=oci+https://getartcraft.com\n'
+    + 'if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi\n',
     1,
+)
+indent = found.group(1)
+content = bundle.sub(
+    lambda m: indent + '# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n'
+    + indent + 'flatpak build-bundle --runtime-repo="$FLATHUB" ${OCI_REPO:+--repo-url="$OCI_REPO"} ' + m.group(2),
+    content,
+    count=1,
 )
 
 with open(path, 'w', encoding='utf-8') as f:

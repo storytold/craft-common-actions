@@ -76,13 +76,15 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         self.assertIn("OCI=0", updated_bundle)
         self.assertIn("--oci) OCI=1; shift ;;", updated_bundle)
         self.assertIn("flatpak build-bundle --oci", updated_bundle)
-        self.assertIn("OCI_REPO=oci+https://getartcraft.com", updated_bundle)
+        self.assertIn("\nOCI_REPO=oci+https://getartcraft.com\n", updated_bundle)
+        # A prerelease bundle gets no update source (the repository serves only the latest stable).
+        self.assertIn('\nif [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi\n', updated_bundle)
         self.assertIn(
-            'flatpak build-bundle --runtime-repo="$FLATHUB" --repo-url="$OCI_REPO" "$WORK/repo" "$OUT" "$APP_ID" stable',
+            '\nflatpak build-bundle --runtime-repo="$FLATHUB" ${OCI_REPO:+--repo-url="$OCI_REPO"} "$WORK/repo" "$OUT" "$APP_ID" stable\n',
             updated_bundle,
         )
         # The OCI image export carries no repo URL.
-        self.assertIn('flatpak build-bundle --oci "$WORK/repo"', updated_bundle)
+        self.assertIn('\n  flatpak build-bundle --oci "$WORK/repo" "$OUT_OCI" "$APP_ID" stable\n', updated_bundle)
 
         # Check flatpak-oci.sh is created and executable
         oci_script = self.packaging_dir / "flatpak-oci.sh"
@@ -106,16 +108,46 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
         self.assertEqual(self.bundle_file.read_text(encoding="utf-8"), updated_bundle)
 
+    def run_script(self, *args, check=True):
+        return subprocess.run([str(SCRIPT), *args, str(self.repo_dir)], capture_output=True, text=True, check=check)
+
     def test_repo_url_is_added_to_an_already_scaffolded_bundle(self):
-        subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
+        self.run_script()
+        scaffolded = self.bundle_file.read_text(encoding="utf-8")
+        # Back to the OCI scaffold of before --repo-url: the three generated lines and the option gone.
+        content = scaffolded
+        for line in [
+            "# The OCI repository serves only the latest stable release, so a prerelease bundle gets no update\n",
+            "# source: Flatpak would otherwise replace it with that older stable build.\n",
+            "OCI_REPO=oci+https://getartcraft.com\n",
+            'if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi\n',
+            "# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n",
+        ]:
+            content = content.replace(line, "")
+        self.bundle_file.write_text(content.replace(' ${OCI_REPO:+--repo-url="$OCI_REPO"}', ""), encoding="utf-8")
+        self.assertIn("missing (flag=1, script=1, repo_url=0)", self.run_script("--verify").stdout)
+        self.run_script()
+        self.assertEqual(self.bundle_file.read_text(encoding="utf-8"), scaffolded)
+
+    def test_a_commented_out_bundle_command_is_left_alone(self):
+        commented = '# flatpak build-bundle --runtime-repo="$FLATHUB" "$WORK/old" "$OUT" "$APP_ID" stable\n'
+        active = 'flatpak build-bundle --runtime-repo="$FLATHUB" "$WORK/repo"'
+        self.bundle_file.write_text(SAMPLE_BUNDLE_SH.replace(active, commented + active, 1), encoding="utf-8")
+        self.run_script()
         content = self.bundle_file.read_text(encoding="utf-8")
-        content = content.replace('OCI_REPO=oci+https://getartcraft.com\n', '')
-        content = content.replace('# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n', '')
-        self.bundle_file.write_text(content.replace(' --repo-url="$OCI_REPO"', ''), encoding="utf-8")
-        res = subprocess.run([str(SCRIPT), "--verify", str(self.repo_dir)], capture_output=True, text=True, check=True)
-        self.assertIn("missing (flag=1, script=1, repo_url=0)", res.stdout)
-        subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
-        self.assertEqual(self.bundle_file.read_text(encoding="utf-8").count('--repo-url="$OCI_REPO"'), 1)
+        self.assertIn(commented, content)
+        self.assertIn('flatpak build-bundle --runtime-repo="$FLATHUB" ${OCI_REPO:+--repo-url="$OCI_REPO"} "$WORK/repo"', content)
+        self.assertIn("fully scaffolded for Flatpak OCI", self.run_script("--verify").stdout)
+
+    def test_another_repo_url_is_reported_and_never_overwritten(self):
+        active = 'flatpak build-bundle --runtime-repo="$FLATHUB" '
+        original = SAMPLE_BUNDLE_SH.replace(active, active + '--repo-url=https://example.org/repo ', 1)
+        self.bundle_file.write_text(original, encoding="utf-8")
+        self.assertIn("repo_url=0", self.run_script("--verify").stdout)
+        res = self.run_script(check=False)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("already sets OCI_REPO or --repo-url", res.stderr)
+        self.assertIn('--repo-url=https://example.org/repo "$WORK/repo"', self.bundle_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
