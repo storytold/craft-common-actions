@@ -108,6 +108,7 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         oci_content = oci_script.read_text(encoding="utf-8")
         self.assertIn("ghcr.io/storytold/sampleapp", oci_content)
         self.assertIn("skopeo copy", oci_content)
+        self.assertIn('if [[ "$VERSION" != *-* && "${GITHUB_REF:-}" == refs/heads/release ]]; then', oci_content)
 
         # Final verify should pass
         res_final = subprocess.run(
