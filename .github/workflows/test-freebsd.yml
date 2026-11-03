@@ -12,6 +12,8 @@ on:
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**
+      - actions/draft-release/**
+      - actions/import-signing-key/**
       - tests/**
   push:
     branches: [main]
@@ -25,6 +27,8 @@ on:
       - .github/workflows/windows-arm64.yml
       - .github/workflows/test-freebsd.yml
       - actions/install-apt-packages/**
+      - actions/draft-release/**
+      - actions/import-signing-key/**
       - tests/**
   workflow_dispatch:
 
@@ -38,6 +42,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install YAML parser
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo
       - name: Exercise failing tests, package validation and required fonts
         run: /usr/bin/python3 -m unittest discover -s tests -v

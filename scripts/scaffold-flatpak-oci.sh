@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# scaffold-flatpak-oci.sh: Scaffold Flatpak OCI export (--oci), the GHCR publishing helper and
-# the bundle's OCI update source (--repo-url) across Craft applications in the Storytold ecosystem.
+# scaffold-flatpak-oci.sh: Scaffold Flatpak OCI export (--oci), the GHCR publishing helper, the
+# bundle's OCI update source (--repo-url) and its signature across Craft applications in the
+# Storytold ecosystem.
 #
 # Usage:
 #   scripts/scaffold-flatpak-oci.sh [OPTIONS] [REPO_PATH...]
@@ -63,6 +64,13 @@ if [[ ${#TARGETS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Does flatpak-bundle.sh sign the bundle's commit and pass the key on its OCI bundle command?
+bundle_is_signed() {
+  # shellcheck disable=SC2016 # the patterns match the script's literal variables
+  grep -qxF '  flatpak build-sign "$WORK/repo" "$APP_ID" stable --gpg-sign="$SIGNING_FPR" --gpg-homedir="${GNUPGHOME:?}"' "$1" \
+    && grep -qE '^[[:space:]]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} "\$\{GPG_KEYS\[@\]\}" ' "$1"
+}
+
 scaffold_repo() {
   local repo="$1"
   local bundle_sh="$repo/packaging/linux/flatpak-bundle.sh"
@@ -106,11 +114,18 @@ scaffold_repo() {
     has_repo_url=1
   fi
 
+  # A release build signs the bundle's commit and embeds the public key (SIGNING_FPR and
+  # SIGNING_PUBKEY from the release workflow's import-signing-key action).
+  local has_signing=0
+  if bundle_is_signed "$bundle_sh"; then
+    has_signing=1
+  fi
+
   if [[ "$VERIFY_ONLY" -eq 1 ]]; then
-    if [[ "$has_oci_flag" -eq 1 && "$has_oci_script" -eq 1 && "$has_repo_url" -eq 1 ]]; then
+    if [[ "$has_oci_flag" -eq 1 && "$has_oci_script" -eq 1 && "$has_repo_url" -eq 1 && "$has_signing" -eq 1 ]]; then
       echo "[✓] $(basename "$repo") ($app_id): fully scaffolded for Flatpak OCI"
     else
-      echo "[✗] $(basename "$repo") ($app_id): missing (flag=$has_oci_flag, script=$has_oci_script, repo_url=$has_repo_url)"
+      echo "[✗] $(basename "$repo") ($app_id): missing (flag=$has_oci_flag, script=$has_oci_script, repo_url=$has_repo_url, signing=$has_signing)"
     fi
     return 0
   fi
@@ -276,6 +291,45 @@ content = bundle.sub(
 
 with open(path, 'w', encoding='utf-8') as f:
     f.write(content)
+EOF
+    bash -n "$bundle_sh" || { echo "error: syntax error in modified $bundle_sh" >&2; return 1; }
+  fi
+
+  # 4. Sign the bundle's commit and embed the release key, so Flatpak verifies the bundle on install
+  # (checked again: step 3 may have just put back the --repo-url this step anchors on).
+  if ! bundle_is_signed "$bundle_sh"; then
+    echo "[+] $(basename "$repo"): adding bundle signing to flatpak-bundle.sh"
+    python3 - "$bundle_sh" << 'EOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    lines = f.read().split('\n')
+
+active = re.compile(r'^[ \t]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} ')
+at = next((i for i, line in enumerate(lines) if active.match(line)), None)
+if at is None:
+    sys.exit(f"error: {path} has no bundle command with the OCI --repo-url to sign")
+if any('GPG_KEYS' in line or 'build-sign' in line for line in lines):
+    sys.exit(f"error: {path} already signs the bundle its own way; make it match the scaffold by hand")
+lines[at] = lines[at].replace('${OCI_REPO:+--repo-url="$OCI_REPO"} ', '${OCI_REPO:+--repo-url="$OCI_REPO"} "${GPG_KEYS[@]}" ', 1)
+# Above the command's own comment lines.
+start = at
+while start > 0 and lines[start - 1].lstrip().startswith('#'):
+    start -= 1
+lines[start:start] = [
+    '# A release build (the shared release workflow sets SIGNING_FPR, SIGNING_PUBKEY and GNUPGHOME)',
+    '# signs the commit and embeds the public key, so Flatpak verifies the bundle when installing it.',
+    'GPG_KEYS=()',
+    'if [[ -n "${SIGNING_FPR:-}" ]]; then',
+    '  flatpak build-sign "$WORK/repo" "$APP_ID" stable --gpg-sign="$SIGNING_FPR" --gpg-homedir="${GNUPGHOME:?}"',
+    '  GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")',
+    'fi',
+]
+
+with open(path, 'w', encoding='utf-8') as f:
+    f.write('\n'.join(lines))
 EOF
     bash -n "$bundle_sh" || { echo "error: syntax error in modified $bundle_sh" >&2; return 1; }
   fi
