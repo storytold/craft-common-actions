@@ -1,0 +1,56 @@
+name: "Import the Linux signing key"
+description: "Imports the release's OpenPGP signing key into a private GNUPGHOME and exports GNUPGHOME, SIGNING_FPR and SIGNING_PUBKEY (binary public key) for later steps"
+
+inputs:
+  key:
+    description: "ASCII-armored OpenPGP secret key without a passphrase (a signing subkey is enough); empty skips signing"
+    required: true
+
+outputs:
+  enabled:
+    description: "true when a key was imported"
+    value: ${{ steps.import.outputs.enabled }}
+  fingerprint:
+    description: "Fingerprint of the signing key"
+    value: ${{ steps.import.outputs.fingerprint }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Import the key
+      id: import
+      shell: bash
+      env:
+        SIGNING_KEY: ${{ inputs.key }}
+      run: |
+        set -euo pipefail
+        if [ -z "$SIGNING_KEY" ]; then
+          echo "enabled=false" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+        home="$RUNNER_TEMP/release-gnupg"
+        mkdir -p -m 700 "$home"
+        printf '%s\n' "$SIGNING_KEY" | gpg --homedir "$home" --batch --quiet --import
+        # The newest key or subkey that can sign, as gpg picks it for --local-user.
+        fpr="$(gpg --homedir "$home" --batch --with-colons --list-secret-keys \
+          | awk -F: '$1 == "sec" || $1 == "ssb" { usable = ($2 !~ /[erd]/ && ($12 ~ /s/ || $12 ~ /S/)) } $1 == "fpr" && usable { f = $10 } END { print f }')"
+        if [ -z "$fpr" ]; then
+          echo "::error::The Linux signing key has no secret key that can sign."
+          exit 1
+        fi
+        # A passphrase would need pinentry in every signing tool (rpmsign, debsigs, flatpak, skopeo).
+        if ! printf 'check' | gpg --homedir "$home" --batch --pinentry-mode error --local-user "$fpr" --detach-sign -o /dev/null 2>/dev/null; then
+          echo "::error::The Linux signing key can't sign without a passphrase. Store an unprotected signing subkey in LINUX_SIGNING_KEY."
+          exit 1
+        fi
+        gpg --homedir "$home" --batch --export "$fpr" >"$home/release-signing-key.gpg"
+        {
+          echo "GNUPGHOME=$home"
+          echo "SIGNING_FPR=$fpr"
+          echo "SIGNING_PUBKEY=$home/release-signing-key.gpg"
+        } >>"$GITHUB_ENV"
+        {
+          echo "enabled=true"
+          echo "fingerprint=$fpr"
+        } >>"$GITHUB_OUTPUT"
+        echo "Imported Linux signing key $fpr"

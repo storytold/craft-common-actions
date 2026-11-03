@@ -1,32 +1,17 @@
 name: Shared FreeBSD workflow tests
 
+# The suite covers every workflow and action, not only FreeBSD, so a change to any of them runs it.
 on:
   pull_request:
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/refresh-contributors.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - actions/refresh-contributors/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   push:
     branches: [main]
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/refresh-contributors.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - actions/refresh-contributors/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   workflow_dispatch:
 
@@ -40,6 +25,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install YAML parser
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo
       - name: Exercise failing tests, package validation and required fonts
         run: /usr/bin/python3 -m unittest discover -s tests -v

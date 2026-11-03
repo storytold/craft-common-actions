@@ -105,7 +105,11 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
         self.assertNotIn('scripts/refresh-contributors.py', action['run'])
         for event in ('pull_request', 'push'):
             paths = load('test-freebsd.yml')['on'][event]['paths']
-            self.assertIn('actions/refresh-contributors/**', paths)
+            for path in ('.github/workflows/refresh-contributors.yml',
+                         'actions/refresh-contributors/action.yml',
+                         'actions/refresh-contributors/refresh_contributors.py'):
+                with self.subTest(event=event, path=path):
+                    self.assertTrue(any(fnmatch.fnmatchcase(path, pattern) for pattern in paths))
 
     def test_old_callers_keep_the_same_permissions_and_skip_artifact_download(self):
         """Leave permissions and checked-in credits unchanged unless callers opt in."""
