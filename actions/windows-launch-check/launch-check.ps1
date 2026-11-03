@@ -42,7 +42,10 @@ function Test-IsCrash([int] $code) {
   return ($code -eq 101 -or $code -lt 0)
 }
 
-$Msi = (Resolve-Path -LiteralPath $Msi).Path
+# A path or a wildcard that matches exactly one MSI (release.yml passes dist/release/*-windows-x64.msi).
+$found = @(Resolve-Path -Path $Msi -ErrorAction SilentlyContinue | ForEach-Object Path)
+if ($found.Count -ne 1) { Write-Output "::error::'$Msi' must match exactly one MSI; it matches $($found.Count)"; exit 1 }
+$Msi = $found[0]
 $work = Join-Path ([IO.Path]::GetTempPath()) ("launch-check-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $work | Out-Null
 
