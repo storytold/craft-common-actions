@@ -37,6 +37,9 @@ class ContributorRefreshTests(unittest.TestCase):
         self.identities = {}
         self.coauthors = {}
         self.pulls = []
+        self.associated = {}
+        self.associated_lookups = []
+        self.linked = {}
         self.permissions = {}
         self.api_calls = []
         self.commit("Initial fixture", "alice")
@@ -45,10 +48,11 @@ class ContributorRefreshTests(unittest.TestCase):
         """Run Git in the fixture, failing the test on a setup error."""
         return subprocess.check_output(["git", *args], cwd=self.root, stderr=subprocess.PIPE).decode().strip()
 
-    def commit(self, message, login):
+    def commit(self, message, login, author=None):
         """Record the GitHub identity separately from untrusted Git author text."""
         self.git("add", ".")
-        self.git("commit", "-m", message)
+        self.git(*(["-c", f"user.name={author[0]}", "-c", f"user.email={author[1]}"] if author else []),
+                 "commit", "-m", message)
         sha = self.git("rev-parse", "HEAD")
         self.identities[sha] = login
         return sha
@@ -66,13 +70,116 @@ class ContributorRefreshTests(unittest.TestCase):
             return [dict(value="Alice Public")]
         self.fail(f"Unexpected API request: {endpoint}")
 
+    def pull_openers(self, root, repo, shas, reachable):
+        """Answer commit-to-PR lookups from the fixture's merged-PR openers."""
+        self.associated_lookups.append(set(shas))
+        return {sha: login for sha, login in self.associated.items() if sha in shas}
+
     def collect(self):
         """Collect through the real Git parser and fixture API."""
         authors = {sha: self.coauthors.get(sha, {login.casefold(): login} if login else {})
                    for sha, login in self.identities.items()}
-        with patch.object(credits, "commit_authors", return_value=(self.identities, authors)), \
+        linked = {sha: self.linked.get(sha, login) for sha, login in self.identities.items()}
+        with patch.object(credits, "commit_authors", return_value=(self.identities, authors, linked)), \
+                patch.object(credits, "pull_openers", side_effect=self.pull_openers), \
                 patch.object(credits, "api", side_effect=self.api):
             return credits.collect(self.root, "owner/app")
+
+    def history_page(self, *nodes):
+        """One GraphQL history page holding the given commit nodes."""
+        return json.dumps(dict(data=dict(repository=dict(object=dict(history=dict(
+            nodes=list(nodes), pageInfo=dict(hasNextPage=False, endCursor=None)))))))
+
+    def test_agent_and_bot_accounts_are_never_people(self):
+        """GitHub links agent trailers to accounts such as claude; only people get rows."""
+        node = dict(oid="a" * 40,
+                    author=dict(email="198982749+Copilot@users.noreply.github.com", user=dict(login="Copilot")),
+                    signature=dict(state="VALID", signer=dict(login="Copilot")),
+                    authors=dict(nodes=[dict(email="noreply@anthropic.com", user=dict(login="claude")),
+                                        dict(email="codex@openai.com", user=dict(login="codex")),
+                                        dict(email="1+dependabot[bot]@users.noreply.github.com",
+                                             user=dict(login="dependabot[bot]")),
+                                        dict(email="alice@anthropic.com", user=dict(login="alice"))],
+                                 pageInfo=dict(hasNextPage=False)))
+        with patch.object(credits, "run", return_value=self.history_page(node)):
+            identities, authors, linked = credits.commit_authors(self.root, "owner/app", "a" * 40)
+        self.assertEqual(authors["a" * 40], {"alice": "alice"})
+        self.assertIsNone(identities["a" * 40])
+        self.assertIsNone(linked["a" * 40])
+
+    def test_agent_authored_commit_credits_its_model_and_the_pr_opener(self):
+        """An agent's own commit counts for its model and for the person whose PR merged it."""
+        (self.root / "text.txt").write_text("agent change\n")
+        sha = self.commit("Agent change", None, author=("Claude", "noreply@anthropic.com"))
+        (self.root / "text.txt").write_text("cursor change\n")
+        cursor = self.commit("Cursor change\n\nCo-authored-by: Claude Opus 5.5 <noreply@anthropic.com>", None,
+                             author=("Cursor Agent", "cursoragent@cursor.com"))
+        self.associated = {sha: "bob", cursor: "Copilot"}
+        result = self.collect()
+        rows = {row["login"]: row for row in result["contributors"]}
+        self.assertEqual(set(rows), {"alice", "bob"})
+        self.assertEqual(rows["bob"]["commits"], 1)
+        self.assertEqual(result["unattributed_commits"], 1)
+        self.assertEqual({row["id"]: row["commits"] for row in result["models"]},
+                         {"anthropic/claude": 1, "anysphere/cursor": 1, "anthropic/claude-opus/5.5": 1})
+        self.assertNotIn("Claude <", json.dumps(result))
+
+    def test_merge_commit_pr_opener_verifies_their_own_names(self):
+        """An unsigned self-added entry merged with a merge commit is verified through its PR."""
+        self.people.write_text('[people.alice]\nsync_github_name = true\n\n'
+                               '[people.bob]\ndisplay_name = "Bob chose this"\n')
+        sha = self.commit("Add my name", "bob")
+        self.identities[sha] = None
+        self.coauthors[sha] = {"bob": "bob"}
+        for opener, expected in ((None, False), ("mallory", False), ("bob", True)):
+            with self.subTest(opener=opener):
+                self.associated = {sha: opener} if opener else {}
+                rows = {row["login"]: row for row in self.collect()["contributors"]}
+                self.assertEqual(rows["bob"]["people_entry"], expected)
+                self.assertIn(sha, self.associated_lookups[-1])
+
+    def test_writer_carrying_the_persons_own_commit_verifies_their_names(self):
+        """An integration PR keeps the contributor's authorship; its writer-opener vouches for it."""
+        self.people.write_text('[people.alice]\nsync_github_name = true\n\n'
+                               '[people.bob]\ndisplay_name = "Bob chose this"\n')
+        sha = self.commit("Add my name", "bob")
+        self.identities[sha] = None
+        self.coauthors[sha] = {"bob": "bob"}
+        self.associated = {sha: "maintainer"}
+        for author, permission, expected in (("bob", "write", True), ("bob", "read", False),
+                                             ("mallory", "write", False)):
+            with self.subTest(author=author, permission=permission):
+                self.linked = {sha: author}
+                self.permissions["maintainer"] = permission
+                rows = {row["login"]: row for row in self.collect()["contributors"]}
+                self.assertEqual(rows["bob"]["people_entry"], expected)
+
+    def test_pull_openers_trust_only_one_merged_reachable_opener(self):
+        """Ignore unmerged, unreachable and truncated PR lists; disagreeing openers stay unknown."""
+        shas = [c * 40 for c in "abcdef"]
+        merged = lambda login, oid="1" * 40: dict(merged=True, author=dict(login=login), mergeCommit=dict(oid=oid))
+        repository = dict(
+            c0=dict(associatedPullRequests=dict(totalCount=2, nodes=[merged("alice"), merged("alice")])),
+            c1=dict(associatedPullRequests=dict(totalCount=2, nodes=[merged("alice"), merged("mallory")])),
+            c2=dict(associatedPullRequests=dict(totalCount=1, nodes=[dict(merged=False, author=dict(login="bob"),
+                                                                           mergeCommit=None)])),
+            c3=dict(associatedPullRequests=dict(totalCount=1, nodes=[merged("bob", "9" * 40)])),
+            c4=dict(associatedPullRequests=dict(totalCount=21, nodes=[merged("bob")])),
+            c5=None)
+        with patch.object(credits, "run", return_value=json.dumps(dict(data=dict(repository=repository)))) as mocked:
+            openers = credits.pull_openers(self.root, "owner/app", shas, {"1" * 40})
+        self.assertEqual(openers, {shas[0]: "alice"})
+        body = json.loads(mocked.call_args.kwargs["input_text"])
+        self.assertIn(f'object(oid: "{shas[0]}")', body["query"])
+        self.assertEqual(body["variables"], dict(owner="owner", name="app"))
+        with self.assertRaisesRegex(ValueError, "Invalid commit identity"):
+            credits.pull_openers(self.root, "owner/app", ['") { evil }'], set())
+
+    def test_pulls_opened_by_agents_or_bots_add_no_people(self):
+        """A merged PR opened by an agent or bot account never creates a contributor row."""
+        sha = self.git("rev-parse", "HEAD")
+        self.pulls = [dict(number=1, sha=sha, login="Copilot"), dict(number=2, sha=sha, login="dependabot[bot]")]
+        self.assertEqual([row["login"] for row in self.collect()["contributors"]], ["alice"])
 
     def test_verified_human_coauthors_are_credited_once(self):
         """Credit API-linked co-authors without interpreting human names or email text."""
@@ -112,7 +219,8 @@ class ContributorRefreshTests(unittest.TestCase):
             pages.append(json.dumps(dict(data=dict(repository=dict(object=dict(history=dict(
                 nodes=[node], pageInfo=dict(hasNextPage=bool(following), endCursor=following))))))))
         with patch.object(credits, "run", side_effect=pages) as mocked:
-            primary, authors = credits.commit_authors(self.root, "owner/app", "a" * 40)
+            primary, authors, linked = credits.commit_authors(self.root, "owner/app", "a" * 40)
+        self.assertEqual(linked, {"a" * 40: "alice", "b" * 40: "bob"})
         self.assertEqual(primary, {"a" * 40: "alice", "b" * 40: "bob"})
         self.assertEqual(authors["b" * 40], {"alice": "alice", "bob": "bob"})
         bodies = [json.loads(call.kwargs["input_text"]) for call in mocked.call_args_list]
@@ -250,16 +358,29 @@ class ContributorRefreshTests(unittest.TestCase):
     def test_supported_model_formats_and_unknown_providers(self):
         """Keep the documented model families aligned with accepted explicit trailers."""
         accepted = {
-            "Claude Sonnet 5.5 <noreply@anthropic.com>": "anthropic/claude-sonnet/5.5",
-            "Codex <codex@openai.com>": "openai/codex",
-            "ChatGPT <noreply@openai.com>": "openai/chatgpt",
-            "GPT-5.1 <noreply@openai.com>": "openai/gpt/5.1",
+            "Claude Sonnet 5.5 <noreply@anthropic.com>": ("anthropic/claude-sonnet/5.5", "Claude Sonnet", "5.5"),
+            "Claude Mythos 5.1 <noreply@anthropic.com>": ("anthropic/claude-mythos/5.1", "Claude Mythos", "5.1"),
+            "Claude <noreply@anthropic.com>": ("anthropic/claude", "Claude", ""),
+            "Codex <codex@openai.com>": ("openai/codex", "Codex", ""),
+            "OpenAI Codex <noreply@openai.com>": ("openai/codex", "Codex", ""),
+            "ChatGPT <noreply@openai.com>": ("openai/chatgpt", "ChatGPT", ""),
+            "GPT-5.1 <noreply@openai.com>": ("openai/gpt/5.1", "GPT", "5.1"),
+            "GPT-6.1 Sol <noreply@openai.com>": ("openai/gpt-sol/6.1", "GPT Sol", "6.1"),
+            "DeepSeek V4.1 Flash <noreply@deepseek.com>": ("deepseek/deepseek-flash/4.1", "DeepSeek Flash", "4.1"),
+            "GLM-5.3-Flash <noreply@z.ai>": ("zhipu/glm-flash/5.3", "GLM Flash", "5.3"),
+            "Qwen 3.8 Flash <noreply@qwen.ai>": ("alibaba/qwen-flash/3.8", "Qwen Flash", "3.8"),
+            "Codex (GPT-6) <noreply@openai.com>": ("openai/gpt/6", "GPT", "6"),
+            "Claude Opus 5.5 (1M context) <noreply@anthropic.com>": ("anthropic/claude-opus/5.5", "Claude Opus", "5.5"),
+            "Cursor Agent <cursoragent@cursor.com>": ("anysphere/cursor", "Cursor", ""),
+            "Copilot App <223556219+Copilot@users.noreply.github.com>": ("github/copilot", "Copilot", ""),
+            "Devin <1+devin-ai-integration[bot]@users.noreply.github.com>": ("cognition/devin", "Devin", ""),
         }
-        for trailer, expected in accepted.items():
+        for trailer, (expected, title, version) in accepted.items():
             with self.subTest(trailer=trailer):
-                self.assertEqual(credits.model(trailer)["id"], expected)
-        for trailer in ("Another Model <noreply@other.example>",
-                        "Claude Opus 5.5 <unrelated@example.test>", "not a trailer"):
+                identity = credits.model(trailer)
+                self.assertEqual((identity["id"], identity["model"], identity["version"]), (expected, title, version))
+        for trailer in ("Another Model <noreply@other.example>", "Claude Opus 5.5 <unrelated@example.test>",
+                        "A Person <someone@anthropic.com>", "Bob <1+bob@users.noreply.github.com>", "not a trailer"):
             with self.subTest(trailer=trailer):
                 self.assertIsNone(credits.model(trailer))
 

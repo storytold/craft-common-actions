@@ -16,6 +16,52 @@ import tempfile
 import tomllib
 
 
+# AI agents identified by their exact Git email or GitHub account: (company, id prefix, default
+# model, read the model and version from the Git name). Agents are credited as models, never people.
+AGENT_EMAILS = {
+    "noreply@anthropic.com": ("Anthropic", "anthropic", "Claude", True),
+    "codex@openai.com": ("OpenAI", "openai", "Codex", True),
+    "noreply@openai.com": ("OpenAI", "openai", "Codex", True),
+    "cursoragent@cursor.com": ("Anysphere", "anysphere", "Cursor", False),
+    "noreply@deepseek.com": ("DeepSeek", "deepseek", "DeepSeek", True),
+    "noreply@z.ai": ("Zhipu AI", "zhipu", "GLM", True),
+    "noreply@zcode.ai": ("Zhipu AI", "zhipu", "GLM", True),
+    "noreply@qwen.ai": ("Alibaba", "alibaba", "Qwen", True),
+    "noreply@google.com": ("Google", "google", "Gemini", True),
+    "noreply@minimax.io": ("MiniMax", "minimax", "MiniMax", True),
+    "noreply@x.ai": ("xAI", "xai", "Grok", True),
+    "noreply@xiaomi.com": ("Xiaomi", "xiaomi", "MiMo", False),
+    "noreply@opencode.ai": ("OpenCode", "opencode", "OpenCode", True),
+    "noreply@codebuff.com": ("Codebuff", "codebuff", "Codebuff", False),
+    "noreply@paperclip.ing": ("Paperclip", "paperclip", "Paperclip", False),
+}
+AGENT_LOGINS = {
+    "claude": AGENT_EMAILS["noreply@anthropic.com"],
+    "codex": AGENT_EMAILS["codex@openai.com"],
+    "cursoragent": AGENT_EMAILS["cursoragent@cursor.com"],
+    "copilot": ("GitHub", "github", "Copilot", False),
+    "copilot-swe-agent[bot]": ("GitHub", "github", "Copilot", False),
+    "devin-ai-integration[bot]": ("Cognition", "cognition", "Devin", False),
+    "coderabbitai[bot]": ("CodeRabbit", "coderabbit", "CodeRabbit", False),
+    "capy-ai[bot]": ("Capy", "capy", "Capy", False),
+}
+# Display casing for model words that Git names often write in lower case.
+MODEL_WORDS = {word.casefold(): word for word in ("GPT", "ChatGPT", "GLM", "DeepSeek", "MiMo", "OpenCode", "MiniMax")}
+
+
+def agent(email, login=None):
+    """Return the agent behind a Git email or GitHub login, or None for a person."""
+    email = (email or "").strip().casefold()
+    noreply = re.fullmatch(r"(?:\d+\+)?([^@]+)@users\.noreply\.github\.com", email)
+    login = (login or (noreply.group(1) if noreply else "")).casefold()
+    return AGENT_EMAILS.get(email) or AGENT_LOGINS.get(login)
+
+
+def human(login):
+    """GitHub accounts credited as people: not AI agents and not other bot accounts."""
+    return bool(login) and not login.casefold().endswith("[bot]") and agent(None, login) is None
+
+
 def run(args, cwd, input_text=None):
     """Run a bounded, non-shell command and report its failure with context."""
     result = subprocess.run(args, cwd=cwd, input=input_text.encode("utf-8") if input_text is not None else None,
@@ -39,14 +85,14 @@ def commit_authors(root, repo, head):
     query = """query($owner: String!, $name: String!, $head: String!, $cursor: String) {
       repository(owner: $owner, name: $name) { object(expression: $head) { ... on Commit {
         history(first: 100, after: $cursor) {
-          nodes { oid author { user { login } } signature { state signer { login } }
-            authors(first: 100) { nodes { user { login } } pageInfo { hasNextPage } }
+          nodes { oid author { email user { login } } signature { state signer { login } }
+            authors(first: 100) { nodes { email user { login } } pageInfo { hasNextPage } }
           }
           pageInfo { hasNextPage endCursor }
         }
       } } }
     }"""
-    identities, authors, seen_cursors = {}, {}, set()
+    identities, authors, linked, seen_cursors = {}, {}, {}, set()
     cursor = None
     while True:
         body = json.dumps(dict(query=query, variables=dict(owner=owner, name=name, head=head, cursor=cursor)))
@@ -58,26 +104,65 @@ def commit_authors(root, repo, head):
                 raise ValueError(f"GitHub returned a duplicate history commit: {sha}")
             if node["authors"]["pageInfo"]["hasNextPage"]:
                 raise ValueError(f"More than 100 authors on {sha}; refusing incomplete credits")
-            primary = node["author"]["user"]
+            actors = [*node["authors"]["nodes"], node["author"]]
+            if any(actor.get("user") and (not isinstance(actor["user"].get("login"), str) or not actor["user"]["login"])
+                   for actor in actors):
+                raise ValueError(f"Invalid GitHub account identity on {sha}")
+            # GitHub links agent trailers such as noreply@anthropic.com to accounts (claude, codex);
+            # those commits are credited to models, so agents and bots never become people.
+            people = [actor["user"]["login"] for actor in actors
+                      if actor.get("user") and agent(actor.get("email"), actor["user"]["login"]) is None
+                      and human(actor["user"]["login"])]
+            primary = node["author"].get("user")
             signature = node.get("signature") or {}
             signer = (signature.get("signer") or {}).get("login")
             signed_by_author = (signature.get("state") == "VALID" and primary is not None
-                                and signer is not None and signer.casefold() == primary["login"].casefold())
+                                and signer is not None and signer.casefold() == primary["login"].casefold()
+                                and primary["login"] in people)
             # Email-linked authors still receive credit, but only a matching signer
             # authenticates a commit's author for opt-in name/consent checks.
             identities[sha] = primary["login"] if signed_by_author else None
-            accounts = [actor["user"]["login"] for actor in node["authors"]["nodes"] if actor["user"]]
-            if primary:
-                accounts.append(primary["login"])
-            if any(not isinstance(login, str) or not login for login in accounts):
-                raise ValueError(f"Invalid GitHub account identity on {sha}")
-            authors[sha] = {login.casefold(): login for login in accounts}
+            linked[sha] = primary["login"] if primary and primary["login"] in people else None
+            authors[sha] = {login.casefold(): login for login in people}
         if not page["pageInfo"]["hasNextPage"]:
-            return identities, authors
+            return identities, authors, linked
         cursor = page["pageInfo"]["endCursor"]
         if not cursor or cursor in seen_cursors:
             raise ValueError("GitHub history pagination did not advance")
         seen_cursors.add(cursor)
+
+
+def pull_openers(root, repo, shas, reachable):
+    """Map commits to the one account that opened the merged PRs containing them.
+
+    A merge-commit or rebase merge leaves the contributor's own commits in history, so their
+    SHAs never equal a PR's merge commit. GitHub's commit-to-PR association finds those PRs;
+    only PRs merged into this history count, and commits whose PRs disagree stay unknown.
+    """
+    owner, name = repo.split("/")
+    openers = {}
+    shas = sorted(shas)
+    for start in range(0, len(shas), 50):
+        batch = shas[start:start + 50]
+        if any(not re.fullmatch(r"[0-9a-f]{40,64}", sha) for sha in batch):
+            raise ValueError("Invalid commit identity in PR lookup")
+        fields = " ".join(
+            f'c{index}: object(oid: "{sha}") {{ ... on Commit {{ associatedPullRequests(first: 20) {{'
+            " totalCount nodes { merged author { login } mergeCommit { oid } } } } }"
+            for index, sha in enumerate(batch))
+        query = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        body = json.dumps(dict(query=query, variables=dict(owner=owner, name=name)))
+        data = json.loads(run(["gh", "api", "graphql", "--input", "-"], root, input_text=body))["data"]["repository"]
+        for index, sha in enumerate(batch):
+            pulls = ((data.get(f"c{index}") or {}).get("associatedPullRequests")) or {}
+            nodes = pulls.get("nodes") or []
+            if pulls.get("totalCount", 0) > len(nodes):
+                continue
+            logins = {(pull.get("author") or {}).get("login") for pull in nodes
+                      if pull.get("merged") and (pull.get("mergeCommit") or {}).get("oid") in reachable}
+            if len(logins) == 1 and None not in logins:
+                openers[sha] = next(iter(logins))
+    return openers
 
 
 def single_value(root, endpoint, query):
@@ -117,14 +202,19 @@ def history(root, head):
     """Read full ancestry and per-commit text/binary statistics without following renames."""
     text = run(["git", "-c", "core.quotePath=true", "log", "--no-show-signature",
                 "--root", "--no-renames", "--raw", "--numstat",
-                "--format=%x00%H%x00%aI%x00%(trailers:key=Co-authored-by,valueonly,separator=%x1f)%x00",
+                "--format=%x00%H%x00%aI%x00%ae%x00%an%x00%(trailers:key=Co-authored-by,valueonly,separator=%x1f)%x00",
                 head, "--"], root)
     fields = text.split("\0")
-    if (len(fields) - 1) % 4:
+    if (len(fields) - 1) % 6:
         raise ValueError("Unexpected Git history format")
     commits = {}
-    for index in range(1, len(fields), 4):
-        sha, date, trailers, changes = fields[index:index + 4]
+    for index in range(1, len(fields), 6):
+        sha, date, email, name, trailers, changes = fields[index:index + 6]
+        # The Git author is read only to credit an agent that authored the commit; a person's
+        # Git name or email is never recorded.
+        trailers = trailers.split("\x1f")
+        if agent(email):
+            trailers.append(f"{name} <{email}>")
         statuses, stats = [], []
         for line in changes.splitlines():
             if line.startswith(":"):
@@ -142,30 +232,46 @@ def history(root, head):
             else:
                 counts["lines_added"] += int(added)
                 counts["lines_deleted"] += int(deleted)
-        commits[sha] = dict(date=utc_date(date), trailers=trailers.split("\x1f"), **counts)
+        commits[sha] = dict(date=utc_date(date), trailers=trailers, **counts)
     return commits
 
 
 def model(trailer):
-    """Recognize explicit model co-author trailers, without inferring a model from humans."""
+    """Recognize an agent's Git identity by its exact email, without inferring a model from humans."""
     match = re.fullmatch(r"\s*(.*?)\s*<([^<>]+)>\s*", trailer)
     if not match:
         return None
     name, email = match.groups()
-    if email.casefold() == "noreply@anthropic.com":
-        match = re.fullmatch(r"Claude(?: (Opus|Sonnet|Haiku|Fable))?(?: (\d+(?:\.\d+)*))?(?: \([^)]*\))?", name)
-        if match:
-            family, version = match.groups()
-            title = "Claude" + (f" {family}" if family else "")
-            return dict(id="anthropic/" + title.lower().replace(" ", "-") + (f"/{version}" if version else ""),
-                        company="Anthropic", model=title, version=version or "")
-    if email.casefold() in ("codex@openai.com", "noreply@openai.com"):
-        match = re.fullmatch(r"(?:OpenAI )?(Codex|ChatGPT|GPT)(?:[- ](\d+(?:\.\d+)*))?", name)
-        if match:
-            family, version = match.groups()
-            return dict(id="openai/" + family.lower() + (f"/{version}" if version else ""),
-                        company="OpenAI", model=family, version=version or "")
-    return None
+    known = agent(email)
+    if known is None:
+        return None
+    company, prefix, default, named = known
+
+    def parse(text):
+        """Split "GPT-6.1 Sol" into its model words and first version number."""
+        words = [word for word in re.split(r"[\s_-]+", text) if word]
+        # Drop a bare company prefix ("OpenAI Codex"), not a brand that names the model ("DeepSeek V3.2").
+        if words and words[0].casefold() == company.casefold() != default.split()[0].casefold():
+            words = words[1:]
+        family, version = [], ""
+        for word in words:
+            if not version and re.fullmatch(r"[vV]?\d+(?:\.\d+)*", word):
+                version = word.lstrip("vV")
+            else:
+                family.append(MODEL_WORDS.get(word.casefold(), word[:1].upper() + word[1:]))
+        return family, version
+
+    family, version = [], ""
+    if named:
+        # "Claude Opus 5.5 (1M context)", "GPT-6.1 Sol", "OpenAI Codex", "DeepSeek V4.1 Flash";
+        # "Codex (GPT-6)" names its model in brackets when the outer name has no version.
+        family, version = parse(re.sub(r"\([^)]*\)", " ", name))
+        for inner in re.findall(r"\(([^)]*)\)", name):
+            if not version and parse(inner)[1]:
+                family, version = parse(inner)
+    title = " ".join(family) or default
+    return dict(id=f"{prefix}/" + title.casefold().replace(" ", "-") + (f"/{version}" if version else ""),
+                company=company, model=title, version=version)
 
 
 def people_authors(root, head="HEAD"):
@@ -186,8 +292,9 @@ def people_authors(root, head="HEAD"):
     return result
 
 
-def verified_people(root, repo, people, identities, pull_authors, head="HEAD"):
-    """Verify self-authored entries or recorded consent committed by a repository writer."""
+def verified_people(root, repo, people, identities, pull_authors, head="HEAD", linked=None):
+    """Verify self-authored entries, a writer's PR carrying the person's own commit, or recorded
+    consent committed by a repository writer."""
     blame = people_authors(root, head)
     permissions = {}
     verified = {}
@@ -198,7 +305,11 @@ def verified_people(root, repo, people, identities, pull_authors, head="HEAD"):
             actor = identities.get(sha) or pull_authors.get(sha)
             if actor and actor.casefold() == login.casefold():
                 continue
-            if not actor or not isinstance(entry.get("consent_source"), str) or not entry["consent_source"].strip():
+            # An integration PR that carries the person's own GitHub-linked commit, keeping its
+            # authorship, is vouched for by the writer who opened it.
+            carried = ((linked or {}).get(sha) or "").casefold() == login.casefold()
+            if not human(actor) or not carried and (
+                    not isinstance(entry.get("consent_source"), str) or not entry["consent_source"].strip()):
                 allowed = False
                 break
             if actor not in permissions:
@@ -222,7 +333,7 @@ def collect(root, repo):
         raise ValueError("Contributor preferences must match the release commit; "
                          f"commit or restore contributors/people.toml ({error})") from error
     commits = history(root, head)
-    identities, authors = commit_authors(root, repo, head)
+    identities, authors, linked = commit_authors(root, repo, head)
     missing = commits.keys() - identities.keys()
     if missing:
         raise ValueError(f"GitHub identity response is missing {len(missing)} reachable commits")
@@ -235,8 +346,15 @@ def collect(root, repo):
             pull_authors.setdefault(pull["sha"], set()).add(pull["login"])
     # Only an unambiguous merged PR can supply an otherwise unknown commit identity.
     pull_authors = {sha: next(iter(logins)) for sha, logins in pull_authors.items() if len(logins) == 1}
+    # Commits merged with a merge commit or rebase need GitHub's commit-to-PR association:
+    # unlinked commits (credit) and the commits behind name preferences (consent).
+    unknown = {sha for sha in commits if not authors[sha]}
+    unknown |= {sha for shas in people_authors(root, head).values() for sha in shas if not identities.get(sha)}
+    unknown -= pull_authors.keys()
+    if unknown:
+        pull_authors.update(pull_openers(root, repo, unknown, commits.keys()))
     people = load_people(root, head)
-    verified = verified_people(root, repo, people, identities, pull_authors, head)
+    verified = verified_people(root, repo, people, identities, pull_authors, head, linked)
     people_logins = {login.casefold(): login for login in people}
     people = {login.casefold(): entry for login, entry in people.items()}
     contributors, models = {}, {}
@@ -251,7 +369,7 @@ def collect(root, repo):
 
     unattributed = 0
     for sha, commit in commits.items():
-        logins = authors[sha] or {login.casefold(): login for login in [pull_authors.get(sha)] if login}
+        logins = authors[sha] or {login.casefold(): login for login in [pull_authors.get(sha)] if human(login)}
         if not logins:
             unattributed += 1
         for login in logins.values():
@@ -272,7 +390,7 @@ def collect(root, repo):
                 row["lines_deleted"] += commit["lines_deleted"]
     seen_pulls = set()
     for pull in pulls:
-        if pull["sha"] in commits and pull["number"] not in seen_pulls and pull["login"]:
+        if pull["sha"] in commits and pull["number"] not in seen_pulls and human(pull["login"]):
             seen_pulls.add(pull["number"])
             contributor(pull["login"])["prs"] += 1
     for row in contributors.values():

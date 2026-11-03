@@ -146,17 +146,30 @@ An unsuccessful refresh or missing artifact blocks the release. Existing callers
 `contributors-artifact` keep their current behavior, permissions, and build paths.
 
 The shared generator uses local Git text/binary statistics and GitHub-linked author/co-author
-identities and merged PRs. Unlinked commits are counted as unattributed. Name preferences are
-verified against the commits that introduced their values. A Git email-linked author is trusted
-for consent only when GitHub reports a valid signature whose signer matches that author;
-otherwise verification falls back to the authenticated opener of an unambiguous merged PR.
-Ordinary commit and co-author credit attribution is unchanged. A maintainer override also requires
-a recorded `consent_source` and repository write access. Public profile names are fetched only
-for verified entries opting into synchronization. Recognized Anthropic Claude and OpenAI
-Codex/ChatGPT/GPT Co-Authored-By trailers supply model credits; other providers and unrecognized
-trailer formats are skipped. Co-authored commits count for each linked contributor/model, so row totals can
-exceed repository totals. Generation replaces only the snapshot, atomically after collection
-succeeds, and never edits `people.toml` or commits/pushes changes.
+identities and merged PRs. A commit with no linked person is credited to the opener of the merged
+PR that contains it, found through GitHub's commit-to-PR association, so squash, rebase and
+merge-commit merges all count; it stays unattributed only when no single opener is known. Merge
+commits count as commits.
+
+AI agents and bots are never listed as people. GitHub links agent trailers such as
+`noreply@anthropic.com` to accounts (`claude`, `codex`), and coding agents such as Copilot, Cursor or
+Devin author commits themselves; both are credited in the snapshot's `models`, which apps show
+under **About ▸ Models**. Agents are recognized only by their exact Git email or GitHub account
+(`AGENT_EMAILS` and `AGENT_LOGINS` in the generator), never by name, so a person's work address at
+an AI company is still a person. A recognized agent's model and version are read from its Git name
+(`Claude Opus 5.5`, `GPT-6.1 Sol`, `DeepSeek V4.1 Flash`); unrecognized emails are skipped. Add a new
+agent to those tables. Other `[bot]` accounts, such as dependabot, are left out.
+
+Name preferences are verified against the commits that introduced their values. A Git
+email-linked author is trusted for consent only when GitHub reports a valid signature whose signer
+matches that author; otherwise verification uses the authenticated opener of the merged PR that
+contains the commit, however it was merged. An integration PR opened by someone with repository
+write access that carries the person's own GitHub-linked commit, keeping its authorship, also
+verifies it. Any other maintainer override requires a recorded `consent_source` and repository
+write access. Public profile names are fetched only for verified
+entries opting into synchronization. Co-authored commits count for each linked contributor and
+model, so row totals can exceed repository totals. Generation replaces only the snapshot,
+atomically after collection succeeds, and never edits `people.toml` or commits/pushes changes.
 Name preferences and their consent checks use the captured Git commit, so concurrent local
 edits cannot change the release snapshot. Uncommitted preferences are rejected before API
 access with an instruction to commit or restore them, without logging their contents.
