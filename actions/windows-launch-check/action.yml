@@ -3,7 +3,7 @@ description: "Installs an MSI and starts its programs without a desktop, as the 
 
 inputs:
   msi:
-    description: "Path to the MSI to install"
+    description: "Path to the MSI to install, or a wildcard that matches exactly one"
     required: true
   main-exe:
     description: "File name of the main app (e.g. pdfcraft.exe); it must stay running or exit 0"
