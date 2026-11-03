@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# scaffold-flatpak-oci.sh: Scaffold Flatpak OCI export (--oci) and GHCR publishing helper
-# across Craft applications in the Storytold ecosystem.
+# scaffold-flatpak-oci.sh: Scaffold Flatpak OCI export (--oci), the GHCR publishing helper and
+# the bundle's OCI update source (--repo-url) across Craft applications in the Storytold ecosystem.
 #
 # Usage:
 #   scripts/scaffold-flatpak-oci.sh [OPTIONS] [REPO_PATH...]
@@ -96,11 +96,17 @@ scaffold_repo() {
     has_oci_script=1
   fi
 
+  # The .flatpak bundle's origin updates from the ArtCraft OCI repository, whose index points at GHCR.
+  local has_repo_url=0
+  if grep -F -q -- '--repo-url=' "$bundle_sh"; then
+    has_repo_url=1
+  fi
+
   if [[ "$VERIFY_ONLY" -eq 1 ]]; then
-    if [[ "$has_oci_flag" -eq 1 && "$has_oci_script" -eq 1 ]]; then
+    if [[ "$has_oci_flag" -eq 1 && "$has_oci_script" -eq 1 && "$has_repo_url" -eq 1 ]]; then
       echo "[✓] $(basename "$repo") ($app_id): fully scaffolded for Flatpak OCI"
     else
-      echo "[✗] $(basename "$repo") ($app_id): missing (flag=$has_oci_flag, script=$has_oci_script)"
+      echo "[✗] $(basename "$repo") ($app_id): missing (flag=$has_oci_flag, script=$has_oci_script, repo_url=$has_repo_url)"
     fi
     return 0
   fi
@@ -226,6 +232,34 @@ fi
 EOF
     chmod +x "$oci_sh"
     bash -n "$oci_sh" || { echo "error: syntax error in $oci_sh" >&2; return 1; }
+  fi
+
+  # 3. Point the bundle's origin at the OCI repository, so bundle installs update from it
+  if [[ "$has_repo_url" -eq 0 ]]; then
+    echo "[+] $(basename "$repo"): adding --repo-url to the bundle in flatpak-bundle.sh"
+    python3 - "$bundle_sh" << 'EOF'
+import sys
+
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+flathub = 'FLATHUB=https://dl.flathub.org/repo/flathub.flatpakrepo\n'
+bundle = 'flatpak build-bundle --runtime-repo="$FLATHUB" '
+if flathub not in content or bundle not in content:
+    sys.exit(f"error: {path} has no FLATHUB line or Flathub build-bundle command to extend")
+content = content.replace(flathub, flathub + 'OCI_REPO=oci+https://getartcraft.com\n', 1)
+content = content.replace(
+    bundle,
+    '# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n'
+    + bundle + '--repo-url="$OCI_REPO" ',
+    1,
+)
+
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(content)
+EOF
+    bash -n "$bundle_sh" || { echo "error: syntax error in modified $bundle_sh" >&2; return 1; }
   fi
 
   echo "[✓] $(basename "$repo") ($app_id): Flatpak OCI ready"

@@ -60,7 +60,7 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
             text=True,
             check=True,
         )
-        self.assertIn("missing (flag=0, script=0)", res.stdout)
+        self.assertIn("missing (flag=0, script=0, repo_url=0)", res.stdout)
 
         # Run scaffolding
         res_scaffold = subprocess.run(
@@ -76,6 +76,13 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         self.assertIn("OCI=0", updated_bundle)
         self.assertIn("--oci) OCI=1; shift ;;", updated_bundle)
         self.assertIn("flatpak build-bundle --oci", updated_bundle)
+        self.assertIn("OCI_REPO=oci+https://getartcraft.com", updated_bundle)
+        self.assertIn(
+            'flatpak build-bundle --runtime-repo="$FLATHUB" --repo-url="$OCI_REPO" "$WORK/repo" "$OUT" "$APP_ID" stable',
+            updated_bundle,
+        )
+        # The OCI image export carries no repo URL.
+        self.assertIn('flatpak build-bundle --oci "$WORK/repo"', updated_bundle)
 
         # Check flatpak-oci.sh is created and executable
         oci_script = self.packaging_dir / "flatpak-oci.sh"
@@ -94,6 +101,21 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
             check=True,
         )
         self.assertIn("fully scaffolded for Flatpak OCI", res_final.stdout)
+
+        # A second run changes nothing.
+        subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
+        self.assertEqual(self.bundle_file.read_text(encoding="utf-8"), updated_bundle)
+
+    def test_repo_url_is_added_to_an_already_scaffolded_bundle(self):
+        subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
+        content = self.bundle_file.read_text(encoding="utf-8")
+        content = content.replace('OCI_REPO=oci+https://getartcraft.com\n', '')
+        content = content.replace('# --repo-url makes the installed origin update from the ArtCraft OCI repository.\n', '')
+        self.bundle_file.write_text(content.replace(' --repo-url="$OCI_REPO"', ''), encoding="utf-8")
+        res = subprocess.run([str(SCRIPT), "--verify", str(self.repo_dir)], capture_output=True, text=True, check=True)
+        self.assertIn("missing (flag=1, script=1, repo_url=0)", res.stdout)
+        subprocess.run([str(SCRIPT), str(self.repo_dir)], capture_output=True, text=True, check=True)
+        self.assertEqual(self.bundle_file.read_text(encoding="utf-8").count('--repo-url="$OCI_REPO"'), 1)
 
 
 if __name__ == "__main__":
