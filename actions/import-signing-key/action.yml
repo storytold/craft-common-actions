@@ -33,7 +33,7 @@ runs:
         printf '%s\n' "$SIGNING_KEY" | gpg --homedir "$home" --batch --quiet --import
         # The newest key or subkey that can sign, as gpg picks it for --local-user.
         fpr="$(gpg --homedir "$home" --batch --with-colons --list-secret-keys \
-          | awk -F: '$1 == "sec" || $1 == "ssb" { usable = ($12 ~ /s/ || $12 ~ /S/) } $1 == "fpr" && usable { f = $10 } END { print f }')"
+          | awk -F: '$1 == "sec" || $1 == "ssb" { usable = ($2 !~ /[erd]/ && ($12 ~ /s/ || $12 ~ /S/)) } $1 == "fpr" && usable { f = $10 } END { print f }')"
         if [ -z "$fpr" ]; then
           echo "::error::The Linux signing key has no secret key that can sign."
           exit 1

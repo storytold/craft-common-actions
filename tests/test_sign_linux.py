@@ -134,7 +134,7 @@ class SigningWiringTests(unittest.TestCase):
     def test_the_release_job_signs_with_the_linux_key(self):
         self.assertIn("LINUX_SIGNING_KEY", WORKFLOW["on"]["workflow_call"]["secrets"])
         draft = next(s for s in WORKFLOW["jobs"]["release"]["steps"] if s.get("uses", "").startswith("storytold/craft-common-actions/actions/draft-release@"))
-        self.assertEqual(draft["with"]["signing-key"], "${{ secrets.LINUX_SIGNING_KEY }}")
+        self.assertEqual(draft["with"]["signing-key"], "${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}")
         names = [s.get("name") for s in DRAFT["runs"]["steps"]]
         # Embedded signatures change the rpm and deb files, so they come before the checksums.
         self.assertLess(names.index("Sign the Linux packages"), names.index("Compute checksums"))

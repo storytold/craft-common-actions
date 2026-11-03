@@ -68,6 +68,8 @@ fi
 bundle_is_signed() {
   # shellcheck disable=SC2016 # the patterns match the script's literal variables
   grep -qxF '  flatpak build-sign "$WORK/repo" "$APP_ID" stable --gpg-sign="$SIGNING_FPR" --gpg-homedir="${GNUPGHOME:?}"' "$1" \
+    && grep -qxF '  GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")' "$1" \
+    && grep -qxF '  if [[ "${OCI_SIGNATURES_READY:-}" != 1 ]]; then OCI_REPO=""; fi' "$1" \
     && grep -qE '^[[:space:]]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} "\$\{GPG_KEYS\[@\]\}" ' "$1"
 }
 
@@ -108,9 +110,12 @@ scaffold_repo() {
   # the exact URL, the prerelease guard, and the option on the active (uncommented) bundle command.
   local has_repo_url=0
   # shellcheck disable=SC2016 # the patterns match the script's literal $VERSION, $FLATHUB and $OCI_REPO
-  if grep -qxF 'OCI_REPO=oci+https://getartcraft.com' "$bundle_sh" \
-    && grep -qxF 'if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi' "$bundle_sh" \
-    && grep -qE '^[[:space:]]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} ' "$bundle_sh"; then
+  if awk '
+    $0 == "OCI_REPO=oci+https://getartcraft.com" { assigned = 1; next }
+    $0 == "if [[ \"$VERSION\" == *-* ]]; then OCI_REPO=\"\"; fi" && assigned { guarded = 1; next }
+    /^[[:space:]]*flatpak build-bundle --runtime-repo="\$FLATHUB" \$\{OCI_REPO:\+--repo-url="\$OCI_REPO"\} / && guarded { found = 1 }
+    END { exit !found }
+  ' "$bundle_sh"; then
     has_repo_url=1
   fi
 
@@ -128,6 +133,13 @@ scaffold_repo() {
       echo "[✗] $(basename "$repo") ($app_id): missing (flag=$has_oci_flag, script=$has_oci_script, repo_url=$has_repo_url, signing=$has_signing)"
     fi
     return 0
+  fi
+
+  # shellcheck disable=SC2016 # the pattern is literal script text
+  if [[ "$has_signing" -eq 0 ]] && grep -qE 'GPG_KEYS|build-sign' "$bundle_sh" \
+    && ! grep -qxF '  GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")' "$bundle_sh"; then
+    echo "error: $bundle_sh already signs the bundle its own way; make it match the scaffold by hand" >&2
+    return 1
   fi
 
   # 1. Update flatpak-bundle.sh if --oci is missing
@@ -242,9 +254,11 @@ if [[ "\$PUSH" = 1 ]]; then
   echo "==> Pushing to \$REGISTRY:\$TAG"
   skopeo copy --format oci "\${AUTH_ARGS[@]}" "oci:\$OUT_OCI" "docker://\$REGISTRY:\$TAG"
 
-  # Also update architecture-specific stable tag
-  echo "==> Pushing to \$REGISTRY:stable-\$ARCH"
-  skopeo copy --format oci "\${AUTH_ARGS[@]}" "oci:\$OUT_OCI" "docker://\$REGISTRY:stable-\$ARCH"
+  # Prereleases must not move the stable tag.
+  if [[ "\$VERSION" != *-* ]]; then
+    echo "==> Pushing to \$REGISTRY:stable-\$ARCH"
+    skopeo copy --format oci "\${AUTH_ARGS[@]}" "oci:\$OUT_OCI" "docker://\$REGISTRY:stable-\$ARCH"
+  fi
 
   echo "==> Push complete"
 fi
@@ -270,7 +284,7 @@ bundle = re.compile(r'^([ \t]*)flatpak build-bundle --runtime-repo="\$FLATHUB" (
 found = bundle.search(content)
 if flathub not in content or found is None:
     sys.exit(f"error: {path} has no FLATHUB line or Flathub build-bundle command to extend")
-if 'OCI_REPO=' in content or '--repo-url' in found.group(2):
+if re.search(r'^OCI_REPO=', content, re.M) or '--repo-url' in found.group(2):
     sys.exit(f"error: {path} already sets OCI_REPO or --repo-url; make it match the scaffold by hand")
 content = content.replace(
     flathub,
@@ -325,6 +339,7 @@ lines[start:start] = [
     'if [[ -n "${SIGNING_FPR:-}" ]]; then',
     '  flatpak build-sign "$WORK/repo" "$APP_ID" stable --gpg-sign="$SIGNING_FPR" --gpg-homedir="${GNUPGHOME:?}"',
     '  GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")',
+    '  if [[ "${OCI_SIGNATURES_READY:-}" != 1 ]]; then OCI_REPO=""; fi',
     'fi',
 ]
 

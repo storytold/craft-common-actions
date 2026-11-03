@@ -607,6 +607,7 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
+      OCI_SIGNATURES_READY: ${{ vars.LINUX_OCI_SIGNATURES_READY }}
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
@@ -666,6 +667,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
         # flatpak-bundle.sh signs the commit and embeds the public key when SIGNING_FPR is set.
         uses: storytold/craft-common-actions/actions/import-signing-key@main
         with:
@@ -701,6 +703,7 @@ jobs:
           TARBALL: ${{ steps.flatpak_bundle.outputs.tarball }}
         run: |
           if [ -x packaging/linux/flatpak-oci.sh ]; then
+            REGISTRY="${REGISTRY,,}"
             packaging/linux/flatpak-oci.sh --push "$TARBALL"
             # The pushed manifest, byte for byte: the release job signs its digest for Flatpak's
             # signature lookaside, and the release keeps it so the digest can be checked.
@@ -1318,4 +1321,4 @@ jobs:
           app-title: ${{ inputs.app-title }}
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          signing-key: ${{ secrets.LINUX_SIGNING_KEY }}
+          signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}

@@ -77,12 +77,12 @@ With `LINUX_SIGNING_KEY` set in the repo's `release` environment and listed in t
 | `.deb` | embedded `_gpgorigin` member (`debsigs`) and `<file>.asc` | `debsig-verify`, `gpg --verify` |
 | `.pkg.tar.zst` | `<file>.sig` | pacman, `pacman-key --verify` |
 | `.AppImage`, `.tar.gz`, `.zsync` | `<file>.asc` | `gpg --verify` |
-| `.flatpak` | signed commit, public key embedded in the bundle, and `<file>.asc` | `flatpak install` (refuses another key) |
+| `.flatpak` | signed commit, public key embedded in the bundle, and `<file>.asc` | `flatpak install` checks the embedded key; authenticate it separately on first install |
 | Flatpak OCI image | `<file>.oci.sig` for `ghcr.io/<repo>@<digest>` (manifest in `<file>.oci-manifest.json`) | Flatpak, from the remote's signature lookaside |
 | everything in the release | `SHA256SUMS.txt.asc` | `gpg --verify SHA256SUMS.txt.asc` |
 
 The release also carries the public key as `release-signing-key.asc`; publish its fingerprint
-somewhere users can check it. The Flatpak bundle is signed when the app's
+somewhere users can check it independently. On first install, compare that fingerprint with the key in the bundle: a bundle can contain an attacker-controlled key. Signed bundles omit the OCI update URL until the signature lookaside is deployed. Once it is live and the launcher configures it, set the `LINUX_OCI_SIGNATURES_READY` release environment variable to `1` in each app; subsequent stable bundles then include the OCI URL. Earlier bundles can be updated by installing a newer bundle. Signing is limited to builds from the `release` branch. The Flatpak bundle is signed when the app's
 `packaging/linux/flatpak-bundle.sh` has been updated with `scripts/scaffold-flatpak-oci.sh`.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing

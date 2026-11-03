@@ -46,6 +46,7 @@ GPG_KEYS=()
 if [[ -n "${SIGNING_FPR:-}" ]]; then
   flatpak build-sign "$WORK/repo" "$APP_ID" stable --gpg-sign="$SIGNING_FPR" --gpg-homedir="${GNUPGHOME:?}"
   GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")
+  if [[ "${OCI_SIGNATURES_READY:-}" != 1 ]]; then OCI_REPO=""; fi
 fi
 """
 
@@ -161,6 +162,21 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         self.assertIn("already signs the bundle its own way", res.stderr)
         self.assertEqual(self.bundle_file.read_text(encoding="utf-8"), own)
 
+    def test_verify_rejects_missing_key_and_guard_after_command(self):
+        self.run_script()
+        original = self.bundle_file.read_text(encoding="utf-8")
+        self.bundle_file.write_text(original.replace('  GPG_KEYS=(--gpg-keys="${SIGNING_PUBKEY:?}")\n', ''), encoding="utf-8")
+        self.assertIn("signing=0", self.run_script("--verify").stdout)
+        guard = 'if [[ "$VERSION" == *-* ]]; then OCI_REPO=""; fi\n'
+        self.bundle_file.write_text(original.replace(guard, '') + guard, encoding="utf-8")
+        self.assertIn("repo_url=0", self.run_script("--verify").stdout)
+
+    def test_custom_signing_rejects_before_writing(self):
+        original = SAMPLE_BUNDLE_SH.replace('OUT="$DIST', 'flatpak build-sign custom\nOUT="$DIST', 1)
+        self.bundle_file.write_text(original, encoding="utf-8")
+        self.assertNotEqual(self.run_script(check=False).returncode, 0)
+        self.assertEqual(self.bundle_file.read_text(encoding="utf-8"), original)
+
     def bundle_commands(self, **env):
         """Runs the scaffolded script with a stub flatpak; returns each flatpak command it ran."""
         tools = self.repo_dir / "tools"
@@ -171,7 +187,7 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
         stub.chmod(0o755)
         log.write_text("")
         run_env = dict(os.environ, PATH=f"{tools}{os.pathsep}{os.environ['PATH']}", DIST=str(self.repo_dir), ROOT=str(self.repo_dir))
-        for name in ["SIGNING_FPR", "SIGNING_PUBKEY", "GNUPGHOME"]:
+        for name in ["SIGNING_FPR", "SIGNING_PUBKEY", "GNUPGHOME", "OCI_SIGNATURES_READY"]:
             run_env.pop(name, None)
         run_env.update(env)
         subprocess.run(["bash", str(self.bundle_file), "--no-test"], env=run_env, check=True, capture_output=True, text=True)
@@ -179,10 +195,12 @@ class ScaffoldFlatpakOciTests(unittest.TestCase):
 
     def test_the_scaffolded_script_signs_only_a_release_build(self):
         self.run_script()
-        signed = self.bundle_commands(VERSION="1.2.3", SIGNING_FPR="ABCD", SIGNING_PUBKEY="/k.gpg", GNUPGHOME="/g")
+        signed = self.bundle_commands(VERSION="1.2.3", SIGNING_FPR="ABCD", SIGNING_PUBKEY="/k.gpg", GNUPGHOME="/g", OCI_SIGNATURES_READY="1")
         self.assertEqual(signed[0], ["build-sign", "/tmp/bundle/repo", "ai.storyteller.sampleapp", "stable", "--gpg-sign=ABCD", "--gpg-homedir=/g"])
         self.assertIn("--gpg-keys=/k.gpg", signed[1])
         self.assertIn("--repo-url=oci+https://getartcraft.com", signed[1])
+        waiting = self.bundle_commands(VERSION="1.2.3", SIGNING_FPR="ABCD", SIGNING_PUBKEY="/k.gpg", GNUPGHOME="/g")
+        self.assertFalse(any(a.startswith("--repo-url") for a in waiting[1]))
         unsigned = self.bundle_commands(VERSION="1.2.3")
         self.assertEqual([c[0] for c in unsigned], ["build-bundle"])
         self.assertFalse(any(a.startswith("--gpg-keys") for a in unsigned[0]))
