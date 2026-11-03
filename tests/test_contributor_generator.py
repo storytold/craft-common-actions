@@ -155,17 +155,19 @@ class ContributorRefreshTests(unittest.TestCase):
                 self.assertEqual(rows["bob"]["people_entry"], expected)
 
     def test_pull_openers_trust_only_one_merged_reachable_opener(self):
-        """Ignore unmerged, unreachable and truncated PR lists; disagreeing openers stay unknown."""
-        shas = [c * 40 for c in "abcdef"]
-        merged = lambda login, oid="1" * 40: dict(merged=True, author=dict(login=login), mergeCommit=dict(oid=oid))
+        """Ignore unmerged, unreachable, bot-opened and truncated PR lists; disagreeing openers stay unknown."""
+        shas = [c * 40 for c in "abcdef"] + ["f" * 39 + "e"]
+        merged = lambda login, oid="1" * 40, kind="User": dict(
+            merged=True, author=dict(__typename=kind, login=login), mergeCommit=dict(oid=oid))
         repository = dict(
             c0=dict(associatedPullRequests=dict(totalCount=2, nodes=[merged("alice"), merged("alice")])),
             c1=dict(associatedPullRequests=dict(totalCount=2, nodes=[merged("alice"), merged("mallory")])),
             c2=dict(associatedPullRequests=dict(totalCount=1, nodes=[dict(merged=False, author=dict(login="bob"),
                                                                            mergeCommit=None)])),
             c3=dict(associatedPullRequests=dict(totalCount=1, nodes=[merged("bob", "9" * 40)])),
-            c4=dict(associatedPullRequests=dict(totalCount=21, nodes=[merged("bob")])),
-            c5=None)
+            c4=dict(associatedPullRequests=dict(totalCount=11, nodes=[merged("bob")])),
+            c5=dict(associatedPullRequests=dict(totalCount=1, nodes=[merged("dependabot", kind="Bot")])),
+            c6=None)
         with patch.object(credits, "run", return_value=json.dumps(dict(data=dict(repository=repository)))) as mocked:
             openers = credits.pull_openers(self.root, "owner/app", shas, {"1" * 40})
         self.assertEqual(openers, {shas[0]: "alice"})

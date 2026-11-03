@@ -142,23 +142,31 @@ def pull_openers(root, repo, shas, reachable):
     owner, name = repo.split("/")
     openers = {}
     shas = sorted(shas)
-    for start in range(0, len(shas), 50):
-        batch = shas[start:start + 50]
+    # Small batches: commit-to-PR association is expensive, and large queries time out on GitHub.
+    for start in range(0, len(shas), 20):
+        batch = shas[start:start + 20]
         if any(not re.fullmatch(r"[0-9a-f]{40,64}", sha) for sha in batch):
             raise ValueError("Invalid commit identity in PR lookup")
         fields = " ".join(
-            f'c{index}: object(oid: "{sha}") {{ ... on Commit {{ associatedPullRequests(first: 20) {{'
-            " totalCount nodes { merged author { login } mergeCommit { oid } } } } }"
+            f'c{index}: object(oid: "{sha}") {{ ... on Commit {{ associatedPullRequests(first: 10) {{'
+            " totalCount nodes { merged author { __typename login } mergeCommit { oid } } } } }"
             for index, sha in enumerate(batch))
         query = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
         body = json.dumps(dict(query=query, variables=dict(owner=owner, name=name)))
-        data = json.loads(run(["gh", "api", "graphql", "--input", "-"], root, input_text=body))["data"]["repository"]
+        try:
+            output = run(["gh", "api", "graphql", "--input", "-"], root, input_text=body)
+        except RuntimeError:
+            # GitHub reports transient query timeouts as failures; one retry keeps a release moving.
+            output = run(["gh", "api", "graphql", "--input", "-"], root, input_text=body)
+        data = json.loads(output)["data"]["repository"]
         for index, sha in enumerate(batch):
             pulls = ((data.get(f"c{index}") or {}).get("associatedPullRequests")) or {}
             nodes = pulls.get("nodes") or []
             if pulls.get("totalCount", 0) > len(nodes):
                 continue
-            logins = {(pull.get("author") or {}).get("login") for pull in nodes
+            # GraphQL names bot openers without "[bot]" (dependabot), so only User accounts count.
+            logins = {(pull.get("author") or {}).get("login")
+                      if (pull.get("author") or {}).get("__typename") == "User" else None for pull in nodes
                       if pull.get("merged") and (pull.get("mergeCommit") or {}).get("oid") in reachable}
             if len(logins) == 1 and None not in logins:
                 openers[sha] = next(iter(logins))
