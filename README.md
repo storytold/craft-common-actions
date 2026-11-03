@@ -18,7 +18,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
-- **Draft Release** (computes `SHA256SUMS.txt` and publishes/updates draft GitHub Release)
+- **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
 
 #### Caller Example:
 ```yaml
@@ -63,7 +63,37 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
       AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
 ```
+
+#### Linux package signing
+
+With `LINUX_SIGNING_KEY` set in the repo's `release` environment and listed in the caller's
+`secrets:` block, a release signs every Linux format with that OpenPGP key:
+
+| Format | Signature | Checked by |
+|---|---|---|
+| `.rpm` | embedded (`rpmsign`) | `rpm -K`, dnf/zypper with `gpgcheck` |
+| `.deb` | embedded `_gpgorigin` member (`debsigs`) and `<file>.asc` | `debsig-verify`, `gpg --verify` |
+| `.pkg.tar.zst` | `<file>.sig` | pacman, `pacman-key --verify` |
+| `.AppImage`, `.tar.gz`, `.zsync` | `<file>.asc` | `gpg --verify` |
+| `.flatpak` | signed commit, public key embedded in the bundle, and `<file>.asc` | `flatpak install` checks the embedded key; authenticate it separately on first install |
+| Flatpak OCI image | `<file>.oci.sig` for `ghcr.io/<repo>@<digest>` (manifest in `<file>.oci-manifest.json`) | Flatpak, from the remote's signature lookaside |
+| everything in the release | `SHA256SUMS.txt.asc` | `gpg --verify SHA256SUMS.txt.asc` |
+
+The release also carries the public key as `release-signing-key.asc`; publish its fingerprint
+somewhere users can check it independently. On first install, compare that fingerprint with the key in the bundle: a bundle can contain an attacker-controlled key. Signed bundles omit the OCI update URL until the signature lookaside is deployed. Once it is live and the launcher configures it, set the `LINUX_OCI_SIGNATURES_READY` release environment variable to `1` in each app; subsequent stable bundles then include the OCI URL. Earlier bundles can be updated by installing a newer bundle. Signing is limited to builds from the `release` branch. The Flatpak bundle is signed when the app's
+`packaging/linux/flatpak-bundle.sh` has been updated with `scripts/scaffold-flatpak-oci.sh`.
+
+The key must sign without a passphrase. Keep the primary key offline and store only a signing
+subkey:
+
+```sh
+gpg --quick-add-key <primary-fingerprint> ed25519 sign 2y
+gpg --armor --export-secret-subkeys <signing-subkey-fingerprint>! | gh secret set LINUX_SIGNING_KEY --env release
+```
+
+Without the secret the release is published unsigned, with a warning.
 
 #### Automatic contributor credits (opt-in)
 
@@ -537,7 +567,8 @@ Individual actions are also available for composing custom pipelines:
   ```
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
-- `actions/draft-release`: Collects artifacts, calculates SHA256 checksums, and publishes/updates draft GitHub release.
+- `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
+- `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
