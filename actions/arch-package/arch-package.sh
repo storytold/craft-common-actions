@@ -132,8 +132,20 @@ pkgdesc=""
 shopt -s nullglob
 metainfos=("$stage"/share/metainfo/*.metainfo.xml)
 shopt -u nullglob
+# The metainfo file comes from the archive. Read it only when it is a regular file (not a
+# symlink, FIFO or device) that resolves inside staging, and read at most a bounded prefix, so a
+# link to an endless stream such as /dev/zero cannot make the parser below consume unbounded memory.
+metainfo_max_bytes=1048576
+metainfo_text=""
 if [[ "${#metainfos[@]}" -gt 0 ]]; then
-  pkgdesc="$(sed -n 's:.*<summary>\(.*\)</summary>.*:\1:p' "${metainfos[0]}" 2>/dev/null | head -n 1 |
+  metainfo="${metainfos[0]}"
+  stage_real="$(realpath -- "$stage")"
+  metainfo_real="$(realpath -e -- "$metainfo" 2>/dev/null)" || metainfo_real=""
+  if [[ -L "$metainfo" || ! -f "$metainfo" || "$metainfo_real" != "$stage_real"/* ]]; then
+    die "refusing metainfo $(basename -- "$metainfo"): not a regular file inside the archive"
+  fi
+  metainfo_text="$(head -c "$metainfo_max_bytes" -- "$metainfo" | tr -d '\0')"
+  pkgdesc="$(sed -n 's:.*<summary>\(.*\)</summary>.*:\1:p' <<< "$metainfo_text" | head -n 1 |
     sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g')"
 fi
 if [[ -z "$pkgdesc" ]]; then
@@ -142,8 +154,8 @@ fi
 
 # Determine homepage url from AppStream metainfo if available
 url="https://storyteller.ai"
-if [[ "${#metainfos[@]}" -gt 0 ]]; then
-  metainfo_url="$(sed -n 's:.*<url type="homepage">\(.*\)</url>.*:\1:p' "${metainfos[0]}" 2>/dev/null | head -n 1)"
+if [[ -n "$metainfo_text" ]]; then
+  metainfo_url="$(sed -n 's:.*<url type="homepage">\(.*\)</url>.*:\1:p' <<< "$metainfo_text" | head -n 1)"
   if [[ -n "$metainfo_url" ]]; then url="$metainfo_url"; fi
 fi
 
