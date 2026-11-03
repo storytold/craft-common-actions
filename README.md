@@ -147,7 +147,10 @@ An unsuccessful refresh or missing artifact blocks the release. Existing callers
 
 The shared generator uses local Git text/binary statistics and GitHub-linked author/co-author
 identities and merged PRs. Unlinked commits are counted as unattributed. Name preferences are
-verified against the commits that introduced their values; a maintainer override also requires
+verified against the commits that introduced their values. A Git email-linked author is trusted
+for consent only when GitHub reports a valid signature whose signer matches that author;
+otherwise verification falls back to the authenticated opener of an unambiguous merged PR.
+Ordinary commit and co-author credit attribution is unchanged. A maintainer override also requires
 a recorded `consent_source` and repository write access. Public profile names are fetched only
 for verified entries opting into synchronization. Recognized Anthropic Claude and OpenAI
 Codex/ChatGPT/GPT Co-Authored-By trailers supply model credits; other providers and unrecognized

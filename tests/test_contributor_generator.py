@@ -106,6 +106,7 @@ class ContributorRefreshTests(unittest.TestCase):
         pages = []
         for sha, login, following in (("a" * 40, "alice", "next"), ("b" * 40, "bob", None)):
             node = dict(oid=sha, author=dict(user=dict(login=login)),
+                        signature=dict(state="VALID", signer=dict(login=login)),
                         authors=dict(nodes=[dict(user=dict(login="alice")), dict(user=dict(login="bob"))],
                                      pageInfo=dict(hasNextPage=False)))
             pages.append(json.dumps(dict(data=dict(repository=dict(object=dict(history=dict(
@@ -115,8 +116,48 @@ class ContributorRefreshTests(unittest.TestCase):
         self.assertEqual(primary, {"a" * 40: "alice", "b" * 40: "bob"})
         self.assertEqual(authors["b" * 40], {"alice": "alice", "bob": "bob"})
         bodies = [json.loads(call.kwargs["input_text"]) for call in mocked.call_args_list]
+        self.assertIn("signature { state signer { login } }", bodies[0]["query"])
         self.assertIsNone(bodies[0]["variables"]["cursor"])
         self.assertEqual(bodies[1]["variables"]["cursor"], "next")
+
+    def test_consent_identity_requires_a_valid_matching_signer(self):
+        """Spoofable email attribution cannot authorize names; signed authors or PR openers can."""
+        sha = self.git("rev-parse", "HEAD")
+        signatures = [
+            (None, False),
+            (dict(state="INVALID", signer=dict(login="alice")), False),
+            (dict(state="VALID", signer=None), False),
+            (dict(state="VALID", signer=dict(login="mallory")), False),
+            (dict(state="VALID", signer=dict(login="ALICE")), True),
+        ]
+        real_run = credits.run
+        for signature, expected in signatures:
+            with self.subTest(signature=signature):
+                node = dict(oid=sha, author=dict(user=dict(login="alice")), signature=signature,
+                            authors=dict(nodes=[dict(user=dict(login="alice"))],
+                                         pageInfo=dict(hasNextPage=False)))
+                page = json.dumps(dict(data=dict(repository=dict(object=dict(history=dict(
+                    nodes=[node], pageInfo=dict(hasNextPage=False, endCursor=None)))))))
+
+                def response(args, root, input_text=None):
+                    if args[:3] == ["gh", "api", "graphql"]:
+                        return page
+                    return real_run(args, root, input_text)
+
+                for opener in (None, "alice", "mallory"):
+                    via_pull = opener == "alice"
+                    self.pulls = [dict(number=1, sha=sha, login=opener)] if opener else []
+                    self.api_calls.clear()
+                    with patch.object(credits, "run", side_effect=response), \
+                            patch.object(credits, "api", side_effect=self.api):
+                        result = credits.collect(self.root, "owner/app")
+                    row = result["contributors"][0]
+                    self.assertEqual(row["login"], "alice")
+                    self.assertEqual(row["commits"], 1)
+                    self.assertEqual(row["people_entry"], expected or via_pull)
+                    self.assertEqual(row["github_name"], "Alice Public" if expected or via_pull else None)
+                    self.assertEqual(any(endpoint == "users/alice" for endpoint, _, _ in self.api_calls),
+                                     expected or via_pull)
 
     def test_invalid_people_field_is_an_actionable_error(self):
         """Reject a malformed opt-in instead of guessing its intended value."""
@@ -263,6 +304,9 @@ class ContributorRefreshTests(unittest.TestCase):
                       dict(number=1, sha=sha, login="alice"),
                       dict(number=2, sha="f" * 40, login="outsider")]
         result = self.collect()
+        pull_queries = [query for endpoint, query, _ in self.api_calls if "/pulls?" in endpoint]
+        self.assertEqual(len(pull_queries), 1)
+        self.assertIn("select(.merged_at != null)", pull_queries[0])
         self.assertEqual(len(result["contributors"]), 1)
         self.assertEqual(result["contributors"][0]["prs"], 1)
 
@@ -290,6 +334,24 @@ class ContributorRefreshTests(unittest.TestCase):
         self.assertEqual(self.api_calls, [])
         self.assertEqual(self.output.read_bytes(), original)
 
+    def test_missing_or_untracked_preferences_fail_before_api_access(self):
+        """An absent committed preference file must not trigger collection or leak local names."""
+        self.git("rm", "contributors/people.toml")
+        self.git("commit", "-m", "Remove preference file")
+        original = self.output.read_bytes()
+        for untracked in (False, True):
+            with self.subTest(untracked=untracked):
+                if untracked:
+                    self.people.write_text('[people.alice]\ndisplay_name = "Private untracked name"\n')
+                with patch.object(credits, "commit_authors") as mocked_history, \
+                        patch.object(credits, "api") as mocked_api:
+                    with self.assertRaisesRegex(ValueError, "commit or restore") as error:
+                        credits.collect(self.root, "owner/app")
+                self.assertNotIn("Private untracked name", str(error.exception))
+                mocked_history.assert_not_called()
+                mocked_api.assert_not_called()
+                self.assertEqual(self.output.read_bytes(), original)
+
     def test_atomic_write_retains_previous_snapshot_on_replace_failure(self):
         """Preserve the last good file when disk replacement fails."""
         original = self.output.read_bytes()
@@ -316,6 +378,7 @@ endpoint = sys.argv[2]
 if endpoint == "graphql":
     commits = json.loads(Path(os.environ["API_FIXTURE"]).read_text())["commits"]
     nodes = [dict(oid=row["sha"], author=dict(user=dict(login=row["login"])),
+                  signature=dict(state="VALID", signer=dict(login=row["login"])),
                   authors=dict(nodes=[dict(user=dict(login=row["login"]))],
                                pageInfo=dict(hasNextPage=False))) for row in commits]
     print(json.dumps(dict(data=dict(repository=dict(object=dict(history=dict(

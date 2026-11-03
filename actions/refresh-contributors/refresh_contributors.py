@@ -39,7 +39,7 @@ def commit_authors(root, repo, head):
     query = """query($owner: String!, $name: String!, $head: String!, $cursor: String) {
       repository(owner: $owner, name: $name) { object(expression: $head) { ... on Commit {
         history(first: 100, after: $cursor) {
-          nodes { oid author { user { login } }
+          nodes { oid author { user { login } } signature { state signer { login } }
             authors(first: 100) { nodes { user { login } } pageInfo { hasNextPage } }
           }
           pageInfo { hasNextPage endCursor }
@@ -59,7 +59,13 @@ def commit_authors(root, repo, head):
             if node["authors"]["pageInfo"]["hasNextPage"]:
                 raise ValueError(f"More than 100 authors on {sha}; refusing incomplete credits")
             primary = node["author"]["user"]
-            identities[sha] = primary["login"] if primary else None
+            signature = node.get("signature") or {}
+            signer = (signature.get("signer") or {}).get("login")
+            signed_by_author = (signature.get("state") == "VALID" and primary is not None
+                                and signer is not None and signer.casefold() == primary["login"].casefold())
+            # Email-linked authors still receive credit, but only a matching signer
+            # authenticates a commit's author for opt-in name/consent checks.
+            identities[sha] = primary["login"] if signed_by_author else None
             accounts = [actor["user"]["login"] for actor in node["authors"]["nodes"] if actor["user"]]
             if primary:
                 accounts.append(primary["login"])
@@ -211,6 +217,7 @@ def collect(root, repo):
     head = run(["git", "rev-parse", "HEAD"], root).strip()
     try:
         run(["git", "diff", "--quiet", head, "--", "contributors/people.toml"], root)
+        run(["git", "cat-file", "-e", f"{head}:contributors/people.toml"], root)
     except RuntimeError as error:
         raise ValueError("Contributor preferences must match the release commit; "
                          f"commit or restore contributors/people.toml ({error})") from error
