@@ -157,8 +157,10 @@ Devin author commits themselves; both are credited in the snapshot's `models`, w
 under **About ▸ Models**. Agents are recognized only by their exact Git email or GitHub account
 (`AGENT_EMAILS` and `AGENT_LOGINS` in the generator), never by name, so a person's work address at
 an AI company is still a person. A recognized agent's model and version are read from its Git name
-(`Claude Opus 5.5`, `GPT-6.1 Sol`, `DeepSeek V4.1 Flash`); unrecognized emails are skipped. Add a new
-agent to those tables. Other `[bot]` accounts, such as dependabot, are left out.
+(`Claude Opus 5.5`, `GPT-6.1 Sol`, `DeepSeek V4.1 Flash`), using only the words those tables list for
+that provider: Git names are free text that ends up in the apps, so any other word credits the
+agent's default model instead. Unrecognized emails are skipped. Add a new agent or model word to
+those tables. Other `[bot]` accounts, such as dependabot, are left out.
 
 Name preferences are verified against the commits that introduced their values. A Git
 email-linked author is trusted for consent only when GitHub reports a valid signature whose signer

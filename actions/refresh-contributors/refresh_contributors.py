@@ -17,36 +17,38 @@ import tomllib
 
 
 # AI agents identified by their exact Git email or GitHub account: (company, id prefix, default
-# model, read the model and version from the Git name). Agents are credited as models, never people.
+# model, the words a Git name may use to name a model). Agents are credited as models, never people.
+# Git names are free text that ends up in the apps, so a model title holds only these words.
+ANTHROPIC = ("Anthropic", "anthropic", "Claude", ("Claude", "Opus", "Sonnet", "Haiku", "Fable", "Mythos", "Code"))
+OPENAI = ("OpenAI", "openai", "Codex", ("Codex", "ChatGPT", "GPT", "Sol", "Luna", "Astra", "Terra"))
+ZHIPU = ("Zhipu AI", "zhipu", "GLM", ("GLM", "Flash", "ZCode"))
 AGENT_EMAILS = {
-    "noreply@anthropic.com": ("Anthropic", "anthropic", "Claude", True),
-    "codex@openai.com": ("OpenAI", "openai", "Codex", True),
-    "noreply@openai.com": ("OpenAI", "openai", "Codex", True),
-    "cursoragent@cursor.com": ("Anysphere", "anysphere", "Cursor", False),
-    "noreply@deepseek.com": ("DeepSeek", "deepseek", "DeepSeek", True),
-    "noreply@z.ai": ("Zhipu AI", "zhipu", "GLM", True),
-    "noreply@zcode.ai": ("Zhipu AI", "zhipu", "GLM", True),
-    "noreply@qwen.ai": ("Alibaba", "alibaba", "Qwen", True),
-    "noreply@google.com": ("Google", "google", "Gemini", True),
-    "noreply@minimax.io": ("MiniMax", "minimax", "MiniMax", True),
-    "noreply@x.ai": ("xAI", "xai", "Grok", True),
-    "noreply@xiaomi.com": ("Xiaomi", "xiaomi", "MiMo", False),
-    "noreply@opencode.ai": ("OpenCode", "opencode", "OpenCode", True),
-    "noreply@codebuff.com": ("Codebuff", "codebuff", "Codebuff", False),
-    "noreply@paperclip.ing": ("Paperclip", "paperclip", "Paperclip", False),
+    "noreply@anthropic.com": ANTHROPIC,
+    "codex@openai.com": OPENAI,
+    "noreply@openai.com": OPENAI,
+    "cursoragent@cursor.com": ("Anysphere", "anysphere", "Cursor", ()),
+    "noreply@deepseek.com": ("DeepSeek", "deepseek", "DeepSeek", ("DeepSeek", "Flash", "Free")),
+    "noreply@z.ai": ZHIPU,
+    "noreply@zcode.ai": ZHIPU,
+    "noreply@qwen.ai": ("Alibaba", "alibaba", "Qwen", ("Qwen", "Flash")),
+    "noreply@google.com": ("Google", "google", "Gemini", ("Gemini", "Flash", "Antigravity")),
+    "noreply@minimax.io": ("MiniMax", "minimax", "MiniMax", ("MiniMax", "M3")),
+    "noreply@x.ai": ("xAI", "xai", "Grok", ("Grok",)),
+    "noreply@xiaomi.com": ("Xiaomi", "xiaomi", "MiMo", ()),
+    "noreply@opencode.ai": ("OpenCode", "opencode", "OpenCode", ("OpenCode", "Big", "Pickle")),
+    "noreply@codebuff.com": ("Codebuff", "codebuff", "Codebuff", ()),
+    "noreply@paperclip.ing": ("Paperclip", "paperclip", "Paperclip", ()),
 }
 AGENT_LOGINS = {
     "claude": AGENT_EMAILS["noreply@anthropic.com"],
     "codex": AGENT_EMAILS["codex@openai.com"],
     "cursoragent": AGENT_EMAILS["cursoragent@cursor.com"],
-    "copilot": ("GitHub", "github", "Copilot", False),
-    "copilot-swe-agent[bot]": ("GitHub", "github", "Copilot", False),
-    "devin-ai-integration[bot]": ("Cognition", "cognition", "Devin", False),
-    "coderabbitai[bot]": ("CodeRabbit", "coderabbit", "CodeRabbit", False),
-    "capy-ai[bot]": ("Capy", "capy", "Capy", False),
+    "copilot": ("GitHub", "github", "Copilot", ()),
+    "copilot-swe-agent[bot]": ("GitHub", "github", "Copilot", ()),
+    "devin-ai-integration[bot]": ("Cognition", "cognition", "Devin", ()),
+    "coderabbitai[bot]": ("CodeRabbit", "coderabbit", "CodeRabbit", ()),
+    "capy-ai[bot]": ("Capy", "capy", "Capy", ()),
 }
-# Display casing for model words that Git names often write in lower case.
-MODEL_WORDS = {word.casefold(): word for word in ("GPT", "ChatGPT", "GLM", "DeepSeek", "MiMo", "OpenCode", "MiniMax")}
 
 
 def agent(email, login=None):
@@ -253,30 +255,33 @@ def model(trailer):
     known = agent(email)
     if known is None:
         return None
-    company, prefix, default, named = known
+    company, prefix, default, allowed = known
+    spelling = {word.casefold(): word for word in allowed}
 
     def parse(text):
-        """Split "GPT-6.1 Sol" into its model words and first version number."""
+        """Split "GPT-6.1 Sol" into model words and a version, or None if any word is unknown."""
         words = [word for word in re.split(r"[\s_-]+", text) if word]
         # Drop a bare company prefix ("OpenAI Codex"), not a brand that names the model ("DeepSeek V3.2").
         if words and words[0].casefold() == company.casefold() != default.split()[0].casefold():
             words = words[1:]
         family, version = [], ""
         for word in words:
-            if not version and re.fullmatch(r"[vV]?\d+(?:\.\d+)*", word):
+            if not version and re.fullmatch(r"[vV]?\d{1,3}(?:\.\d{1,3}){0,2}", word):
                 version = word.lstrip("vV")
+            elif word.casefold() in spelling:
+                family.append(spelling[word.casefold()])
             else:
-                family.append(MODEL_WORDS.get(word.casefold(), word[:1].upper() + word[1:]))
+                return None
         return family, version
 
-    family, version = [], ""
-    if named:
-        # "Claude Opus 5.5 (1M context)", "GPT-6.1 Sol", "OpenAI Codex", "DeepSeek V4.1 Flash";
-        # "Codex (GPT-6)" names its model in brackets when the outer name has no version.
-        family, version = parse(re.sub(r"\([^)]*\)", " ", name))
-        for inner in re.findall(r"\(([^)]*)\)", name):
-            if not version and parse(inner)[1]:
-                family, version = parse(inner)
+    # "Claude Opus 5.5 (1M context)", "GPT-6.1 Sol", "OpenAI Codex", "DeepSeek V4.1 Flash"; "Codex
+    # (GPT-6)" names its model in brackets when the outer name has no version. A name with any other
+    # word, such as a person's, credits the agent's default model and repeats none of it.
+    family, version = (parse(re.sub(r"\([^)]*\)", " ", name)) if allowed else None) or ([], "")
+    for inner in re.findall(r"\(([^)]*)\)", name) if allowed else []:
+        found = parse(inner)
+        if not version and found and found[1]:
+            family, version = found
     title = " ".join(family) or default
     return dict(id=f"{prefix}/" + title.casefold().replace(" ", "-") + (f"/{version}" if version else ""),
                 company=company, model=title, version=version)

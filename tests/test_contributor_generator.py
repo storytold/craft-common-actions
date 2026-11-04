@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -386,6 +387,34 @@ class ContributorRefreshTests(unittest.TestCase):
             with self.subTest(trailer=trailer):
                 self.assertIsNone(credits.model(trailer))
 
+    def test_free_text_git_names_never_become_model_titles(self):
+        """Anyone can commit under an agent email; only known words reach the apps."""
+        claude, codex = ("anthropic/claude", "Claude", ""), ("openai/codex", "Codex", "")
+        for trailer, expected in {
+            "Private Person <noreply@anthropic.com>": claude,
+            "Claude Buy This 5.5 <noreply@anthropic.com>": claude,
+            "Claude 123456789 <noreply@anthropic.com>": claude,
+            "Mallory <codex@openai.com>": codex,
+            "GPT Mallory 6 <noreply@openai.com>": codex,
+            "Mallory (nothing here) <noreply@openai.com>": codex,
+            "Mallory (GPT-6) <noreply@openai.com>": ("openai/gpt/6", "GPT", "6"),
+            "Mallory <noreply@deepseek.com>": ("deepseek/deepseek", "DeepSeek", ""),
+        }.items():
+            with self.subTest(trailer=trailer):
+                identity = credits.model(trailer)
+                self.assertEqual((identity["id"], identity["model"], identity["version"]), expected)
+
+    def test_a_person_committing_under_an_agent_email_is_not_published(self):
+        """The commit credits the agent's default model and repeats nothing of the Git name."""
+        (self.root / "text.txt").write_text("spoofed\n")
+        self.commit("Spoofed author", None, author=("Private Person", "noreply@anthropic.com"))
+        (self.root / "text.txt").write_text("spoofed trailer\n")
+        self.commit("Spoofed trailer\n\nCo-authored-by: Other Person <noreply@openai.com>", None)
+        result = self.collect()
+        self.assertEqual({row["id"]: row["commits"] for row in result["models"]}, {"anthropic/claude": 1, "openai/codex": 1})
+        self.assertNotIn("Private Person", json.dumps(result))
+        self.assertNotIn("Other Person", json.dumps(result))
+
     def test_profiles_are_requested_only_for_verified_opt_in_entries(self):
         """A copied people entry never enables name synchronization."""
         result = self.collect()
@@ -430,8 +459,22 @@ class ContributorRefreshTests(unittest.TestCase):
         pull_queries = [query for endpoint, query, _ in self.api_calls if "/pulls?" in endpoint]
         self.assertEqual(len(pull_queries), 1)
         self.assertIn("select(.merged_at != null)", pull_queries[0])
+        self.assertIn("sha: .merge_commit_sha", pull_queries[0])
         self.assertEqual(len(result["contributors"]), 1)
         self.assertEqual(result["contributors"][0]["prs"], 1)
+
+    @unittest.skipUnless(shutil.which("jq"), "needs jq, the language of gh's --jq")
+    def test_pull_projection_selects_the_merge_commit_not_the_head(self):
+        """A squash merge's head commit is not on the base branch; only the merge commit is."""
+        self.collect()
+        query = next(query for endpoint, query, _ in self.api_calls if "/pulls?" in endpoint)
+        pulls = [dict(number=7, merged_at="2026-11-01T00:00:00Z", merge_commit_sha="a" * 40,
+                      head=dict(sha="b" * 40), user=dict(login="alice")),
+                 dict(number=8, merged_at=None, merge_commit_sha="c" * 40,
+                      head=dict(sha="d" * 40), user=dict(login="bob"))]
+        output = subprocess.check_output(["jq", "-c", query], input=json.dumps(pulls), text=True)
+        self.assertEqual([json.loads(line) for line in output.splitlines()],
+                         [dict(number=7, sha="a" * 40, login="alice")])
 
     def test_unknown_identity_is_not_guessed_from_git_author(self):
         """Keep unmapped commits visible as unattributed statistics."""
