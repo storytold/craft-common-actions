@@ -71,7 +71,10 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(self.validation['if'], "steps.token.outputs.available == 'true'")
         self.assertEqual(self.scan['if'], self.validation['if'])
         self.assertEqual(self.scan['env']['SONAR_HOST_URL'], 'https://sonarcloud.io')
-        self.assertEqual(self.scan['env']['SONAR_TOKEN'], '${{ secrets.SONAR_TOKEN }}')
+        self.assertEqual(
+            self.scan['env']['SONAR_TOKEN'],
+            '${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}',
+        )
         self.assertEqual(
             self.scan['with']['args'].splitlines()[0],
             '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold '
