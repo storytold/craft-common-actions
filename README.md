@@ -686,6 +686,12 @@ pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 
 Land the shared workflow before switching app callers to it. Keep each app's
 pre-signing check in `package.ps1` until its packaging process invokes the shared
 checker; moving the lint job alone does not replace that release safeguard.
+In each caller migration, replace only the `windows-install-policy` job, keeping
+the caller's triggers, permissions, concurrency and other jobs. Update its local
+test instructions before removing the old fixture generator. An app that still
+uses that generator locally can keep it during the transition. Full removal of
+the app-local checker needs a separate integration that keeps the pre-signing
+check available to both CI and local packaging builds.
 The shared checker's policy assertions are copied from the existing app checker;
 only the policy file location becomes an explicit parameter.
 
