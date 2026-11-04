@@ -119,7 +119,7 @@ jobs:
         with:
           packages: >-
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev
+            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev
             libgl1-mesa-dev mesa-vulkan-drivers
       - name: Install Rust and cargo-llvm-cov
         run: |
@@ -188,7 +188,7 @@ jobs:
         with:
           packages: >-
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev
+            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev
             libgl1-mesa-dev mesa-vulkan-drivers
       - uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68 # v2.88.1
         with:
@@ -291,7 +291,7 @@ jobs:
         with:
           packages: >-
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
-            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev
+            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev
             libgl1-mesa-dev mesa-vulkan-drivers
       - name: Install Rust and cargo-llvm-cov
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
