@@ -81,8 +81,9 @@ runs:
         # there are none to run).
         ast-grep test --config "$CONFIG" --skip-snapshot-tests
         # GitHub shows only the first few annotations of a step, so a failing scan also prints
-        # every finding as file:line in the log.
-        if ! ast-grep scan --config "$CONFIG" --format github "${paths[@]}"; then
-          ast-grep scan --config "$CONFIG" --report-style short "${paths[@]}" || true
+        # every finding as file:line in the log. "--" ends option parsing: a checked path whose
+        # name looks like an option (a file called --update-all, say) stays a path.
+        if ! ast-grep scan --config "$CONFIG" --format github -- "${paths[@]}"; then
+          ast-grep scan --config "$CONFIG" --report-style short -- "${paths[@]}" || true
           exit 1
         fi

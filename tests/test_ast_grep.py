@@ -38,6 +38,15 @@ class AstGrepTests(unittest.TestCase):
         self.assertEqual(set(step['with']), set(ACTION['inputs']))
         self.assertEqual(set(WORKFLOW['on']['workflow_call']['inputs']), set(ACTION['inputs']))
 
+    def test_scan_paths_follow_the_end_of_options_marker(self):
+        # A path the action checked must reach ast-grep as a path, never as an option.
+        run = ACTION['runs']['steps'][1]['run']
+        scans = [line for line in run.splitlines() if 'ast-grep scan' in line]
+        self.assertEqual(len(scans), 2)
+        for line in scans:
+            with self.subTest(line=line.strip()):
+                self.assertIn(' -- "${paths[@]}"', line)
+
 
 if __name__ == '__main__':
     unittest.main()

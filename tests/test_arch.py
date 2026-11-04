@@ -1,5 +1,6 @@
 """Unit tests for Arch Linux packaging action and workflow integration."""
 
+import io
 import os
 from pathlib import Path
 import re
@@ -210,6 +211,59 @@ exit 0
             )
             self.assertIn("provides=(myapp=1.2.3-2)", pkgbuild)
 
+    def test_prerelease_version_from_the_tarball_name(self):
+        # release.yml names the tarball after the resolved version, so a prerelease such as a
+        # 0.2.0-rc.1 test run reaches here with a hyphen in it. Arch pkgver has no hyphens; each
+        # form below still sorts before its release in pacman.
+        for version, pkgver in (("0.2.0-rc.1", "0.2.0rc.1"), ("1.2.3-1", "1.2.3pre1"), ("1.2.3--1", "1.2.3pre1")):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                tarball = self._create_fixture_tarball(tmp_path, filename=f"myapp-{version}-linux-x86_64.tar.gz")
+                tools = self._setup_mock_tools(tmp_path)
+                # Extract for real: an unmatched name falls back to the archive's executable.
+                (tools / "tar").unlink()
+                capture = tmp_path / "capture"
+                capture.mkdir()
+                res = subprocess.run(
+                    [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+                )
+                self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+                pkgbuild = (capture / "PKGBUILD").read_text()
+                self.assertIn(f"pkgver={pkgver}\n", pkgbuild)
+                self.assertIn("pkgrel=1\n", pkgbuild)
+                self.assertIn(f"provides=(myapp={pkgver}-1)", pkgbuild)
+                self.assertEqual([p.name for p in (tmp_path / "out").iterdir()],
+                                 [f"myapp-{version}-linux-x86_64.pkg.tar.zst"])
+
+    def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
+        """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
+
+        winit's X11 backend loads libxkbcommon-x11 at startup and panics without it, and Arch
+        ships it apart from libxkbcommon: a package without it could not open its window on
+        X11 or XWayland.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tarball = self._create_fixture_tarball(tmp_path)
+            tools = self._setup_mock_tools(tmp_path)
+            capture = tmp_path / "capture"
+            capture.mkdir()
+            res = subprocess.run(
+                [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+            )
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            depends = next(
+                line for line in (capture / "PKGBUILD").read_text().splitlines() if line.startswith("depends=(")
+            )
+            for package in ("'libxkbcommon'", "'libxkbcommon-x11'"):
+                self.assertIn(package, depends)
+
     def test_package_function_rejects_symlinked_license_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -241,6 +295,82 @@ exit 0
             )
             self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
             self.assertIn("SUCCESS: package() rejected symlinked licenses dir", res.stdout)
+
+    def _metainfo_tarball(self, tmp_path, add_metainfo):
+        """A release tarball whose share/metainfo entry is written by add_metainfo(tar, arcname)."""
+        tarball = self._create_fixture_tarball(tmp_path)
+        arcname = "share/metainfo/ai.storyteller.myapp.metainfo.xml"
+        with tarfile.open(tarball, "r:gz") as src:
+            members = [(m, src.extractfile(m).read() if m.isfile() else None) for m in src.getmembers()]
+        with tarfile.open(tarball, "w:gz") as tar:
+            for member, data in members:
+                tar.addfile(member, io.BytesIO(data) if data is not None else None)
+            add_metainfo(tar, arcname)
+        return tarball
+
+    def _run_with_real_tar(self, tmp_path, tarball):
+        # The shared mock tools replace tar with a no-op; these tests need the archive extracted.
+        tools = self._setup_mock_tools(tmp_path)
+        (tools / "tar").unlink()
+        capture = tmp_path / "capture"
+        capture.mkdir(exist_ok=True)
+        return capture, subprocess.run(
+            [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+        )
+
+    def test_metainfo_summary_and_homepage_are_read(self):
+        def add(tar, arcname):
+            data = (b'<component><summary>Edits &amp; paints</summary>'
+                    b'<url type="homepage">https://example.com/myapp</url></component>\n')
+            info = tarfile.TarInfo(arcname)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            capture, res = self._run_with_real_tar(tmp_path, self._metainfo_tarball(tmp_path, add))
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            pkgbuild = (capture / "PKGBUILD").read_text()
+            self.assertIn("pkgdesc=Edits\\ \\&\\ paints", pkgbuild)
+            self.assertIn("url=https://example.com/myapp", pkgbuild)
+
+    def test_metainfo_that_is_not_a_regular_file_is_refused(self):
+        """A metainfo entry that links to an endless stream, or is a FIFO, is refused before it is read."""
+        def symlink_to_zero(tar, arcname):
+            info = tarfile.TarInfo(arcname)
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/dev/zero"
+            tar.addfile(info)
+
+        def fifo(tar, arcname):
+            info = tarfile.TarInfo(arcname)
+            info.type = tarfile.FIFOTYPE
+            tar.addfile(info)
+
+        for name, add in (("symlink", symlink_to_zero), ("fifo", fifo)):
+            with self.subTest(kind=name), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                _, res = self._run_with_real_tar(tmp_path, self._metainfo_tarball(tmp_path, add))
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn("refusing metainfo", res.stderr)
+
+    def test_metainfo_read_is_bounded(self):
+        """Only a bounded prefix of a large metainfo file is parsed."""
+        def add(tar, arcname):
+            data = b"x" * (2 * 1024 * 1024) + b"<summary>past the limit</summary>\n"
+            info = tarfile.TarInfo(arcname)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            capture, res = self._run_with_real_tar(tmp_path, self._metainfo_tarball(tmp_path, add))
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            self.assertIn("pkgdesc=myapp", (capture / "PKGBUILD").read_text())
 
     @unittest.skipUnless(
         shutil.which("makepkg") and shutil.which("bsdtar") and shutil.which("zstd"),

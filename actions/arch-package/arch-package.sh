@@ -71,7 +71,8 @@ fi
 
 # Detect application name and version
 tar_basename="$(basename "$tarball" .tar.gz)"
-if [[ "$tar_basename" =~ ^([a-zA-Z0-9_-]+)-([0-9]+\.[0-9]+\.[0-9]+[^-_]*)-linux-([a-zA-Z0-9_]+)$ ]]; then
+# The version may carry a prerelease (1.2.3-rc.1): the hyphens are dropped from pkgver below.
+if [[ "$tar_basename" =~ ^([a-zA-Z0-9_-]+)-([0-9]+\.[0-9]+\.[0-9]+[^_]*)-linux-([a-zA-Z0-9_]+)$ ]]; then
   app="${BASH_REMATCH[1]}"
   raw_version="${BASH_REMATCH[2]}"
 else
@@ -91,15 +92,14 @@ if [[ ! "$app" =~ ^[a-zA-Z0-9][a-zA-Z0-9_+.-]*$ ]]; then
   die "invalid application name derived from archive: '$app'"
 fi
 
-# Format Arch pkgver (no hyphens or tildes allowed in pkgver)
-upstream="${raw_version%-*}"
-if [[ "$upstream" != "$raw_version" ]]; then
-  rel="${raw_version##*-}"
-  if [[ "$rel" =~ ^[0-9]+$ ]]; then
-    pkgrel="$rel"
-  fi
+# Format Arch pkgver (no hyphens or tildes allowed in pkgver). The version is semver, so a
+# hyphen starts a prerelease, not a package release; joined on, it still sorts before the
+# release in pacman (1.2.3rc.1 < 1.2.3).
+pkgver="${raw_version//\~/}"
+# A numeric prerelease needs a letter in front: 1.2.3-1 as 1.2.31 would sort after 1.2.4.
+if [[ "$pkgver" =~ ^[0-9]+\.[0-9]+\.[0-9]+-+[0-9] ]]; then
+  pkgver="${pkgver/-/pre}"
 fi
-pkgver="${upstream//\~/}"
 pkgver="${pkgver//-/}"
 # pkgver, pkgrel and the license words are written into PKGBUILD, which makepkg sources as
 # Bash; the tarball name and the environment are not trusted to be shell-safe.
@@ -132,8 +132,20 @@ pkgdesc=""
 shopt -s nullglob
 metainfos=("$stage"/share/metainfo/*.metainfo.xml)
 shopt -u nullglob
+# The metainfo file comes from the archive. Read it only when it is a regular file (not a
+# symlink, FIFO or device) that resolves inside staging, and read at most a bounded prefix, so a
+# link to an endless stream such as /dev/zero cannot make the parser below consume unbounded memory.
+metainfo_max_bytes=1048576
+metainfo_text=""
 if [[ "${#metainfos[@]}" -gt 0 ]]; then
-  pkgdesc="$(sed -n 's:.*<summary>\(.*\)</summary>.*:\1:p' "${metainfos[0]}" 2>/dev/null | head -n 1 |
+  metainfo="${metainfos[0]}"
+  stage_real="$(realpath -- "$stage")"
+  metainfo_real="$(realpath -e -- "$metainfo" 2>/dev/null)" || metainfo_real=""
+  if [[ -L "$metainfo" || ! -f "$metainfo" || "$metainfo_real" != "$stage_real"/* ]]; then
+    die "refusing metainfo $(basename -- "$metainfo"): not a regular file inside the archive"
+  fi
+  metainfo_text="$(head -c "$metainfo_max_bytes" -- "$metainfo" | tr -d '\0')"
+  pkgdesc="$(sed -n 's:.*<summary>\(.*\)</summary>.*:\1:p' <<< "$metainfo_text" | head -n 1 |
     sed -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g')"
 fi
 if [[ -z "$pkgdesc" ]]; then
@@ -142,8 +154,8 @@ fi
 
 # Determine homepage url from AppStream metainfo if available
 url="https://storyteller.ai"
-if [[ "${#metainfos[@]}" -gt 0 ]]; then
-  metainfo_url="$(sed -n 's:.*<url type="homepage">\(.*\)</url>.*:\1:p' "${metainfos[0]}" 2>/dev/null | head -n 1)"
+if [[ -n "$metainfo_text" ]]; then
+  metainfo_url="$(sed -n 's:.*<url type="homepage">\(.*\)</url>.*:\1:p' <<< "$metainfo_text" | head -n 1)"
   if [[ -n "$metainfo_url" ]]; then url="$metainfo_url"; fi
 fi
 
@@ -181,6 +193,9 @@ COMPRESSZST=(zstd -c -T0 --ultra -20 -)
 EOF
 
 # Write PKGBUILD
+# libxkbcommon-x11 is a hard dependency next to libxkbcommon: the apps build winit's X11 backend,
+# which loads it at startup on X11 and XWayland, and panics without it ("Library
+# libxkbcommon-x11.so could not be loaded"; photocraft#201). Arch packages it separately.
 cat > "$work/PKGBUILD" <<EOF
 # Maintainer: Storyteller Authors
 pkgname=$(printf '%q' "$pkgname")
@@ -190,7 +205,7 @@ pkgdesc=$(printf '%q' "$pkgdesc")
 arch=($(printf '%q' "$arch"))
 url=$(printf '%q' "$url")
 license=($license_str)
-depends=('glibc' 'gcc-libs' 'hicolor-icon-theme' 'libxkbcommon' 'vulkan-icd-loader')
+depends=('glibc' 'gcc-libs' 'hicolor-icon-theme' 'libxkbcommon' 'libxkbcommon-x11' 'vulkan-icd-loader')
 optdepends=(
   'alsa-lib: sound support'
   'pipewire-alsa: audio playback and recording via PipeWire'

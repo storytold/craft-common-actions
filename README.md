@@ -18,7 +18,7 @@ Full multi-platform release pipeline for Craft apps:
 - **Arch Linux** (x86_64, aarch64 `.pkg.tar.zst` built via `makepkg` from release tarball, named by bundle id; set `has-arch: false` to skip)
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
-- **Draft Release** (signs the Linux packages, computes `SHA256SUMS.txt` then generates a table of assets with architecture choices combined in each row and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
+- **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
 
 #### Caller Example:
 ```yaml
@@ -63,7 +63,79 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
       AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
 ```
+
+#### Linux package signing
+
+With `LINUX_SIGNING_KEY` set in the repo's `release` environment and listed in the caller's
+`secrets:` block, a release signs every Linux format with that OpenPGP key:
+
+| Format | Signature | Checked by |
+|---|---|---|
+| `.rpm` | embedded (`rpmsign`) | `rpm -K`, dnf/zypper with `gpgcheck` |
+| `.deb` | embedded `_gpgorigin` member (`debsigs`) and `<file>.asc` | `debsig-verify`, `gpg --verify` |
+| `.pkg.tar.zst` | `<file>.sig` | pacman, `pacman-key --verify` |
+| `.AppImage`, `.tar.gz`, `.zsync` | `<file>.asc` | `gpg --verify` |
+| `.flatpak` | signed commit, public key embedded in the bundle, and `<file>.asc` | `flatpak install` checks the embedded key; authenticate it separately on first install |
+| Flatpak OCI image | `<file>.oci.sig` for `ghcr.io/<repo>@<digest>` (manifest in `<file>.oci-manifest.json`) | Flatpak, from the remote's signature lookaside |
+| everything in the release | `SHA256SUMS.txt.asc` | `gpg --verify SHA256SUMS.txt.asc` |
+
+The release also carries the public key as `release-signing-key.asc`; publish its fingerprint
+somewhere users can check it independently. On first install, compare that fingerprint with the key in the bundle: a bundle can contain an attacker-controlled key. Signed bundles omit the OCI update URL until the signature lookaside is deployed. Once it is live and the launcher configures it, set the `LINUX_OCI_SIGNATURES_READY` release environment variable to `1` in each app; subsequent stable bundles then include the OCI URL. Earlier bundles can be updated by installing a newer bundle. Signing is limited to builds from the `release` branch. The Flatpak bundle is signed when the app's
+`packaging/linux/flatpak-bundle.sh` has been updated with `scripts/scaffold-flatpak-oci.sh`.
+
+The key must sign without a passphrase. Keep the primary key offline and store only a signing
+subkey:
+
+```sh
+gpg --quick-add-key <primary-fingerprint> ed25519 sign 2y
+gpg --armor --export-secret-subkeys <signing-subkey-fingerprint>! | gh secret set LINUX_SIGNING_KEY --env release
+```
+
+Without the secret the release is published unsigned, with a warning.
+
+#### Automatic contributor credits (opt-in)
+
+Apps with `scripts/refresh-contributors.py` can refresh bundled credits once before a release.
+Grant the caller workflow `contents: write` for release publishing, and keep the preparatory
+`credits` job read-only with its job-level override. A called workflow cannot increase the
+token permissions granted by its caller; see [reusable-workflow permissions](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#supported-keywords-for-jobs-that-call-a-reusable-workflow).
+Call the preparatory workflow, then pass its output to the release workflow:
+
+```yaml
+permissions:
+  contents: write
+
+jobs:
+  credits:
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: storytold/craft-common-actions/.github/workflows/refresh-contributors.yml@main
+  release:
+    needs: credits
+    permissions:
+      contents: write
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+    with:
+      app-name: effectcraft
+      app-title: EffectCraft
+      contributors-artifact: ${{ needs.credits.outputs.artifact-name }}
+    # Include the app's existing signing secrets here.
+```
+
+The preparatory workflow checks out full history, runs the app's script with `--repo` set to
+`github.repository` and a read-only `GH_TOKEN`, and validates that the resulting nonempty
+`contributors/contributors.json` belongs to `github.sha`. It uploads that file only after a
+successful refresh. The intermediate `contributor-snapshot-*` artifact stays outside the
+`release-*` collection used for release assets and checksums, including on reruns.
+Every source-build job installs the same artifact after checkout, including
+FreeBSD before copying the workspace to its VM. Flatpak and Arch inherit the refreshed credits
+from the Linux binaries. The generated snapshot is not committed or pushed back to the app.
+
+An unsuccessful refresh or missing artifact blocks the release. Existing callers that omit
+`contributors-artifact` keep their current behavior, permissions, and build paths.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
@@ -347,18 +419,34 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
-- `packages` installed through `actions/install-apt-packages` on Linux legs;
+- `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
   profile) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
-- a rust-cache dependency cache that only the default branch saves, so pull requests restore
-  main's entry and never evict it. The key includes the root `Cargo.toml`, since rust-cache hashes
-  only the members' manifests. Bump `cache-version` to start afresh.
+- a rust-cache dependency cache saved by the default branch by default. Pull requests only
+  restore caches; callers may opt manual branch runs into branch-scoped writes with
+  `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
+  table; dependency, version and comment edits do not discard reusable dependency artifacts.
+  rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
-`timeout-minutes` (default 60). Jobs only some apps need, such as fuzzing or web builds, stay in
-the app's own workflow next to the call.
+`timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
+check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
+`cache-version` so its cache (another profile or target) doesn't share the main gate's key:
+
+```yaml
+  web:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      cache-version: v1-web
+      os: '["ubuntu-24.04"]'
+      targets: wasm32-unknown-unknown
+      craft-fonts-ref: ""
+      tools: trunk@0.21.14
+      command: packaging/web/package.sh
+```
 
 #### Caller Example:
 ```yaml
@@ -479,7 +567,8 @@ Individual actions are also available for composing custom pipelines:
   ```
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
-- `actions/draft-release`: Collects artifacts, calculates SHA256 checksums, and publishes/updates draft GitHub release.
+- `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
+- `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
@@ -493,8 +582,14 @@ Keep app-specific packaging assertions in the caller repository and pass their
 Bash script to `packaging-lint.yml` with
 `extra-checks-script: packaging/check-app-specific.sh`. It runs after the shared
 lint action, with the checkout and lint tools available. A missing or failing
-requested script fails the job. Native Windows installer probes remain separate
-caller jobs; Linux static lint does not replace them.
+requested script fails the job. Linux static lint does not replace native Windows
+installer probes; those belong in a shared workflow here as well.
+
+An app's `.github/workflows/` only calls this repository's workflows at `@main`,
+with inputs and secrets: no caller jobs with their own `runs-on`/`steps`. App-specific
+checks (fuzzing, corpora, web builds, installer probes) become shared workflows or
+inputs here. Jobs that apps still run themselves move here without being dropped:
+an app removes one only once a shared workflow runs it.
 
 ## Job time limits
 
@@ -559,3 +654,17 @@ The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
 custom test group, default build/test failures, missing/corrupt packages and font
 environment propagation. They do not replace native FreeBSD caller runs.
+
+### Gate cache reuse
+
+The gate cache key includes the canonical root `[profile]` table, including per-package
+profile overrides. Dependency and version edits no longer change the restore prefix;
+`rust-cache` still keys on the lockfile, toolchain, environment and member manifests,
+and Cargo validates restored fingerprints. The first run after adopting this key
+is cold.
+
+Only the default branch saves by default. A caller may set
+`cache-save-on-dispatch: true` for repeated manual integration testing. This permits
+`workflow_dispatch` runs to save a cache scoped by GitHub to that branch, never a
+pull-request run. Use this selectively to avoid storage churn; sibling branches cannot
+restore each other's caches. Do not pass the input until this workflow change has landed.

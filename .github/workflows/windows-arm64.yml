@@ -62,9 +62,13 @@ jobs:
         with:
           toolchain: stable
           targets: aarch64-pc-windows-msvc
+      # The nightly run on main saves; pull requests and `release` restore it. A pull request's
+      # cache (about 0.7 GB) is visible to that pull request alone, and the apps' caches sit at
+      # the 10 GB limit, so each one evicted a cache main's gate restores.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-arm64-package
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install WiX
         uses: storytold/craft-common-actions/actions/install-wix@main
         with:
