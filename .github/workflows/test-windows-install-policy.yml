@@ -79,3 +79,63 @@ jobs:
             throw "Expected the shared checker to reject the mismatched UpgradeCode: $output"
           }
           $global:LASTEXITCODE = 0
+      - name: Reject a policy that names another suite folder
+        shell: pwsh
+        env:
+          APP_ID: ${{ matrix.app }}
+        run: |
+          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy | Add-Member -NotePropertyName suiteFolder -NotePropertyValue 'NotTheSuite' -Force
+          $path = Join-Path $env:RUNNER_TEMP 'other-suite-policy.json'
+          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'NotTheSuite') {
+            throw "Expected the shared checker to enforce the policy's suiteFolder: $output"
+          }
+          $global:LASTEXITCODE = 0
+      - name: Report a policy without an upgrade code clearly
+        shell: pwsh
+        env:
+          APP_ID: ${{ matrix.app }}
+        run: |
+          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy.PSObject.Properties.Remove('upgradeCode')
+          $path = Join-Path $env:RUNNER_TEMP 'no-upgrade-code-policy.json'
+          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch "does not define 'upgradeCode'") {
+            throw "Expected a clear error for a missing upgradeCode: $output"
+          }
+          $global:LASTEXITCODE = 0
+
+  wrapper:
+    name: Reusable workflow matches the action
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The reusable workflow can only call the action at @main, so the fixture job above cannot reach
+      # it. Check that every input it passes exists on the action and that the defaults agree, so a
+      # rename in one file cannot silently break callers.
+      - name: Check the workflow passes only inputs the action defines
+        shell: pwsh
+        run: |
+          $action = Get-Content -Raw actions/windows-install-policy/action.yml
+          $workflow = Get-Content -Raw .github/workflows/windows-install-policy.yml
+          $actionInputs = [regex]::Match($action, '(?ms)^inputs:\s*[\r\n]+(.*?)^runs:').Groups[1].Value
+          $defined = [regex]::Matches($actionInputs, '(?m)^  ([a-z-]+):\s*$') | ForEach-Object { $_.Groups[1].Value }
+          $call = [regex]::Match($workflow, '(?ms)actions/windows-install-policy@main\s*[\r\n]+\s*with:\s*[\r\n]+(.*)\z').Groups[1].Value
+          $passed = [regex]::Matches($call, '(?m)^\s+([a-z-]+):') | ForEach-Object { $_.Groups[1].Value }
+          if (-not $passed) { throw 'The reusable workflow does not call the action with any inputs.' }
+          foreach ($name in $passed) {
+            if ($name -notin $defined) { throw "The workflow passes '$name', which the action does not define ($($defined -join ', '))." }
+          }
+          $actionDefault = [regex]::Match($actionInputs, '(?ms)^  packaging-directory:.*?default:\s*(\S+)').Groups[1].Value
+          $workflowDefault = [regex]::Match($workflow, '(?ms)packaging-directory:.*?default:\s*(\S+)').Groups[1].Value
+          if (-not $actionDefault -or $actionDefault -ne $workflowDefault) {
+            throw "packaging-directory defaults differ: action '$actionDefault', workflow '$workflowDefault'."
+          }

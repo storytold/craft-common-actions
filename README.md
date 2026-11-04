@@ -695,6 +695,17 @@ check available to both CI and local packaging builds.
 The shared checker's policy assertions are copied from the existing app checker;
 only the policy file location becomes an explicit parameter.
 
+Two optional policy keys describe behavior that differs between apps. Without
+them the checker behaves as it always has, so existing policy files need no change:
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `suiteFolder` | Folder that groups the suite's apps under Program Files and the per-user programs folder | `ArtCraft` |
+| `skipsLicencePage` | The wizard skips the licence page; the checker verifies the Welcome and Install folder pages route around it in both directions | `true` for `deckcraft`, `filmcraft` and `soundcraft`, otherwise `false` |
+
+A policy with no `upgradeCode`, or an MSI with no `UpgradeCode` property, fails
+with a message naming the missing value.
+
 The test workflow checks this PR's local action against pinned EffectCraft,
 PhotoCraft, FilmCraft and VectorCraft sources on Windows. It exercises all three
 architectures, the existing-MSI action mode, and rejection of a mismatched upgrade
