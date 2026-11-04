@@ -42,7 +42,10 @@ on:
         default: 4
     secrets:
       SONAR_TOKEN:
-        description: "SonarCloud analysis token"
+        description: "Legacy or repository-level SonarCloud analysis token"
+        required: false
+      SONAR_CLOUD_PAT:
+        description: "Organization-level SonarCloud personal access token"
         required: false
 
 permissions:
@@ -69,7 +72,7 @@ jobs:
       - name: Build shard matrix
         id: matrix
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
           SHARDS: ${{ inputs.shards }}
         run: |
           # The matrix caps at 256 jobs, and nextest partitions need whole numbers.
@@ -243,7 +246,7 @@ jobs:
       - name: Check for SonarCloud token
         id: token
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
         run: |
           if [ -n "$SONAR_TOKEN" ]; then
             echo "available=true" >>"$GITHUB_OUTPUT"
@@ -410,7 +413,7 @@ jobs:
         if: steps.token.outputs.available == 'true'
         uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
         with:
           args: >
