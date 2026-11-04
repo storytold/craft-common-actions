@@ -1,0 +1,48 @@
+name: Set up Windows signing
+description: >-
+  Make the shared Authenticode signing script available to the app's packaging step. It exports
+  CRAFT_SIGN_SCRIPT (the script), CRAFT_SIGN_PRODUCT and CRAFT_SIGN_URL; the packaging script then
+  signs with `& $env:CRAFT_SIGN_SCRIPT <files>` and the signing secrets in its own environment
+  (WINDOWS_CERTIFICATE or the AZURE_* values), so the secrets never pass through this action.
+
+inputs:
+  product-name:
+    description: Product name embedded in the signature (signtool /d), for example PhotoCraft
+    required: true
+  product-url:
+    description: Product URL embedded in the signature (signtool /du). Defaults to the repository's GitHub URL
+    required: false
+    default: ""
+
+outputs:
+  script:
+    description: Path of the shared sign.ps1
+    value: ${{ steps.setup.outputs.script }}
+
+runs:
+  using: composite
+  steps:
+    - name: Export the signing script
+      id: setup
+      shell: pwsh
+      env:
+        PRODUCT_NAME: ${{ inputs.product-name }}
+        PRODUCT_URL: ${{ inputs.product-url }}
+        REPOSITORY: ${{ github.repository }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $url = if ($env:PRODUCT_URL) { $env:PRODUCT_URL } else { "https://github.com/$($env:REPOSITORY)" }
+        # These values are written to GITHUB_ENV and GITHUB_OUTPUT as name=value lines, so a line
+        # break in one could add a variable of its own.
+        foreach ($value in @($env:PRODUCT_NAME, $url)) {
+          if ($value -match '[\r\n]') { throw 'The product name and URL must each be a single line.' }
+        }
+        if (-not $env:PRODUCT_NAME.Trim()) { throw 'product-name is required.' }
+        if ($url -notmatch '^https://') { throw "product-url must be an https URL, not '$url'." }
+        $script = (Resolve-Path -LiteralPath (Join-Path $env:ACTION_PATH 'sign.ps1')).Path
+        "CRAFT_SIGN_SCRIPT=$script" >> $env:GITHUB_ENV
+        "CRAFT_SIGN_PRODUCT=$($env:PRODUCT_NAME)" >> $env:GITHUB_ENV
+        "CRAFT_SIGN_URL=$url" >> $env:GITHUB_ENV
+        "script=$script" >> $env:GITHUB_OUTPUT
+        Write-Output "Windows signing script: $script"

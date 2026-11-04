@@ -620,6 +620,8 @@ Individual actions are also available for composing custom pipelines:
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
+- `actions/import-macos-certificate`: Imports a Developer ID Application certificate into a private temporary keychain and exports `MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` (see "Code signing scripts").
+- `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Code signing scripts").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
 ## Storytold Organization Hosting
@@ -640,6 +642,57 @@ with inputs and secrets: no caller jobs with their own `runs-on`/`steps`. App-sp
 checks (fuzzing, corpora, web builds, installer probes) become shared workflows or
 inputs here. Jobs that apps still run themselves move here without being dropped:
 an app removes one only once a shared workflow runs it.
+
+## Code signing scripts
+
+Every app used to carry its own copy of `packaging/macos/import-cert.sh` and
+`packaging/windows/sign.ps1`. The copies drifted: some apps lacked the SHA-256 pin on the
+Azure Trusted Signing client, and some still wrote the macOS signing certificate to a predictable
+temporary path. These two actions are the maintained versions, so a fix lands once.
+
+**macOS.** Replace the app's import step with the action. It sets the same
+`MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` variables that `package.sh` already reads:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/import-macos-certificate@main
+  with:
+    certificate: ${{ secrets.APPLE_CERTIFICATE }}
+    certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
+```
+
+The certificate and keychain go in a fresh private directory with an unpredictable name. The
+decoded bundle is deleted as soon as it is imported, and a failed import also deletes the keychain.
+Without a certificate it only warns and exits successfully, so unsigned test builds still work.
+
+**Windows.** Signing happens inside the app's `package.ps1` (it signs the executable before the MSI
+is built, then the MSI), so the action does not sign anything itself. It makes the shared script
+available and the packaging script calls it with the signing secrets in its own environment, so the
+secrets never pass through the action:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/setup-windows-signing@main
+  with:
+    product-name: PhotoCraft   # signtool /d; /du defaults to the repository's GitHub URL
+- run: ./packaging/windows/package.ps1 -Arch x64
+  shell: pwsh
+  env:
+    WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+    # ... the other WINDOWS_* and AZURE_* secrets
+```
+
+```powershell
+# in package.ps1, where it used to call sign.ps1
+& $env:CRAFT_SIGN_SCRIPT dist/app.exe dist/App.msi
+```
+
+The script prefers a PFX (`WINDOWS_CERTIFICATE`) and falls back to Azure Trusted Signing. Before
+loading the Trusted Signing client it checks the downloaded package against a pinned SHA-256;
+upgrading the client means changing the version and hash together. With neither kind of secret it
+warns and leaves the files unsigned.
+
+Existing callers are unaffected: the shared `release.yml` still runs each app's own
+`packaging/.../` scripts. Apps adopt the actions one at a time, then delete their copies.
 
 ## Job time limits
 
