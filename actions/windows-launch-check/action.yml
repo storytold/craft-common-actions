@@ -23,6 +23,7 @@ runs:
         MAIN_EXE: ${{ inputs.main-exe }}
         WAIT_SECONDS: ${{ inputs.wait-seconds }}
       run: |
-        if ($env:WAIT_SECONDS -notmatch '^[0-9]+\z') { Write-Output "::error::invalid wait-seconds '$env:WAIT_SECONDS'"; exit 1 }
+        # At least 1: with 0 every program looks "still running" and nothing is checked.
+        if ($env:WAIT_SECONDS -notmatch '^[1-9][0-9]*\z') { Write-Output "::error::invalid wait-seconds '$env:WAIT_SECONDS' (a whole number of seconds, at least 1)"; exit 1 }
         & "$env:GITHUB_ACTION_PATH/launch-check.ps1" -Msi $env:MSI -MainExe $env:MAIN_EXE -WaitSeconds ([int]$env:WAIT_SECONDS)
         exit $LASTEXITCODE
