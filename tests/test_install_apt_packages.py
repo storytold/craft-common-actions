@@ -114,20 +114,29 @@ class StalledMirrorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             bin_dir = Path(tmpdir) / 'bin'
             bin_dir.mkdir()
-            for name, body in [('apt-get', FAKE_APT), ('sudo', '#!/bin/bash\nexec "$@"\n'), ('sleep', '#!/bin/bash\n')]:
+            # Keep the action's system-only man-db cleanup inside the fixture too.
+            for name, body in [
+                ('apt-get', FAKE_APT),
+                ('sudo', '#!/bin/bash\nexec "$@"\n'),
+                ('sleep', '#!/bin/bash\n'),
+                ('rm', '#!/bin/bash\nprintf "%s\\n" "$*" >> "$RM_LOG"\n[[ "$*" == "-f /var/lib/man-db/auto-update" ]]\n'),
+            ]:
                 (bin_dir / name).write_text(body, newline='\n')
                 (bin_dir / name).chmod(0o755)
             log = Path(tmpdir) / 'apt.log'
             log.touch()
+            rm_log = Path(tmpdir) / 'rm.log'
+            rm_log.touch()
             res = subprocess.run(
                 ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', install_step['run']],
                 env={**os.environ, 'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}", 'HOME': tmpdir,
                      'PACKAGE_LIST': 'curl git ', 'APT_NETWORK_TIMEOUT': '1', 'APT_NETWORK_ATTEMPTS': '3',
-                     'APT_LOG': str(log), 'STALL_OP': stall_op, 'STALLS': str(stalls)},
+                     'APT_LOG': str(log), 'RM_LOG': str(rm_log), 'STALL_OP': stall_op, 'STALLS': str(stalls)},
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
+            self.assertEqual(rm_log.read_text().splitlines(), ['-f /var/lib/man-db/auto-update'])
             return res, log.read_text().split()
 
     def test_a_stalled_update_is_retried(self):
