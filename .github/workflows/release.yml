@@ -571,6 +571,17 @@ jobs:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
         run: packaging/linux/package.sh
+      - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
+        id: linux_signing
+        uses: storytold/craft-common-actions/actions/import-signing-key@main
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
+      - name: Sign the RPM packages
+        if: steps.linux_signing.outputs.enabled == 'true'
+        uses: storytold/craft-common-actions/actions/sign-rpms@main
+        with:
+          path: dist/release
       - name: Check the packages
         run: |
           dpkg-deb --info dist/release/*.deb || true
@@ -1240,6 +1251,17 @@ jobs:
           EMULATOR: qemu-riscv64
           QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
         run: packaging/linux/package.sh --formats "deb rpm tar"
+      - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
+        id: linux_signing
+        uses: storytold/craft-common-actions/actions/import-signing-key@main
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
+      - name: Sign the RPM packages
+        if: steps.linux_signing.outputs.enabled == 'true'
+        uses: storytold/craft-common-actions/actions/sign-rpms@main
+        with:
+          path: dist/release
       - name: Check the packages
         run: |
           dpkg-deb --info dist/release/*-linux-riscv64.deb 2>/dev/null || true
