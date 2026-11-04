@@ -1,5 +1,5 @@
 name: "Draft GitHub Release"
-description: "Collects release artifacts, computes sha256 checksums, generates a table of downloads, and creates or updates a draft GitHub Release"
+description: "Collects release artifacts, signs the Linux packages when given a key, computes (and signs) sha256 checksums, generates a table of downloads, and creates or updates a draft GitHub Release"
 
 inputs:
   version:
@@ -69,7 +69,7 @@ runs:
           echo
           sed 's/^/    /' SHA256SUMS.txt
         } >>"$GITHUB_STEP_SUMMARY"
-        
+
         # Generate a table of downloads for the release notes
         python3 - <<'PY' > "$table_file"
         import html
