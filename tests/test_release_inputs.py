@@ -99,6 +99,21 @@ Path('args.json').write_text(json.dumps(sys.argv[1:]))
                         self.assertEqual(result.returncode, 0, result.stderr)
                         self.assertEqual(args, ['-tzf', f'dist/release/{app_name}-server-1.2.3-linux-x86_64.tar.gz'])
 
+    def test_windows_launch_check_is_opt_in_and_wired_to_its_inputs(self):
+        inputs = DATA['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['windows-launch-check']['default'], 'false')
+        self.assertEqual(inputs['windows-main-exe']['default'], '')
+        step = next(step for step in DATA['jobs']['windows']['steps']
+                    if step.get('name') == 'Launch check (winget-pkgs validation)')
+        # x64 and x86 only: the runner can't start arm64 programs.
+        self.assertEqual(step['if'], "inputs.windows-launch-check && matrix.arch != 'arm64'")
+        self.assertEqual(step['uses'], 'storytold/craft-common-actions/actions/windows-launch-check@main')
+        self.assertEqual(step['with']['msi'], 'dist/release/*-windows-${{ matrix.arch }}.msi')
+        # The override wins when set; otherwise <app-name>.exe.
+        self.assertEqual(step['with']['main-exe'],
+                         "${{ inputs.windows-main-exe != '' && inputs.windows-main-exe "
+                         "|| format('{0}.exe', inputs.app-name) }}")
+
     def test_server_archive_name_is_preserved(self):
         result, args, injected = self.run_step('server', 'Check the archive', 'pdfcraft')
         self.assertEqual(result.returncode, 0, result.stderr)
