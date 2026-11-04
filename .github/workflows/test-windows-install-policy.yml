@@ -1,0 +1,81 @@
+name: Windows installation policy test
+
+on:
+  pull_request:
+    paths:
+      - actions/windows-install-policy/**
+      - .github/workflows/windows-install-policy.yml
+      - .github/workflows/test-windows-install-policy.yml
+  push:
+    branches: [main]
+    paths:
+      - actions/windows-install-policy/**
+      - .github/workflows/windows-install-policy.yml
+      - .github/workflows/test-windows-install-policy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    name: ${{ matrix.app }} installer fixtures
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: effectcraft
+            ref: bb78d55825adc879ae522c18ac57c4ce5690318d
+          - app: photocraft
+            ref: 5617e00ca05adf7658afa4ec68908cb1889edf79
+          - app: filmcraft
+            ref: c9be14245a6c9da585ff906a6e0ca9c8200652ea
+          - app: vectorcraft
+            ref: bd8cc893da71beaec0125d0d9c8df8f9a744499c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/${{ matrix.app }}
+          ref: ${{ matrix.ref }}
+          path: app
+          sparse-checkout: |
+            packaging/windows
+            assets/app-icon
+          persist-credentials: false
+      - name: Check shared PowerShell syntax
+        shell: pwsh
+        run: |
+          foreach ($file in Get-ChildItem actions/windows-install-policy/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { throw ($errors | Out-String) }
+          }
+      - name: Build and check all three architectures
+        uses: ./actions/windows-install-policy
+        with:
+          packaging-directory: app/packaging/windows
+      - name: Check an existing MSI through the action
+        uses: ./actions/windows-install-policy
+        with:
+          packaging-directory: app/packaging/windows
+          msi-path: ${{ runner.temp }}/craft-install-policy-tests/x64/${{ matrix.app }}-NOT-INSTALLABLE.msi
+      - name: Reject a mismatched policy
+        shell: pwsh
+        env:
+          APP_ID: ${{ matrix.app }}
+        run: |
+          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy.upgradeCode = '00000000-0000-0000-0000-000000000001'
+          $path = Join-Path $env:RUNNER_TEMP 'wrong-policy.json'
+          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'upgrade identity') {
+            throw "Expected the shared checker to reject the mismatched UpgradeCode: $output"
+          }
+          $global:LASTEXITCODE = 0

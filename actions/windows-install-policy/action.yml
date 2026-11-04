@@ -1,0 +1,44 @@
+name: Windows installation policy
+description: Check compiled MSI policy, or build and check metadata-only fixtures without building the app
+
+inputs:
+  packaging-directory:
+    description: App packaging directory containing install-policy.json and WiX sources
+    default: packaging/windows
+  msi-path:
+    description: Existing MSI to check; empty builds fixtures for x86, x64 and ARM64
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned fixture toolchain
+      if: inputs.msi-path == ''
+      shell: pwsh
+      env:
+        PACKAGING_DIRECTORY: ${{ inputs.packaging-directory }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $tools = Join-Path $env:RUNNER_TEMP 'craft-install-policy-wix'
+        dotnet tool install --tool-path $tools wix --version 5.0.2
+        if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
+        $tools >> $env:GITHUB_PATH
+        $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING_DIRECTORY 'install-policy.json') | ConvertFrom-Json
+        foreach ($extension in @($policy.extensions)) {
+          if ($extension -notmatch '^[A-Za-z][A-Za-z0-9]*$') { throw "Invalid WiX extension: $extension" }
+          & (Join-Path $tools 'wix.exe') extension add -g "WixToolset.$extension.wixext/5.0.2"
+          if ($LASTEXITCODE -ne 0) { throw "WiX extension $extension installation failed." }
+        }
+    - name: Check compiled installation policy
+      shell: pwsh
+      env:
+        POLICY_ACTION_PATH: ${{ github.action_path }}
+        PACKAGING_DIRECTORY: ${{ inputs.packaging-directory }}
+        MSI_PATH: ${{ inputs.msi-path }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ($env:MSI_PATH) {
+          & (Join-Path $env:POLICY_ACTION_PATH 'check-install-policy.ps1') -MsiPath $env:MSI_PATH -PolicyPath (Join-Path $env:PACKAGING_DIRECTORY 'install-policy.json')
+        } else {
+          & (Join-Path $env:POLICY_ACTION_PATH 'test-install-policy.ps1') -PackagingDirectory $env:PACKAGING_DIRECTORY -OutputDirectory (Join-Path $env:RUNNER_TEMP 'craft-install-policy-tests')
+        }

@@ -620,6 +620,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
+- `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see below).
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
 ## Storytold Organization Hosting
@@ -641,6 +642,58 @@ checks (fuzzing, corpora, web builds, installer probes) become shared workflows 
 inputs here. Jobs that apps still run themselves move here without being dropped:
 an app removes one only once a shared workflow runs it.
 
+## Windows installation policy
+
+Apps with `packaging/windows/install-policy.json` can replace the Windows
+installation-policy job in their packaging lint workflow with:
+
+```yaml
+jobs:
+  windows-install-policy:
+    uses: storytold/craft-common-actions/.github/workflows/windows-install-policy.yml@main
+```
+
+The shared job installs WiX 5.0.2 and the extensions listed in the policy, then
+builds metadata-only fixtures for x86, x64 and ARM64. It checks the compiled MSI's
+scope, folders, upgrade identity, registry entries and wizard behavior without
+installing a product or building the Rust app. The fixture payloads are plain text,
+not executable app binaries. The job keeps the existing ten-minute limit.
+
+The app keeps its policy JSON, WiX sources, localization and icon in its own
+repository. Its `test-legacy-fixture.ps1` regression hook also runs if present. Paths in the
+policy retain their existing meaning: sources and localization are relative to
+the packaging directory, and the icon is relative to the app root two levels
+above it. Set the workflow's `packaging-directory` input if that directory is
+somewhere other than `packaging/windows`.
+
+For an existing MSI in a Windows job, use the action with `msi-path`; this skips
+WiX installation and fixture generation:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/windows-install-policy@main
+  with:
+    msi-path: target/package/app.msi
+```
+
+The checker can also run directly from a checkout of this repository:
+
+```powershell
+pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 `
+  -MsiPath C:/app/target/package/app.msi `
+  -PolicyPath C:/app/packaging/windows/install-policy.json
+```
+
+Land the shared workflow before switching app callers to it. Keep each app's
+pre-signing check in `package.ps1` until its packaging process invokes the shared
+checker; moving the lint job alone does not replace that release safeguard.
+The shared checker's policy assertions are copied from the existing app checker;
+only the policy file location becomes an explicit parameter.
+
+The test workflow checks this PR's local action against pinned EffectCraft,
+PhotoCraft, FilmCraft and VectorCraft sources on Windows. It exercises all three
+architectures, the existing-MSI action mode, and rejection of a mismatched upgrade
+identity. It does not build or install the apps.
+
 ## Job time limits
 
 Limits live on executable jobs in these reusable workflows, since caller jobs
@@ -649,6 +702,7 @@ using `uses` cannot set `timeout-minutes`.
 | Work | Limit (minutes) |
 | --- | ---: |
 | Packaging lint | 15 |
+| Windows installation policy | 10 |
 | Release version / draft publication | 10 |
 | Release macOS, Windows, Linux, Flatpak, web, RISC-V and server builds | 90 |
 | Release FreeBSD | 300 |
