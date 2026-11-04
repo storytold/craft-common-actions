@@ -140,8 +140,9 @@ runs:
             if path.is_file()
             and path.name != "SHA256SUMS.txt"
             and not path.name.lower().endswith(".zsync")
+            and not path.name.lower().endswith(".json")
         ]
-        categories = (
+        known_categories = (
             ("MacOS Installer", lambda name: name.lower().endswith(".dmg") and ("macos" in name.lower() or "darwin" in name.lower())),
             ("MacOS CLI", lambda name: is_cli(name) and ("macos" in name.lower() or "darwin" in name.lower()) and name.lower().endswith(".zip")),
             ("Windows Installer", lambda name: not is_cli(name) and name.lower().endswith((".msi", ".exe"))),
@@ -161,6 +162,10 @@ runs:
             ("FreeBSD", lambda name: not is_cli(name) and "freebsd" in name.lower()),
             ("FreeBSD CLI", lambda name: is_cli(name) and "freebsd" in name.lower() and name.lower().endswith(".tar.gz")),
             ("WebAssembly", lambda name: ("web" in name.lower() or "wasm" in name.lower()) and name.lower().endswith(".zip")),
+        )
+        categories = (
+            *known_categories,
+            ("Other", lambda name: not any(matches(name) for _, matches in known_categories)),
         )
         repository = os.environ["GH_REPO"]
         tag = f"v{os.environ['VERSION']}"
@@ -203,6 +208,14 @@ runs:
                         rf"-{re.escape(os.environ['VERSION'])}(?=\.zip$)",
                         "",
                         name,
+                        flags=re.IGNORECASE,
+                    )
+                elif label == "Other":
+                    display = re.sub(
+                        rf"^.*?-{re.escape(os.environ['VERSION'])}-",
+                        "",
+                        Path(name).name,
+                        count=1,
                         flags=re.IGNORECASE,
                     )
                 else:
