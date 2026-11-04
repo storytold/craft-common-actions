@@ -1,5 +1,5 @@
 name: "Draft GitHub Release"
-description: "Collects release artifacts, signs the Linux packages when given a key, computes (and signs) sha256 checksums, and creates or updates a draft GitHub Release"
+description: "Collects release artifacts, signs the Linux packages when given a key, computes (and signs) sha256 checksums, generates a table of downloads, and creates or updates a draft GitHub Release"
 
 inputs:
   version:
