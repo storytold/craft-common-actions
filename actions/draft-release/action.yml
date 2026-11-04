@@ -213,6 +213,32 @@ runs:
         print()
         PY
         cat "$table_file" >>"$GITHUB_STEP_SUMMARY"
-        printf '\n' >> "$notes_file"
-        cat "$table_file" >> "$notes_file"
+        python3 - "$notes_file" "$table_file" <<'PY'
+        from pathlib import Path
+        import re
+        import sys
+
+        notes_path, table_path = map(Path, sys.argv[1:])
+        start_marker = "<!-- BEGIN GENERATED DOWNLOAD TABLE -->"
+        end_marker = "<!-- END GENERATED DOWNLOAD TABLE -->"
+        notes = notes_path.read_text()
+
+        if notes.count(start_marker) != notes.count(end_marker):
+            raise SystemExit("Release notes contain an unmatched generated download table marker")
+
+        block = re.compile(
+            rf"(?m)^{re.escape(start_marker)}\r?\n.*?^{re.escape(end_marker)}(?:\r?\n|$)",
+            re.DOTALL,
+        )
+        matches = list(block.finditer(notes))
+        if len(matches) != notes.count(start_marker):
+            raise SystemExit("Release notes contain a malformed generated download table block")
+
+        notes = block.sub("", notes).rstrip("\r\n")
+        table = table_path.read_text().rstrip()
+        separator = "\n\n" if notes else ""
+        notes_path.write_text(
+            f"{notes}{separator}{start_marker}\n{table}\n{end_marker}\n"
+        )
+        PY
         gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE" --notes-file "$notes_file"
