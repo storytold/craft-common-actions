@@ -86,6 +86,11 @@ The release also carries the public key as `release-signing-key.asc`; publish it
 somewhere users can check it independently. On first install, compare that fingerprint with the key in the bundle: a bundle can contain an attacker-controlled key. Signed bundles omit the OCI update URL until the signature lookaside is deployed. Once it is live and the launcher configures it, set the `LINUX_OCI_SIGNATURES_READY` release environment variable to `1` in each app; subsequent stable bundles then include the OCI URL. Earlier bundles can be updated by installing a newer bundle. Signing is limited to builds from the `release` branch. The Flatpak bundle is signed when the app's
 `packaging/linux/flatpak-bundle.sh` has been updated with `scripts/scaffold-flatpak-oci.sh`.
 
+The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
+builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
+stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
+of the script does with `--push`.
+
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
 
@@ -598,6 +603,58 @@ jobs:
       paths: apps crates
 ```
 
+### 8. `changed-paths.yml`
+
+Whether a run's changes touch any of `paths` (bash globs, one per line; `*` also matches `/`), or
+its pull request carries `label`. Its `matched` output (`'true'`/`'false'`) lets an app run an
+expensive job, such as a Windows gate leg, only when it can matter. Pull requests compare GitHub's
+merge commit with its first parent, so only the pull request's own changes count; pushes compare
+`before` with the pushed commit; any other event, a new branch, or a `before` that can't be fetched
+matches. The checkout is two commits deep, a blobless partial clone that checks out only `.github`
+and the root-level files.
+
+To let adding the label start the job, list `labeled` in the caller's `pull_request` types and keep
+that workflow's concurrency group separate from the main gate's, so a label never cancels it.
+
+#### Caller Example:
+```yaml
+jobs:
+  windows-scope:
+    uses: storytold/craft-common-actions/.github/workflows/changed-paths.yml@main
+    with:
+      label: full-ci
+      paths: |
+        crates/wincolor/*
+        crates/ui-egui/*
+  gate-windows:
+    needs: windows-scope
+    if: needs.windows-scope.outputs.matched == 'true'
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      os: '["windows-latest"]'
+      windows-command: cargo test -p my-windows-crate
+```
+
+### 9. `git-sources.yml`
+
+Fails unless the app builds only from what its `Cargo.lock` names, and every git dependency in it
+comes from `github.com/storytold`: `Cargo.lock` exists and is up to date with the manifests
+(`cargo metadata --locked`), and neither `.cargo/config.toml` nor the legacy `.cargo/config`
+replaces, patches or overrides a source (none of that shows up in `Cargo.lock`). It reports every
+problem it finds. This replaces the "Git dependencies come from storytold" job apps carried in
+their own `ci.yml`, `nix.yml` or `release.yml`; `working-directory` points it at a workspace that
+isn't the repository root.
+
+#### Caller Example:
+```yaml
+jobs:
+  git-sources:
+    uses: storytold/craft-common-actions/.github/workflows/git-sources.yml@main
+  release:
+    needs: git-sources
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -619,9 +676,12 @@ Individual actions are also available for composing custom pipelines:
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
+- `actions/import-macos-certificate`: Imports a Developer ID Application certificate into a private temporary keychain and exports `MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` (see "macOS code signing").
 - `actions/packaging-lint`: Steps for packaging linter.
-- `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see below).
+- `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see "Windows installation policy").
+- `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
 
 ## Storytold Organization Hosting
 
@@ -711,6 +771,30 @@ PhotoCraft, FilmCraft and VectorCraft sources on Windows. It exercises all three
 architectures, the existing-MSI action mode, and rejection of a mismatched upgrade
 identity. It does not build or install the apps.
 
+## macOS code signing
+
+Every app used to carry its own copy of `packaging/macos/import-cert.sh`, and the copies drifted:
+some still wrote the signing certificate to a predictable temporary path. `import-macos-certificate`
+is the maintained version, so a fix lands once.
+
+Replace the app's import step with the action. It sets the same
+`MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` variables that `package.sh` already reads:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/import-macos-certificate@main
+  with:
+    certificate: ${{ secrets.APPLE_CERTIFICATE }}
+    certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+    keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
+```
+
+The certificate and keychain go in a fresh private directory with an unpredictable name. The
+decoded bundle is deleted as soon as it is imported, and a failed import also deletes the keychain.
+Without a certificate it only warns and exits successfully, so unsigned test builds still work.
+
+Existing callers are unaffected: the shared `release.yml` still runs each app's own
+`packaging/macos/` script. Apps adopt the action one at a time, then delete their copy.
+
 ## Job time limits
 
 Limits live on executable jobs in these reusable workflows, since caller jobs
@@ -726,7 +810,16 @@ using `uses` cannot set `timeout-minutes`.
 | Standalone FreeBSD build, test and optional package | 300 |
 | Windows ARM64 package / install | 90 / 30 |
 | CI gate, per leg (`timeout-minutes` input) | 60 |
+| Changed paths | 5 |
+| Git sources | 5 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
+
+A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job
+timeout, and GitHub only reports the job as cancelled. Pass `gate-timeout-minutes`, a few minutes
+below `timeout-minutes` (for example 70 with `timeout-minutes: 85`), and the gate command is
+stopped at that time instead (GNU `timeout`, then killed 30 s later). The leg fails with a
+`Gate timed out` error, and a log group lists the processes still running one minute before the
+deadline. The default, 0, sets no limit of its own. Windows legs use Git Bash's `timeout`.
 
 SonarCloud callers whose instrumented workspace tests exceed the 90-minute
 default can pass `timeout-minutes: 120` under the calling job's `with`. This
@@ -762,6 +855,41 @@ The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
 successful cold builds after rollout and lower them when the evidence supports it.
 These are per-job limits, not a total workflow duration or spend budget.
+
+## Windows code signing
+
+Every app used to carry its own copy of `packaging/windows/sign.ps1`, and the copies drifted: some
+lacked the SHA-256 pin on the Azure Trusted Signing client. `setup-windows-signing` ships the
+maintained version, so a fix lands once.
+
+Signing happens inside the app's `package.ps1` (it signs the executable before the MSI
+is built, then the MSI), so the action does not sign anything itself. It makes the shared script
+available and the packaging script calls it with the signing secrets in its own environment, so the
+secrets never pass through the action:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/setup-windows-signing@main
+  with:
+    product-name: PhotoCraft   # signtool /d; /du defaults to the repository's GitHub URL
+- run: ./packaging/windows/package.ps1 -Arch x64
+  shell: pwsh
+  env:
+    WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+    # ... the other WINDOWS_* and AZURE_* secrets
+```
+
+```powershell
+# in package.ps1, where it used to call sign.ps1
+& $env:CRAFT_SIGN_SCRIPT dist/app.exe dist/App.msi
+```
+
+The script prefers a PFX (`WINDOWS_CERTIFICATE`) and falls back to Azure Trusted Signing. Before
+loading the Trusted Signing client it checks the downloaded package against a pinned SHA-256;
+upgrading the client means changing the version and hash together. With neither kind of secret it
+warns and leaves the files unsigned.
+
+Existing callers are unaffected: the shared `release.yml` still runs each app's own
+`packaging/windows/` scripts. Apps adopt the action one at a time, then delete their copy.
 
 ## Testing workflow failure paths
 
