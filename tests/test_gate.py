@@ -50,6 +50,61 @@ class GateWorkflowTests(unittest.TestCase):
                     self.assertNotIn('${{', s['run'])
 
 
+class GateTimeoutTests(unittest.TestCase):
+    STEP = step('Gate')
+
+    def run_gate(self, command, minutes, fake_timeout=None):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.environ['PATH']
+            if fake_timeout is not None:
+                Path(directory, 'bin').mkdir()
+                fake = Path(directory, 'bin', 'timeout')
+                fake.write_text(fake_timeout)
+                fake.chmod(0o755)
+                path = f"{directory}/bin:{path}"
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', self.STEP['run']],
+                cwd=directory, capture_output=True, text=True, timeout=60,
+                env={**os.environ, 'PATH': path, 'GATE': command, 'GATE_TIMEOUT': minutes,
+                     'RUNNER_TEMP': directory, 'RUNNER_OS': 'Linux'})
+            return result.returncode, result.stdout + result.stderr
+
+    def test_input_defaults_to_no_limit(self):
+        self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['gate-timeout-minutes']['default'], '0')
+        self.assertEqual(set(self.STEP['env']), {'GATE', 'GATE_TIMEOUT'})
+
+    def test_no_limit_runs_the_command_as_before(self):
+        self.assertEqual(self.run_gate('echo ran; exit 3', '0'), (3, 'ran\n'))
+
+    def test_limit_keeps_the_exit_status(self):
+        self.assertEqual(self.run_gate('echo ran', '5'), (0, 'ran\n'))
+        status, out = self.run_gate('false', '5')
+        self.assertEqual(status, 1)
+        self.assertNotIn('timed out', out)
+
+    def test_watchdog_prints_processes_a_minute_before(self):
+        # with a 1 minute limit the snapshot is due at once
+        status, out = self.run_gate('sleep 2', '1')
+        self.assertEqual(status, 0)
+        self.assertIn('::group::Processes running one minute before the gate timeout', out)
+
+    def test_timeout_is_reported(self):
+        status, out = self.run_gate('true', '5', '#!/bin/sh\n[ "$1" = --version ] && exit 0\nexit 124\n')
+        self.assertEqual(status, 124)
+        self.assertIn('::error title=Gate timed out::', out)
+
+    def test_without_gnu_timeout_runs_unlimited(self):
+        status, out = self.run_gate('echo ran', '5', '#!/bin/sh\nexit 1\n')
+        self.assertEqual(status, 0)
+        self.assertIn('ran', out)
+        self.assertIn('Gate timeout not set', out)
+
+    def test_bad_value_warns_and_runs(self):
+        status, out = self.run_gate('echo ran', '1.5')
+        self.assertEqual(status, 0)
+        self.assertIn('Gate timeout not set', out)
+
+
 class CallerEnvironmentTests(unittest.TestCase):
     STEP = step('Caller environment')
 
