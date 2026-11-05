@@ -620,6 +620,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
+- `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 
 ## Storytold Organization Hosting
@@ -691,6 +692,41 @@ The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
 successful cold builds after rollout and lower them when the evidence supports it.
 These are per-job limits, not a total workflow duration or spend budget.
+
+## Windows code signing
+
+Every app used to carry its own copy of `packaging/windows/sign.ps1`, and the copies drifted: some
+lacked the SHA-256 pin on the Azure Trusted Signing client. `setup-windows-signing` ships the
+maintained version, so a fix lands once.
+
+Signing happens inside the app's `package.ps1` (it signs the executable before the MSI
+is built, then the MSI), so the action does not sign anything itself. It makes the shared script
+available and the packaging script calls it with the signing secrets in its own environment, so the
+secrets never pass through the action:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/setup-windows-signing@main
+  with:
+    product-name: PhotoCraft   # signtool /d; /du defaults to the repository's GitHub URL
+- run: ./packaging/windows/package.ps1 -Arch x64
+  shell: pwsh
+  env:
+    WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+    # ... the other WINDOWS_* and AZURE_* secrets
+```
+
+```powershell
+# in package.ps1, where it used to call sign.ps1
+& $env:CRAFT_SIGN_SCRIPT dist/app.exe dist/App.msi
+```
+
+The script prefers a PFX (`WINDOWS_CERTIFICATE`) and falls back to Azure Trusted Signing. Before
+loading the Trusted Signing client it checks the downloaded package against a pinned SHA-256;
+upgrading the client means changing the version and hash together. With neither kind of secret it
+warns and leaves the files unsigned.
+
+Existing callers are unaffected: the shared `release.yml` still runs each app's own
+`packaging/windows/` scripts. Apps adopt the action one at a time, then delete their copy.
 
 ## Testing workflow failure paths
 
