@@ -55,6 +55,19 @@ function Find-SignTool {
   return $found.FullName
 }
 
+# The PE machine type of an executable (0x8664 x64, 0x14C x86, 0xAA64 ARM64), or $null when the
+# file is not a PE image.
+function Get-PEMachine([string] $Path) {
+  $buffer = New-Object byte[] 4096
+  $stream = [IO.File]::OpenRead($Path)
+  try { $read = $stream.Read($buffer, 0, $buffer.Length) } finally { $stream.Dispose() }
+  if ($read -lt 0x40 -or $buffer[0] -ne 0x4D -or $buffer[1] -ne 0x5A) { return $null }
+  $pe = [BitConverter]::ToInt32($buffer, 0x3C)
+  if ($pe -lt 0 -or $pe + 6 -gt $read) { return $null }
+  if ([BitConverter]::ToUInt32($buffer, $pe) -ne 0x00004550) { return $null }
+  return [BitConverter]::ToUInt16($buffer, $pe + 4)
+}
+
 function Invoke-SignTool([string[]] $Arguments) {
   & $script:SignTool @Arguments
   if ($LASTEXITCODE -ne 0) { throw "signtool $($Arguments[0]) failed with exit code $LASTEXITCODE" }
@@ -92,6 +105,11 @@ try {
   }
   else {
     Write-Output "Signing with Azure Trusted Signing ($env:AZURE_SIGNING_ACCOUNT / $env:AZURE_CERT_PROFILE): $($Files -join ', ')"
+    # The x64 dlib below loads only into an x64 signtool; SIGNTOOL or PATH may name another one.
+    $machine = Get-PEMachine $script:SignTool
+    if ($null -ne $machine -and $machine -ne 0x8664) {
+      throw ("Azure Trusted Signing needs an x64 signtool.exe, but {0} is machine type 0x{1:X4}: set SIGNTOOL to the Windows SDK's bin\<version>\x64\signtool.exe" -f $script:SignTool, $machine)
+    }
     # The dlib authenticates with DefaultAzureCredential, which reads AZURE_TENANT_ID,
     # AZURE_CLIENT_ID and AZURE_CLIENT_SECRET from the environment.
     $pkg = Join-Path $tmp 'trusted-signing.zip'

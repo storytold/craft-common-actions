@@ -108,6 +108,27 @@ class WindowsSigningScriptTests(unittest.TestCase):
         self.assertIn("signtool sign failed", result.stdout + result.stderr)
         self.assertEqual(list(tmp.iterdir()), [], "the decoded certificate must not outlive the script")
 
+    def test_azure_signing_refuses_a_signtool_that_is_not_x64(self):
+        # The x64 dlib cannot load into an x86 or ARM64 signtool; the script must say so before
+        # downloading the client, not leave signtool to fail obscurely.
+        azure = {name: "x" for name in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET",
+                                        "AZURE_SIGNING_ENDPOINT", "AZURE_SIGNING_ACCOUNT", "AZURE_CERT_PROFILE")}
+        for machine, label in ((0x014C, "014C"), (0xAA64, "AA64")):
+            with self.subTest(machine=label):
+                signtool = self.root / f"signtool-{label}.exe"
+                header = bytearray(0x200)
+                header[0:2] = b"MZ"
+                header[0x3C:0x40] = (0x80).to_bytes(4, "little")
+                header[0x80:0x84] = b"PE\0\0"
+                header[0x84:0x86] = machine.to_bytes(2, "little")
+                signtool.write_bytes(bytes(header))
+                result = self.sign(SIGNTOOL=str(signtool), **azure)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("needs an x64 signtool.exe", output)
+                self.assertIn(f"0x{label}", output)
+                self.assertEqual(self.log.read_text(), "", "signtool must not be run")
+
     def test_the_trusted_signing_client_is_pinned_by_version_and_hash(self):
         text = SIGN_PS1.read_text()
         self.assertRegex(text, r"Version = '\d+\.\d+\.\d+'")
