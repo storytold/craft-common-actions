@@ -605,7 +605,8 @@ its pull request carries `label`. Its `matched` output (`'true'`/`'false'`) lets
 expensive job, such as a Windows gate leg, only when it can matter. Pull requests compare GitHub's
 merge commit with its first parent, so only the pull request's own changes count; pushes compare
 `before` with the pushed commit; any other event, a new branch, or a `before` that can't be fetched
-matches. The checkout is two commits deep with no file contents.
+matches. The checkout is two commits deep, a blobless partial clone that checks out only `.github`
+and the root-level files.
 
 To let adding the label start the job, list `labeled` in the caller's `pull_request` types and keep
 that workflow's concurrency group separate from the main gate's, so a label never cancels it.

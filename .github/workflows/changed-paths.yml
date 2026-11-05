@@ -66,8 +66,10 @@ jobs:
         run: |
           set -euo pipefail
           result() {
-            printf 'matched=%s\nreason=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
-            echo "matched=$1 ($2)"
+            # a path may hold a newline: keep the reason on one output line
+            local reason=${2//[$'\n\r']/ }
+            printf 'matched=%s\nreason=%s\n' "$1" "$reason" >> "$GITHUB_OUTPUT"
+            echo "matched=$1 ($reason)"
             exit 0
           }
           case "$EVENT" in
@@ -87,8 +89,10 @@ jobs:
               ;;
             *) result true "event $EVENT" ;;
           esac
-          changed=$(git diff --name-only --no-renames "$base" HEAD)
-          while IFS= read -r file; do
+          # NUL-separated: --name-only alone quotes paths with non-ASCII bytes, tabs or quotes.
+          changed=$(mktemp)
+          git diff -z --name-only --no-renames "$base" HEAD > "$changed"
+          while IFS= read -r -d '' file; do
             [ -n "$file" ] || continue
             while IFS= read -r pattern; do
               pattern=${pattern#"${pattern%%[![:space:]]*}"}
@@ -98,5 +102,5 @@ jobs:
               # shellcheck disable=SC2053
               if [[ $file == $pattern ]]; then result true "$file matches $pattern"; fi
             done <<< "$PATTERNS"
-          done <<< "$changed"
+          done < "$changed"
           result false "no changed path matches"

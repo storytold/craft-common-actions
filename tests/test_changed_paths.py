@@ -73,6 +73,16 @@ class ChangedPathsTests(unittest.TestCase):
         self.assertEqual(out['matched'], 'true')
         self.assertIn('crates/wincolor/src/lib.rs', out['reason'])
 
+    def test_unusual_path_names_match_unquoted(self):
+        # git quotes these in plain --name-only output; a newline must not add output lines
+        self.pull_request({'crates/wincolor/src/färg "x".rs': 'x', 'crates/wincolor/a\nmatched=false': 'y'})
+        out = self.run_match('pull_request', 'crates/wincolor/src/*')
+        self.assertEqual(out['matched'], 'true')
+        self.assertIn('färg "x".rs', out['reason'])
+        out = self.run_match('pull_request', 'crates/wincolor/a*')
+        self.assertEqual(out['matched'], 'true')
+        self.assertEqual(list(out), ['matched', 'reason'])
+
     def test_pull_request_counts_only_its_own_changes(self):
         # base-moved.txt changed on main, not in the pull request
         self.pull_request({'docs/x.md': 'x'})
