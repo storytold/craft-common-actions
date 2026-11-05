@@ -598,6 +598,37 @@ jobs:
       paths: apps crates
 ```
 
+### 8. `changed-paths.yml`
+
+Whether a run's changes touch any of `paths` (bash globs, one per line; `*` also matches `/`), or
+its pull request carries `label`. Its `matched` output (`'true'`/`'false'`) lets an app run an
+expensive job, such as a Windows gate leg, only when it can matter. Pull requests compare GitHub's
+merge commit with its first parent, so only the pull request's own changes count; pushes compare
+`before` with the pushed commit; any other event, a new branch, or a `before` that can't be fetched
+matches. The checkout is two commits deep with no file contents.
+
+To let adding the label start the job, list `labeled` in the caller's `pull_request` types and keep
+that workflow's concurrency group separate from the main gate's, so a label never cancels it.
+
+#### Caller Example:
+```yaml
+jobs:
+  windows-scope:
+    uses: storytold/craft-common-actions/.github/workflows/changed-paths.yml@main
+    with:
+      label: full-ci
+      paths: |
+        crates/wincolor/*
+        crates/ui-egui/*
+  gate-windows:
+    needs: windows-scope
+    if: needs.windows-scope.outputs.matched == 'true'
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      os: '["windows-latest"]'
+      windows-command: cargo test -p my-windows-crate
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -655,6 +686,7 @@ using `uses` cannot set `timeout-minutes`.
 | Standalone FreeBSD build, test and optional package | 300 |
 | Windows ARM64 package / install | 90 / 30 |
 | CI gate, per leg (`timeout-minutes` input) | 60 |
+| Changed paths | 5 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 SonarCloud callers whose instrumented workspace tests exceed the 90-minute
