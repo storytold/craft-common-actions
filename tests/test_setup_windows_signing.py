@@ -164,7 +164,11 @@ class SetupWindowsSigningActionTests(unittest.TestCase):
                    GITHUB_ENV=str(self.github_env), GITHUB_OUTPUT=str(self.github_output))
         result = subprocess.run([PWSH, "-NoProfile", "-File", str(self.script)], env=env, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("product-name is required", result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn("product-name is required", output)
+        # PowerShell echoes the failing source line, so the message alone proves nothing: the old
+        # code failed earlier, calling .Trim() on a missing variable.
+        self.assertNotIn("null-valued", output)
         self.assertFalse(self.github_env.exists())
 
     def test_a_blank_name_and_a_non_https_url_are_refused(self):
