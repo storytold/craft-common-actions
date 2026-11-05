@@ -35,7 +35,8 @@ class ExportAppBuildEnvTests(unittest.TestCase):
     def run_script(self, **extra):
         env = {key: value for key, value in os.environ.items() if key not in ("ENV_PREFIX", "APP_NAME")}
         env.update(GITHUB_ENV=str(self.github_env), GITHUB_OUTPUT=str(self.github_output),
-                   BUILD_VERSION="1.2.0-rc.1", BUILD_DATE_VALUE="2026-11-05", BUILD_SHA_VALUE="0123abcd", **extra)
+                   BUILD_VERSION="1.2.0-rc.1", BUILD_DATE_VALUE="2026-11-05", BUILD_SHA_VALUE="0123abcd")
+        env.update(extra)
         return subprocess.run([BASH, str(SCRIPT)], cwd=self.app, env=env, capture_output=True, text=True)
 
     def exported(self):
@@ -110,14 +111,18 @@ class ReleaseWorkflowListsNoAppsTests(unittest.TestCase):
                 with self.subTest(job=name, where=place):
                     self.assertEqual(named, [], "export-app-build-env sets these from the app's env.sh")
 
-    def test_every_job_that_builds_a_version_exports_the_apps_variables_after_checkout(self):
+    def test_every_job_that_builds_a_version_exports_the_apps_variables_before_building(self):
         for name, job in self.jobs_with_steps().items():
             if (job.get("env") or {}).get("VERSION") != "${{ needs.version.outputs.version }}":
                 continue
             with self.subTest(job=name):
                 steps = job["steps"]
                 checkout = next(i for i, step in enumerate(steps) if step.get("uses", "").startswith("actions/checkout@"))
-                export = steps[checkout + 1]
+                # Right after the checkout, or after the contributor snapshot that must follow it directly.
+                after = checkout + 1
+                if steps[after].get("name") == "Load refreshed contributor credits":
+                    after += 1
+                export = steps[after]
                 self.assertEqual(export.get("id"), "app-env")
                 self.assertEqual(export["uses"], "storytold/craft-common-actions/actions/export-app-build-env@main")
                 self.assertEqual(export["with"]["app-name"], "${{ inputs.app-name }}")
