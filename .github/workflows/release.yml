@@ -481,6 +481,9 @@ jobs:
     timeout-minutes: 90
     name: Linux ${{ matrix.arch }}
     needs: [version]
+    # The signing key lives in the release environment, as it does for the macOS, Windows and
+    # flatpak jobs; without this the Linux packages are built unsigned.
+    environment: release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -1150,6 +1153,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
+    environment: release
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
