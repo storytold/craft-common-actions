@@ -718,11 +718,29 @@ jobs:
         run: |
           if [ -x packaging/linux/flatpak-oci.sh ]; then
             REGISTRY="${REGISTRY,,}"
-            packaging/linux/flatpak-oci.sh --push "$TARBALL"
+            creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
+            # The app's script only builds the layout; the tags are pushed here. Older copies of
+            # flatpak-oci.sh move stable-<arch> on every --push, so a prerelease or a test run
+            # from any branch would become what stable-<arch> clients install.
+            packaging/linux/flatpak-oci.sh "$TARBALL"
+            base="$(basename "$TARBALL" .tar.gz)"
+            layout="dist/release/$base-oci"
+            if [ ! -d "$layout" ]; then
+              echo "::error::packaging/linux/flatpak-oci.sh did not write the OCI layout $layout"
+              exit 1
+            fi
+            echo "==> Pushing to $REGISTRY:$RELEASE_VERSION-$ARCH"
+            skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:$RELEASE_VERSION-$ARCH"
+            # Only a stable version built from the release branch may move the stable tag.
+            if [[ "$RELEASE_VERSION" != *-* && "$GITHUB_REF" == refs/heads/release ]]; then
+              echo "==> Pushing to $REGISTRY:stable-$ARCH"
+              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:stable-$ARCH"
+            else
+              echo "Leaving $REGISTRY:stable-$ARCH unchanged: $RELEASE_VERSION from $GITHUB_REF is not a stable release-branch build"
+            fi
             # The pushed manifest, byte for byte: the release job signs its digest for Flatpak's
             # signature lookaside, and the release keeps it so the digest can be checked.
-            base="$(basename "$TARBALL" .tar.gz)"
-            skopeo inspect --raw --creds "${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN" \
+            skopeo inspect --raw --creds "$creds" \
               "docker://$REGISTRY:$RELEASE_VERSION-$ARCH" >"dist/release/$base.oci-manifest.json"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

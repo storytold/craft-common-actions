@@ -86,6 +86,11 @@ The release also carries the public key as `release-signing-key.asc`; publish it
 somewhere users can check it independently. On first install, compare that fingerprint with the key in the bundle: a bundle can contain an attacker-controlled key. Signed bundles omit the OCI update URL until the signature lookaside is deployed. Once it is live and the launcher configures it, set the `LINUX_OCI_SIGNATURES_READY` release environment variable to `1` in each app; subsequent stable bundles then include the OCI URL. Earlier bundles can be updated by installing a newer bundle. Signing is limited to builds from the `release` branch. The Flatpak bundle is signed when the app's
 `packaging/linux/flatpak-bundle.sh` has been updated with `scripts/scaffold-flatpak-oci.sh`.
 
+The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
+builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
+stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
+of the script does with `--push`.
+
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
 
