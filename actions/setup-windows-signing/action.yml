@@ -35,10 +35,11 @@ runs:
         $url = if ($env:PRODUCT_URL) { $env:PRODUCT_URL } else { "https://github.com/$($env:REPOSITORY)" }
         # These values are written to GITHUB_ENV and GITHUB_OUTPUT as name=value lines, so a line
         # break in one could add a variable of its own.
+        # An unset or blank name (an empty variable reaches here as no value at all) is refused first.
+        if ([string]::IsNullOrWhiteSpace($env:PRODUCT_NAME)) { throw 'product-name is required.' }
         foreach ($value in @($env:PRODUCT_NAME, $url)) {
           if ($value -match '[\r\n]') { throw 'The product name and URL must each be a single line.' }
         }
-        if (-not $env:PRODUCT_NAME.Trim()) { throw 'product-name is required.' }
         if ($url -notmatch '^https://') { throw "product-url must be an https URL, not '$url'." }
         $script = (Resolve-Path -LiteralPath (Join-Path $env:ACTION_PATH 'sign.ps1')).Path
         "CRAFT_SIGN_SCRIPT=$script" >> $env:GITHUB_ENV

@@ -204,6 +204,19 @@ class WindowsSigningScriptTests(unittest.TestCase):
         self.assertIn("/d Other /du https://example.com/other", self.log.read_text().splitlines()[0])
 
     @unittest.skipUnless(POSIX and BASH, "the stand-in signtool is a bash script")
+    def test_a_file_name_with_wildcard_characters_is_signed_as_written(self):
+        signtool = self.root / "signtool"
+        executable(signtool, FAKE_SIGNTOOL)
+        odd = self.root / "App [x64].exe"
+        odd.write_bytes(b"MZ")
+        result = subprocess.run([PWSH, "-NoProfile", "-File", str(SIGN_PS1), str(odd)],
+                                env={**self.env, "SIGNTOOL": str(signtool),
+                                     "WINDOWS_CERTIFICATE": base64.b64encode(b"pfx").decode()},
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.log.read_text().splitlines()[0].endswith(str(odd)))
+
+    @unittest.skipUnless(POSIX and BASH, "the stand-in signtool is a bash script")
     def test_a_signtool_failure_fails_the_script_and_removes_the_certificate(self):
         signtool = self.root / "signtool"
         executable(signtool, FAKE_SIGNTOOL)
@@ -263,6 +276,16 @@ class SetupWindowsSigningActionTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("single line", result.stdout + result.stderr)
                 self.assertFalse(self.github_env.exists())
+
+    def test_an_unset_name_is_refused_with_a_clear_message(self):
+        # An empty input reaches the step as a variable that is not there at all, not as an empty string.
+        env = {key: value for key, value in os.environ.items() if key != "PRODUCT_NAME"}
+        env.update(PRODUCT_URL="", REPOSITORY="storytold/demo", ACTION_PATH=str(SIGN_DIR),
+                   GITHUB_ENV=str(self.github_env), GITHUB_OUTPUT=str(self.github_output))
+        result = subprocess.run([PWSH, "-NoProfile", "-File", str(self.script)], env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("product-name is required", result.stdout + result.stderr)
+        self.assertFalse(self.github_env.exists())
 
     def test_a_blank_name_and_a_non_https_url_are_refused(self):
         self.assertNotEqual(self.run_step(name="  ").returncode, 0)

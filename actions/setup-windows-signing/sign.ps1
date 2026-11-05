@@ -63,7 +63,8 @@ function Invoke-SignTool([string[]] $Arguments) {
 if (-not $ProductName) { throw 'No product name: pass -ProductName or set CRAFT_SIGN_PRODUCT (see the setup-windows-signing action).' }
 if (-not $ProductUrl) { throw 'No product URL: pass -ProductUrl or set CRAFT_SIGN_URL (see the setup-windows-signing action).' }
 
-$Files = $Files | ForEach-Object { (Resolve-Path $_).Path }
+# -LiteralPath: a file name such as 'App [x64].msi' must not be read as a wildcard pattern.
+$Files = $Files | ForEach-Object { (Resolve-Path -LiteralPath $_).Path }
 $haveCert = [bool]$env:WINDOWS_CERTIFICATE
 $azureVars = 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_CERT_PROFILE'
 $haveAzure = -not ($azureVars | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
