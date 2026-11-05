@@ -20,6 +20,12 @@ Full multi-platform release pipeline for Craft apps:
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
 - **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
 
+Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
+`<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA`. The prefix is the one the app's
+`packaging/env.sh` (or `packaging/common.sh`) reads in `VERSION="${<PREFIX>_VERSION:-...}"`, so a
+new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
+`CRAFT_ANYTHING`).
+
 #### Caller Example:
 ```yaml
 name: Release
@@ -680,6 +686,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
 
 ## Storytold Organization Hosting
