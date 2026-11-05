@@ -1,0 +1,25 @@
+name: Check git sources
+description: >-
+  Fail unless Cargo.lock exists and is up to date, no Cargo config replaces, patches or overrides a
+  source, and every git dependency comes from the allowed prefix (github.com/storytold by default)
+
+inputs:
+  working-directory:
+    description: "The Cargo workspace root, relative to the checkout"
+    required: false
+    default: "."
+  allowed-prefix:
+    description: "The Cargo.lock source prefix every git dependency must have"
+    required: false
+    default: "git+https://github.com/storytold/"
+
+runs:
+  using: composite
+  steps:
+    - name: Git dependencies come from storytold
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/check_git_sources.py
+        WORKSPACE_DIR: ${{ inputs.working-directory }}
+        ALLOWED_PREFIX: ${{ inputs.allowed-prefix }}
+      run: python3 "$CHECK_PATH" --directory "$WORKSPACE_DIR" --allowed-prefix "$ALLOWED_PREFIX"

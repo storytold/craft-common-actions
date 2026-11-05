@@ -630,6 +630,26 @@ jobs:
       windows-command: cargo test -p my-windows-crate
 ```
 
+### 9. `git-sources.yml`
+
+Fails unless the app builds only from what its `Cargo.lock` names, and every git dependency in it
+comes from `github.com/storytold`: `Cargo.lock` exists and is up to date with the manifests
+(`cargo metadata --locked`), and neither `.cargo/config.toml` nor the legacy `.cargo/config`
+replaces, patches or overrides a source (none of that shows up in `Cargo.lock`). It reports every
+problem it finds. This replaces the "Git dependencies come from storytold" job apps carried in
+their own `ci.yml`, `nix.yml` or `release.yml`; `working-directory` points it at a workspace that
+isn't the repository root.
+
+#### Caller Example:
+```yaml
+jobs:
+  git-sources:
+    uses: storytold/craft-common-actions/.github/workflows/git-sources.yml@main
+  release:
+    needs: git-sources
+    uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -653,6 +673,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
 
 ## Storytold Organization Hosting
 
@@ -688,6 +709,7 @@ using `uses` cannot set `timeout-minutes`.
 | Windows ARM64 package / install | 90 / 30 |
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
+| Git sources | 5 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job

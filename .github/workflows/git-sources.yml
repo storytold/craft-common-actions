@@ -1,0 +1,35 @@
+name: "Git sources"
+
+# Fails unless the app builds only from what its Cargo.lock names, and every git dependency comes
+# from github.com/storytold: Cargo.lock exists and is up to date, and no .cargo/config(.toml)
+# replaces, patches or overrides a source. Callers run it beside their gate, or before a release:
+#
+#   git-sources:
+#     uses: storytold/craft-common-actions/.github/workflows/git-sources.yml@main
+#   release:
+#     needs: git-sources
+#     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "The Cargo workspace root, relative to the checkout"
+        type: string
+        required: false
+        default: "."
+
+permissions:
+  contents: read
+
+jobs:
+  git-sources:
+    name: Git dependencies come from storytold
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/check-git-sources@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
