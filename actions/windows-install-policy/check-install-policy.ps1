@@ -36,6 +36,18 @@ function Get-MsiProperty($Properties, [string] $Name) {
 $suite = [string](Get-PolicyValue 'suiteFolder' 'ArtCraft')
 $skipsLicencePage = [bool](Get-PolicyValue 'skipsLicencePage' ((Get-PolicyValue 'id') -in 'deckcraft', 'filmcraft', 'soundcraft'))
 $upgradeCode = [string](Assert-PolicyValue 'upgradeCode')
+$productName = [string](Assert-PolicyValue 'name')
+$registryPolicy = @(Get-PolicyValue 'registry' @())
+# A missing row would otherwise surface as "Cannot index into a null array" under strict mode.
+function Get-Directory($Directories, [string] $Name) {
+  if (-not $Directories.ContainsKey($Name)) { throw "The MSI has no $Name directory, so its installation folder cannot be checked." }
+  $Directories[$Name]
+}
+function Get-SequenceCondition($Database, [string] $Table, [string] $Action) {
+  $rows = @(Read-Rows $Database ("SELECT ``Condition`` FROM ``$Table`` WHERE ``Action`` = '{0}'" -f $Action) 1)
+  if ($rows.Count -eq 0) { throw "The MSI's $Table has no $Action action." }
+  $rows[0][0]
+}
 function Read-Rows($Database, [string] $Sql, [int] $Columns) {
   $view = $Database.OpenView($Sql)
   try {
@@ -82,15 +94,17 @@ try {
     if ((Get-MsiProperty $properties 'UpgradeCode').Trim('{}') -ne $upgradeCode) { throw 'Launcher upgrade identity changed.' }
     $dirs = @{}
     foreach ($row in (Read-Rows $database 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $dirs[$row[0]] = @($row[1],$row[2]) }
-    if ($dirs['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or $dirs['CraftSuiteFolder'][1] -ne $suite -or
-        $dirs['CraftSuiteFolder'][0] -ne 'LocalProgramsFolder' -or $dirs['LocalProgramsFolder'][0] -ne 'LocalAppDataFolder') {
+    $installDirRow = Get-Directory $dirs 'INSTALLFOLDER'; $suiteRow = Get-Directory $dirs 'CraftSuiteFolder'
+    $programsRow = Get-Directory $dirs 'LocalProgramsFolder'
+    if ($installDirRow[0] -ne 'CraftSuiteFolder' -or $suiteRow[1] -ne $suite -or
+        $suiteRow[0] -ne 'LocalProgramsFolder' -or $programsRow[0] -ne 'LocalAppDataFolder') {
       throw "Launcher new-install folder must be under the per-user $suite suite root."
     }
     foreach ($explicit in @('', 'F:\Chosen exact launcher')) {
       Set-SessionProperty $session 'PREVIOUSINSTALLFOLDER' 'E:\Existing exact launcher'
       Set-SessionProperty $session 'INSTALLFOLDER' $explicit
-      $row = @(Read-Rows $database 'SELECT `Condition` FROM `InstallUISequence` WHERE `Action` = ''CraftRestoreLauncherFolder''' 1)[0]
-      if ($session.EvaluateCondition($row[0]) -eq 1) {
+      $condition = Get-SequenceCondition $database 'InstallUISequence' 'CraftRestoreLauncherFolder'
+      if ($session.EvaluateCondition($condition) -eq 1) {
         if ($session.DoAction('CraftRestoreLauncherFolder') -ne 1) { throw 'Launcher restore action failed.' }
       }
       $expected = if ($explicit) { $explicit } else { 'E:\Existing exact launcher' }
@@ -98,7 +112,7 @@ try {
     }
     $rows = @(Read-Rows $database 'SELECT `Root`, `Key`, `Name`, `Value` FROM `Registry`' 4)
     if (@($rows | Where-Object { $_[0] -ne '1' }).Count) { throw 'Launcher registration must stay under the current account.' }
-    foreach ($entry in $policy.registry) {
+    foreach ($entry in $registryPolicy) {
       if (@($rows | Where-Object { $_[0] -eq $entry[0] -and $_[1] -eq $entry[1] -and $_[2] -eq $entry[2] -and $_[3] -eq $entry[3] }).Count -ne 1) {
         throw 'Launcher registration or shortcut preference changed unexpectedly.'
       }
@@ -114,10 +128,10 @@ try {
   foreach ($row in (Read-Rows $database 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) {
     $directories[$row[0]] = @($row[1], $row[2])
   }
-  if ($directories['INSTALLFOLDER'][0] -ne 'CraftSuiteFolder' -or
-      $directories['CraftSuiteFolder'][1] -ne $suite) { throw "Expected the app under the $suite suite folder." }
-  $programs = $directories['CraftSuiteFolder'][0]
-  if ($programs -eq 'ProgramFiles6432Folder') { $programs = $directories[$programs][0] }
+  if ((Get-Directory $directories 'INSTALLFOLDER')[0] -ne 'CraftSuiteFolder' -or
+      (Get-Directory $directories 'CraftSuiteFolder')[1] -ne $suite) { throw "Expected the app under the $suite suite folder." }
+  $programs = (Get-Directory $directories 'CraftSuiteFolder')[0]
+  if ($programs -eq 'ProgramFiles6432Folder') { $programs = (Get-Directory $directories $programs)[0] }
   if ($programs -notin 'ProgramFilesFolder', 'ProgramFiles64Folder') {
     throw 'Use Windows Installer native folder redirection, not a hard-coded profile path.'
   }
@@ -156,9 +170,9 @@ try {
       Set-SessionProperty $session 'CRAFT_MACHINE_DIR' 'E:\Existing machine app'
       $action = if ($scope -eq '1') { 'CraftRestoreMachineFolder' } else { 'CraftRestoreUserFolder' }
       # Evaluate the compiled condition, so the test exercises it instead of calling the action directly.
-      $restore = @(Read-Rows $database ('SELECT `Condition` FROM `InstallExecuteSequence` WHERE `Action` = ''{0}''' -f $action) 1)[0]
-      $selected = $session.EvaluateCondition($restore[0]) -eq 1
-      if ($selected -eq [bool]$explicit) { throw "$action must run only when no folder was supplied (condition: $($restore[0]))." }
+      $restore = Get-SequenceCondition $database 'InstallExecuteSequence' $action
+      $selected = $session.EvaluateCondition($restore) -eq 1
+      if ($selected -eq [bool]$explicit) { throw "$action must run only when no folder was supplied (condition: $restore)." }
       if ($selected -and $session.DoAction($action) -ne 1) { throw 'Remembered-folder property action failed.' }
       $expected = if ($explicit) { $explicit } elseif ($scope -eq '1') { 'E:\Existing machine app' } else { 'D:\Existing user app' }
       if ((Get-SessionProperty $session 'INSTALLFOLDER') -ne $expected) { throw 'Custom or remembered folder was not preserved.' }
@@ -189,7 +203,7 @@ try {
   $machineRoot = if ((Get-PackageTemplate $database) -match '^Intel') {
     if (Get-SessionProperty $session 'VersionNT64') { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
   } elseif ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
-  $machineFolder = (Join-Path $machineRoot "$suite\$($policy.name)") + '\'
+  $machineFolder = (Join-Path $machineRoot "$suite\$productName") + '\'
   foreach ($scope in @('1', '')) {
     Set-SessionProperty $session 'ALLUSERS' $scope
     Set-SessionProperty $session 'INSTALLFOLDER' ''
@@ -199,14 +213,14 @@ try {
       if ($session.EvaluateCondition($row[2]) -eq 1 -and $session.DoAction($row[0]) -ne 1) { throw "$($row[0]) failed." }
     }
     $folder = Get-SessionProperty $session 'INSTALLFOLDER'
-    $wanted = if ($scope -eq '1') { $machineFolder } else { (Join-Path $env:LOCALAPPDATA "Programs\$suite\$($policy.name)") + '\' }
+    $wanted = if ($scope -eq '1') { $machineFolder } else { (Join-Path $env:LOCALAPPDATA "Programs\$suite\$productName") + '\' }
     if ($folder -ine $wanted) { throw "Wizard default folder for ALLUSERS='$scope' is '$folder', expected '$wanted'." }
   }
   # Replay the wizard's compiled folder actions in sequence order, as the full UI runs them. A remembered
   # folder must win over the new-install default, and a folder the user typed must survive both.
   $uiFolderActions = @(Read-Rows $database 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallUISequence`' 3 |
     Where-Object { $_[0] -match '^Craft(Restore|Default)' } | Sort-Object { [int]$_[1] })
-  $userDefault = (Join-Path $env:LOCALAPPDATA "Programs\$suite\$($policy.name)") + '\'
+  $userDefault = (Join-Path $env:LOCALAPPDATA "Programs\$suite\$productName") + '\'
   foreach ($case in @(
       @('1', 'D:\Remembered user app', 'E:\Remembered machine app', '', 'E:\Remembered machine app'),
       @('', 'D:\Remembered user app', 'E:\Remembered machine app', '', 'D:\Remembered user app'),
@@ -245,8 +259,8 @@ try {
   $appPaths = '^Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\[^\\]+\.exe$'
   # Suffix, how to match the key, key, value name, locator type (2 = raw value, 1 = file; the 64-bit flag is masked off).
   $searchContract = @(
-    @('DIR',       'exact', "Software\$($policy.name)", 'InstallDir',    '2'),
-    @('FOLDER',    'exact', "Software\$($policy.name)", 'InstallFolder', '2'),
+    @('DIR',       'exact', "Software\$productName", 'InstallDir',    '2'),
+    @('FOLDER',    'exact', "Software\$productName", 'InstallFolder', '2'),
     @('PATH',      'regex', $appPaths,                  'Path',          '2'),
     @('EXEFOLDER', 'regex', $appPaths,                  '',              '1'),
     @('EXE',       'regex', $appPaths,                  '',              '1'))
@@ -295,8 +309,8 @@ try {
   Set-SessionProperty $session 'CRAFT_SCOPE' 'user'
   Set-SessionProperty $session 'CRAFT_USER_DIR' ''
   Set-SessionProperty $session 'CRAFT_MACHINE_DIR' 'E:\Existing machine app'
-  $preference = @(Read-Rows $database 'SELECT `Condition` FROM `InstallUISequence` WHERE `Action` = ''CraftPreferMachineScope''' 1)[0]
-  if ($session.EvaluateCondition($preference[0]) -ne 1 -or $session.DoAction('CraftPreferMachineScope') -ne 1 -or
+  $preference = Get-SequenceCondition $database 'InstallUISequence' 'CraftPreferMachineScope'
+  if ($session.EvaluateCondition($preference) -ne 1 -or $session.DoAction('CraftPreferMachineScope') -ne 1 -or
       (Get-SessionProperty $session 'CRAFT_SCOPE') -ne 'machine') {
     throw 'Full-UI machine upgrades must initially select the existing machine context.'
   }
@@ -383,13 +397,13 @@ try {
   if (@($registry | Where-Object { $_[0] -eq '0' -and $_[1] -match '^Software\\Classes(\\|$)' }).Count) {
     throw 'HKCR keys must be relative to Classes.'
   }
-  foreach ($entry in $policy.registry) {
+  foreach ($entry in $registryPolicy) {
     $found = @($registry | Where-Object { $_[0] -eq $entry[0] -and $_[1] -eq $entry[1] -and $_[2] -eq $entry[2] -and $_[3] -eq $entry[3] })
     if ($found.Count -ne 1) { throw "Lost or changed registration: $($entry[1]) / $($entry[2])" }
   }
-  $installDir = @($registry | Where-Object { $_[0] -eq '-1' -and $_[1] -eq "Software\$($policy.name)" -and $_[2] -eq 'InstallDir' -and $_[3] -eq '[INSTALLFOLDER]' })
+  $installDir = @($registry | Where-Object { $_[0] -eq '-1' -and $_[1] -eq "Software\$productName" -and $_[2] -eq 'InstallDir' -and $_[3] -eq '[INSTALLFOLDER]' })
   if ($installDir.Count -ne 1) { throw 'A context-sensitive installation-folder record is required.' }
-  Write-Output "PASS $($policy.name): $cases scope cases, folder preservation, action sequencing and registry contract. No installation performed."
+  Write-Output "PASS ${productName}: $cases scope cases, folder preservation, action sequencing and registry contract. No installation performed."
 } finally {
   foreach ($com in @($session, $database, $installer)) {
     if ($null -ne $com) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($com) }

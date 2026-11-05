@@ -110,6 +110,22 @@ jobs:
           }
           $global:LASTEXITCODE = 0
 
+      - name: Report a policy without a product name clearly
+        shell: pwsh
+        env:
+          APP_ID: ${{ matrix.app }}
+        run: |
+          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy.PSObject.Properties.Remove('name')
+          $path = Join-Path $env:RUNNER_TEMP 'no-name-policy.json'
+          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch "does not define 'name'") {
+            throw "Expected a clear error for a missing name: $output"
+          }
+          $global:LASTEXITCODE = 0
+
   wrapper:
     name: Reusable workflow matches the action
     runs-on: ubuntu-latest

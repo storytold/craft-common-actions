@@ -706,7 +706,7 @@ them the checker behaves as it always has, so existing policy files need no chan
 A policy with no `upgradeCode`, or an MSI with no `UpgradeCode` property, fails
 with a message naming the missing value.
 
-The test workflow checks this PR's local action against pinned EffectCraft,
+The test workflow checks the action in this repository against pinned EffectCraft,
 PhotoCraft, FilmCraft and VectorCraft sources on Windows. It exercises all three
 architectures, the existing-MSI action mode, and rejection of a mismatched upgrade
 identity. It does not build or install the apps.
