@@ -657,6 +657,13 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
+A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job
+timeout, and GitHub only reports the job as cancelled. Pass `gate-timeout-minutes`, a few minutes
+below `timeout-minutes` (for example 70 with `timeout-minutes: 85`), and the gate command is
+stopped at that time instead (GNU `timeout`, then killed 30 s later). The leg fails with a
+`Gate timed out` error, and a log group lists the processes still running one minute before the
+deadline. The default, 0, sets no limit of its own. Windows legs use Git Bash's `timeout`.
+
 SonarCloud callers whose instrumented workspace tests exceed the 90-minute
 default can pass `timeout-minutes: 120` under the calling job's `with`. This
 changes the job's time budget without dropping tests or coverage. Pass
