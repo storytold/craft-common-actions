@@ -11,6 +11,11 @@ on:
         description: "Installation folder name inside ProgramFiles or LocalAppData (e.g. PhotoCraft)"
         type: string
         required: true
+      app-title:
+        description: "Application display name for the shared signing script (default: app-dir). This workflow has no signing secrets, so the package stays unsigned"
+        type: string
+        required: false
+        default: ""
       install-relative-path:
         description: "Install path below LocalAppData (per-user) or ProgramFiles (per-machine), independent of app-dir"
         type: string
@@ -73,6 +78,12 @@ jobs:
         uses: storytold/craft-common-actions/actions/install-wix@main
         with:
           wix-version: ${{ inputs.wix-version }}
+      - name: Set up the shared signing script
+        # package.ps1 calls the same CRAFT_SIGN_SCRIPT as in a release; without secrets it warns
+        # and leaves the files unsigned.
+        uses: storytold/craft-common-actions/actions/setup-windows-signing@main
+        with:
+          product-name: ${{ inputs.app-title || inputs.app-dir }}
       - name: Build and package (unsigned)
         shell: pwsh
         env:
