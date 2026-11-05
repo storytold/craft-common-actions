@@ -1,0 +1,106 @@
+name: "Changed paths"
+
+# Whether a run's changes touch any of `paths`, or its pull request carries `label`: lets an app
+# run an expensive job (a Windows gate leg, say) only when it can matter. A second job in the
+# caller reads `matched`:
+#
+#   windows-scope:
+#     uses: storytold/craft-common-actions/.github/workflows/changed-paths.yml@main
+#     with: { paths: "crates/wincolor/*", label: full-ci }
+#   gate-windows:
+#     needs: windows-scope
+#     if: needs.windows-scope.outputs.matched == 'true'
+#
+# Pull requests compare the merge commit with its first parent (the base tip GitHub merged into),
+# so only the pull request's own changes count; pushes compare `before` with the pushed commit.
+# Anything else (a manual or scheduled run, a new branch, a push whose `before` is gone) matches.
+on:
+  workflow_call:
+    inputs:
+      paths:
+        description: "Bash glob patterns, one per line, matched against repository-relative paths; `*` also matches `/`, so crates/ui-egui/* covers the whole crate"
+        type: string
+        required: true
+      label:
+        description: "A pull request label that matches whatever the paths; empty: none"
+        type: string
+        required: false
+        default: ""
+    outputs:
+      matched:
+        description: "'true' when a changed path matches, the pull request has `label`, or the run is not a pull request or push"
+        value: ${{ jobs.changes.outputs.matched }}
+      reason:
+        description: "Why: the first matching path, the label, or the event"
+        value: ${{ jobs.changes.outputs.reason }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matched: ${{ steps.match.outputs.matched }}
+      reason: ${{ steps.match.outputs.reason }}
+    steps:
+      # Two commits deep for the merge commit's first parent; trees only, no file contents.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: true
+
+      - name: Match
+        id: match
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          BEFORE: ${{ github.event.before }}
+          PATTERNS: ${{ inputs.paths }}
+          LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          result() {
+            # a path may hold a newline: keep the reason on one output line
+            local reason=${2//[$'\n\r']/ }
+            printf 'matched=%s\nreason=%s\n' "$1" "$reason" >> "$GITHUB_OUTPUT"
+            echo "matched=$1 ($reason)"
+            exit 0
+          }
+          case "$EVENT" in
+            pull_request)
+              if [ -n "$LABEL" ] && printf '%s' "${LABELS:-[]}" | jq -e --arg l "$LABEL" 'index($l) != null' >/dev/null; then
+                result true "label $LABEL"
+              fi
+              base=HEAD^1
+              ;;
+            push)
+              if [ -z "${BEFORE//0/}" ]; then result true "push without a previous commit"; fi
+              if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+                && ! git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$BEFORE"; then
+                result true "push from $BEFORE, which could not be fetched"
+              fi
+              base=$BEFORE
+              ;;
+            *) result true "event $EVENT" ;;
+          esac
+          # NUL-separated: --name-only alone quotes paths with non-ASCII bytes, tabs or quotes.
+          changed=$(mktemp)
+          git diff -z --name-only --no-renames "$base" HEAD > "$changed"
+          while IFS= read -r -d '' file; do
+            [ -n "$file" ] || continue
+            while IFS= read -r pattern; do
+              pattern=${pattern#"${pattern%%[![:space:]]*}"}
+              pattern=${pattern%"${pattern##*[![:space:]]}"}
+              [ -n "$pattern" ] || continue
+              # Unquoted on purpose: the pattern is a glob.
+              # shellcheck disable=SC2053
+              if [[ $file == $pattern ]]; then result true "$file matches $pattern"; fi
+            done <<< "$PATTERNS"
+          done < "$changed"
+          result false "no changed path matches"
