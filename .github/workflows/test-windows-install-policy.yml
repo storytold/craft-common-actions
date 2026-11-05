@@ -77,7 +77,9 @@ jobs:
           foreach ($case in $cases) {
             $changed = $policy | ConvertTo-Json -Depth 20 | ConvertFrom-Json
             if ($case.remove) { $changed.PSObject.Properties.Remove($case.remove) }
-            foreach ($key in @($case.set.Keys)) { $changed | Add-Member -NotePropertyName $key -NotePropertyValue $case.set[$key] -Force }
+            if ($case.set) {
+              foreach ($key in $case.set.Keys) { $changed | Add-Member -NotePropertyName $key -NotePropertyValue $case.set[$key] -Force }
+            }
             $path = Join-Path $env:RUNNER_TEMP 'changed-policy.json'
             $changed | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
             $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1 | Out-String
