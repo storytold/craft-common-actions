@@ -8,7 +8,6 @@
   ],
   "icon": "../fixture.ico",
   "localization": [],
-  "extensions": [],
   "payloads": [
     "NOTICE",
     "fixturecustomui-cli.exe",

@@ -24,7 +24,9 @@ runs:
         if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
         $tools >> $env:GITHUB_PATH
         $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING_DIRECTORY 'install-policy.json') | ConvertFrom-Json
-        foreach ($extension in @($policy.extensions)) {
+        # extensions is optional: a missing key installs none (@($null) would be one empty name).
+        $extensions = if ($null -eq $policy.extensions) { @() } else { @($policy.extensions) }
+        foreach ($extension in $extensions) {
           if ($extension -notmatch '^[A-Za-z][A-Za-z0-9]*$') { throw "Invalid WiX extension: $extension" }
           & (Join-Path $tools 'wix.exe') extension add -g "WixToolset.$extension.wixext/5.0.2"
           if ($LASTEXITCODE -ne 0) { throw "WiX extension $extension installation failed." }

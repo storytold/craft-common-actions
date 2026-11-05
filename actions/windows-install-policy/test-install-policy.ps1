@@ -71,7 +71,12 @@ function New-Placeholder([string] $Stage, [string] $Name, [string] $Spec) {
 $output = (Resolve-Path -LiteralPath $OutputDirectory).Path
 # The app's own regression hook, if it has one, runs before any build.
 $hook = Join-Path $packaging 'test-legacy-fixture.ps1'
-if (Test-Path -LiteralPath $hook) { & $hook -Work (Join-Path $output 'legacy-source') }
+if (Test-Path -LiteralPath $hook) {
+  # A throw stops this script anyway; an `exit 1` only sets LASTEXITCODE, which the build would reset.
+  $global:LASTEXITCODE = 0
+  & $hook -Work (Join-Path $output 'legacy-source')
+  if ($LASTEXITCODE -ne 0) { throw "The app's test-legacy-fixture.ps1 failed (exit $LASTEXITCODE)." }
+}
 
 Add-Type -AssemblyName System.Drawing
 $shell = (Get-Process -Id $PID).Path
