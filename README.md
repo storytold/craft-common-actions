@@ -704,8 +704,7 @@ an app removes one only once a shared workflow runs it.
 
 ## Windows installation policy
 
-Apps with `packaging/windows/install-policy.json` can replace the Windows
-installation-policy job in their packaging lint workflow with:
+An app with `packaging/windows/install-policy.json` checks its installer with:
 
 ```yaml
 jobs:
@@ -713,70 +712,27 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/windows-install-policy.yml@main
 ```
 
-The shared job installs WiX 5.0.2 and the extensions listed in the policy, then
-builds metadata-only fixtures for x86, x64 and ARM64. It checks the compiled MSI's
-scope, folders, upgrade identity, registry entries and wizard behavior without
-installing a product or building the Rust app. The fixture payloads are plain text,
-not executable app binaries. The job keeps the existing ten-minute limit.
+It installs WiX 5.0.2 and the extensions the policy lists, builds metadata-only MSIs (plain-text
+payloads) for x86, x64 and ARM64 from the app's own WiX sources, and checks their scope, folders,
+upgrade identity, registry entries and wizard. Nothing is installed and the app isn't built. Paths in
+the policy are relative to the packaging directory (`packaging-directory`, default
+`packaging/windows`), and the icon to the app root two levels above it. An app's
+`test-legacy-fixture.ps1` there runs first, if it has one. To check an MSI it already built, a
+Windows job uses the action with `msi-path`.
 
-The app keeps its policy JSON, WiX sources, localization and icon in its own
-repository. Its `test-legacy-fixture.ps1` regression hook also runs if present. Paths in the
-policy retain their existing meaning: sources and localization are relative to
-the packaging directory, and the icon is relative to the app root two levels
-above it. Set the workflow's `packaging-directory` input if that directory is
-somewhere other than `packaging/windows`.
-
-For an existing MSI in a Windows job, use the action with `msi-path`; this skips
-WiX installation and fixture generation:
-
-```yaml
-- uses: storytold/craft-common-actions/actions/windows-install-policy@main
-  with:
-    msi-path: target/package/app.msi
-```
-
-The checker can also run directly from a checkout of this repository:
-
-```powershell
-pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 `
-  -MsiPath C:/app/target/package/app.msi `
-  -PolicyPath C:/app/packaging/windows/install-policy.json
-```
-
-Land the shared workflow before switching app callers to it. Keep each app's
-pre-signing check in `package.ps1` until its packaging process invokes the shared
-checker; moving the lint job alone does not replace that release safeguard.
-In each caller migration, replace only the `windows-install-policy` job, keeping
-the caller's triggers, permissions, concurrency and other jobs. Update its local
-test instructions before removing the old fixture generator. An app that still
-uses that generator locally can keep it during the transition. Full removal of
-the app-local checker needs a separate integration that keeps the pre-signing
-check available to both CI and local packaging builds.
-The shared checker's policy assertions are copied from the existing app checker;
-only the policy file location becomes an explicit parameter.
-
-Two optional policy keys describe behavior that differs between apps. The checker knows nothing
-about particular apps: anything that differs comes from the policy file.
+Two optional policy keys cover what differs between apps; the checker knows nothing about
+particular apps:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
 | `suiteFolder` | Folder that groups the suite's apps under Program Files and the per-user programs folder | `ArtCraft` |
-| `skipsLicencePage` | The wizard skips the licence page; the checker verifies the Welcome and Install folder pages route around it in both directions | `false` |
+| `skipsLicencePage` | The wizard goes straight from Welcome to the install folder; the checker verifies that routing in both directions | `false` |
 
-An app whose wizard goes straight from Welcome to the install folder sets
-`"skipsLicencePage": true` in its policy when it moves to the shared workflow, so that routing is
-checked.
+When an app moves to the shared workflow it replaces only its `windows-install-policy` job, and keeps
+the pre-signing check in its `package.ps1` until its packaging calls the shared checker.
 
-A policy with no `upgradeCode`, or an MSI with no `UpgradeCode` property, fails
-with a message naming the missing value.
-
-The test workflow checks the action against made-up fixture apps in
-`tests/fixtures/windows-install-policy`, one per installer shape callers have: an app's own wizard
-with a legacy regression hook, the WiX UI wizard with the licence page skipped, the UI and Util
-extensions with a localization file, and file associations. It checks out no app repository. It
-exercises all three architectures, the existing-MSI action mode, rejection of a mismatched upgrade
-identity or suite folder, clear errors for missing keys, and that `skipsLicencePage` comes from the
-policy. Nothing is installed.
+The test workflow builds two made-up apps in `tests/fixtures/windows-install-policy` (one with its
+own wizard, one with the WiX UI wizard) and checks that mismatched or incomplete policies fail.
 
 ## macOS code signing
 

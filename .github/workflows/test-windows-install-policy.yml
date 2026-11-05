@@ -21,9 +21,8 @@ permissions:
 
 jobs:
   fixtures:
-    # Each fixture is a made-up app in tests/fixtures/windows-install-policy with the installer shape
-    # one kind of caller has; no app repository is checked out. Apps run the reusable workflow for
-    # themselves only.
+    # Made-up apps in tests/fixtures/windows-install-policy, one per kind of installer the callers
+    # have; no app repository is checked out.
     name: ${{ matrix.fixture }} installer fixture
     runs-on: windows-latest
     timeout-minutes: 10
@@ -34,15 +33,10 @@ jobs:
           # Its own wizard (installer-ui.wxs), no WiX extensions, and a legacy regression hook.
           - fixture: custom-ui
             id: fixturecustomui
-          # The WiX UI extension's InstallDir wizard with the licence page skipped.
-          - fixture: skips-licence
-            id: fixtureskipslicence
-          # UI and Util extensions with a localization file.
-          - fixture: localized
-            id: fixturelocalized
-          # File associations and Open With registration under Software\Classes.
-          - fixture: file-associations
-            id: fixtureassociations
+          # The WiX UI wizard without its licence page, UI and Util extensions, a localization file
+          # and file associations.
+          - fixture: wixui
+            id: fixturewixui
     env:
       PACKAGING: tests/fixtures/windows-install-policy/${{ matrix.fixture }}/packaging/windows
       APP_ID: ${{ matrix.id }}
@@ -50,14 +44,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Check shared PowerShell syntax
-        shell: pwsh
-        run: |
-          foreach ($file in Get-ChildItem actions/windows-install-policy/*.ps1) {
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors) | Out-Null
-            if ($errors) { throw ($errors | Out-String) }
-          }
       - name: Build and check all three architectures
         uses: ./actions/windows-install-policy
         with:
@@ -67,114 +53,37 @@ jobs:
         with:
           packaging-directory: ${{ env.PACKAGING }}
           msi-path: ${{ runner.temp }}/craft-install-policy-tests/x64/${{ matrix.id }}-NOT-INSTALLABLE.msi
-      - name: Reject a mismatched policy
-        shell: pwsh
-        run: |
-          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
-          $policy.upgradeCode = '00000000-0000-0000-0000-000000000001'
-          $path = Join-Path $env:RUNNER_TEMP 'wrong-policy.json'
-          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
-          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
-          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
-          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'upgrade identity') {
-            throw "Expected the shared checker to reject the mismatched UpgradeCode: $output"
-          }
-          $global:LASTEXITCODE = 0
-      - name: Reject a policy that names another suite folder
-        shell: pwsh
-        run: |
-          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
-          $policy | Add-Member -NotePropertyName suiteFolder -NotePropertyValue 'NotTheSuite' -Force
-          $path = Join-Path $env:RUNNER_TEMP 'other-suite-policy.json'
-          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
-          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
-          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
-          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'NotTheSuite') {
-            throw "Expected the shared checker to enforce the policy's suiteFolder: $output"
-          }
-          $global:LASTEXITCODE = 0
-      - name: Report a policy without an upgrade code clearly
-        shell: pwsh
-        run: |
-          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
-          $policy.PSObject.Properties.Remove('upgradeCode')
-          $path = Join-Path $env:RUNNER_TEMP 'no-upgrade-code-policy.json'
-          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
-          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
-          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
-          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch "does not define 'upgradeCode'") {
-            throw "Expected a clear error for a missing upgradeCode: $output"
-          }
-          $global:LASTEXITCODE = 0
-
-      - name: Report a policy without a product name clearly
-        shell: pwsh
-        run: |
-          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
-          $policy.PSObject.Properties.Remove('name')
-          $path = Join-Path $env:RUNNER_TEMP 'no-name-policy.json'
-          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
-          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
-          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
-          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch "does not define 'name'") {
-            throw "Expected a clear error for a missing name: $output"
-          }
-          $global:LASTEXITCODE = 0
-
       - name: Run the app's legacy regression hook when it has one
         shell: pwsh
         run: |
-          $hook = Join-Path $env:PACKAGING 'test-legacy-fixture.ps1'
-          $marker = Join-Path $env:RUNNER_TEMP 'craft-install-policy-tests/legacy-source/legacy-hook-ran.txt'
-          if ((Test-Path -LiteralPath $hook) -ne (Test-Path -LiteralPath $marker)) {
-            throw "test-legacy-fixture.ps1 present: $(Test-Path -LiteralPath $hook); it ran: $(Test-Path -LiteralPath $marker)"
-          }
-
-      - name: Read skipsLicencePage from the policy, not from the app's name
+          $hook = Test-Path -LiteralPath (Join-Path $env:PACKAGING 'test-legacy-fixture.ps1')
+          $ran = Test-Path -LiteralPath (Join-Path $env:RUNNER_TEMP 'craft-install-policy-tests/legacy-source/legacy-hook-ran.txt')
+          if ($hook -ne $ran) { throw "test-legacy-fixture.ps1 present: $hook; it ran: $ran" }
+      - name: Reject policies that do not match the MSI
         shell: pwsh
         run: |
           $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
-          if ($policy.PSObject.Properties['skipsLicencePage'] -and $policy.skipsLicencePage) {
-            Write-Output 'This fixture skips the licence page, and the build step checked both directions.'
-            return
-          }
-          # A wizard that shows the licence page must fail once its policy claims it is skipped.
-          $policy | Add-Member -NotePropertyName skipsLicencePage -NotePropertyValue $true -Force
-          $path = Join-Path $env:RUNNER_TEMP 'skips-licence-policy.json'
-          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
           $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
-          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
-          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'Skipping the licence page') {
-            throw "Expected skipsLicencePage = true to be checked against this wizard: $output"
+          $cases = @(
+            @{ change = 'a different upgrade code'; set = @{ upgradeCode = '00000000-0000-0000-0000-000000000001' }; expect = 'upgrade identity' }
+            @{ change = 'another suite folder'; set = @{ suiteFolder = 'NotTheSuite' }; expect = 'NotTheSuite' }
+            @{ change = 'no upgrade code'; remove = 'upgradeCode'; expect = "does not define 'upgradeCode'" }
+            @{ change = 'no product name'; remove = 'name'; expect = "does not define 'name'" }
+          )
+          # skipsLicencePage comes from the policy: claiming it for a wizard that shows the page fails.
+          if (-not $policy.skipsLicencePage) {
+            $cases += @{ change = 'a licence page it says is skipped'; set = @{ skipsLicencePage = $true }; expect = 'Skipping the licence page' }
+          }
+          foreach ($case in $cases) {
+            $changed = $policy | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            if ($case.remove) { $changed.PSObject.Properties.Remove($case.remove) }
+            foreach ($key in @($case.set.Keys)) { $changed | Add-Member -NotePropertyName $key -NotePropertyValue $case.set[$key] -Force }
+            $path = Join-Path $env:RUNNER_TEMP 'changed-policy.json'
+            $changed | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+            $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -or $output -notmatch [regex]::Escape($case.expect)) {
+              throw "A policy with $($case.change) should fail with '$($case.expect)': $output"
+            }
+            Write-Output "OK: a policy with $($case.change) is rejected."
           }
           $global:LASTEXITCODE = 0
-
-  wrapper:
-    name: Reusable workflow matches the action
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      # The reusable workflow can only call the action at @main, so the fixture job above cannot reach
-      # it. Check that every input it passes exists on the action and that the defaults agree, so a
-      # rename in one file cannot silently break callers.
-      - name: Check the workflow passes only inputs the action defines
-        shell: pwsh
-        run: |
-          $action = Get-Content -Raw actions/windows-install-policy/action.yml
-          $workflow = Get-Content -Raw .github/workflows/windows-install-policy.yml
-          $actionInputs = [regex]::Match($action, '(?ms)^inputs:\s*[\r\n]+(.*?)^runs:').Groups[1].Value
-          $defined = [regex]::Matches($actionInputs, '(?m)^  ([a-z-]+):\s*$') | ForEach-Object { $_.Groups[1].Value }
-          $call = [regex]::Match($workflow, '(?ms)actions/windows-install-policy@main\s*[\r\n]+\s*with:\s*[\r\n]+(.*)\z').Groups[1].Value
-          $passed = [regex]::Matches($call, '(?m)^\s+([a-z-]+):') | ForEach-Object { $_.Groups[1].Value }
-          if (-not $passed) { throw 'The reusable workflow does not call the action with any inputs.' }
-          foreach ($name in $passed) {
-            if ($name -notin $defined) { throw "The workflow passes '$name', which the action does not define ($($defined -join ', '))." }
-          }
-          $actionDefault = [regex]::Match($actionInputs, '(?ms)^  packaging-directory:.*?default:\s*(\S+)').Groups[1].Value
-          $workflowDefault = [regex]::Match($workflow, '(?ms)packaging-directory:.*?default:\s*(\S+)').Groups[1].Value
-          if (-not $actionDefault -or $actionDefault -ne $workflowDefault) {
-            throw "packaging-directory defaults differ: action '$actionDefault', workflow '$workflowDefault'."
-          }

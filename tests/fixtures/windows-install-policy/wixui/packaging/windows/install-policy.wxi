@@ -6,24 +6,24 @@
        (two registered products, and uninstall leaves files behind). Checked with real msiexec runs. -->
   <Property Id="INSTALLFOLDER" Secure="yes" />
   <Property Id="CRAFT_SCOPE" Value="user" Secure="yes" />
-  <Property Id="CRAFT_U_DIR" Secure="yes"><RegistrySearch Id="CRAFT_U_DIRSearch" Root="HKCU" Key="Software\FixtureLocalized" Name="InstallDir" Type="raw" /></Property>
+  <Property Id="CRAFT_U_DIR" Secure="yes"><RegistrySearch Id="CRAFT_U_DIRSearch" Root="HKCU" Key="Software\FixtureWixUi" Name="InstallDir" Type="raw" /></Property>
   <SetProperty Id="CRAFT_USER_DIR" Action="CraftUFromDIR" Value="[CRAFT_U_DIR]" After="AppSearch" Sequence="both" Condition="NOT CRAFT_USER_DIR AND CRAFT_U_DIR" />
-  <Property Id="CRAFT_U_FOLDER" Secure="yes"><RegistrySearch Id="CRAFT_U_FOLDERSearch" Root="HKCU" Key="Software\FixtureLocalized" Name="InstallFolder" Type="raw" /></Property>
+  <Property Id="CRAFT_U_FOLDER" Secure="yes"><RegistrySearch Id="CRAFT_U_FOLDERSearch" Root="HKCU" Key="Software\FixtureWixUi" Name="InstallFolder" Type="raw" /></Property>
   <SetProperty Id="CRAFT_USER_DIR" Action="CraftUFromFOLDER" Value="[CRAFT_U_FOLDER]" After="CraftUFromDIR" Sequence="both" Condition="NOT CRAFT_USER_DIR AND CRAFT_U_FOLDER" />
-  <Property Id="CRAFT_U_PATH" Secure="yes"><RegistrySearch Id="CRAFT_U_PATHSearch" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Name="Path" Type="raw" /></Property>
+  <Property Id="CRAFT_U_PATH" Secure="yes"><RegistrySearch Id="CRAFT_U_PATHSearch" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Name="Path" Type="raw" /></Property>
   <SetProperty Id="CRAFT_USER_DIR" Action="CraftUFromPATH" Value="[CRAFT_U_PATH]" After="CraftUFromFOLDER" Sequence="both" Condition="NOT CRAFT_USER_DIR AND CRAFT_U_PATH" />
-  <Property Id="CRAFT_U_EXEFOLDER" Secure="yes"><RegistrySearch Id="CRAFT_ULegacyFolder" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Type="file" /></Property>
-  <Property Id="CRAFT_U_EXE" Secure="yes"><RegistrySearch Id="CRAFT_ULegacyExe" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Type="file"><FileSearch Id="CRAFT_ULegacyFile" Name="fixturelocalized.exe" /></RegistrySearch></Property>
+  <Property Id="CRAFT_U_EXEFOLDER" Secure="yes"><RegistrySearch Id="CRAFT_ULegacyFolder" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Type="file" /></Property>
+  <Property Id="CRAFT_U_EXE" Secure="yes"><RegistrySearch Id="CRAFT_ULegacyExe" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Type="file"><FileSearch Id="CRAFT_ULegacyFile" Name="fixturewixui.exe" /></RegistrySearch></Property>
   <SetProperty Id="CRAFT_USER_DIR" Action="CraftUFromLegacyExe" Value="[CRAFT_U_EXEFOLDER]" After="CraftUFromPATH" Sequence="both" Condition="NOT CRAFT_USER_DIR AND CRAFT_U_EXEFOLDER AND CRAFT_U_EXE" />
   <Property Id="CRAFT_USER_DIR" Secure="yes" />
-  <Property Id="CRAFT_M_DIR" Secure="yes"><RegistrySearch Id="CRAFT_M_DIRSearch" Root="HKLM" Key="Software\FixtureLocalized" Name="InstallDir" Type="raw" /></Property>
+  <Property Id="CRAFT_M_DIR" Secure="yes"><RegistrySearch Id="CRAFT_M_DIRSearch" Root="HKLM" Key="Software\FixtureWixUi" Name="InstallDir" Type="raw" /></Property>
   <SetProperty Id="CRAFT_MACHINE_DIR" Action="CraftMFromDIR" Value="[CRAFT_M_DIR]" After="CraftUFromLegacyExe" Sequence="both" Condition="NOT CRAFT_MACHINE_DIR AND CRAFT_M_DIR" />
-  <Property Id="CRAFT_M_FOLDER" Secure="yes"><RegistrySearch Id="CRAFT_M_FOLDERSearch" Root="HKLM" Key="Software\FixtureLocalized" Name="InstallFolder" Type="raw" /></Property>
+  <Property Id="CRAFT_M_FOLDER" Secure="yes"><RegistrySearch Id="CRAFT_M_FOLDERSearch" Root="HKLM" Key="Software\FixtureWixUi" Name="InstallFolder" Type="raw" /></Property>
   <SetProperty Id="CRAFT_MACHINE_DIR" Action="CraftMFromFOLDER" Value="[CRAFT_M_FOLDER]" After="CraftMFromDIR" Sequence="both" Condition="NOT CRAFT_MACHINE_DIR AND CRAFT_M_FOLDER" />
-  <Property Id="CRAFT_M_PATH" Secure="yes"><RegistrySearch Id="CRAFT_M_PATHSearch" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Name="Path" Type="raw" /></Property>
+  <Property Id="CRAFT_M_PATH" Secure="yes"><RegistrySearch Id="CRAFT_M_PATHSearch" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Name="Path" Type="raw" /></Property>
   <SetProperty Id="CRAFT_MACHINE_DIR" Action="CraftMFromPATH" Value="[CRAFT_M_PATH]" After="CraftMFromFOLDER" Sequence="both" Condition="NOT CRAFT_MACHINE_DIR AND CRAFT_M_PATH" />
-  <Property Id="CRAFT_M_EXEFOLDER" Secure="yes"><RegistrySearch Id="CRAFT_MLegacyFolder" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Type="file" /></Property>
-  <Property Id="CRAFT_M_EXE" Secure="yes"><RegistrySearch Id="CRAFT_MLegacyExe" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturelocalized.exe" Type="file"><FileSearch Id="CRAFT_MLegacyFile" Name="fixturelocalized.exe" /></RegistrySearch></Property>
+  <Property Id="CRAFT_M_EXEFOLDER" Secure="yes"><RegistrySearch Id="CRAFT_MLegacyFolder" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Type="file" /></Property>
+  <Property Id="CRAFT_M_EXE" Secure="yes"><RegistrySearch Id="CRAFT_MLegacyExe" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturewixui.exe" Type="file"><FileSearch Id="CRAFT_MLegacyFile" Name="fixturewixui.exe" /></RegistrySearch></Property>
   <SetProperty Id="CRAFT_MACHINE_DIR" Action="CraftMFromLegacyExe" Value="[CRAFT_M_EXEFOLDER]" After="CraftMFromPATH" Sequence="both" Condition="NOT CRAFT_MACHINE_DIR AND CRAFT_M_EXEFOLDER AND CRAFT_M_EXE" />
   <Property Id="CRAFT_MACHINE_DIR" Secure="yes" />
   <SetProperty Id="CRAFT_SCOPE" Action="CraftPreferMachineScope" Value="machine" After="CraftMFromLegacyExe" Sequence="ui" Condition="ALLUSERS = 1 OR (CRAFT_MACHINE_DIR AND NOT CRAFT_USER_DIR)" />
@@ -31,12 +31,12 @@
   <!-- The wizard can change the context after Windows Installer has already resolved Program Files for the first one.
        Give the new-install folder explicitly so Everyone never lands in the profile and Only for me never lands in Program Files. -->
   <?if $(sys.BUILDARCH) = x86 ?>
-  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder" Value="[%ProgramFiles(x86)]\ArtCraft\FixtureLocalized\" After="CraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND VersionNT64" />
-  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder32" Value="[%ProgramFiles]\ArtCraft\FixtureLocalized\" After="CraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND NOT VersionNT64" />
-  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\ArtCraft\FixtureLocalized\" After="CraftDefaultMachineFolder32" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
+  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder" Value="[%ProgramFiles(x86)]\ArtCraft\FixtureWixUi\" After="CraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND VersionNT64" />
+  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder32" Value="[%ProgramFiles]\ArtCraft\FixtureWixUi\" After="CraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND NOT VersionNT64" />
+  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\ArtCraft\FixtureWixUi\" After="CraftDefaultMachineFolder32" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
   <?else?>
-  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder" Value="[%ProgramW6432]\ArtCraft\FixtureLocalized\" After="CraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1" />
-  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\ArtCraft\FixtureLocalized\" After="CraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
+  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultMachineFolder" Value="[%ProgramW6432]\ArtCraft\FixtureWixUi\" After="CraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1" />
+  <SetProperty Id="INSTALLFOLDER" Action="CraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\ArtCraft\FixtureWixUi\" After="CraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
   <?endif?>
   <SetProperty Id="INSTALLFOLDER" Action="CraftRestoreMachineFolder" Value="[CRAFT_MACHINE_DIR]" Before="CraftRestoreUserFolder" Sequence="both" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND CRAFT_MACHINE_DIR" />
   <Launch Condition="Installed OR ALLUSERS &lt;&gt; 1 OR NOT CRAFT_USER_DIR" Message="This app is already installed for your account. Choose Only for me to update it, or uninstall that copy before changing who it is installed for." />
