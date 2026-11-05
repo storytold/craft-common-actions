@@ -1,0 +1,44 @@
+{
+  "id": "fixturecustomui",
+  "name": "FixtureCustomUi",
+  "upgradeCode": "45EE9367-3C8B-44CD-B176-E80C5C4FCC4A",
+  "sources": [
+    "fixturecustomui.wxs",
+    "installer-ui.wxs"
+  ],
+  "icon": "../fixture.ico",
+  "localization": [],
+  "extensions": [],
+  "payloads": [
+    "NOTICE",
+    "fixturecustomui-cli.exe",
+    "fixturecustomui.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\fixturecustomui.exe",
+      "",
+      "[#FixtureCustomUiExe]"
+    ],
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\fixturecustomui.exe",
+      "Path",
+      "[INSTALLFOLDER]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureCustomUi",
+      "DesktopShortcut",
+      "[DESKTOPSHORTCUT]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureCustomUi",
+      "DesktopShortcut",
+      "1"
+    ]
+  ],
+  "mode": "dualScope"
+}

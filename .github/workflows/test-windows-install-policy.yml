@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - actions/windows-install-policy/**
+      - tests/fixtures/windows-install-policy/**
       - .github/workflows/windows-install-policy.yml
       - .github/workflows/test-windows-install-policy.yml
   push:
     branches: [main]
     paths:
       - actions/windows-install-policy/**
+      - tests/fixtures/windows-install-policy/**
       - .github/workflows/windows-install-policy.yml
       - .github/workflows/test-windows-install-policy.yml
   workflow_dispatch:
@@ -19,33 +21,34 @@ permissions:
 
 jobs:
   fixtures:
-    name: ${{ matrix.app }} installer fixtures
+    # Each fixture is a made-up app in tests/fixtures/windows-install-policy with the installer shape
+    # one kind of caller has; no app repository is checked out. Apps run the reusable workflow for
+    # themselves only.
+    name: ${{ matrix.fixture }} installer fixture
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         include:
-          - app: effectcraft
-            ref: bb78d55825adc879ae522c18ac57c4ce5690318d
-          - app: photocraft
-            ref: 5617e00ca05adf7658afa4ec68908cb1889edf79
-          - app: filmcraft
-            ref: c9be14245a6c9da585ff906a6e0ca9c8200652ea
-          - app: vectorcraft
-            ref: bd8cc893da71beaec0125d0d9c8df8f9a744499c
+          # Its own wizard (installer-ui.wxs), no WiX extensions, and a legacy regression hook.
+          - fixture: custom-ui
+            id: fixturecustomui
+          # The WiX UI extension's InstallDir wizard with the licence page skipped.
+          - fixture: skips-licence
+            id: fixtureskipslicence
+          # UI and Util extensions with a localization file.
+          - fixture: localized
+            id: fixturelocalized
+          # File associations and Open With registration under Software\Classes.
+          - fixture: file-associations
+            id: fixtureassociations
+    env:
+      PACKAGING: tests/fixtures/windows-install-policy/${{ matrix.fixture }}/packaging/windows
+      APP_ID: ${{ matrix.id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: storytold/${{ matrix.app }}
-          ref: ${{ matrix.ref }}
-          path: app
-          sparse-checkout: |
-            packaging/windows
-            assets/app-icon
           persist-credentials: false
       - name: Check shared PowerShell syntax
         shell: pwsh
@@ -58,18 +61,16 @@ jobs:
       - name: Build and check all three architectures
         uses: ./actions/windows-install-policy
         with:
-          packaging-directory: app/packaging/windows
+          packaging-directory: ${{ env.PACKAGING }}
       - name: Check an existing MSI through the action
         uses: ./actions/windows-install-policy
         with:
-          packaging-directory: app/packaging/windows
-          msi-path: ${{ runner.temp }}/craft-install-policy-tests/x64/${{ matrix.app }}-NOT-INSTALLABLE.msi
+          packaging-directory: ${{ env.PACKAGING }}
+          msi-path: ${{ runner.temp }}/craft-install-policy-tests/x64/${{ matrix.id }}-NOT-INSTALLABLE.msi
       - name: Reject a mismatched policy
         shell: pwsh
-        env:
-          APP_ID: ${{ matrix.app }}
         run: |
-          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
           $policy.upgradeCode = '00000000-0000-0000-0000-000000000001'
           $path = Join-Path $env:RUNNER_TEMP 'wrong-policy.json'
           $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
@@ -81,10 +82,8 @@ jobs:
           $global:LASTEXITCODE = 0
       - name: Reject a policy that names another suite folder
         shell: pwsh
-        env:
-          APP_ID: ${{ matrix.app }}
         run: |
-          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
           $policy | Add-Member -NotePropertyName suiteFolder -NotePropertyValue 'NotTheSuite' -Force
           $path = Join-Path $env:RUNNER_TEMP 'other-suite-policy.json'
           $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
@@ -96,10 +95,8 @@ jobs:
           $global:LASTEXITCODE = 0
       - name: Report a policy without an upgrade code clearly
         shell: pwsh
-        env:
-          APP_ID: ${{ matrix.app }}
         run: |
-          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
           $policy.PSObject.Properties.Remove('upgradeCode')
           $path = Join-Path $env:RUNNER_TEMP 'no-upgrade-code-policy.json'
           $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
@@ -112,10 +109,8 @@ jobs:
 
       - name: Report a policy without a product name clearly
         shell: pwsh
-        env:
-          APP_ID: ${{ matrix.app }}
         run: |
-          $policy = Get-Content -Raw -LiteralPath app/packaging/windows/install-policy.json | ConvertFrom-Json
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
           $policy.PSObject.Properties.Remove('name')
           $path = Join-Path $env:RUNNER_TEMP 'no-name-policy.json'
           $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
@@ -123,6 +118,34 @@ jobs:
           $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
           if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch "does not define 'name'") {
             throw "Expected a clear error for a missing name: $output"
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Run the app's legacy regression hook when it has one
+        shell: pwsh
+        run: |
+          $hook = Join-Path $env:PACKAGING 'test-legacy-fixture.ps1'
+          $marker = Join-Path $env:RUNNER_TEMP 'craft-install-policy-tests/legacy-source/legacy-hook-ran.txt'
+          if ((Test-Path -LiteralPath $hook) -ne (Test-Path -LiteralPath $marker)) {
+            throw "test-legacy-fixture.ps1 present: $(Test-Path -LiteralPath $hook); it ran: $(Test-Path -LiteralPath $marker)"
+          }
+
+      - name: Read skipsLicencePage from the policy, not from the app's name
+        shell: pwsh
+        run: |
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
+          if ($policy.PSObject.Properties['skipsLicencePage'] -and $policy.skipsLicencePage) {
+            Write-Output 'This fixture skips the licence page, and the build step checked both directions.'
+            return
+          }
+          # A wizard that shows the licence page must fail once its policy claims it is skipped.
+          $policy | Add-Member -NotePropertyName skipsLicencePage -NotePropertyValue $true -Force
+          $path = Join-Path $env:RUNNER_TEMP 'skips-licence-policy.json'
+          $policy | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1
+          if ($LASTEXITCODE -eq 0 -or ($output | Out-String) -notmatch 'Skipping the licence page') {
+            throw "Expected skipsLicencePage = true to be checked against this wizard: $output"
           }
           $global:LASTEXITCODE = 0
 

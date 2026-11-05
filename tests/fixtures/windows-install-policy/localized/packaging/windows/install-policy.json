@@ -1,0 +1,42 @@
+{
+  "id": "fixturelocalized",
+  "name": "FixtureLocalized",
+  "upgradeCode": "3A7303C4-C6ED-45A7-BF54-2C665A89312A",
+  "sources": [
+    "fixturelocalized.wxs"
+  ],
+  "icon": "../fixture.ico",
+  "localization": [
+    "fixturelocalized.en-us.wxl"
+  ],
+  "extensions": [
+    "UI",
+    "Util"
+  ],
+  "payloads": [
+    "fixturelocalized-cli.exe",
+    "fixturelocalized.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\fixturelocalized.exe",
+      "",
+      "[#FixtureLocalizedExe]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureLocalized",
+      "InstallDir",
+      "[INSTALLFOLDER]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureLocalized",
+      "DesktopShortcut",
+      "#1"
+    ]
+  ],
+  "mode": "dualScope",
+  "skipsLicencePage": true
+}

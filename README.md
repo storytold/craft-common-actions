@@ -755,21 +755,28 @@ check available to both CI and local packaging builds.
 The shared checker's policy assertions are copied from the existing app checker;
 only the policy file location becomes an explicit parameter.
 
-Two optional policy keys describe behavior that differs between apps. Without
-them the checker behaves as it always has, so existing policy files need no change:
+Two optional policy keys describe behavior that differs between apps. The checker knows nothing
+about particular apps: anything that differs comes from the policy file.
 
 | Key | Meaning | Default |
 | --- | --- | --- |
 | `suiteFolder` | Folder that groups the suite's apps under Program Files and the per-user programs folder | `ArtCraft` |
-| `skipsLicencePage` | The wizard skips the licence page; the checker verifies the Welcome and Install folder pages route around it in both directions | `true` for `deckcraft`, `filmcraft` and `soundcraft`, otherwise `false` |
+| `skipsLicencePage` | The wizard skips the licence page; the checker verifies the Welcome and Install folder pages route around it in both directions | `false` |
+
+An app whose wizard goes straight from Welcome to the install folder sets
+`"skipsLicencePage": true` in its policy when it moves to the shared workflow, so that routing is
+checked.
 
 A policy with no `upgradeCode`, or an MSI with no `UpgradeCode` property, fails
 with a message naming the missing value.
 
-The test workflow checks the action in this repository against pinned EffectCraft,
-PhotoCraft, FilmCraft and VectorCraft sources on Windows. It exercises all three
-architectures, the existing-MSI action mode, and rejection of a mismatched upgrade
-identity. It does not build or install the apps.
+The test workflow checks the action against made-up fixture apps in
+`tests/fixtures/windows-install-policy`, one per installer shape callers have: an app's own wizard
+with a legacy regression hook, the WiX UI wizard with the licence page skipped, the UI and Util
+extensions with a localization file, and file associations. It checks out no app repository. It
+exercises all three architectures, the existing-MSI action mode, rejection of a mismatched upgrade
+identity or suite folder, clear errors for missing keys, and that `skipsLicencePage` comes from the
+policy. Nothing is installed.
 
 ## macOS code signing
 

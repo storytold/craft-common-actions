@@ -28,13 +28,13 @@ function Get-MsiProperty($Properties, [string] $Name) {
   if (-not $Properties.ContainsKey($Name)) { throw "The MSI has no $Name property, so its identity cannot be checked." }
   $Properties[$Name]
 }
-# Optional policy keys. Their defaults reproduce what the checker enforced before they existed, so an
-# existing policy file keeps working unchanged:
+# Optional policy keys; the checker knows nothing about particular apps, so everything that differs
+# between them comes from the policy file:
 #   suiteFolder      Folder under Program Files that groups the suite's apps (default 'ArtCraft').
 #   skipsLicencePage True when the wizard skips the licence page; the checker then verifies that
-#                    navigation in both directions (default: only the original three apps).
+#                    navigation in both directions (default false).
 $suite = [string](Get-PolicyValue 'suiteFolder' 'ArtCraft')
-$skipsLicencePage = [bool](Get-PolicyValue 'skipsLicencePage' ((Get-PolicyValue 'id') -in 'deckcraft', 'filmcraft', 'soundcraft'))
+$skipsLicencePage = [bool](Get-PolicyValue 'skipsLicencePage' $false)
 $upgradeCode = [string](Assert-PolicyValue 'upgradeCode')
 $productName = [string](Assert-PolicyValue 'name')
 $registryPolicy = @(Get-PolicyValue 'registry' @())

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Overrides for the setup wizard's WixUI strings, so its pages name the version being installed
+  ([FixtureLocalizedVersion] is the full version, pre-release tag included, set in fixturelocalized.wxs).
+-->
+<WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
+  <String Id="WelcomeDlgTitle" Value="{\WixUI_Font_Bigger}Welcome to the [ProductName] [FixtureLocalizedVersion] Setup Wizard" />
+  <String Id="WelcomeDlgDescription" Value="The Setup Wizard will install [ProductName] version [FixtureLocalizedVersion] on your computer. Click Next to continue or Cancel to exit the Setup Wizard." />
+  <String Id="VerifyReadyDlgInstallTitle" Value="{\WixUI_Font_Title}Ready to install [ProductName] [FixtureLocalizedVersion]" />
+  <String Id="ShortcutsDlgTitle" Value="{\WixUI_Font_Title}Shortcuts" />
+  <String Id="ShortcutsDlgDescription" Value="Choose where you can start [ProductName] from." />
+  <String Id="ShortcutsDlgDesktop" Value="Create a &amp;desktop shortcut" />
+  <String Id="ShortcutsDlgStartMenu" Value="[ProductName] is always added to the Start menu." />
+  <String Id="ExitDialogTitle" Value="{\WixUI_Font_Bigger}Completed the [ProductName] [FixtureLocalizedVersion] Setup Wizard" />
+</WixLocalization>
