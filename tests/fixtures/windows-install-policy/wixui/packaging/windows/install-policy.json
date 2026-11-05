@@ -56,5 +56,10 @@
     ]
   ],
   "mode": "dualScope",
-  "skipsLicencePage": true
+  "skipsLicencePage": true,
+  "wixVariables": {
+    "DocsDir": "@folder",
+    "BannerBmp": "@bitmap 493x58",
+    "DialogBmp": "@bitmap 493x312"
+  }
 }

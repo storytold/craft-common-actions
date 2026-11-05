@@ -720,13 +720,21 @@ the policy are relative to the packaging directory (`packaging-directory`, defau
 `test-legacy-fixture.ps1` there runs first, if it has one. To check an MSI it already built, a
 Windows job uses the action with `msi-path`.
 
-Two optional policy keys cover what differs between apps; the checker knows nothing about
-particular apps:
+The build defines `Version`, `DisplayVersion`, `BinDir` (the policy's `payloads`) and `IconPath`.
+Anything else the app's WiX reads goes in the policy's `wixVariables`: a literal value, or a
+placeholder the build creates, `@folder [file ...]`, `@bitmap WIDTHxHEIGHT` or `@rtf`:
+
+```json
+"wixVariables": { "DocsDir": "@folder", "BannerBmp": "@bitmap 493x58", "HasCli": "1" }
+```
+
+Optional policy keys; nothing here knows about particular apps:
 
 | Key | Meaning | Default |
 | --- | --- | --- |
 | `suiteFolder` | Folder that groups the suite's apps under Program Files and the per-user programs folder | `ArtCraft` |
 | `skipsLicencePage` | The wizard goes straight from Welcome to the install folder; the checker verifies that routing in both directions | `false` |
+| `mode` | Only `dualScope` (the wizard offers per-user or per-machine) is checked; a per-user-only installer keeps its own check for now | `dualScope` |
 
 When an app moves to the shared workflow it replaces only its `windows-install-policy` job, and keeps
 the pre-signing check in its `package.ps1` until its packaging calls the shared checker.

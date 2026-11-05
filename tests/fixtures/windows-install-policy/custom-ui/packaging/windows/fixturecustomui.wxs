@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="FixtureCustomUi" Manufacturer="craft-common-actions test fixture" Version="$(var.Version)" UpgradeCode="45EE9367-3C8B-44CD-B176-E80C5C4FCC4A" Scope="perUserOrMachine" Compressed="yes" Language="1033">
-    <SummaryInformation Description="FixtureCustomUi motion graphics and visual effects" Manufacturer="craft-common-actions test fixture" />
+    <SummaryInformation Description="FixtureCustomUi test fixture" Manufacturer="craft-common-actions test fixture" />
     <?include $(sys.SOURCEFILEDIR)install-policy.wxi?>
     <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
          (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
@@ -16,23 +16,18 @@
     <Property Id="ARPURLUPDATEINFO" Value="https://example.invalid/fixturecustomui" />
     <Property Id="ARPHELPLINK" Value="https://example.invalid/help" />
 
-    <!-- An upgrade, repair or silent reinstall goes where the installed copy already is: the App Paths
-         "Path" value written below, or for releases before this installer change (no Path value; they
-         could be put elsewhere with INSTALLFOLDER=...) the folder of the fixturecustomui.exe that App Paths names. A
-         "file" search with no FileSearch inside yields that file's folder. A folder passed on the
-         command line (INSTALLFOLDER=...) wins. -->
+    <!-- An upgrade goes where the installed copy is: the App Paths "Path" value, or else the folder of
+         the exe App Paths names (a "file" search with no FileSearch yields that folder). -->
     <Property Id="PREVIOUSINSTALLFOLDER" Secure="yes">
       <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Type="directory" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturecustomui.exe" Name="Path" />
     </Property>
     <Property Id="PREVIOUSEXEFOLDER" Secure="yes">
       <RegistrySearch Id="PreviousExeFolder" Root="HKLM" Type="file" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturecustomui.exe" />
     </Property>
-    <!-- The desktop shortcut: on by default for a fresh install (a box in the wizard, or
-         DESKTOPSHORTCUT=0 silently); an upgrade keeps what the installed copy chose, and adds none
-         to an install from before this option. -->
+    <!-- The desktop shortcut: on for a fresh install; an upgrade keeps the installed copy's choice,
+         saved per scope (CraftLoadOption1M/U below). -->
     <Property Id="DESKTOPSHORTCUT" Value="1" Secure="yes" />
-    <Property Id="PREVIOUSDESKTOPSHORTCUT" Secure="yes">
-      </Property>
+    <Property Id="PREVIOUSDESKTOPSHORTCUT" Secure="yes" />
     <SetProperty Id="DESKTOPSHORTCUT" Value="[PREVIOUSDESKTOPSHORTCUT]" After="CraftLoadOption1U" Sequence="both" Condition="WIX_UPGRADE_DETECTED" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
@@ -46,9 +41,16 @@
     <Feature Id="Main" Title="FixtureCustomUi" Level="1">
       <ComponentGroupRef Id="FixtureCustomUiFiles" />
     </Feature>
-  <Property Id="CRAFT_OPTION_1_M" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_MSearch" Root="HKLM" Type="raw" Key="Software\FixtureCustomUi" Name="DesktopShortcut" />
-    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1M" Value="[CRAFT_OPTION_1_M]" After="LaunchConditions" Sequence="both" Condition="ALLUSERS = 1" /><Property Id="CRAFT_OPTION_1_U" Secure="yes"><RegistrySearch Id="CRAFT_OPTION_1_USearch" Root="HKCU" Type="raw" Key="Software\FixtureCustomUi" Name="DesktopShortcut" />
-    </Property><SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1U" Value="[CRAFT_OPTION_1_U]" After="CraftLoadOption1M" Sequence="both" Condition="ALLUSERS &lt;&gt; 1" /></Package>
+
+    <Property Id="CRAFT_OPTION_1_M" Secure="yes">
+      <RegistrySearch Id="CRAFT_OPTION_1_MSearch" Root="HKLM" Type="raw" Key="Software\FixtureCustomUi" Name="DesktopShortcut" />
+    </Property>
+    <SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1M" Value="[CRAFT_OPTION_1_M]" After="LaunchConditions" Sequence="both" Condition="ALLUSERS = 1" />
+    <Property Id="CRAFT_OPTION_1_U" Secure="yes">
+      <RegistrySearch Id="CRAFT_OPTION_1_USearch" Root="HKCU" Type="raw" Key="Software\FixtureCustomUi" Name="DesktopShortcut" />
+    </Property>
+    <SetProperty Id="PREVIOUSDESKTOPSHORTCUT" Action="CraftLoadOption1U" Value="[CRAFT_OPTION_1_U]" After="CraftLoadOption1M" Sequence="both" Condition="ALLUSERS &lt;&gt; 1" />
+  </Package>
 
   <Fragment>
     <ComponentGroup Id="FixtureCustomUiFiles" Directory="INSTALLFOLDER">
@@ -57,14 +59,14 @@
       </Component>
       <Component Id="FixtureCustomUiApp" Guid="641814C8-EA27-4F48-A976-ED5F6887D838">
         <File Id="FixtureCustomUiExe" Source="$(var.BinDir)\fixturecustomui.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="FixtureCustomUi" Description="FixtureCustomUi motion graphics and visual effects" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="FixtureCustomUiIcon.ico" IconIndex="0" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="FixtureCustomUi" Description="FixtureCustomUi test fixture" WorkingDirectory="INSTALLFOLDER" Advertise="yes" Icon="FixtureCustomUiIcon.ico" IconIndex="0" />
         </File>
 
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturecustomui.exe" Value="[#FixtureCustomUiExe]" Type="string" />
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\fixturecustomui.exe" Name="Path" Value="[INSTALLFOLDER]" Type="string" />
         <!-- The desktop shortcut choice, for the next upgrade (empty: none). -->
         <RegistryValue Root="HKMU" Key="Software\FixtureCustomUi" Name="DesktopShortcut" Value="[DESKTOPSHORTCUT]" Type="string" />
-      <RegistryValue Root="HKMU" Key="Software\FixtureCustomUi" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\FixtureCustomUi" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
 
       <Component Id="FixtureCustomUiCli">
@@ -73,7 +75,7 @@
 
       <!-- A component under the user's profile folders needs an HKCU key path (ICE38, ICE43). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
-        <Shortcut Id="DesktopShortcut" Name="FixtureCustomUi" Description="FixtureCustomUi motion graphics and visual effects" Target="[#FixtureCustomUiExe]" WorkingDirectory="INSTALLFOLDER" Icon="FixtureCustomUiIcon.ico" IconIndex="0" />
+        <Shortcut Id="DesktopShortcut" Name="FixtureCustomUi" Description="FixtureCustomUi test fixture" Target="[#FixtureCustomUiExe]" WorkingDirectory="INSTALLFOLDER" Icon="FixtureCustomUiIcon.ico" IconIndex="0" />
         <RegistryValue Root="HKMU" Key="Software\FixtureCustomUi" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
       </Component>
     </ComponentGroup>

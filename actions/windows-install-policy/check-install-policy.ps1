@@ -38,6 +38,10 @@ $skipsLicencePage = [bool](Get-PolicyValue 'skipsLicencePage' $false)
 $upgradeCode = [string](Assert-PolicyValue 'upgradeCode')
 $productName = [string](Assert-PolicyValue 'name')
 $registryPolicy = @(Get-PolicyValue 'registry' @())
+# Installers whose wizard lets the user choose per-user or per-machine. A per-user-only installer
+# (mode 'perUser') isn't checked here yet.
+$mode = [string](Get-PolicyValue 'mode' 'dualScope')
+if ($mode -ne 'dualScope') { throw "The policy's mode is '$mode'; this checker checks only 'dualScope' installers." }
 # A missing row would otherwise surface as "Cannot index into a null array" under strict mode.
 function Get-Directory($Directories, [string] $Name) {
   if (-not $Directories.ContainsKey($Name)) { throw "The MSI has no $Name directory, so its installation folder cannot be checked." }
@@ -88,37 +92,6 @@ try {
   $secureProperties = @($properties['SecureCustomProperties'] -split ';')
   if ('INSTALLFOLDER' -notin $secureProperties) {
     throw 'The selected installation folder must survive elevation (secure INSTALLFOLDER).'
-  }
-  if ((Get-PolicyValue 'mode') -eq 'perUser') {
-    if ($properties.ContainsKey('ALLUSERS')) { throw 'Launcher must remain per-user: it must not set ALLUSERS or install machine-wide.' }
-    if ((Get-MsiProperty $properties 'UpgradeCode').Trim('{}') -ne $upgradeCode) { throw 'Launcher upgrade identity changed.' }
-    $dirs = @{}
-    foreach ($row in (Read-Rows $database 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $dirs[$row[0]] = @($row[1],$row[2]) }
-    $installDirRow = Get-Directory $dirs 'INSTALLFOLDER'; $suiteRow = Get-Directory $dirs 'CraftSuiteFolder'
-    $programsRow = Get-Directory $dirs 'LocalProgramsFolder'
-    if ($installDirRow[0] -ne 'CraftSuiteFolder' -or $suiteRow[1] -ne $suite -or
-        $suiteRow[0] -ne 'LocalProgramsFolder' -or $programsRow[0] -ne 'LocalAppDataFolder') {
-      throw "Launcher new-install folder must be under the per-user $suite suite root."
-    }
-    foreach ($explicit in @('', 'F:\Chosen exact launcher')) {
-      Set-SessionProperty $session 'PREVIOUSINSTALLFOLDER' 'E:\Existing exact launcher'
-      Set-SessionProperty $session 'INSTALLFOLDER' $explicit
-      $condition = Get-SequenceCondition $database 'InstallUISequence' 'CraftRestoreLauncherFolder'
-      if ($session.EvaluateCondition($condition) -eq 1) {
-        if ($session.DoAction('CraftRestoreLauncherFolder') -ne 1) { throw 'Launcher restore action failed.' }
-      }
-      $expected = if ($explicit) { $explicit } else { 'E:\Existing exact launcher' }
-      if ((Get-SessionProperty $session 'INSTALLFOLDER') -ne $expected) { throw 'Launcher custom or existing path was lost.' }
-    }
-    $rows = @(Read-Rows $database 'SELECT `Root`, `Key`, `Name`, `Value` FROM `Registry`' 4)
-    if (@($rows | Where-Object { $_[0] -ne '1' }).Count) { throw 'Launcher registration must stay under the current account.' }
-    foreach ($entry in $registryPolicy) {
-      if (@($rows | Where-Object { $_[0] -eq $entry[0] -and $_[1] -eq $entry[1] -and $_[2] -eq $entry[2] -and $_[3] -eq $entry[3] }).Count -ne 1) {
-        throw 'Launcher registration or shortcut preference changed unexpectedly.'
-      }
-    }
-    Write-Output "PASS $suite Launcher: per-user scope, suite folder, remembered/custom paths and existing registration. No installation performed."
-    return
   }
   if ($properties['ALLUSERS'] -ne '2' -or $properties['MSIINSTALLPERUSER'] -ne '1') {
     throw 'Policy regression: new packages must default to the per-user dual-scope context.'

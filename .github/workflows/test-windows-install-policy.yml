@@ -69,6 +69,7 @@ jobs:
             @{ change = 'another suite folder'; set = @{ suiteFolder = 'NotTheSuite' }; expect = 'NotTheSuite' }
             @{ change = 'no upgrade code'; remove = 'upgradeCode'; expect = "does not define 'upgradeCode'" }
             @{ change = 'no product name'; remove = 'name'; expect = "does not define 'name'" }
+            @{ change = 'a per-user-only mode'; set = @{ mode = 'perUser' }; expect = "checks only 'dualScope'" }
           )
           # skipsLicencePage comes from the policy: claiming it for a wizard that shows the page fails.
           if (-not $policy.skipsLicencePage) {
