@@ -244,8 +244,9 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
             raise RuntimeError(f"house rules: could not read {SOURCES[name]} at {sha}")
         rendered.append(render(name, sha, content))
     path = agents_file(str(directory))
+    # The existing file is preserved around the blocks. Its text is not a path.
     current = path.read_text(encoding="utf-8") if path.is_file() else ""
-    path.write_text(apply_blocks(current, rendered), encoding="utf-8")
+    path.write_text(apply_blocks(current, rendered), encoding="utf-8")  # NOSONAR
 
 
 def main(argv: list[str] | None = None) -> int:
