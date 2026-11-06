@@ -1,0 +1,7 @@
+# Review changes to the shared release pipeline and the checker itself.
+#
+# This file only takes effect when the repository's branch ruleset enables
+# "Require review from Code Owners"; that is an owner setting, not a file in this PR.
+/.github/workflows/ @dylanmtaylor @echelon @skylartaylor
+/actions/ @dylanmtaylor @echelon @skylartaylor
+/scripts/ @dylanmtaylor @echelon @skylartaylor
