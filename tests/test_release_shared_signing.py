@@ -37,8 +37,11 @@ class SharedSigningWiringTests(unittest.TestCase):
             self.assertEqual(inputs, {"certificate": "${{ secrets.APPLE_CERTIFICATE }}",
                                       "certificate-password": "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}",
                                       "keychain-password": "${{ secrets.KEYCHAIN_PASSWORD }}"})
-            # The clean-up step removes the keychain the action exports.
-            self.assertTrue(any("MACOS_KEYCHAIN" in step.get("run", "") for step in job["steps"][packaging:]))
+            # A clean-up step deletes the keychain the action exports, even when packaging failed.
+            cleanup = [step for step in job["steps"][packaging:]
+                       if 'security delete-keychain "$MACOS_KEYCHAIN"' in step.get("run", "")]
+            self.assertEqual(len(cleanup), 1, names)
+            self.assertEqual(cleanup[0].get("if"), "always()")
 
     def test_every_windows_packaging_step_has_the_signing_script_set_up_first(self):
         found = []
