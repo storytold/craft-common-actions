@@ -69,7 +69,8 @@ class SonarCloudTests(unittest.TestCase):
         )
         self.assertLess(self.steps.index(self.validation), self.steps.index(self.scan))
         self.assertEqual(self.validation['if'], "steps.token.outputs.available == 'true'")
-        self.assertEqual(self.scan['if'], self.validation['if'])
+        self.assertIn("steps.project.outcome == 'success'", self.scan['if'])
+        self.assertIn('!cancelled()', self.scan['if'])
         self.assertEqual(self.scan['env']['SONAR_HOST_URL'], 'https://sonarcloud.io')
         # The scan consumes whatever the validation step accepted: the SonarCloud PAT when the
         # repo has one, otherwise the plain project token.
@@ -77,11 +78,13 @@ class SonarCloudTests(unittest.TestCase):
             self.scan['env']['SONAR_TOKEN'],
             '${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}',
         )
-        self.assertEqual(
-            self.scan['with']['args'].splitlines()[0],
-            '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold '
-            '-Dsonar.rust.lcov.reportPaths=lcov.info "-Dsonar.cpd.exclusions=**/i18n/**"',
-        )
+        args = self.scan['with']['args']
+        self.assertIn('"-Dsonar.projectKey=${{ steps.project.outputs.key }}"', args)
+        self.assertIn('-Dsonar.qualitygate.wait=false', args)
+        self.assertIn('-Dsonar.rust.clippy.enabled=false', args)
+        self.assertIn('"-Dsonar.rust.lcov.reportPaths=${{ steps.reports.outputs.rust }}"', args)
+        self.assertIn('"-Dsonar.python.coverage.reportPaths=${{ steps.reports.outputs.python }}"', args)
+        self.assertIn('"-Dsonar.cpd.exclusions=**/i18n/**"', args)
 
     def test_coverage_is_generated_before_the_scan_imports_it(self):
         coverage = next(step for step in self.steps if step.get('id') == 'coverage')
@@ -263,14 +266,52 @@ class SonarCloudTests(unittest.TestCase):
         self.assertIn('-ne 100', tests['run'])
         self.assertIn('no coverage profiles', tests['run'])
 
-    def test_scan_fails_when_a_prerequisite_job_failed(self):
+    def test_scan_runs_after_failed_prerequisites(self):
         workflow = yaml.load(
             (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
         condition = workflow['jobs']['sonarcloud']['if']
-        for job in ('plan', 'build', 'coverage'):
-            self.assertIn(f'needs.{job}.result', condition)
-        self.assertIn('"success","skipped"', condition)
-        self.assertIn('!cancelled()', condition)
+        self.assertEqual(condition, '${{ !cancelled() }}')
+        for step in self.steps:
+            if 'inputs.shards > 1' in step.get('if', ''):
+                self.assertIn("needs.build.result == 'success'", step['if'])
+                self.assertIn("needs.coverage.result == 'success'", step['if'])
+
+    def test_report_selection_rejects_missing_partial_and_linked_reports(self):
+        selection = next(step for step in self.steps if step.get('id') == 'reports')
+        self.assertIn('!cancelled()', selection['if'])
+        self.assertIn("steps.reports.outcome == 'success'", self.scan['if'])
+        cases = [
+            ('success', '', 'success', 'complete', 'lcov.info', 'python-coverage.xml'),
+            ('', 'success', '', 'complete', 'lcov.info', ''),
+            ('failure', 'skipped', 'failure', 'complete', '', ''),
+            ('success', '', 'success', 'missing', '', ''),
+            ('success', '', 'success', 'empty', '', ''),
+            ('success', '', 'success', 'symlink', '', ''),
+        ]
+        for rust, shard, python, kind, want_rust, want_python in cases:
+            with self.subTest(rust=rust, shard=shard, python=python, kind=kind):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    output = root / 'output'
+                    summary = root / 'summary'
+                    for name in ('lcov.info', 'python-coverage.xml'):
+                        report = root / name
+                        if kind == 'symlink':
+                            target = root / (name + '.target')
+                            target.write_text('report')
+                            report.symlink_to(target)
+                        elif kind != 'missing':
+                            report.write_text('' if kind == 'empty' else 'report')
+                    result = subprocess.run(
+                        ['bash', '-e', '-o', 'pipefail', '-c', selection['run']], cwd=root,
+                        env={**os.environ, 'GITHUB_OUTPUT': str(output),
+                             'GITHUB_STEP_SUMMARY': str(summary), 'RUST_COVERAGE': rust,
+                             'SHARD_COVERAGE': shard, 'PYTHON_COVERAGE': python},
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output.read_text(), f'rust={want_rust}\npython={want_python}\n')
+                    if not want_rust and not want_python:
+                        self.assertIn('static analysis only', summary.read_text())
 
     def test_token_availability_still_controls_the_scan(self):
         token_step = next(step for step in self.steps if step.get('id') == 'token')

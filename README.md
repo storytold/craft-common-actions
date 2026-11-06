@@ -759,7 +759,22 @@ when running tests; a requested font pin also sets `CRAFT_FONTS_REQUIRED=1`
 so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-fonts.py` can also pass
 `pdf-test-fonts: true` to provision their pinned PDF fixtures outside the checkout
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
-failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
+failures remain visible, but do not suppress static analysis. The scan runs after failed
+coverage prerequisites and setup steps unless the run is cancelled, the token is missing,
+or project-key validation fails. Missing, empty or incomplete coverage is omitted instead
+of importing a partial shard set. The run summary identifies static-only analysis.
+`sonar.qualitygate.wait=false` keeps quality-gate results informational; scanner transport
+or configuration failures remain visible. Do not add Sonar to the application's required
+merge gate. Automatic Rust Clippy invocation is disabled, avoiding another build during
+static analysis after a coverage build failed.
+
+Fork `pull_request` runs still cannot access Sonar credentials. This workflow does not
+solve that limitation and must not be reused under a privileged trigger to execute fork
+code. A separate trusted static-only scanner and caller rollout are required for fork
+analysis; no repository permissions or secret settings are changed here.
+Cancellation and runner failures can still prevent a scan. Unsharded Rust and Python
+coverage currently share the scan job timeout, so a hung coverage step can exhaust
+that budget before scanning; separating those producers remains follow-up work.
 
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
@@ -767,10 +782,11 @@ pinned coverage.py in an isolated virtual environment and writes `python-coverag
 Both paths must be inside the checkout and contain no commas or glob characters.
 The environment contains only coverage.py and the runner’s Python standard library;
 caller coverage configuration is ignored so parallel-data settings cannot hide the report.
-Set `sonar.python.coverage.reportPaths=python-coverage.xml` in the caller's Sonar
-configuration and classify its test files as tests. The script runs in full, but
+The workflow selects `python-coverage.xml` only after successful generation; classify
+the caller's test files as tests. The script runs in full, but
 is omitted from the production coverage report. Missing inputs, failed tests or
-report generation stop the job; empty inputs leave existing callers unchanged.
+report generation remain visible as errors, but static analysis still runs without that
+report; empty inputs leave existing callers unchanged.
 This step requires the Sonar token, so token-independent CI should also run the tests.
 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
