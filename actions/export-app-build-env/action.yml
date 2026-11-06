@@ -1,0 +1,47 @@
+name: Export app build variables
+description: >-
+  Set the app's own <PREFIX>_VERSION, <PREFIX>_BUILD_DATE and <PREFIX>_BUILD_SHA for the steps that
+  follow, with the prefix the app's packaging/env.sh reads, so no workflow here lists the apps
+
+inputs:
+  app-name:
+    description: "The app's repository name; gives the prefix when packaging/env.sh doesn't name one"
+    required: false
+    default: ""
+  env-prefix:
+    description: "The prefix to use instead of the one in packaging/env.sh (e.g. ARTCRAFT_LAUNCHER)"
+    required: false
+    default: ""
+  version:
+    description: "The build version"
+    required: true
+  date:
+    description: "The build date (YYYY-MM-DD)"
+    required: true
+  sha:
+    description: "The commit the build is from"
+    required: false
+    default: ${{ github.sha }}
+
+outputs:
+  prefix:
+    description: "The prefix used"
+    value: ${{ steps.export.outputs.prefix }}
+  names:
+    description: "The exported variable names, space-separated (for a VM's envs list)"
+    value: ${{ steps.export.outputs.names }}
+
+runs:
+  using: composite
+  steps:
+    - id: export
+      name: Export the app's build variables
+      shell: bash
+      env:
+        SCRIPT: ${{ github.action_path }}/export-app-build-env.sh
+        APP_NAME: ${{ inputs.app-name }}
+        ENV_PREFIX: ${{ inputs.env-prefix }}
+        BUILD_VERSION: ${{ inputs.version }}
+        BUILD_DATE_VALUE: ${{ inputs.date }}
+        BUILD_SHA_VALUE: ${{ inputs.sha }}
+      run: bash "$SCRIPT"
