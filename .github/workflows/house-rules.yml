@@ -1,0 +1,47 @@
+name: House rules
+
+# Fails unless AGENTS.md copies the shared rules from craft-contrib unchanged, at a commit that is
+# on main. An intact older copy warns and does not fail. Callers run it beside their gate:
+#
+#   house-rules:
+#     uses: storytold/craft-common-actions/.github/workflows/house-rules.yml@main
+#     with:
+#       rust: true
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory that contains AGENTS.md, relative to the checkout"
+        type: string
+        required: false
+        default: "."
+      rust:
+        description: "Require the Rust block as well as the core block"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  house-rules:
+    name: House rules match craft-contrib
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-contrib
+          ref: main
+          path: .craft-contrib
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/house-rules@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          source: .craft-contrib
+          require-rust: ${{ inputs.rust }}
