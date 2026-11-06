@@ -15,6 +15,9 @@ inputs:
   github-token:
     description: "GitHub token for authenticating gh CLI"
     required: true
+  tag-prefix:
+    description: "Release tag prefix"
+    default: "v"
   signing-key:
     description: "ASCII-armored OpenPGP secret key (LINUX_SIGNING_KEY) that signs the Linux packages and SHA256SUMS.txt; empty publishes them unsigned"
     required: false
@@ -72,13 +75,14 @@ runs:
       shell: bash
       working-directory: artifacts
       env:
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
         VERSION: ${{ inputs.version }}
         APP_TITLE: ${{ inputs.app-title }}
         PRERELEASE: ${{ inputs.prerelease }}
         GH_TOKEN: ${{ inputs.github-token }}
         GH_REPO: ${{ github.repository }}
       run: |
-        tag="v$VERSION"
+        tag="${TAG_PREFIX}$VERSION"
         title="$APP_TITLE v$VERSION"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
