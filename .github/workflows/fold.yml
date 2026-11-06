@@ -49,6 +49,11 @@ jobs:
   fold:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # Two runs for one branch (a schedule and a dispatch) must not overlap: a run that finds nothing
+    # to fold would close the pull request the other run just opened.
+    concurrency:
+      group: fold-${{ github.repository }}-${{ inputs.branch }}
+      cancel-in-progress: false
     steps:
       # The fold writes the default branch's docs only. Run from any other ref (a dispatch on a
       # feature branch), it would open a fold pull request built from that branch's files.
@@ -99,8 +104,11 @@ jobs:
           BRANCH: ${{ inputs.branch }}
           BASE: ${{ steps.gate.outputs.base }}
         run: |
+          # The build could have written git hooks or an fsmonitor into .git/config; none run while
+          # the token is in use.
+          safe_git() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
           open_pr() { gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -qx OPEN; }
-          if [ -z "$(git status --porcelain)" ]; then
+          if [ -z "$(safe_git status --porcelain)" ]; then
             echo "Nothing to fold."
             # Last night's fold pull request is stale now (main already has what it folded, or
             # someone folded by hand): close it rather than let it merge an old fold.
@@ -110,15 +118,14 @@ jobs:
             fi
             exit 0
           fi
-          # The build could have written git hooks; none run while the token is in use.
-          safe_git() { git -c core.hooksPath=/dev/null "$@"; }
           safe_git config user.name "craft-fold[bot]"
           safe_git config user.email "craft-fold[bot]@users.noreply.github.com"
           safe_git switch -c "$BRANCH"
           safe_git add -A
           # The fold writes only Markdown: ROADMAP.md and docs/. Anything else (a build output, a
-          # lockfile the build touched) must never be swept into the fold's commit.
-          stray=$(git diff --cached --name-only | grep -Ev '^docs/|\.md$' || true)
+          # lockfile the build touched) must never be swept into the fold's commit. No rename
+          # detection: a file moved into docs/ is listed by the path it left too.
+          stray=$(safe_git diff --cached --name-only --no-renames | grep -Ev '^docs/|\.md$' || true)
           if [ -n "$stray" ]; then
             echo "::error::The fold changed files outside ROADMAP.md, docs/ and *.md:"
             echo "$stray"
