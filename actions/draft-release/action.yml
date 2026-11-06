@@ -15,6 +15,10 @@ inputs:
   github-token:
     description: "GitHub token for authenticating gh CLI"
     required: true
+  retain:
+    description: "Retain existing draft assets; uploads still replace assets with matching names"
+    required: false
+    default: "false"
   tag-prefix:
     description: "Release tag prefix"
     default: "v"
@@ -75,6 +79,7 @@ runs:
       shell: bash
       working-directory: artifacts
       env:
+        RETAIN: ${{ inputs.retain }}
         TAG_PREFIX: ${{ inputs.tag-prefix }}
         VERSION: ${{ inputs.version }}
         APP_TITLE: ${{ inputs.app-title }}
@@ -91,10 +96,13 @@ runs:
             echo "::error::Release $tag is already published. Bump the version (cargo xtask version set) before pushing to release."
             exit 1
           fi
-          echo "Updating draft $tag: replacing its assets"
-          gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
-            gh release delete-asset "$tag" "$asset" --yes
-          done
+          # Separate platform workflows share a draft; only remove all assets when this run owns them all.
+          if [ "$RETAIN" != "true" ]; then
+            echo "Updating draft $tag: replacing its assets"
+            gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
+              gh release delete-asset "$tag" "$asset" --yes
+            done
+          fi
           gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE"
           gh release upload "$tag" --clobber -- *
         else
