@@ -76,11 +76,13 @@ runs:
     - name: PowerShell
       shell: pwsh
       run: |
-        foreach ($f in Get-ChildItem packaging/windows/*.ps1) {
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null
-          if ($errors) { $errors | ForEach-Object { Write-Output "::error file=$($f.Name)::$_" }; exit 1 }
-          Write-Output "ok $($f.Name)"
+        if (Test-Path ./packaging/windows) {
+          foreach ($f in Get-ChildItem packaging/windows/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Output "::error file=$($f.Name)::$_" }; exit 1 }
+            Write-Output "ok $($f.Name)"
+          }
         }
         if (Test-Path ./packaging/windows/check-icons.ps1) {
           ./packaging/windows/check-icons.ps1
