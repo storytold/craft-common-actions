@@ -20,10 +20,15 @@ runs:
         for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
           echo "deb [arch=riscv64] https://ports.ubuntu.com/ubuntu-ports $suite main universe restricted multiverse"
         done | sudo tee /etc/apt/sources.list.d/riscv64.list
-        # Multi-Arch: same packages (zlib1g, ...) must match across amd64 and riscv64. ports.ubuntu.com
-        # publishes security updates as soon as security.ubuntu.com does, but the runner's amd64 mirror
-        # (azure.archive.ubuntu.com) lags for hours, so apt finds no matching pair ("held broken
-        # packages"). Read amd64 security updates from the primary too, so both sides can match.
+        # Multi-Arch: same packages (libc6, linux-libc-dev, zlib1g, ...) must match across amd64 and
+        # riscv64. ports.ubuntu.com publishes a suite as soon as archive.ubuntu.com does, but the
+        # runner's amd64 mirror (azure.archive.ubuntu.com) lags for hours, leaving apt without a
+        # matching pair: it reports "held broken packages" and names a dependency such as
+        # linux-libc-dev:riscv64 that "is not going to be installed". Read amd64 from the primary
+        # for every suite, security included, so both sides always offer the same versions.
+        for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates"; do
+          echo "deb [arch=amd64] https://archive.ubuntu.com/ubuntu $suite main universe restricted multiverse"
+        done | sudo tee /etc/apt/sources.list.d/amd64-primary.list
         echo "deb [arch=amd64] https://security.ubuntu.com/ubuntu $VERSION_CODENAME-security main universe restricted multiverse" \
           | sudo tee /etc/apt/sources.list.d/amd64-security.list
         sudo apt-get update
