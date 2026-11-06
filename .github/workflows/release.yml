@@ -84,6 +84,19 @@ on:
         type: boolean
         required: false
         default: false
+      windows-launch-check:
+        # winget-pkgs validation starts installed programs without a desktop and rejects a version
+        # whose app crashes or exits with an error there (Validation-Executable-Error). Set this once
+        # the app reports a failed graphics start in a dialog instead (FilmCraft 0.14.0).
+        description: "Install the x64 and x86 MSIs and start their programs without a desktop, as winget-pkgs validation does; the Windows build fails if the main app crashes or exits with an error"
+        type: boolean
+        required: false
+        default: false
+      windows-main-exe:
+        description: "The main app's .exe for windows-launch-check (empty: <app-name>.exe)"
+        type: string
+        required: false
+        default: ""
 
     secrets:
       APPLE_CERTIFICATE:
@@ -405,6 +418,13 @@ jobs:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
         run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
+      # The runner is x64: it runs x64 and x86 programs, not arm64 ones.
+      - name: Launch check (winget-pkgs validation)
+        if: inputs.windows-launch-check && matrix.arch != 'arm64'
+        uses: storytold/craft-common-actions/actions/windows-launch-check@main
+        with:
+          msi: dist/release/*-windows-${{ matrix.arch }}.msi
+          main-exe: ${{ inputs.windows-main-exe != '' && inputs.windows-main-exe || format('{0}.exe', inputs.app-name) }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows-${{ matrix.arch }}
