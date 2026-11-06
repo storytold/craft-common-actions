@@ -86,6 +86,55 @@ class HouseRulesTests(unittest.TestCase):
         again = (self.app / "AGENTS.md").read_text()
         self.assertEqual(text, again)
 
+    def test_local_text_between_blocks_is_kept(self):
+        core = house_rules.render("core", self.first, "Core one.\n")
+        rust = house_rules.render("rust", self.first, "Rust one.\n")
+        local = "\n## Local guard\nNever remove this guard.\n\n"
+        target = self.app / "AGENTS.md"
+        target.write_text("Before.\n" + core + local + rust + "After.\n")
+        self.write()
+        self.assertEqual(target.read_text(), "Before.\n" +
+                         house_rules.render("core", self.second, "Core two.\n") + local +
+                         house_rules.render("rust", self.second, "Rust two.\n") + "After.\n")
+
+    def test_writer_preserves_outside_bytes_and_is_idempotent(self):
+        core = house_rules.render("core", self.first, "Core one.\n").replace("\n", "\r\n")
+        rust = house_rules.render("rust", self.first, "Rust one.\n").replace("\n", "\r\n")
+        target = self.app / "AGENTS.md"
+        local = "\r\nLocal guard.\r\n\r\n"
+        target.write_bytes(("Before.\r\n" + core + local + rust + "After.\r\n\r\n").encode())
+        self.write()
+        expected = ("Before.\r\n" +
+                    house_rules.render("core", self.second, "Core two.\n") + local +
+                    house_rules.render("rust", self.second, "Rust two.\n") + "After.\r\n\r\n").encode()
+        self.assertEqual(target.read_bytes(), expected)
+        self.write()
+        self.assertEqual(target.read_bytes(), expected)
+        self.assertEqual(self.check(), ([], []))
+
+    def test_initial_write_keeps_local_line_endings_and_no_final_newline(self):
+        target = self.app / "AGENTS.md"
+        original = b"# App\r\nLocal rule without final newline."
+        target.write_bytes(original)
+        self.write()
+        self.assertTrue(target.read_bytes().endswith(original))
+
+    def test_removing_rust_does_not_remove_intervening_local_rule(self):
+        target = self.app / "AGENTS.md"
+        target.write_text(house_rules.render("core", self.first, "Core one.\n") +
+                          "Local rule.\n" + house_rules.render("rust", self.first, "Rust one.\n"))
+        self.write(require_rust=False)
+        self.assertEqual(target.read_text(),
+                         house_rules.render("core", self.second, "Core two.\n") + "Local rule.\n")
+
+    def test_unclosed_block_is_not_overwritten(self):
+        target = self.app / "AGENTS.md"
+        original = house_rules.render("core", self.first, "Core one.\n").replace(house_rules.END, "Local guard")
+        target.write_text(original)
+        with self.assertRaises(ValueError):
+            self.write()
+        self.assertEqual(target.read_text(), original)
+
     def test_an_edited_block_fails_even_when_its_digest_is_rewritten(self):
         self.write()
         text = (self.app / "AGENTS.md").read_text()

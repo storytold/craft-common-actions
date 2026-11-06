@@ -22,7 +22,7 @@ SOURCES = {
     "rust": "standards/house-rules-rust.md",
 }
 START = re.compile(
-    r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->\n"
+    r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->(?:\r\n|\r|\n)"
 )
 END = "<!-- craft-house-rules:end -->"
 
@@ -40,7 +40,6 @@ def digest(text: str) -> str:
 
 def parse_blocks(text: str):
     """Return (blocks, spans). A span is the half-open range of one block in `text`."""
-    text = normalize(text)
     blocks = []
     spans = []
     position = 0
@@ -60,8 +59,13 @@ def parse_blocks(text: str):
                 "body": body,
             }
         )
-        spans.append((match.start(), end_at + len(END)))
         position = end_at + len(END)
+        # The marker's line ending belongs to the generated block, not local text.
+        if text.startswith("\r\n", position):
+            position += 2
+        elif text[position:position + 1] in ("\r", "\n"):
+            position += 1
+        spans.append((match.start(), position))
     return blocks, spans
 
 
@@ -200,24 +204,29 @@ def head_sha(source: str) -> str:
 
 
 def apply_blocks(agents: str, rendered: list[str]) -> str:
-    text = normalize(agents) if agents else ""
-    try:
-        _, spans = parse_blocks(text) if text else ([], [])
-    except ValueError:
-        spans = []
-    insertion = "".join(rendered)
+    """Replace only generated spans; keep all surrounding local text verbatim."""
+    blocks, spans = parse_blocks(agents) if agents else ([], [])
+    replacements = {}
+    for text in rendered:
+        generated, _ = parse_blocks(text)
+        replacements[generated[0]["name"]] = text
     if not spans:
-        rest = text
-        if rest and not rest.startswith("\n"):
-            rest = "\n" + rest
-        return insertion + rest
-    start = spans[0][0]
-    end = spans[-1][1]
-    # Drop a single trailing newline that belonged to the last rendered block.
-    suffix = text[end:]
-    if suffix.startswith("\n"):
-        suffix = suffix[1:]
-    return text[:start] + insertion + suffix
+        separator = "\n" if agents and not agents.startswith(("\n", "\r")) else ""
+        return "".join(rendered) + separator + agents
+    names = [block["name"] for block in blocks]
+    if len(set(names)) != len(names):
+        raise ValueError("house rules: a block name is repeated")
+    if any(name not in SOURCES for name in names):
+        raise ValueError("house rules: refusing to replace an unknown block")
+    pieces = []
+    position = 0
+    for block, (start, end) in zip(blocks, spans):
+        pieces.append(agents[position:start])
+        pieces.append(replacements.pop(block["name"], ""))
+        position = end
+    pieces.extend(replacements.values())
+    pieces.append(agents[position:])
+    return "".join(pieces)
 
 
 def agents_file(raw: str) -> Path:
@@ -245,8 +254,13 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
         rendered.append(render(name, sha, content))
     path = agents_file(str(directory))
     # The existing file is preserved around the blocks. Its text is not a path.
-    current = path.read_text(encoding="utf-8") if path.is_file() else ""
-    path.write_text(apply_blocks(current, rendered), encoding="utf-8")  # NOSONAR
+    current = ""
+    if path.is_file():
+        with path.open(encoding="utf-8", newline="") as handle:
+            current = handle.read()
+    updated = apply_blocks(current, rendered)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)  # NOSONAR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "write":
         try:
             write_agents(directory, source, args.require_rust)
-        except RuntimeError as error:
+        except (RuntimeError, ValueError) as error:
             print(error)
             return 2
         return 0
