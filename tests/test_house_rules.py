@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -179,8 +180,10 @@ class HouseRulesTests(unittest.TestCase):
         git(self.source, "checkout", "--orphan", "side")
         self.commit_standards("Side core.\n", "Side rust.\n")
         side = git(self.source, "rev-parse", "HEAD")
-        house_rules.write_agents(self.app, self.source, True)
-        git(self.source, "checkout", "main")
+        (self.app / "AGENTS.md").write_text(
+            house_rules.render("core", side, "Side core.\n") +
+            house_rules.render("rust", side, "Side rust.\n"))
+        # Even with HEAD still on the unmerged side branch, it must not pass.
         failures, _ = self.check()
         self.assertTrue(any("is not on main" in item for item in failures), failures)
         self.assertIn(side, " ".join(failures))
@@ -198,6 +201,113 @@ class HouseRulesTests(unittest.TestCase):
         self.assertEqual(failures, [])
         failures, _ = self.check(require_rust=True)
         self.assertIn("house rules: the rust block is missing", failures)
+
+
+    def test_malformed_optional_rust_marker_fails_without_writing(self):
+        core = house_rules.render("core", self.second, "Core two.\n")
+        rust = house_rules.render("rust", self.second, "Rust two.\n")
+        for broken in (rust.replace("sha256=", "sha256=bad"),
+                       rust.replace("source=", "source=bad"),
+                       rust.replace("start rust", "start Rust"),
+                       rust.replace("<!-- craft", "<!--craft", 1)):
+            with self.subTest(broken=broken):
+                target = self.app / "AGENTS.md"
+                original = (core + broken).encode()
+                target.write_bytes(original)
+                failures, _ = self.check(require_rust=False)
+                self.assertTrue(any("marker" in item for item in failures), failures)
+                with self.assertRaises(ValueError):
+                    self.write(require_rust=False)
+                self.assertEqual(target.read_bytes(), original)
+
+    def test_nested_or_orphan_markers_fail_without_writing(self):
+        core = house_rules.render("core", self.second, "Core two.\n")
+        rust = house_rules.render("rust", self.second, "Rust two.\n")
+        for text in (house_rules.END + "\n" + core, core + house_rules.END,
+                     core.replace(house_rules.END, rust + house_rules.END),
+                     core.replace(house_rules.END, "<!-- craft-house-rules:end bad -->")):
+            with self.subTest(text=text):
+                target = self.app / "AGENTS.md"
+                target.write_bytes(text.encode())
+                self.assertTrue(self.check(False)[0])
+                with self.assertRaises(ValueError):
+                    self.write(False)
+                self.assertEqual(target.read_bytes(), text.encode())
+
+    def test_duplicate_and_unknown_blocks_fail_without_writing(self):
+        core = house_rules.render("core", self.second, "Core two.\n")
+        for text in (core + core, core + house_rules.render("other", self.second, "Other.\n")):
+            with self.subTest(text=text):
+                target = self.app / "AGENTS.md"
+                target.write_bytes(text.encode())
+                self.assertTrue(self.check(False)[0])
+                with self.assertRaises(ValueError):
+                    self.write(False)
+                self.assertEqual(target.read_bytes(), text.encode())
+
+    def test_writer_uses_main_even_with_unmerged_head(self):
+        git(self.source, "checkout", "-b", "side")
+        self.commit_standards("Side core.\n", "Side rust.\n")
+        self.write()
+        text = (self.app / "AGENTS.md").read_text()
+        self.assertIn(self.second, text)
+        self.assertIn("Core two.", text)
+        self.assertNotIn("Side core.", text)
+        self.assertEqual(self.check(), ([], []))
+
+    def test_origin_main_takes_priority_over_local_main(self):
+        git(self.source, "update-ref", "refs/remotes/origin/main", self.first)
+        self.write()
+        text = (self.app / "AGENTS.md").read_text()
+        self.assertIn(self.first, text)
+        self.assertIn("Core one.", text)
+        self.assertEqual(self.check(), ([], []))
+        self.assertEqual(house_rules.revision_state(str(self.source), self.second), "not-on-main")
+
+    def test_missing_main_fails_closed_even_with_valid_head(self):
+        self.write()
+        target = self.app / "AGENTS.md"
+        original = target.read_bytes()
+        git(self.source, "branch", "-m", "side")
+        self.assertTrue(any("could not check" in item for item in self.check()[0]))
+        with self.assertRaises(RuntimeError):
+            self.write()
+        self.assertEqual(target.read_bytes(), original)
+
+    def test_detached_head_uses_named_main(self):
+        git(self.source, "checkout", "--detach", self.first)
+        self.write()
+        self.assertIn(self.second, (self.app / "AGENTS.md").read_text())
+        self.assertEqual(self.check(), ([], []))
+
+    def test_ancestry_errors_are_not_reported_as_non_ancestry(self):
+        real_git = house_rules.git
+        def git_error(source, args):
+            if args[0] == "merge-base":
+                return subprocess.CompletedProcess(args, 128, "", "missing intermediate commit")
+            return real_git(source, args)
+        with mock.patch.object(house_rules, "git", side_effect=git_error):
+            self.assertEqual(house_rules.revision_state(str(self.source), self.first), "missing")
+            failures, _ = house_rules.check_file(
+                house_rules.render("core", self.first, "Core one.\n"), self.source, False)
+            self.assertTrue(any("could not check" in item for item in failures))
+
+    def test_git_uses_explicit_utf8_and_reports_invalid_output(self):
+        with mock.patch.object(house_rules.subprocess, "run") as run:
+            house_rules.git(str(self.source), ["status"])
+            self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")
+        with mock.patch.object(house_rules.subprocess, "run", side_effect=error):
+            self.assertNotEqual(house_rules.git(str(self.source), ["status"]).returncode, 0)
+
+    def test_non_ascii_standards_round_trip(self):
+        standards = self.source / "standards"
+        (standards / "house-rules-core.md").write_bytes("Core café.\n".encode("utf-8"))
+        git(self.source, "add", "standards")
+        git(self.source, "commit", "-m", "Unicode standards")
+        self.write()
+        self.assertIn("café".encode("utf-8"), (self.app / "AGENTS.md").read_bytes())
+        self.assertEqual(self.check(), ([], []))
 
 
 class HouseRulesWiringTests(unittest.TestCase):

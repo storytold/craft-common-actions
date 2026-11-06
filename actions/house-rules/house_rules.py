@@ -4,7 +4,7 @@
 The bytes inside a block are the normalized standards file. The recorded sha256
 must match those bytes, and those bytes must match the file at the recorded
 commit on craft-contrib main. A digest rewritten to suit an edit does not pass.
-An intact older commit warns. A missing source is "could not check".
+An intact older commit warns only when the normalized standards file changed on main. A missing source is "could not check".
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ START = re.compile(
     r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->(?:\r\n|\r|\n)"
 )
 END = "<!-- craft-house-rules:end -->"
+MARKER = re.compile(r"<!--\s*craft-house-rules:")
 
 
 def normalize(text: str) -> str:
@@ -44,12 +45,18 @@ def parse_blocks(text: str):
     spans = []
     position = 0
     while True:
-        match = START.search(text, position)
-        if match is None:
+        marker = MARKER.search(text, position)
+        if marker is None:
             break
-        end_at = text.find(END, match.end())
-        if end_at < 0:
+        match = START.match(text, marker.start())
+        if match is None:
+            raise ValueError("house rules: malformed or unexpected block marker")
+        closing = MARKER.search(text, match.end())
+        if closing is None:
             raise ValueError(f"house rules: {match.group(1)} block is not closed")
+        end_at = closing.start()
+        if not text.startswith(END, end_at):
+            raise ValueError("house rules: nested or malformed block marker")
         body = text[match.end() : end_at]
         blocks.append(
             {
@@ -94,11 +101,24 @@ def commit_sha(raw: str) -> str | None:
 
 
 def git(source: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", source, *args],
-        capture_output=True,
-        text=True,
-    )
+    command = ["git", "-C", source, *args]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return subprocess.CompletedProcess(command, 128, "", str(error))
+
+
+def main_sha(source: str) -> str | None:
+    """Prefer fetched origin/main, falling back to local main; never trust HEAD."""
+    for ref in ("refs/remotes/origin/main", "refs/heads/main"):
+        exists = git(source, ["show-ref", "--verify", "--quiet", ref])
+        if exists.returncode == 1:
+            continue
+        if exists.returncode != 0:
+            return None
+        result = git(source, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+        return commit_sha(result.stdout) if result.returncode == 0 else None
+    return None
 
 
 def revision_state(source: str, sha: str) -> str:
@@ -106,28 +126,22 @@ def revision_state(source: str, sha: str) -> str:
     recorded = commit_sha(sha)
     if recorded is None:
         return "missing"
-    head = git(source, ["rev-parse", "HEAD"])
-    if head.returncode != 0:
-        return "missing"
-    head_sha_value = commit_sha(head.stdout)
-    if head_sha_value is None:
+    main = main_sha(source)
+    if main is None:
         return "missing"
     if git(source, ["cat-file", "-e", f"{recorded}^{{commit}}"]).returncode != 0:
         return "missing"
-    if head_sha_value == recorded:
+    if main == recorded:
         return "identical"
-    if git(source, ["merge-base", "--is-ancestor", recorded, "HEAD"]).returncode == 0:
+    ancestry = git(source, ["merge-base", "--is-ancestor", recorded, main])
+    if ancestry.returncode == 0:
         return "older"
-    return "not-on-main"
+    return "not-on-main" if ancestry.returncode == 1 else "missing"
 
 
-def file_at_head(source: str, path: str) -> str | None:
-    if path not in SOURCES.values():
-        return None
-    shown = git(source, ["show", f"HEAD:{path}"])
-    if shown.returncode != 0:
-        return None
-    return shown.stdout
+def file_at_main(source: str, path: str) -> str | None:
+    main = main_sha(source)
+    return file_at(source, main, path) if main is not None else None
 
 
 def file_at(source: str, sha: str, path: str) -> str | None:
@@ -160,7 +174,7 @@ def judge_block(source: str, block: dict) -> tuple[str | None, str | None]:
         return f"house rules: {block['name']} block does not match {path} at {block['source']}", None
     if state != "older":
         return None, None
-    current = file_at_head(source, path)
+    current = file_at_main(source, path)
     if current is None:
         return f"house rules: could not check {block['name']} at main", None
     if normalize(current) != body:
@@ -195,9 +209,8 @@ def check_file(agents: str, source: Path, require_rust: bool) -> tuple[list[str]
     return failures, warnings
 
 
-def head_sha(source: str) -> str:
-    result = git(source, ["rev-parse", "HEAD"])
-    recorded = commit_sha(result.stdout) if result.returncode == 0 else None
+def source_sha(source: str) -> str:
+    recorded = main_sha(source)
     if recorded is None:
         raise RuntimeError("house rules: could not read the source revision")
     return recorded
@@ -244,7 +257,7 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
     checkout = checkout_path(str(source))
     if checkout is None:
         raise RuntimeError("house rules: could not read the craft-contrib checkout")
-    sha = head_sha(checkout)
+    sha = source_sha(checkout)
     names = ["core", "rust"] if require_rust else ["core"]
     rendered = []
     for name in names:
