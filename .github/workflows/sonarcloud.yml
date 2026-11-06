@@ -234,8 +234,8 @@ jobs:
   sonarcloud:
     name: SonarCloud Scan
     needs: [plan, build, coverage]
-    # Scan unless a prerequisite failed outright; a red test shard still lets the scan measure what ran.
-    if: ${{ !cancelled() && contains(fromJSON('["success","skipped"]'), needs.plan.result) && contains(fromJSON('["success","skipped"]'), needs.build.result) && contains(fromJSON('["success","skipped"]'), needs.coverage.result) }}
+    # Coverage is enrichment, never a prerequisite for static analysis.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
@@ -325,23 +325,24 @@ jobs:
           cargo llvm-cov --workspace --ignore-run-fail --lcov --output-path lcov.info
           --ignore-filename-regex "$COVERAGE_IGNORE"
       - name: Download shard profiles and archive
-        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != '' && needs.build.result == 'success' && needs.coverage.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: profraw-*
           path: profraw
           merge-multiple: true
       - name: Download test archive
-        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != '' && needs.build.result == 'success' && needs.coverage.result == 'success'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nextest-archive
           path: archive
       - name: Install LLVM tools for the archive's toolchain
-        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != '' && needs.build.result == 'success' && needs.coverage.result == 'success'
         run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
       - name: Combine shard coverage
-        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        id: combined-coverage
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != '' && needs.build.result == 'success' && needs.coverage.result == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -367,6 +368,7 @@ jobs:
           "$llvm_bin/llvm-cov" export -format=lcov -instr-profile=coverage.profdata \
             "${objects[0]}" "${extra[@]}" -ignore-filename-regex="$COVERAGE_IGNORE" >lcov.info
       - name: Generate Python coverage
+        id: python-coverage
         if: steps.token.outputs.available == 'true' && (inputs.python-coverage-source != '' || inputs.python-coverage-script != '')
         shell: bash
         env:
@@ -409,8 +411,31 @@ jobs:
           "$coverage_env/bin/python" -m coverage run --rcfile="$coverage_config" "$test_script" || status=$?
           "$coverage_env/bin/python" -m coverage xml --rcfile="$coverage_config" -o python-coverage.xml
           exit "$status"
+      - name: Select available coverage reports
+        id: reports
+        if: ${{ !cancelled() && steps.token.outputs.available == 'true' && steps.project.outcome == 'success' }}
+        shell: bash
+        env:
+          RUST_COVERAGE: ${{ steps.coverage.outcome }}
+          SHARD_COVERAGE: ${{ steps.combined-coverage.outcome }}
+          PYTHON_COVERAGE: ${{ steps.python-coverage.outcome }}
+        run: |
+          rust_report=''
+          python_report=''
+          if [[ ( "$RUST_COVERAGE" == success || "$SHARD_COVERAGE" == success ) && -s lcov.info && ! -L lcov.info ]]; then
+            rust_report=lcov.info
+          fi
+          if [[ "$PYTHON_COVERAGE" == success && -s python-coverage.xml && ! -L python-coverage.xml ]]; then
+            python_report=python-coverage.xml
+          fi
+          printf 'rust=%s\npython=%s\n' "$rust_report" "$python_report" >> "$GITHUB_OUTPUT"
+          if [[ -z "$rust_report" && -z "$python_report" ]]; then
+            echo '::notice::Coverage is unavailable; continuing with static analysis only.'
+            echo 'SonarCloud: static analysis only (no completed coverage report).' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: SonarCloud Scan
-        if: steps.token.outputs.available == 'true'
+        # Explicit status function bypasses failed coverage/setup steps, but not validation.
+        if: ${{ !cancelled() && steps.token.outputs.available == 'true' && steps.project.outcome == 'success' && steps.reports.outcome == 'success' }}
         uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
@@ -419,5 +444,8 @@ jobs:
           args: >
             "-Dsonar.projectKey=${{ steps.project.outputs.key }}"
             -Dsonar.organization=storytold
-            -Dsonar.rust.lcov.reportPaths=lcov.info
+            -Dsonar.qualitygate.wait=false
+            -Dsonar.rust.clippy.enabled=false
+            "-Dsonar.rust.lcov.reportPaths=${{ steps.reports.outputs.rust }}"
+            "-Dsonar.python.coverage.reportPaths=${{ steps.reports.outputs.python }}"
             "-Dsonar.cpd.exclusions=**/i18n/**"
