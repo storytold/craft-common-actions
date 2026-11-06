@@ -1,7 +1,7 @@
 name: House rules
 
 # Fails unless AGENTS.md copies the shared rules from craft-contrib unchanged, at a commit that is
-# on main. An intact older copy warns and does not fail. Callers run it beside their gate:
+# on main. An intact older copy warns only when its normalized standards file changed on main, and does not fail. Callers run it beside their gate:
 #
 #   house-rules:
 #     uses: storytold/craft-common-actions/.github/workflows/house-rules.yml@main

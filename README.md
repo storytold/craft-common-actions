@@ -668,7 +668,8 @@ Fails unless `AGENTS.md` carries the shared house rules from
 the commit it was copied from and the SHA-256 of the bytes inside it. The check loads
 `standards/house-rules-core.md` (and `standards/house-rules-rust.md` when `rust` is true) at that
 commit, requires the commit to be on `main`, and compares the normalized bytes. An edited block, or
-a commit that is not on `main`, fails. An intact older commit warns. A source that cannot be read
+a commit that is not on `main`, fails. An intact older commit warns only when its normalized standards file changed on `main`.
+If the file is unchanged, there is no warning. A source that cannot be read
 fails as "could not check". `rust` defaults to true; a repository that is not Rust passes `false`.
 
 The caller is only the workflow call. The reusable workflow checks the app out and checks
@@ -710,7 +711,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
-- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history; `require-rust` asks for the Rust block as well as the core block.
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
 
