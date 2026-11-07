@@ -1,0 +1,104 @@
+name: Windows installation policy test
+
+on:
+  pull_request:
+    paths:
+      - actions/windows-install-policy/**
+      - tests/fixtures/windows-install-policy/**
+      - .github/workflows/windows-install-policy.yml
+      - .github/workflows/test-windows-install-policy.yml
+  push:
+    branches: [main]
+    paths:
+      - actions/windows-install-policy/**
+      - tests/fixtures/windows-install-policy/**
+      - .github/workflows/windows-install-policy.yml
+      - .github/workflows/test-windows-install-policy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    # Made-up apps in tests/fixtures/windows-install-policy, one per kind of installer the callers
+    # have; no app repository is checked out.
+    name: ${{ matrix.fixture }} installer fixture
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Its own wizard (installer-ui.wxs), no WiX extensions, and a legacy regression hook.
+          - fixture: custom-ui
+            id: fixturecustomui
+          # The WiX UI wizard without its licence page, UI and Util extensions, a localization file
+          # and file associations.
+          - fixture: wixui
+            id: fixturewixui
+    env:
+      PACKAGING: tests/fixtures/windows-install-policy/${{ matrix.fixture }}/packaging/windows
+      APP_ID: ${{ matrix.id }}
+      FIXTURE: ${{ matrix.fixture }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and check all three architectures
+        uses: ./actions/windows-install-policy
+        with:
+          packaging-directory: ${{ env.PACKAGING }}
+      - name: Check an existing MSI through the action
+        uses: ./actions/windows-install-policy
+        with:
+          packaging-directory: ${{ env.PACKAGING }}
+          msi-path: ${{ runner.temp }}/craft-install-policy-tests/x64/${{ matrix.id }}-NOT-INSTALLABLE.msi
+      - name: Run the app's legacy regression hook, and stop when it fails
+        shell: pwsh
+        run: |
+          $hook = Test-Path -LiteralPath (Join-Path $env:PACKAGING 'test-legacy-fixture.ps1')
+          $ran = Test-Path -LiteralPath (Join-Path $env:RUNNER_TEMP 'craft-install-policy-tests/legacy-source/legacy-hook-ran.txt')
+          if ($hook -ne $ran) { throw "test-legacy-fixture.ps1 present: $hook; it ran: $ran" }
+          if (-not $hook) { return }
+          # A hook that exits with an error stops the build.
+          $copy = Join-Path $env:RUNNER_TEMP 'failing-hook'
+          Copy-Item -Recurse -Path tests/fixtures/windows-install-policy -Destination $copy
+          $packaging = Join-Path $copy "$env:FIXTURE/packaging/windows"
+          Set-Content -LiteralPath (Join-Path $packaging 'test-legacy-fixture.ps1') -Value 'exit 3'
+          $output = & pwsh -NoProfile -File ./actions/windows-install-policy/test-install-policy.ps1 -PackagingDirectory $packaging -OutputDirectory (Join-Path $copy 'out') 2>&1 | Out-String
+          if ($LASTEXITCODE -eq 0 -or $output -notmatch 'test-legacy-fixture\.ps1 failed \(exit 3\)') {
+            throw "A failing hook should stop the build: $output"
+          }
+          $global:LASTEXITCODE = 0
+      - name: Reject policies that do not match the MSI
+        shell: pwsh
+        run: |
+          $policy = Get-Content -Raw -LiteralPath (Join-Path $env:PACKAGING 'install-policy.json') | ConvertFrom-Json
+          $msi = Join-Path $env:RUNNER_TEMP "craft-install-policy-tests/x64/$($env:APP_ID)-NOT-INSTALLABLE.msi"
+          $cases = @(
+            @{ change = 'a different upgrade code'; set = @{ upgradeCode = '00000000-0000-0000-0000-000000000001' }; expect = 'upgrade identity' }
+            @{ change = 'another suite folder'; set = @{ suiteFolder = 'NotTheSuite' }; expect = 'NotTheSuite' }
+            @{ change = 'no upgrade code'; remove = 'upgradeCode'; expect = "does not define 'upgradeCode'" }
+            @{ change = 'no product name'; remove = 'name'; expect = "does not define 'name'" }
+            @{ change = 'a per-user-only mode'; set = @{ mode = 'perUser' }; expect = "checks only 'dualScope'" }
+          )
+          # skipsLicencePage comes from the policy: claiming it for a wizard that shows the page fails.
+          if (-not $policy.skipsLicencePage) {
+            $cases += @{ change = 'a licence page it says is skipped'; set = @{ skipsLicencePage = $true }; expect = 'Skipping the licence page' }
+          }
+          foreach ($case in $cases) {
+            $changed = $policy | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+            if ($case.remove) { $changed.PSObject.Properties.Remove($case.remove) }
+            if ($case.set) {
+              foreach ($key in $case.set.Keys) { $changed | Add-Member -NotePropertyName $key -NotePropertyValue $case.set[$key] -Force }
+            }
+            $path = Join-Path $env:RUNNER_TEMP 'changed-policy.json'
+            $changed | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $path
+            $output = & pwsh -NoProfile -File ./actions/windows-install-policy/check-install-policy.ps1 -MsiPath $msi -PolicyPath $path 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -or $output -notmatch [regex]::Escape($case.expect)) {
+              throw "A policy with $($case.change) should fail with '$($case.expect)': $output"
+            }
+            Write-Output "OK: a policy with $($case.change) is rejected."
+          }
+          $global:LASTEXITCODE = 0
