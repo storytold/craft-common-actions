@@ -200,7 +200,7 @@ Rust build code.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
-macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
+macOS and Windows packages are signed by the app's packaging scripts, with the shared certificate import and signing script (see "macOS code signing" and "Windows code signing"). `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
 
 Build provenance, a CycloneDX SBOM, and a Sigstore signature of the published files are a second job. Add it only in an app that is ready to grant those permissions. `release.yml` does not call `supply-chain.yml`.
 
@@ -752,8 +752,8 @@ The certificate and keychain go in a fresh private directory with an unpredictab
 decoded bundle is deleted as soon as it is imported, and a failed import also deletes the keychain.
 Without a certificate it only warns and exits successfully, so unsigned test builds still work.
 
-Existing callers are unaffected: the shared `release.yml` still runs each app's own
-`packaging/macos/` script. Apps adopt the action one at a time, then delete their copy.
+The shared `release.yml` imports the certificate with this action, so an app's own
+`packaging/macos/import-cert.sh` is no longer run and can be deleted.
 
 ## Job time limits
 
@@ -847,8 +847,10 @@ loading the Trusted Signing client it checks the downloaded package against a pi
 upgrading the client means changing the version and hash together. With neither kind of secret it
 warns and leaves the files unsigned.
 
-Existing callers are unaffected: the shared `release.yml` still runs each app's own
-`packaging/windows/` scripts. Apps adopt the action one at a time, then delete their copy.
+The shared `release.yml` and `windows-arm64.yml` run this action before `package.ps1`, with the
+app's `app-title` as the product name (`windows-arm64.yml` falls back to `app-dir`), so
+`CRAFT_SIGN_SCRIPT` is always set there. An app switches by making `package.ps1` call it instead of
+its own `sign.ps1`, then deletes its copy; until then nothing changes for it.
 
 ## Testing workflow failure paths
 
