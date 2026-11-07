@@ -126,27 +126,49 @@ class FileCacheTests(unittest.TestCase):
     def test_is_off_by_default(self):
         inputs = WORKFLOW['on']['workflow_call']['inputs']
         self.assertEqual(inputs['file-cache-paths']['default'], '')
-        for name in ('File cache key', 'Restore cached files', 'Save cached files'):
+        for name in ('File cache key', 'Restore cached files', 'Hash restored files', 'Save cached files'):
             with self.subTest(step=name):
                 self.assertIn("inputs.file-cache-paths != ''", step(name)['if'])
 
     def test_restores_before_the_gate_and_saves_after(self):
-        self.assertLess(self.NAMES.index('Restore cached files'), self.NAMES.index('Gate'))
+        self.assertLess(self.NAMES.index('Restore cached files'), self.NAMES.index('Hash restored files'))
+        self.assertLess(self.NAMES.index('Hash restored files'), self.NAMES.index('Gate'))
         self.assertGreater(self.NAMES.index('Save cached files'), self.NAMES.index('Gate'))
         restore, save = step('Restore cached files')['with'], step('Save cached files')['with']
-        self.assertEqual((restore['path'], restore['key']), (save['path'], save['key']))
+        self.assertEqual(restore['path'], save['path'])
         self.assertNotIn('restore-keys', save)
 
-    def test_falls_back_to_an_older_cache_under_the_prefix(self):
-        self.assertEqual(step('Restore cached files')['with']['restore-keys'],
-                         '${{ steps.file-cache.outputs.prefix }}')
+    def test_each_save_gets_its_own_key(self):
+        # A cache entry can never be overwritten, so a fixed key could never replace a damaged one.
+        self.assertEqual(step('Save cached files')['with']['key'],
+                         '${{ steps.file-cache.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}')
+
+    def test_restores_the_newest_for_the_key_files_then_under_the_prefix(self):
+        restore = step('Restore cached files')['with']
+        self.assertEqual(restore['restore-keys'].splitlines(),
+                         ['${{ steps.file-cache.outputs.key }}-', '${{ steps.file-cache.outputs.prefix }}'])
+
+    def test_saves_what_the_gate_changed(self):
+        self.assertEqual(step('Hash restored files')['env']['HASH'], '${{ hashFiles(inputs.file-cache-paths) }}')
+        condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
+        self.assertIn("steps.file-cache-restore.outputs.cache-matched-key == ''", condition)
+        self.assertIn("!startsWith(steps.file-cache-restore.outputs.cache-matched-key, "
+                      "format('{0}-', steps.file-cache.outputs.key))", condition)
+        self.assertIn('hashFiles(inputs.file-cache-paths) != steps.file-cache-restored.outputs.hash', condition)
+        self.assertNotIn('cache-hit', condition)
+
+    def test_file_cache_version_rotates_only_the_file_cache(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['file-cache-version']['default'], 'v1')
+        self.assertIn('${{ inputs.file-cache-version }}', step('File cache key')['env']['PREFIX'])
+        rust = next(s for s in STEPS if s.get('uses', '').startswith('Swatinem/rust-cache@'))
+        self.assertNotIn('file-cache-version', str(rust))
 
     def test_saves_under_the_dependency_cache_rule(self):
         condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
         self.assertIn("github.event_name != 'pull_request'", condition)
         self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
         self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
-        self.assertIn("steps.file-cache-restore.outputs.cache-hit != 'true'", condition)
 
     def test_saves_only_after_a_passing_gate(self):
         condition = step('Save cached files')['if'].strip()
