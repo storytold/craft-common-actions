@@ -192,7 +192,10 @@ jobs:
                 exit 1
                 ;;
             esac
-            args=(--platform "$PLATFORM" --file "$BUILD_DOCKERFILE")
+            # No provenance attestation: it names the registry it was pushed to,
+            # so each repository would get a different digest and the merge job
+            # could not tag one manifest for both.
+            args=(--platform "$PLATFORM" --file "$BUILD_DOCKERFILE" --provenance=false)
             if [ -n "$BUILD_TARGET" ]; then args+=(--target "$BUILD_TARGET"); fi
             if [ -n "$CACHE_FROM" ]; then args+=(--cache-from "$CACHE_FROM"); fi
             if [ -n "$CACHE_TO" ]; then args+=(--cache-to "$CACHE_TO"); fi
