@@ -1,0 +1,70 @@
+name: "SteamOS artifacts"
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name-prefix:
+        description: "Prefix for uploaded artifact names (normally the app's machine name)"
+        type: string
+        required: true
+      architectures:
+        description: 'JSON architecture array; supported values are x86_64 and aarch64'
+        type: string
+        required: false
+        default: '["x86_64","aarch64"]'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: SteamOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(inputs.architectures) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate architecture and packaging entry point
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          case "$ARCH" in
+            x86_64|aarch64) ;;
+            *) echo "::error::unsupported SteamOS architecture '$ARCH' (use x86_64 or aarch64)"; exit 1 ;;
+          esac
+          test -x packaging/steamos/build.sh || {
+            echo "::error::packaging/steamos/build.sh is missing or not executable"
+            exit 1
+          }
+
+      - name: Build in the pinned Steam Linux Runtime SDK
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: packaging/steamos/build.sh "$ARCH"
+
+      - name: Write checksum
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          cd dist/release
+          files=( *-linux-"$ARCH".tar.gz )
+          if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+            echo "::error::expected one Linux $ARCH tarball, found ${#files[@]}"
+            exit 1
+          fi
+          sha256sum "${files[0]}" > "SHA256SUMS-$ARCH.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name-prefix }}-steamos-${{ matrix.arch }}
+          path: |
+            dist/release/*-linux-${{ matrix.arch }}.tar.gz
+            dist/release/SHA256SUMS-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          retention-days: 14

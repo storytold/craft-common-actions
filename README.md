@@ -6,6 +6,11 @@ Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCra
 
 This repository unifies and eliminates duplicate CI/CD and release workflow definitions across the ArtCraft ecosystem into DRY, reusable GitHub Actions.
 
+`steamos.yml` is an opt-in artifact workflow for apps that provide
+`packaging/steamos/build.sh`. It builds x86_64 and ARM64 tarballs in each app's pinned Steam Linux
+Runtime SDK container, writes SHA-256 checksums and uploads short-lived CI artifacts. It does not
+publish a release or use signing secrets.
+
 ## Workflows Included
 
 ### 1. `release.yml`
