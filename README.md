@@ -11,7 +11,7 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ### 1. `release.yml`
 Full multi-platform release pipeline for Craft apps:
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
-- **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
+- **Windows** (x64, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
 - **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
