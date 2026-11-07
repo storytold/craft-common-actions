@@ -164,16 +164,24 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      # Each digest has to be pushed to every repository at once, so the output
-      # list carries one `name=` per image; the merge job joins them afterwards.
-      - name: Compose image outputs
-        id: outputs
+      # A by-digest push names one repository, so each image is built separately;
+      # the layer cache makes the repeats cheap. Every platform build must produce
+      # the same manifest digest, which the merge job then tags.
+      - name: Build and push by digest
+        id: build
         shell: bash
         env:
           IMAGES: ${{ inputs.images }}
+          PLATFORM: ${{ matrix.platform.platform }}
+          BUILD_CONTEXT: ${{ inputs.context }}
+          BUILD_DOCKERFILE: ${{ inputs.dockerfile }}
+          BUILD_TARGET: ${{ inputs.target }}
+          BUILD_ARGS: ${{ inputs.build-args }}
+          CACHE_FROM: ${{ inputs.cache-from }}
+          CACHE_TO: ${{ inputs.cache-to }}
         run: |
           set -euo pipefail
-          refs=""
+          digest=""
           while IFS= read -r image; do
             image="${image//[[:space:]]/}"
             [ -n "$image" ] || continue
@@ -184,29 +192,38 @@ jobs:
                 exit 1
                 ;;
             esac
-            refs="${refs:+$refs,}name=${image}"
+            args=(--platform "$PLATFORM" --file "$BUILD_DOCKERFILE")
+            if [ -n "$BUILD_TARGET" ]; then args+=(--target "$BUILD_TARGET"); fi
+            if [ -n "$CACHE_FROM" ]; then args+=(--cache-from "$CACHE_FROM"); fi
+            if [ -n "$CACHE_TO" ]; then args+=(--cache-to "$CACHE_TO"); fi
+            while IFS= read -r build_arg; do
+              build_arg="${build_arg#"${build_arg%%[![:space:]]*}"}"
+              [ -n "$build_arg" ] || continue
+              args+=(--build-arg "$build_arg")
+            done <<< "$BUILD_ARGS"
+            meta="$RUNNER_TEMP/meta-$(printf '%s' "$image" | tr '/.:' '___').json"
+            docker buildx build \
+              "${args[@]}" \
+              --output "type=image,name=$image,push-by-digest=true,name-canonical=true,push=true" \
+              --metadata-file "$meta" \
+              "$BUILD_CONTEXT"
+            candidate="$(jq -r '."containerimage.digest" // empty' "$meta")"
+            if [ -z "$candidate" ]; then
+              echo "error: no digest produced for $image" >&2
+              exit 1
+            fi
+            if [ -n "$digest" ] && [ "$digest" != "$candidate" ]; then
+              echo "error: $image produced $candidate, expected $digest" >&2
+              exit 1
+            fi
+            digest="$candidate"
+            echo "$image -> $digest"
           done <<< "$IMAGES"
-          if [ -z "$refs" ]; then
+          if [ -z "$digest" ]; then
             echo "error: images is empty" >&2
             exit 1
           fi
-          printf 'outputs=type=image,%s,push-by-digest=true,name-canonical=true,push=true\n' "$refs" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: ${{ inputs.context }}
-          file: ${{ inputs.dockerfile }}
-          target: ${{ inputs.target }}
-          platforms: ${{ matrix.platform.platform }}
-          build-args: ${{ inputs.build-args }}
-          outputs: ${{ steps.outputs.outputs.outputs }}
-          cache-from: ${{ inputs.cache-from }}
-          cache-to: ${{ inputs.cache-to }}
-          # Attestations would add a second manifest per platform; the merge job
-          # publishes plain manifests so `docker pull` stays a single request.
-          provenance: false
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Export digest
         shell: bash
