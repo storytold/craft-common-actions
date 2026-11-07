@@ -190,7 +190,7 @@ jobs:
             echo "error: images is empty" >&2
             exit 1
           fi
-          printf 'outputs=%s,push-by-digest=true,name-canonical=true,push=true\n' "$refs" >> "$GITHUB_OUTPUT"
+          printf 'outputs=type=image,%s,push-by-digest=true,name-canonical=true,push=true\n' "$refs" >> "$GITHUB_OUTPUT"
 
       - name: Build and push by digest
         id: build
