@@ -1,0 +1,1158 @@
+name: "FreeBSD Cross-Compile"
+
+on:
+  workflow_call:
+    inputs:
+      architectures:
+        description: 'JSON architecture array; empty selects x86_64 for PRs and both architectures otherwise'
+        type: string
+        required: false
+        default: ""
+      craft-fonts-ref:
+        description: "The commit ref for storytold/craft-fonts. Defaults to the suite's pin; empty builds without craft-fonts"
+        type: string
+        required: false
+        default: "bfcbf714e45a3ea8e98f88ab2b7971372a576414"
+      require-craft-fonts:
+        description: "Require the supplied craft-fonts checkout during builds and tests"
+        type: boolean
+        required: false
+        default: false
+      freebsd-release:
+        description: "FreeBSD OS release version (STABLE inputs are normalized to RELEASE for sysroot matching)"
+        type: string
+        required: false
+        default: "15.1-STABLE"
+      cargo-test-extra-args:
+        description: "Extra arguments to append to cargo test compilation"
+        type: string
+        required: false
+        default: ""
+      cargo-build-extra-args:
+        description: "Extra arguments to append to cargo build"
+        type: string
+        required: false
+        default: ""
+      skip-tests:
+        description: "Skip running tests (e.g. if the VM lacks GPU/oracle dependencies)"
+        type: boolean
+        required: false
+        default: false
+      run-package-check:
+        description: "Run the fallback packaging logic and verify produced tarball"
+        type: boolean
+        required: false
+        default: false
+      custom-test-command:
+        description: "Custom test commands to run instead of default cargo test. This completely bypasses the default architecture checks and timeouts."
+        type: string
+        required: false
+        default: ""
+      app-name:
+        description: "Name of the application for packaging"
+        type: string
+        required: false
+        default: ""
+      cold-start:
+        description: "Skip the FreeBSD sysroot cache restore, so the run downloads base.txz and fetches the pkg archives again. The sysroot is still saved. Use false to measure the cached path."
+        type: boolean
+        required: false
+        default: false
+      fixture-manifests:
+        description: "Space-separated Cargo.toml paths for plugin fixtures to pre-build for the target triple"
+        type: string
+        required: false
+        default: ""
+      skip-test-binaries-x86-64:
+        description: "Space-separated glob patterns of x86_64 test binaries to skip. Applied on the x86_64 leg only, whether or not KVM is available: even an accelerated guest has a single vCPU here, which can break the same timing assumptions QEMU TCG breaks."
+        type: string
+        required: false
+        default: ""
+      skip-test-binaries-aarch64:
+        description: "Space-separated glob patterns of aarch64 test binaries to skip. Applied on the aarch64 leg only."
+        type: string
+        required: false
+        default: ""
+      skip-test-cases-x86-64:
+        description: "Space-separated libtest name filters. Each pattern is passed to x86_64 test binaries as --skip <pattern>, so the binary still runs and only the matching cases are skipped. Ignored for harness = false binaries."
+        type: string
+        required: false
+        default: ""
+      skip-test-cases-aarch64:
+        description: "Space-separated libtest name filters. Each pattern is passed to aarch64 test binaries as --skip <pattern>. Ignored for harness = false binaries."
+        type: string
+        required: false
+        default: ""
+      stub-cargo:
+        description: "Install a stub cargo on PATH inside the VM for tests that shell out to cargo"
+        type: boolean
+        required: false
+        default: false
+      test-timeout-seconds:
+        description: "Timeout in seconds for each test binary. Default 1800s: the value is tuned for timeout profiling across the craft suite, so a binary that exceeds it is a finding, not an accident."
+        type: number
+        required: false
+        default: 1800
+      only-test-binaries:
+        description: "Space-separated glob patterns. When set, only matching test binaries are packed and run; the rest are not transferred. Matched against the recorded path, e.g. 'target/*/debug/deps/clap_e2e-*'."
+        type: string
+        required: false
+        default: ""
+      only-test-cases:
+        description: "Space-separated libtest name filters (substring match). When set, only matching cases run inside the selected binaries."
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  validate-architectures:
+    runs-on: ubuntu-24.04
+    outputs:
+      arch_matrix: ${{ steps.compute.outputs.arch_matrix }}
+    steps:
+      - name: Validate and normalize architectures
+        id: compute
+        shell: bash
+        env:
+          RAW_ARCHITECTURES: ${{ inputs.architectures }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          raw="$RAW_ARCHITECTURES"
+          if [ -z "$raw" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              archs='["x86_64"]'
+            else
+              archs='["x86_64","aarch64"]'
+            fi
+          else
+            archs="$raw"
+          fi
+          
+          if ! printf '%s' "$archs" | jq -e 'type == "array" and length > 0' >/dev/null; then
+            echo "Error: architectures must be a non-empty JSON array of strings." >&2
+            exit 1
+          fi
+          
+          if ! printf '%s' "$archs" | jq -e 'all(.[]; . == "x86_64" or . == "aarch64")' >/dev/null; then
+            echo "Error: architectures must only contain \"x86_64\" or \"aarch64\"." >&2
+            exit 1
+          fi
+          
+          archs=$(printf '%s' "$archs" | jq -c .)
+          echo "arch_matrix=$archs" >> "$GITHUB_OUTPUT"
+
+  freebsd:
+    name: FreeBSD ${{ matrix.arch }} (build + test)
+    needs: [validate-architectures]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.validate-architectures.outputs.arch_matrix) }}
+    env:
+      MATRIX_ARCH: ${{ matrix.arch }}
+      CARGO_BUILD_EXTRA_ARGS: ${{ inputs.cargo-build-extra-args }}
+      CARGO_TEST_EXTRA_ARGS: ${{ inputs.cargo-test-extra-args }}
+      CUSTOM_TEST_COMMAND: ${{ inputs.custom-test-command }}
+      FREEBSD_RELEASE: ${{ inputs.freebsd-release }}
+      REQUIRE_CRAFT_FONTS: ${{ inputs.require-craft-fonts }}
+      RUN_PACKAGE_CHECK: ${{ inputs.run-package-check }}
+      APP_NAME: ${{ inputs.app-name }}
+      FIXTURE_MANIFESTS: ${{ inputs.fixture-manifests }}
+      SKIP_TEST_BINARIES_X86_64: ${{ inputs.skip-test-binaries-x86-64 }}
+      SKIP_TEST_BINARIES_AARCH64: ${{ inputs.skip-test-binaries-aarch64 }}
+      SKIP_TEST_CASES_X86_64: ${{ inputs.skip-test-cases-x86-64 }}
+      SKIP_TEST_CASES_AARCH64: ${{ inputs.skip-test-cases-aarch64 }}
+      STUB_CARGO: ${{ inputs.stub-cargo }}
+      TEST_TIMEOUT_SECONDS: ${{ inputs.test-timeout-seconds }}
+      ONLY_TEST_BINARIES: ${{ inputs.only-test-binaries }}
+      ONLY_TEST_CASES: ${{ inputs.only-test-cases }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Pre-install QEMU dependencies
+        run: |
+          sudo apt-get update
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then
+            echo "Installing x86_64 QEMU dependencies..."
+            sudo apt-get install -y --no-install-recommends \
+              qemu-system-x86 qemu-utils ovmf zstd
+          else
+            echo "Installing aarch64 QEMU dependencies..."
+            sudo apt-get install -y --no-install-recommends \
+              qemu-system-arm qemu-efi-aarch64 qemu-utils zstd
+          fi
+
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@5d4336931c0b690c73444391c5de2e95389186a0
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@9587bf235d3d96532d6e5f2d7180355ed96bc667
+      
+      - name: Resolve FreeBSD release
+        id: freebsd-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          release="${FREEBSD_RELEASE}"
+          release="${release%-STABLE}"
+          release="${release%-RELEASE}"
+          
+          if [[ ! "$release" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Invalid FreeBSD release format: $FREEBSD_RELEASE" >&2
+            exit 1
+          fi
+          
+          echo "release=${release}" >> "$GITHUB_OUTPUT"
+          major="${release%%.*}"
+          echo "major=${major}" >> "$GITHUB_OUTPUT"
+
+      # Runs before the sysroot so the cache key can encode whether the third-party
+      # libraries belong to this repository's dependency tree at all.
+      - name: Detect required extra libs
+        id: detect-libs
+        run: |
+          if grep -qiE 'name = "(alsa|alsa-sys|libpulse|libpulse-sys|libpulse-binding|wayland|wayland-client|wayland-sys|x11|x11-sys|libxcb)"' Cargo.lock; then
+            echo "needs_extra_libs=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_extra_libs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set sysroot path
+        run: echo "SYSROOT=$HOME/freebsd-sysroot" >> "$GITHUB_ENV"
+
+      # The sysroot comes from the official FreeBSD release image and the official
+      # pkg archives. Neither depends on this repository, so the key carries no
+      # Cargo.lock hash and survives a version bump, unlike the Cargo cache. A
+      # cold-start run skips the restore, because measuring the uncached path is
+      # the whole point of that run.
+      # The sysroot also holds packages from the pkg repository's latest branch,
+      # which is rebuilt without changing the FreeBSD release. meta.conf is
+      # static (version, packing format, file names), so its content never
+      # moves. packagesite.pkg is the catalogue itself and is rewritten on every
+      # repository update; its ETag identifies that state, so it joins the cache
+      # key. Only the header is fetched: the catalogue is close to 10 MB.
+      - name: Resolve the pkg catalogue identity
+        id: pkg-epoch
+        if: steps.detect-libs.outputs.needs_extra_libs == 'true'
+        env:
+          MAJOR_VER: ${{ steps.freebsd-release.outputs.major }}
+        run: |
+          set -eu
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then abi="amd64"; else abi="aarch64"; fi
+          url="https://pkg.FreeBSD.org/FreeBSD:${MAJOR_VER}:${abi}/quarterly/packagesite.pkg"
+          etag=$(curl -fsSI --retry 3 --connect-timeout 20 --max-time 60 "$url" \
+            | awk -F": " 'tolower($1) == "etag" { gsub(/"/, "", $2); gsub(/\r/, "", $2); print $2; exit }')
+          if [ -z "$etag" ]; then
+            echo "Error: could not read the pkg catalogue ETag from $url" >&2
+            exit 1
+          fi
+          echo "epoch=${etag}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore FreeBSD sysroot
+        id: sysroot-cache
+        if: inputs.cold-start != true
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
+        with:
+          path: ~/freebsd-sysroot
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
+
+      - name: Extract FreeBSD Sysroot
+        if: steps.sysroot-cache.outputs.cache-hit != 'true'
+        env:
+          RELEASE_VER: ${{ steps.freebsd-release.outputs.release }}
+        run: |
+          set -eu
+          if [ "$MATRIX_ARCH" = "x86_64" ]; then
+            url="https://download.freebsd.org/releases/amd64/${RELEASE_VER}-RELEASE/base.txz"
+          else
+            url="https://download.freebsd.org/releases/arm64/aarch64/${RELEASE_VER}-RELEASE/base.txz"
+          fi
+          echo "Downloading sysroot from: $url"
+          
+          mkdir -p "$SYSROOT"
+          
+          curl -fL --retry 3 --connect-timeout 30 --max-time 600 -o base.txz "$url"
+          curl -fL --retry 3 --connect-timeout 30 --max-time 60 -o MANIFEST "${url%/*}/MANIFEST"
+          
+          expected=$(awk '$1=="base.txz"{print $2}' MANIFEST)
+          if [ -z "$expected" ]; then
+            echo "Error: base.txz checksum not found in MANIFEST" >&2
+            exit 1
+          fi
+          echo "base.txz sha256: $(sha256sum base.txz | awk '{print $1}')"
+          echo "expected sha256 from MANIFEST: $expected"
+          echo "$expected  base.txz" | sha256sum -c -
+          echo "✓ base.txz checksum verified"
+          rm -f MANIFEST
+          
+          tar -xf base.txz -C "$SYSROOT" ./lib/ ./usr/lib/ ./usr/include/ ./libexec/
+          rm -f base.txz
+          
+          ln -sf ../usr/lib/libcxxrt.so.1 "$SYSROOT/lib/libcxxrt.so.1" 2>/dev/null || true
+          ln -sf ../usr/lib/libc++.so.1 "$SYSROOT/lib/libc++.so.1" 2>/dev/null || true
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+
+      - name: Fetch FreeBSD Third-party Packages via VM
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        env:
+          MAJOR_VER: ${{ steps.freebsd-release.outputs.major }}
+        with:
+          release: ${{ steps.freebsd-release.outputs.release }}
+          usesh: true
+          copyback: true
+          envs: 'MATRIX_ARCH MAJOR_VER'
+          run: |
+            set -eu
+            if [ "$MATRIX_ARCH" = "x86_64" ]; then
+              ABI="FreeBSD:${MAJOR_VER}:amd64"
+            else
+              ABI="FreeBSD:${MAJOR_VER}:aarch64"
+            fi
+            OSVERSION=$(sysctl -n kern.osreldate)
+            env ABI=$ABI OSVERSION=$OSVERSION pkg update -f
+            env ABI=$ABI OSVERSION=$OSVERSION pkg fetch -y -d alsa-lib wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 || { echo 'Error: pkg fetch failed'; exit 1; }
+            mkdir -p packages
+            find /var/cache/pkg -maxdepth 1 -type f -name '*.pkg' -exec cp {} packages/ \;
+
+      - name: Clean up leftover VM from fetch step
+        if: always() && steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        run: |
+          pkill -f 'qemu-system-x86_64.*freebsd' || true
+          pkill -f 'qemu-system-aarch64.*freebsd' || true
+          sleep 2
+          pgrep -af qemu-system || true
+
+      - name: Extract Packages into Sysroot
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && steps.detect-libs.outputs.needs_extra_libs == 'true'
+        run: |
+          set -eu
+          if [ ! -d packages ] || [ "$(find packages -name '*.pkg' | wc -l)" -eq 0 ]; then
+            echo "Error: packages directory is empty, but extra libs are required." >&2
+            exit 1
+          fi
+          
+          for pkg in packages/*.pkg; do
+            echo "Extracting $pkg"
+            if tar -tf "$pkg" | grep -qx 'data.tar'; then
+              tar -xf "$pkg" -O data.tar | tar -xf - -C "$SYSROOT"
+            else
+              tar -xf "$pkg" -C "$SYSROOT" --exclude '+*'
+            fi
+          done
+          
+          echo "Verifying sysroot contents:"
+          ls -la "$SYSROOT/usr/local/lib" 2>/dev/null || echo "Warning: usr/local/lib not populated"
+          ls -la "$SYSROOT/usr/local/libdata/pkgconfig" 2>/dev/null || echo "Warning: pkgconfig dir not populated"
+          rm -rf packages
+
+      - name: Save FreeBSD sysroot
+        # Only on a miss; re-saving an existing key fails for no benefit.
+        if: steps.sysroot-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
+        with:
+          path: ~/freebsd-sysroot
+          key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
+
+      - name: Setup Toolchain
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+          # Pinned to ubuntu-24.04 (noble) candidate versions as of 2026-11-01.
+          # If these versions are removed from the Ubuntu archives in the future,
+          # maintainers should update them by querying the latest available versions 
+          # via: `apt-cache madison <pkg>` (e.g., apt-cache madison clang).
+          CLANG_VER: "1:18.0-59~exp2"
+          CLANG_18_VER: "1:18.1.3-1ubuntu1"
+          LLD_VER: "1:18.0-59~exp2"
+          LLD_18_VER: "1:18.1.3-1ubuntu1"
+          PKG_CONFIG_VER: "1.8.1-2build1"
+          MOLD_VER: "2.30.0+dfsg-1build1"
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            "clang=${CLANG_VER}" \
+            "clang-18=${CLANG_18_VER}" \
+            "lld=${LLD_VER}" \
+            "lld-18=${LLD_18_VER}" \
+            "pkg-config=${PKG_CONFIG_VER}" \
+            "mold=${MOLD_VER}"
+
+          if [ "$MATRIX_ARCH" = "aarch64" ]; then
+            rustup target add aarch64-unknown-freebsd
+          else
+            rustup target add x86_64-unknown-freebsd
+          fi
+
+      # No target/ cache. Its key would carry the Cargo.lock hash, which changes on
+      # every version bump, and Cargo invalidates the fingerprints anyway once the
+      # workspace version moves. For a release-driven workflow that entry would never
+      # hit, so the compile always starts from an empty target/.
+      - name: Cross Compile Workspace
+        run: |
+          set -eu
+          TARGET_TRIPLE="${MATRIX_ARCH}-unknown-freebsd"
+          
+          export PKG_CONFIG_ALLOW_CROSS=1
+          export PKG_CONFIG_SYSROOT_DIR="$SYSROOT"
+          export PKG_CONFIG_LIBDIR="$SYSROOT/usr/local/libdata/pkgconfig:$SYSROOT/usr/libdata/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$SYSROOT/usr/local/libdata/pkgconfig:$SYSROOT/usr/libdata/pkgconfig:$SYSROOT/usr/lib/pkgconfig"
+          
+          target_key="${TARGET_TRIPLE//-/_}"
+          target_key_upper="${target_key^^}"
+          
+          printf -v "CC_${target_key}" '%s' "clang"
+          printf -v "CXX_${target_key}" '%s' "clang++"
+          printf -v "CFLAGS_${target_key}" '%s' "--target=$TARGET_TRIPLE --sysroot=$SYSROOT"
+          printf -v "CXXFLAGS_${target_key}" '%s' "--target=$TARGET_TRIPLE --sysroot=$SYSROOT"
+          export "CC_${target_key}" "CXX_${target_key}" "CFLAGS_${target_key}" "CXXFLAGS_${target_key}"
+          
+          printf -v "CARGO_TARGET_${target_key_upper}_LINKER" '%s' "clang"
+          printf -v "CARGO_TARGET_${target_key_upper}_RUSTFLAGS" '%s' "-Clink-arg=--target=$TARGET_TRIPLE -Clink-arg=--sysroot=$SYSROOT -Clink-arg=-fuse-ld=mold -Clink-arg=-L$SYSROOT/lib -Clink-arg=-L$SYSROOT/usr/lib -Clink-arg=-L$SYSROOT/usr/local/lib"
+          export "CARGO_TARGET_${target_key_upper}_LINKER" "CARGO_TARGET_${target_key_upper}_RUSTFLAGS"
+          
+          export CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_PROFILE_TEST_DEBUG=0
+          export CARGO_BUILD_JOBS=3
+          
+          if [ -d craft-fonts ]; then
+            export CRAFT_FONTS_DIR="$PWD/craft-fonts"
+          fi
+          if [ "$REQUIRE_CRAFT_FONTS" = "true" ]; then
+            if [ ! -d craft-fonts ]; then
+              echo "error: required craft-fonts checkout is missing" >&2
+              exit 1
+            fi
+            export CRAFT_FONTS_REQUIRED=1
+          fi
+          
+          if [ "$RUN_PACKAGE_CHECK" = "true" ]; then
+            # shellcheck disable=SC2086
+            cargo build --release --workspace --target=$TARGET_TRIPLE --locked $CARGO_BUILD_EXTRA_ARGS
+          fi
+          
+          # shellcheck disable=SC2086
+          # json-render-diagnostics keeps the JSON in test-output.json for the jq filter below,
+          # while the rendered diagnostics go to stderr and therefore into the job log. With
+          # plain --message-format=json the errors exist only inside test-output.json, which
+          # this script deletes, so a failed build left no compiler message behind.
+          if ! cargo test --workspace --target=$TARGET_TRIPLE --locked --no-run --message-format=json-render-diagnostics $CARGO_TEST_EXTRA_ARGS > test-output.json; then
+            echo '=== compiler diagnostics ===' >&2
+            jq -r 'select(.reason=="compiler-message" and .message.level=="error") | .message.rendered' test-output.json 2>/dev/null >&2 || true
+            exit 1
+          fi
+
+          if [ -n "${FIXTURE_MANIFESTS:-}" ]; then
+            for manifest in $FIXTURE_MANIFESTS; do
+              [ -f "$manifest" ] || { echo "Error: fixture manifest not found: $manifest" >&2; exit 1; }
+              fixture_name=$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")" | sed 's/-host$//')
+              echo "Pre-building fixture: $manifest"
+              FIXTURE_TMPDIR="$PWD/target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target"
+              mkdir -p "$FIXTURE_TMPDIR"
+              fixture_locked=""
+              if [ -f "$(dirname "$manifest")/Cargo.lock" ]; then
+                fixture_locked="--locked"
+              fi
+              # shellcheck disable=SC2086
+              cargo build --manifest-path "$manifest" --target=$TARGET_TRIPLE --target-dir "$FIXTURE_TMPDIR" $fixture_locked
+              mkdir -p "$FIXTURE_TMPDIR/debug"
+              for so in "$FIXTURE_TMPDIR/$TARGET_TRIPLE/debug"/*.so; do
+                [ -f "$so" ] || continue
+                cp "$so" "$FIXTURE_TMPDIR/debug/"
+              done
+            done
+          fi
+          
+          jq -r --arg root "$PWD" 'select(.reason=="compiler-artifact" and .executable!=null and .profile.test==true) 
+            | "\(.manifest_path | sub("/Cargo.toml$";"") | ltrimstr($root) | ltrimstr("/") | if .=="" then "." else . end)\t\(.executable | ltrimstr($root+"/"))"' \
+            test-output.json > test-binaries.txt
+
+          if [ -n "${ONLY_TEST_BINARIES:-}" ]; then
+            tab=$(printf '\t')
+            : > test-binaries.selected
+            set -f
+            while IFS="$tab" read -r crate_dir test_bin; do
+              [ -n "$test_bin" ] || continue
+              for pattern in $ONLY_TEST_BINARIES; do
+                case "$test_bin" in
+                  $pattern) printf '%s\t%s\n' "$crate_dir" "$test_bin" >> test-binaries.selected; break ;;
+                esac
+              done
+            done < test-binaries.txt
+            set +f
+            mv test-binaries.selected test-binaries.txt
+            if [ ! -s test-binaries.txt ]; then
+              echo "Error: only-test-binaries matched no test binary: $ONLY_TEST_BINARIES" >&2
+              exit 1
+            fi
+            echo "Selected $(wc -l < test-binaries.txt) test binaries."
+          fi
+
+      - name: Package
+        if: env.RUN_PACKAGE_CHECK == 'true'
+        run: |
+          set -eu
+          if [ -z "$APP_NAME" ]; then
+            echo "error: app-name is required for packaging fallback" >&2
+            exit 1
+          fi
+          
+          VERSION=$(grep -m 1 '^version' Cargo.toml | awk -F'"' '{print $2}' || true)
+          if [ -z "$VERSION" ]; then
+            echo "error: version not found in Cargo.toml" >&2
+            exit 1
+          fi
+          
+          NAME="${APP_NAME}-${VERSION}-freebsd-${MATRIX_ARCH}"
+          mkdir -p "dist/release/$NAME"
+          mkdir -p "dist/release/$NAME/icons"
+          
+          found=$(find target/${MATRIX_ARCH}-unknown-freebsd/release -maxdepth 1 -type f -executable -name "${APP_NAME}*" | head -n 1)
+          if [ -z "$found" ]; then
+            echo "error: no executable matching ${APP_NAME}* found in release target" >&2
+            exit 1
+          fi
+          
+          find target/${MATRIX_ARCH}-unknown-freebsd/release -maxdepth 1 -type f -executable -name "${APP_NAME}*" -exec cp {} "dist/release/$NAME/" \;
+          
+          if [ -f "README.md" ]; then cp README.md "dist/release/$NAME/"; fi
+          if [ -f "LICENSE-MIT" ]; then cp LICENSE-MIT "dist/release/$NAME/"; fi
+          if [ -f "LICENSE-APACHE" ]; then cp LICENSE-APACHE "dist/release/$NAME/"; fi
+          if [ -f "NOTICE" ]; then cp NOTICE "dist/release/$NAME/"; fi
+          if [ -f "ATTRIBUTION.md" ]; then cp ATTRIBUTION.md "dist/release/$NAME/"; fi
+          if [ -d "assets/app-icon/hicolor" ]; then cp -R assets/app-icon/hicolor "dist/release/$NAME/icons/"; fi
+          
+          tar -C dist/release -czf "dist/release/$NAME.tar.gz" "$NAME"
+          rm -rf "dist/release/$NAME"
+          
+          echo "Verifying archive contents..."
+          tar -tzf "dist/release/$NAME.tar.gz" > "dist/release/$NAME-files.txt"
+          
+          if ! grep -qxF "$NAME/$APP_NAME" "dist/release/$NAME-files.txt"; then
+            echo "Error: packaged archive does not contain the main binary." >&2
+            exit 1
+          fi
+          if [ -f "README.md" ] && ! grep -qxF "${NAME}/README.md" "dist/release/$NAME-files.txt"; then
+            echo "Error: packaged archive does not contain README.md." >&2
+            exit 1
+          fi
+          echo "Archive contents verified:"
+          head -n 10 "dist/release/$NAME-files.txt"
+
+      - name: Upload the packaged FreeBSD archive
+        if: always() && env.RUN_PACKAGE_CHECK == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freebsd-${{ matrix.arch }}-package
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*-files.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Write test environment
+        run: |
+          set -eu
+          echo "#!/bin/sh" > test-env.sh
+          if [ -d craft-fonts ]; then
+            echo "export CRAFT_FONTS_DIR=\"\$PWD/craft-fonts\"" >> test-env.sh
+          fi
+          if [ "$REQUIRE_CRAFT_FONTS" = "true" ]; then
+            echo "export CRAFT_FONTS_REQUIRED=1" >> test-env.sh
+          fi
+
+      - name: Write custom test command
+        if: inputs.custom-test-command != ''
+        run: |
+          printf '%s\n' "$CUSTOM_TEST_COMMAND" > custom-test-command.sh
+
+      - name: Pack workspace
+        if: inputs.skip-tests != true
+        run: |
+          set -eu
+          TARGET_TRIPLE="${MATRIX_ARCH}-unknown-freebsd"
+          
+          if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
+            tab=$(printf '\t')
+            while IFS= read -r line || [ -n "$line" ]; do
+              [ -z "$line" ] && continue
+              case "$line" in
+                *"$tab"*) ;;
+                *) echo "Error: missing TAB separator: $line" >&2; exit 1 ;;
+              esac
+              crate_dir=${line%%"$tab"*}
+              test_bin=${line#*"$tab"}
+              case "$crate_dir:$test_bin" in
+                :*|*:) echo "Error: empty field: $line" >&2; exit 1 ;;
+              esac
+              case "$test_bin" in
+                *"$tab"*) echo "Error: too many fields: $line" >&2; exit 1 ;;
+              esac
+              
+              case "$test_bin" in
+                target/*) ;;
+                *) echo "Error: test binary must be under target/: $test_bin" >&2; exit 1 ;;
+              esac
+              case "/$test_bin/" in
+                */../*|*//*) echo "Error: unsafe test binary path: $test_bin" >&2; exit 1 ;;
+              esac
+              case "$crate_dir" in
+                .) ;;
+                *) 
+                  case "$crate_dir" in
+                    /*|../*|*/../*|*/..|*//*|./*)
+                      echo "Error: unsafe crate_dir path: $crate_dir" >&2
+                      exit 1
+                      ;;
+                  esac
+                  ;;
+              esac
+            done < test-binaries.txt
+          elif [ -z "${CUSTOM_TEST_COMMAND:-}" ]; then
+            echo "Error: test-binaries.txt is empty and no custom test command is provided." >&2
+            exit 1
+          fi
+          
+          mkdir -p "target-slim/target/$TARGET_TRIPLE/debug/deps" "target-slim/target/$TARGET_TRIPLE/tmp"
+          
+          if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
+            grep -Ev '^[[:space:]]*$' test-binaries.txt > test-binaries-clean.txt
+            while IFS=$'\t' read -r crate_dir test_bin; do
+              [ -z "$test_bin" ] && continue
+              mkdir -p "target-slim/$(dirname "$test_bin")"
+              cp "$test_bin" "target-slim/$test_bin"
+            done < test-binaries-clean.txt
+            mv test-binaries-clean.txt test-binaries.txt
+          fi
+
+          # Copy workspace binaries that tests reference via CARGO_BIN_EXE_<name>.
+          # env!("CARGO_BIN_EXE_<name>") bakes an absolute path into the test binary,
+          # so the file must exist at the same relative location inside the VM.
+          if [ -d "target/$TARGET_TRIPLE/debug" ]; then
+            while IFS= read -r bin; do
+              [ -n "$bin" ] || continue
+              base=$(basename "$bin")
+              case "$base" in
+                *.so|*.d|*.rlib|*.rmeta|*.dylib|*.pdb|*.o) continue ;;
+              esac
+              mkdir -p "target-slim/target/$TARGET_TRIPLE/debug"
+              cp "$bin" "target-slim/target/$TARGET_TRIPLE/debug/$base"
+            done < <(find "target/$TARGET_TRIPLE/debug" -maxdepth 1 -type f -executable)
+          fi
+
+          if [ -n "${FIXTURE_MANIFESTS:-}" ]; then
+            for manifest in $FIXTURE_MANIFESTS; do
+              fixture_name=$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")" | sed 's/-host$//')
+              src="target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target"
+              if [ ! -d "$src" ]; then
+                echo "Error: fixture target not found for manifest $manifest (expected $src)" >&2
+                exit 1
+              fi
+              dest="target-slim/target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target"
+              mkdir -p "$dest"
+              if [ -d "$src/debug" ]; then
+                cp -r "$src/debug" "$dest/"
+              else
+                cp -r "$src" "$dest"
+                rm -rf "$dest/$TARGET_TRIPLE" "$dest/debug/incremental"
+              fi
+            done
+          fi
+
+          if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
+            while IFS=$'\t' read -r crate_dir test_bin; do
+              hash=$(sha256sum "$test_bin" | awk '{print $1}')
+              printf '%s\t%s\n' "$hash" "$test_bin"
+            done < test-binaries.txt > test-binaries.sha256
+          fi
+          
+          tar --exclude='./target' --exclude='./target-slim' --exclude='./.git' --exclude='./payload.tar' --exclude='./test-output.json' --exclude='./dist' -cf payload.tar .
+          tar -rf payload.tar -C target-slim .
+          
+          tar -tf payload.tar > payload-files.txt
+          if [ -f test-binaries.txt ]; then
+            grep -Fx './test-binaries.txt' payload-files.txt
+          fi
+          if [ -f test-binaries.sha256 ]; then
+            grep -Fx './test-binaries.sha256' payload-files.txt
+          fi
+          
+          if [ -n "${FIXTURE_MANIFESTS:-}" ]; then
+            for manifest in $FIXTURE_MANIFESTS; do
+              fixture_name=$(basename "$(dirname "$(dirname "$(dirname "$manifest")")")" | sed 's/-host$//')
+              found_so=false
+              for so in "target/$TARGET_TRIPLE/tmp/${fixture_name}-fixture-target/debug"/*.so; do
+                [ -f "$so" ] || continue
+                found_so=true
+                if ! grep -Fxq "./$so" payload-files.txt; then
+                  echo "Error: fixture .so missing from archive: $so" >&2
+                  exit 1
+                fi
+              done
+              if [ "$found_so" = "false" ]; then
+                echo "Error: no .so produced for fixture $manifest" >&2
+                exit 1
+              fi
+            done
+          fi
+
+          if [ -f test-binaries.txt ] && [ -s test-binaries.txt ]; then
+            while IFS=$'\t' read -r crate_dir test_bin; do
+              [ -n "$test_bin" ] || continue
+              if ! grep -Fxq "./$test_bin" payload-files.txt; then
+                echo "Error: missing test binary in archive: $test_bin" >&2
+                exit 1
+              fi
+            done < test-binaries.txt
+          fi
+          rm -f payload-files.txt
+          
+          zstd -T0 payload.tar
+          rm -f payload.tar
+          
+          # Split with fixed-width numeric suffixes and record both the exact
+          # part order and a per-part checksum. The guest cannot trust a glob
+          # order or assume every part survived the transfer: a missing or
+          # rewritten part used to surface only as "Restored data doesn't match
+          # checksum" after the parts were already concatenated.
+          split -b 500M --numeric-suffixes=0 --suffix-length=4 payload.tar.zst payload.tar.zst.part.
+          rm -f payload.tar.zst
+          ls -1v payload.tar.zst.part.* > payload.parts.list
+          while IFS= read -r part; do
+            [ -n "$part" ] || continue
+            printf '%s\t%s\n' "$(sha256sum "$part" | awk '{print $1}')" "$part"
+          done < payload.parts.list > payload.parts.sha256
+          echo "Packaged $(wc -l < payload.parts.list) payload parts:"
+          cat payload.parts.list
+          rm -rf target target-slim test-output.json
+
+      - name: Run Tests in FreeBSD VM
+        if: inputs.skip-tests != true
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        env:
+          # Passed as data: no input expression is ever pasted into shell source.
+          INSTALL_RUST: ${{ inputs.custom-test-command != '' }}
+        with:
+          release: ${{ steps.freebsd-release.outputs.release }}
+          arch: ${{ matrix.arch }}
+          usesh: true
+          copyback: false
+          # Transport history on this payload:
+          #   rsync (default) aborts multi-GB payloads with "Invalid block index
+          #     (count=0)" in receiver.c with rsync 3.5.0.
+          #   tar rewrote the first 500 MB part on payloads of three parts or
+          #     more (per-part SHA-256 mismatch on part.0000 while one- and
+          #     two-part payloads passed).
+          # scp copies each part as an opaque file, which is the granularity
+          # the checksum list already verifies.
+          sync: scp
+          envs: 'MATRIX_ARCH REQUIRE_CRAFT_FONTS STUB_CARGO SKIP_TEST_BINARIES_X86_64 SKIP_TEST_BINARIES_AARCH64 SKIP_TEST_CASES_X86_64 SKIP_TEST_CASES_AARCH64 TEST_TIMEOUT_SECONDS ONLY_TEST_CASES INSTALL_RUST'
+          prepare: |
+            pkg update -f
+            pkg install -y bash file git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu zstd
+            # A custom command list may call cargo, so it needs the guest toolchain.
+            if [ "$INSTALL_RUST" = "true" ]; then pkg install -y rust; fi
+          run: |
+            set -eu
+            
+            tab=$(printf '\t')
+            
+            if ls payload.tar.zst.part.* >/dev/null 2>&1; then
+              echo "Verifying chunked archive..."
+              if [ ! -f payload.parts.list ] || [ ! -f payload.parts.sha256 ]; then
+                echo "Error: payload parts exist but payload.parts.list or payload.parts.sha256 is missing" >&2
+                exit 1
+              fi
+
+              expected_parts=$(grep -cve '^[[:space:]]*$' payload.parts.list || true)
+              actual_parts=$(ls -1 payload.tar.zst.part.* 2>/dev/null | wc -l | tr -d ' ')
+              if [ "$expected_parts" != "$actual_parts" ]; then
+                echo "Error: expected $expected_parts payload parts, found $actual_parts" >&2
+                ls -l payload.tar.zst.part.* >&2 || true
+                exit 1
+              fi
+
+              # Verify every part before any of them is concatenated, so a
+              # corrupt part is named instead of failing later as a zstd
+              # checksum error on the merged stream.
+              while IFS="$tab" read -r expected part; do
+                [ -n "$part" ] || continue
+                if [ ! -f "$part" ]; then
+                  echo "Error: payload part missing: $part" >&2
+                  exit 1
+                fi
+                actual=$(sha256 -q "$part")
+                if [ "$actual" != "$expected" ]; then
+                  echo "Error: payload part checksum mismatch: $part" >&2
+                  echo "  expected $expected" >&2
+                  echo "  actual   $actual" >&2
+                  exit 1
+                fi
+              done < payload.parts.sha256
+              echo "All $expected_parts payload parts verified."
+
+              # Stream the parts through zstd and tar so neither the merged
+              # compressed stream nor the uncompressed tar ever lands on disk.
+              # FreeBSD /bin/sh has no pipefail, so the three stages run as
+              # separate processes joined by FIFOs and each exit code is
+              # collected individually.
+              extract_dir=$(mktemp -d "${TMPDIR:-/tmp}/payload-extract.XXXXXX")
+              parts_pid=
+              zstd_pid=
+              tar_pid=
+              cleanup_extract() {
+                for pid in "$parts_pid" "$zstd_pid" "$tar_pid"; do
+                  if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || :; fi
+                done
+                rm -rf "$extract_dir"
+              }
+              trap cleanup_extract EXIT
+              trap 'exit 130' INT
+              trap 'exit 143' TERM
+
+              mkfifo "$extract_dir/compressed.fifo" "$extract_dir/raw.fifo"
+
+              tar -xf - < "$extract_dir/raw.fifo" > "$extract_dir/tar.log" 2>&1 &
+              tar_pid=$!
+
+              zstd -d -c < "$extract_dir/compressed.fifo" > "$extract_dir/raw.fifo" 2> "$extract_dir/zstd.log" &
+              zstd_pid=$!
+
+              (
+                while IFS= read -r part; do
+                  [ -n "$part" ] || continue
+                  cat "$part" || exit 21
+                done < payload.parts.list
+              ) > "$extract_dir/compressed.fifo" 2> "$extract_dir/parts.log" &
+              parts_pid=$!
+
+              set +e
+              wait "$parts_pid"; parts_rc=$?; parts_pid=
+              wait "$zstd_pid"; zstd_rc=$?; zstd_pid=
+              wait "$tar_pid"; tar_rc=$?; tar_pid=
+              set -e
+
+              if [ "$parts_rc" -ne 0 ] || [ "$zstd_rc" -ne 0 ] || [ "$tar_rc" -ne 0 ]; then
+                echo "Error: streaming payload extraction failed." >&2
+                echo "Part reader exit code: $parts_rc" >&2
+                echo "Zstd exit code:        $zstd_rc" >&2
+                echo "Tar exit code:         $tar_rc" >&2
+                for stage in parts zstd tar; do
+                  if [ -s "$extract_dir/$stage.log" ]; then
+                    echo "===== $stage log =====" >&2
+                    cat "$extract_dir/$stage.log" >&2
+                  fi
+                done
+                echo "Payload parts are kept until the VM exits for diagnosis." >&2
+                exit 1
+              fi
+
+              # Only after a fully successful extraction are the parts removed.
+              while IFS= read -r part; do
+                [ -n "$part" ] || continue
+                rm -f "$part"
+              done < payload.parts.list
+              rm -f payload.parts.list payload.parts.sha256
+            elif [ -f payload.tar.zst ]; then
+              echo "Verifying and extracting archive..."
+              zstd -t payload.tar.zst
+              zstd -d -c payload.tar.zst > payload.tar
+              rm -f payload.tar.zst
+              tar -xf payload.tar
+              rm -f payload.tar
+            else
+              echo "Error: payload archive not found" >&2
+              exit 1
+            fi
+            
+            echo "Disk space after extraction:"
+            df -h
+            
+            if [ -f test-binaries.sha256 ]; then
+              echo "Verifying test binary checksums..."
+              while IFS="$tab" read -r expected test_bin; do
+                [ -n "$test_bin" ] || continue
+                actual=$(sha256 -q "$test_bin")
+                if [ "$actual" != "$expected" ]; then
+                  echo "Error: Checksum mismatch for $test_bin" >&2
+                  exit 1
+                fi
+              done < test-binaries.sha256
+              echo "All checksums verified."
+            fi
+            
+            if [ -f test-env.sh ]; then
+              . ./test-env.sh
+            fi
+
+            # Tests run as an ordinary user: as root a test that expects "permission
+            # denied" fails, and a permission bug root would hide goes unseen.
+            if [ "$(id -u)" -eq 0 ]; then
+              id craft-test >/dev/null 2>&1 || pw useradd craft-test -m -s /bin/sh
+              # The extracted payload, including the test binaries and fixtures.
+              chown -R craft-test "$(pwd)"
+              # A writable cache directory, since HOME is redirected under it.
+              install -d -o craft-test -g craft-test /home/craft-test/.cache
+            fi
+            
+            if [ -f custom-test-command.sh ]; then
+              if [ "$(id -u)" -eq 0 ]; then
+                # -m keeps the caller's environment, which includes HOME=/root.
+                # /root is 0700, so the test user could not write anywhere the
+                # suite expects to. HOME and XDG_CACHE_HOME are set explicitly.
+                su -m craft-test -c "HOME=/home/craft-test XDG_CACHE_HOME=/home/craft-test/.cache PATH='$PATH' && export HOME XDG_CACHE_HOME PATH && sh -eu custom-test-command.sh"
+              else
+                sh -eu custom-test-command.sh
+              fi
+            else
+              if [ ! -f test-binaries.txt ]; then
+                echo "Error: test-binaries.txt not found" >&2
+                exit 1
+              fi
+              
+              case "$MATRIX_ARCH" in
+                aarch64) arch_pattern="aarch64" ;;
+                x86_64)  arch_pattern="x86-64" ;;
+                *)       echo "Unsupported architecture: $MATRIX_ARCH" >&2; exit 1 ;;
+              esac
+              
+              if ! command -v timeout >/dev/null 2>&1; then
+                echo "Error: timeout command not found" >&2
+                exit 1
+              fi
+              
+              checked=0
+              attempted=0
+              passed=0
+              skipped=0
+              executed_cases=0
+              failed=""
+              root=$(pwd)
+              : > excluded-tests.txt
+              : > timed-out-tests.txt
+              
+              if [ "${STUB_CARGO:-false}" = "true" ]; then
+                printf '#!/bin/sh\necho "stub cargo called with: $*" >&2\nexit 0\n' > "$root/cargo"
+                chmod +x "$root/cargo"
+                export PATH="$root:$PATH"
+                export CARGO="$root/cargo"
+              fi
+              
+              total_bins=$(grep -cve '^[[:space:]]*$' test-binaries.txt || true)
+              
+              while IFS="$tab" read -r crate_dir test_bin; do
+                [ -n "$test_bin" ] || continue
+                checked=$((checked + 1))
+                
+                if [ ! -f "$test_bin" ] || [ ! -x "$test_bin" ]; then
+                  echo "Error: recorded test executable is missing or not executable: $test_bin" >&2
+                  failed="$failed $test_bin(missing)"
+                  continue
+                fi
+                
+                file_info="$(file -b "$test_bin")"
+                if ! printf '%s' "$file_info" | grep -qi "FreeBSD" || ! printf '%s' "$file_info" | grep -qi -- "$arch_pattern"; then
+                  echo "Error: $test_bin is not a FreeBSD $arch_pattern binary: $file_info" >&2
+                  failed="$failed $test_bin(wrong-arch)"
+                  continue
+                fi
+                
+                # The skip lists are per architecture and are always honoured.
+                # They are not tied to KVM: a cross-architecture guest runs under
+                # TCG, and the x86_64 guest still has a single vCPU, so either
+                # leg can overrun timing or resource assumptions a native host
+                # would meet.
+                case "$MATRIX_ARCH" in
+                  aarch64) skip_list="${SKIP_TEST_BINARIES_AARCH64:-}" ;;
+                  x86_64)  skip_list="${SKIP_TEST_BINARIES_X86_64:-}" ;;
+                  *)       skip_list="" ;;
+                esac
+                if [ -n "$skip_list" ]; then
+                  matched=false
+                  for pattern in $skip_list; do
+                    case "$test_bin" in
+                      $pattern) matched=true; break ;;
+                    esac
+                  done
+                  if [ "$matched" = "true" ]; then
+                    echo "Skipping (listed for $MATRIX_ARCH): $test_bin" >> excluded-tests.txt
+                    skipped=$((skipped + 1))
+                    continue
+                  fi
+                fi
+                
+                case "$MATRIX_ARCH" in
+                  aarch64) case_skip="${SKIP_TEST_CASES_AARCH64:-}" ;;
+                  x86_64)  case_skip="${SKIP_TEST_CASES_X86_64:-}" ;;
+                  *)       case_skip="" ;;
+                esac
+                # Only libtest harnesses understand --skip and positional filters.
+                # Probe with --list so a harness = false binary is not handed a
+                # flag it rejects; the probe is bounded because a custom main()
+                # could block.
+                is_libtest_harness=false
+                if [ -n "$case_skip" ] || [ -n "${ONLY_TEST_CASES:-}" ]; then
+                  # The probe is bounded because a custom main() could block.
+                  set +e
+                  timeout 60 "$root/$test_bin" --list >/dev/null 2>&1
+                  probe_rc=$?
+                  set -e
+                  if [ "$probe_rc" -eq 124 ]; then
+                    echo "Error: --list probe timed out after 60s for $test_bin" >&2
+                    failed="$failed $test_bin(probe-timeout)"
+                    continue
+                  elif [ "$probe_rc" -eq 0 ]; then
+                    is_libtest_harness=true
+                  fi
+                fi
+
+                case_skip_flags=""
+                if [ -n "$case_skip" ]; then
+                  if [ "$is_libtest_harness" = "true" ]; then
+                    for pattern in $case_skip; do
+                      # Single-quoted so '::' and '*' reach libtest verbatim; the
+                      # root path re-parses this string in the su shell, which
+                      # also runs with globbing disabled (set -f).
+                      case_skip_flags="$case_skip_flags --skip '$pattern'"
+                    done
+                    echo "Skipping cases matching: $case_skip"
+                  else
+                    echo "::warning::skip-test-cases-$MATRIX_ARCH ignored for $test_bin: not a libtest harness"
+                  fi
+                fi
+                
+                # Plain words are safe here: patterns contain no whitespace and
+                # globbing is off (set -f) in both the su and non-root branches.
+                case_only_flags=""
+                if [ -n "${ONLY_TEST_CASES:-}" ]; then
+                  if [ "$is_libtest_harness" = "true" ]; then
+                    for pattern in ${ONLY_TEST_CASES:-}; do
+                      case_only_flags="$case_only_flags $pattern"
+                    done
+                  else
+                    echo "::warning::only-test-cases ignored for $test_bin: not a libtest harness"
+                  fi
+                fi
+
+                echo "Running test binary: $test_bin in $crate_dir"
+
+                # ========== Original direct-run path (non-libtest or fallback) ==========
+                test_log="test-log-$(printf '%s' "$test_bin" | sha256 -q).log"
+                set +e
+                if [ "$(id -u)" -eq 0 ]; then
+                  su -m craft-test -c "set -f; HOME=/home/craft-test XDG_CACHE_HOME=/home/craft-test/.cache PATH='$PATH' && export HOME XDG_CACHE_HOME PATH && cd '$root/$crate_dir' && CARGO_MANIFEST_DIR='$root/$crate_dir' && export CARGO_MANIFEST_DIR && timeout ${TEST_TIMEOUT_SECONDS:-1800} '$root/$test_bin'$case_only_flags$case_skip_flags" < /dev/null > "$root/$test_log" 2>&1
+                else
+                  (set -f; cd "$root/$crate_dir" && CARGO_MANIFEST_DIR="$root/$crate_dir" timeout "${TEST_TIMEOUT_SECONDS:-1800}" "$root/$test_bin" $case_only_flags $case_skip_flags < /dev/null > "$root/$test_log" 2>&1)
+                fi
+                rc=$?
+                set -e
+                attempted=$((attempted + 1))
+                if [ "$rc" -eq 124 ]; then
+                  echo "$test_bin" >> timed-out-tests.txt
+                  echo "TIMEOUT after ${TEST_TIMEOUT_SECONDS:-1800}s: $test_bin" >&2
+                  # libtest runs cases in --list order, so the first case that never
+                  # printed a result is the likeliest hang.
+                  if timeout 60 "$root/$test_bin" --list > "$root/all-cases.txt" 2>/dev/null; then
+                    sed -n 's/: test$//p' "$root/all-cases.txt" > "$root/all.names"
+                    sed -n 's/^test \(.*\) \.\.\. .*/\1/p' "$root/$test_log" > "$root/finished.names"
+                    grep -vxF -f "$root/finished.names" "$root/all.names" > "$root/unfinished.names" || true
+                    echo "Unfinished cases: $(wc -l < "$root/unfinished.names" | tr -d ' ')" >&2
+                    echo "First unfinished (likely the hang):" >&2
+                    head -3 "$root/unfinished.names" >&2
+                    echo "  first unfinished: $(head -1 "$root/unfinished.names")" >> timed-out-tests.txt
+                    rm -f "$root/all-cases.txt" "$root/all.names" "$root/finished.names" "$root/unfinished.names"
+                  fi
+                fi
+                if [ "$rc" -ne 0 ]; then
+                  echo "======================================================"
+                  echo "FAILED (exit code $rc): $test_bin"
+                  echo "----------------- Output begins ----------------------"
+                  cat "$root/$test_log"
+                  echo "------------------ Output ends -----------------------"
+                  echo "======================================================"
+                  failed="$failed $test_bin(failed)"
+                else
+                  if [ "$rc" -eq 0 ]; then
+                    n=$(sed -n 's/.*test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' "$root/$test_log" | tail -n 1)
+                    n=${n:-0}
+                    executed_cases=$((executed_cases + n))
+                    if [ -n "${ONLY_TEST_CASES:-}" ] && [ "$n" -eq 0 ]; then
+                      echo "::warning::$test_bin matched zero cases for only-test-cases" >&2
+                    fi
+                  fi
+                  passed=$((passed + 1))
+                fi
+                rm -f "$root/$test_log"
+              done < test-binaries.txt
+              
+              if [ -s excluded-tests.txt ]; then
+                echo "### Architecture Exclusions"
+                echo ""
+                echo "The caller listed the following $MATRIX_ARCH test binaries in skip-test-binaries-$MATRIX_ARCH. They were built and architecture-verified but NOT executed, so this run does not validate them. The usual causes are wall-clock dilation under QEMU TCG and the single vCPU the guest is given."
+                echo '```text'
+                cat excluded-tests.txt
+                echo '```'
+              fi
+              
+              if [ -s timed-out-tests.txt ]; then
+                echo "### Timed Out Test Binaries"
+                echo ""
+                echo "Each binary below exceeded the per-binary limit of ${TEST_TIMEOUT_SECONDS:-1800} seconds and was killed. They are listed here as well as counted in Failed."
+                echo '```text'
+                cat timed-out-tests.txt
+                echo '```'
+              fi
+
+              echo "Summary: Checked $checked, Attempted $attempted, Passed $passed, Skipped $skipped, Failed ${failed:-0}, ExecutedCases $executed_cases"
+              
+              if [ "$checked" -eq 0 ]; then
+                echo "Error: no test binaries were checked" >&2
+                exit 1
+              fi
+
+              # Checking every binary is not the same as running one. A skip list
+              # that matches the whole payload would otherwise leave this phase
+              # green with zero tests executed. Callers who mean to skip the suite
+              # set skip-tests: true, which is visible in the inputs.
+              if [ "$attempted" -eq 0 ]; then
+                echo "Error: no test binary was executed (checked $checked, skipped $skipped)." >&2
+                exit 1
+              fi
+
+              if [ -n "$failed" ]; then
+                echo "Error: The following test binaries failed:$failed" >&2
+                exit 1
+              fi
+
+              if [ -n "${ONLY_TEST_CASES:-}" ] && [ "$executed_cases" -eq 0 ]; then
+                echo "Error: only-test-cases was set but no libtest case executed (checked $checked, attempted $attempted)." >&2
+                exit 1
+              fi
+              
+              # Every enumerated binary is visited exactly once and increments
+              # checked: executed, skipped (TCG exclusion), or recorded as failed
+              # (missing / wrong architecture). attempted + skipped therefore
+              # cannot be reconciled against the list when a binary failed.
+              if [ "$checked" -ne "$total_bins" ]; then
+                echo "Error: Checked $checked binaries, but test-binaries.txt lists $total_bins." >&2
+                exit 1
+              fi
+            fi
