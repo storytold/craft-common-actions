@@ -1,0 +1,294 @@
+name: "Docker build"
+
+# Builds one image per entry in `platforms`, pushes every platform by digest to
+# each repository in `images`, then joins those digests into a single multi-arch
+# manifest per repository. This is how the two craft web images publish:
+# artcraft-services (8 binaries, a 64-core runner and a GHA layer cache) and
+# font-preview-service (multi-arch, DOCR plus a GHCR mirror).
+#
+#   docker-publish:
+#     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
+#     with:
+#       images: |
+#         registry.digitalocean.com/artcraft/font-preview-service
+#         ghcr.io/storytold/font-preview-service
+#     secrets: inherit
+#
+# The caller owns triggers, concurrency and the `packages: write` permission; a
+# called workflow cannot grant itself more than its caller has.
+on:
+  workflow_call:
+    inputs:
+      images:
+        description: "Image repositories to push, one per line (registry.digitalocean.com/... and/or ghcr.io/...)"
+        type: string
+        required: true
+      platforms:
+        description: 'JSON array of {"platform": "linux/amd64", "runner": "ubuntu-26.04"} entries'
+        type: string
+        required: false
+        default: '[{"platform":"linux/amd64","runner":"ubuntu-26.04"},{"platform":"linux/arm64","runner":"ubuntu-26.04-arm"}]'
+      dockerfile:
+        description: "Dockerfile path, relative to the checkout"
+        type: string
+        required: false
+        default: "Dockerfile"
+      context:
+        description: "Build context, relative to the checkout"
+        type: string
+        required: false
+        default: "."
+      target:
+        description: "Dockerfile stage to build; empty builds the final stage"
+        type: string
+        required: false
+        default: ""
+      build-args:
+        description: "Docker build arguments, one KEY=VALUE per line"
+        type: string
+        required: false
+        default: ""
+      tags:
+        description: "docker/metadata-action tag rules applied to every image"
+        type: string
+        required: false
+        default: |
+          type=ref,event=branch
+          type=semver,pattern={{version}}
+          type=raw,value=latest,enable=${{ github.ref_name == github.event.repository.default_branch }}
+      pre-build-command:
+        description: "Bash run after checkout and before the build, for example fetching large sources; empty skips it"
+        type: string
+        required: false
+        default: ""
+      free-disk:
+        description: "Remove the runner's preinstalled SDKs before building, for images that need the space"
+        type: boolean
+        required: false
+        default: false
+      cache-from:
+        description: "BuildKit cache source, for example type=gha; empty disables it"
+        type: string
+        required: false
+        default: ""
+      cache-to:
+        description: "BuildKit cache destination, for example type=gha,mode=max; empty disables it"
+        type: string
+        required: false
+        default: ""
+      dhi-login:
+        description: "Log in to dhi.io before building, for images based on Docker Hardened Images"
+        type: boolean
+        required: false
+        default: false
+      timeout-minutes:
+        description: "Time limit for each platform build"
+        type: number
+        required: false
+        default: 60
+    secrets:
+      DIGITALOCEAN_TOKEN:
+        description: "DigitalOcean token or DOCR robot with write access; used when an image lives in registry.digitalocean.com"
+        required: false
+      DOCKERHUB_USERNAME:
+        description: "Docker Hub user for dhi.io base images; only read with dhi-login"
+        required: false
+      DOCKERHUB_TOKEN:
+        description: "Docker Hub token for dhi.io base images; only read with dhi-login"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform.platform }}
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: ${{ fromJSON(inputs.platforms) }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The Rust release build in artcraft-services fills the ~14 GB of SDKs a
+      # hosted runner ships with; pruning them first avoids a mid-build ENOSPC.
+      - name: Free disk space
+        if: ${{ inputs.free-disk }}
+        shell: bash
+        run: |
+          set -x
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af --volumes || true
+          df -h /
+
+      # Passed through the environment so the command is data, not workflow
+      # source: it runs with `set -euo pipefail` like any other build step.
+      - name: Prepare build context
+        if: ${{ inputs.pre-build-command != '' }}
+        shell: bash
+        env:
+          PRE_BUILD_COMMAND: ${{ inputs.pre-build-command }}
+        run: bash --noprofile --norc -eo pipefail -c "$PRE_BUILD_COMMAND"
+
+      - name: Log in to Docker Hub (DHI base images)
+        if: ${{ inputs.dhi-login }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: dhi.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to the DigitalOcean Container Registry
+        if: ${{ contains(inputs.images, 'registry.digitalocean.com') }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: registry.digitalocean.com
+          username: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          password: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Log in to GHCR
+        if: ${{ contains(inputs.images, 'ghcr.io') }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Each digest has to be pushed to every repository at once, so the output
+      # list carries one `name=` per image; the merge job joins them afterwards.
+      - name: Compose image outputs
+        id: outputs
+        shell: bash
+        env:
+          IMAGES: ${{ inputs.images }}
+        run: |
+          set -euo pipefail
+          refs=""
+          while IFS= read -r image; do
+            image="${image//[[:space:]]/}"
+            [ -n "$image" ] || continue
+            case "$image" in
+              registry.digitalocean.com/* | ghcr.io/*) ;;
+              *)
+                echo "error: unsupported image repository: $image" >&2
+                exit 1
+                ;;
+            esac
+            refs="${refs:+$refs,}name=${image}"
+          done <<< "$IMAGES"
+          if [ -z "$refs" ]; then
+            echo "error: images is empty" >&2
+            exit 1
+          fi
+          printf 'outputs=%s,push-by-digest=true,name-canonical=true,push=true\n' "$refs" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          target: ${{ inputs.target }}
+          platforms: ${{ matrix.platform.platform }}
+          build-args: ${{ inputs.build-args }}
+          outputs: ${{ steps.outputs.outputs.outputs }}
+          cache-from: ${{ inputs.cache-from }}
+          cache-to: ${{ inputs.cache-to }}
+          # Attestations would add a second manifest per platform; the merge job
+          # publishes plain manifests so `docker pull` stays a single request.
+          provenance: false
+
+      - name: Export digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch manifests
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to the DigitalOcean Container Registry
+        if: ${{ contains(inputs.images, 'registry.digitalocean.com') }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: registry.digitalocean.com
+          username: ${{ secrets.DIGITALOCEAN_TOKEN }}
+          password: ${{ secrets.DIGITALOCEAN_TOKEN }}
+
+      - name: Log in to GHCR
+        if: ${{ contains(inputs.images, 'ghcr.io') }}
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ inputs.images }}
+          tags: ${{ inputs.tags }}
+
+      - name: Create manifest lists and push
+        shell: bash
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGES: ${{ inputs.images }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # metadata-action emits "<repo>:<tag>" for every image, so each
+          # registry only receives the tags that belong to it.
+          while IFS= read -r repo; do
+            repo="${repo//[[:space:]]/}"
+            [ -n "$repo" ] || continue
+            tag_args=()
+            while IFS= read -r tag; do
+              case "$tag" in
+                "$repo":*) tag_args+=(--tag "$tag") ;;
+              esac
+            done <<< "$TAGS"
+            if [ "${#tag_args[@]}" -eq 0 ]; then
+              echo "no tags for $repo on this ref; skipping"
+              continue
+            fi
+            refs=()
+            for digest in *; do
+              refs+=("${repo}@sha256:${digest}")
+            done
+            docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+          done <<< "$IMAGES"

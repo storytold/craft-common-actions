@@ -683,6 +683,58 @@ jobs:
       rust: true
 ```
 
+### 11. `docker-build.yml`
+
+Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
+`images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
+where an image needs it: `registry.digitalocean.com` when a DOCR image is listed, `ghcr.io` through
+the workflow token, and `dhi.io` when `dhi-login: true` and the Docker Hub secrets are provided.
+
+Both craft web images publish this way. `font-preview-service` fetches its font sources into the
+build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
+larger runner, passes `build-args` and a GHA layer cache, and sets `free-disk: true` because the Rust
+release build needs the space.
+
+#### Caller Example:
+```yaml
+name: Docker publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
+    with:
+      images: |
+        registry.digitalocean.com/artcraft/artcraft-services
+        ghcr.io/storytold/artcraft-services
+      platforms: '[{"platform":"linux/amd64","runner":"github-ubuntu-64core"}]'
+      dockerfile: build/service_cpu.Dockerfile
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+      free-disk: true
+      cache-from: type=gha
+      cache-to: type=gha,mode=max
+    secrets: inherit
+```
+
+The caller owns triggers, concurrency and `packages: write`; a called workflow cannot raise its
+owner's permissions. Tags default to the branch name, the semver tag and `latest` on the default
+branch, and the `tags` input replaces those metadata-action rules. `timeout-minutes` (default 60)
+bounds each platform build; the manifest merge has its own 15-minute limit.
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -771,6 +823,7 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
 | Git sources | 5 |
+| Docker build, per platform / manifest merge | 60 / 15 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job
