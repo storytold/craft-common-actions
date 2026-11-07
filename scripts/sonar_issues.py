@@ -21,15 +21,57 @@ import urllib.request
 
 DEFAULT_URL = "https://sonarcloud.io"
 PAGE_SIZE = 500
+SONAR_PAGING_CAP = 10_000
+
+
+def _port(parsed: urllib.parse.ParseResult) -> int:
+    """The effective port of an HTTPS URL."""
+    return parsed.port or 443
+
+
+def _validate_base_url(base_url: str) -> str:
+    """Require a credential-safe base URL; the API token must never travel in cleartext."""
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("SonarCloud base URL must be an https:// URL")
+    if parsed.username or parsed.password:
+        raise ValueError("SonarCloud base URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("SonarCloud base URL must not contain a query or fragment")
+    _port(parsed)  # Invalid ports are a ValueError, not a later request failure.
+    return base_url.rstrip("/")
+
+
+class _SameOriginHTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to the same HTTPS origin, so a token cannot be forwarded elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlparse(req.full_url)
+        new = urllib.parse.urlparse(newurl)
+        if (
+            new.scheme.lower() != "https"
+            or not new.hostname
+            or new.hostname != old.hostname
+            or _port(new) != _port(old)
+            or new.username
+            or new.password
+        ):
+            raise urllib.error.HTTPError(newurl, code, "refusing cross-origin redirect", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_SAFE_OPENER = urllib.request.build_opener(_SameOriginHTTPSRedirectHandler())
 
 
 def fetch_issues(
     project_key: str,
     base_url: str = DEFAULT_URL,
     token: str | None = None,
-    opener=urllib.request.urlopen,
+    opener=None,
 ) -> tuple[int, list[dict]]:
     """Return ``(total, issues)`` for every unresolved issue of ``project_key``."""
+    base_url = _validate_base_url(base_url)
+    open_url = opener or _SAFE_OPENER.open
     issues: list[dict] = []
     page = 1
     total = 0
@@ -46,11 +88,16 @@ def fetch_issues(
         if token:
             headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(f"{base_url.rstrip('/')}/api/issues/search?{query}", headers=headers)
-        with opener(request, timeout=60) as response:
+        with open_url(request, timeout=60) as response:
             payload = json.load(response)
         page_issues = payload.get("issues") or []
         issues.extend(page_issues)
         total = int((payload.get("paging") or {}).get("total") or len(issues))
+        if total >= SONAR_PAGING_CAP:
+            raise ValueError(
+                f"SonarCloud reports {total} unresolved issues (cap {SONAR_PAGING_CAP}); "
+                "cannot verify a complete export"
+            )
         if not page_issues or len(issues) >= total:
             return total, issues
         page += 1
@@ -87,11 +134,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     output = {"total": total, "issues": [reduce_issue(issue) for issue in issues]}
     text = json.dumps(output, indent=2) + "\n"
-    if args.out:
-        with open(args.out, "w", encoding="utf-8") as output_file:
-            output_file.write(text)
-    else:
-        sys.stdout.write(text)
+    try:
+        if args.out:
+            with open(args.out, "w", encoding="utf-8") as output_file:
+                output_file.write(text)
+        else:
+            sys.stdout.write(text)
+    except OSError as error:
+        print(f"sonar_issues: {error}", file=sys.stderr)
+        return 1
     return 0
 
 

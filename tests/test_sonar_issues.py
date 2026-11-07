@@ -1,10 +1,12 @@
 """The SonarCloud issue helper: pagination, the reduced fields and the output file."""
-from pathlib import Path
 import importlib.util
 import io
 import json
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +92,33 @@ class SonarIssuesTests(unittest.TestCase):
                 self.assertEqual(sonar_issues.main(["p", "--out", str(out)]), 0)
             written = json.loads(out.read_text())
         self.assertEqual(written, {"total": 1, "issues": [sonar_issues.reduce_issue(issue)]})
+
+    def test_base_url_must_be_https_and_credential_free(self):
+        for url in (
+            "http://sonar.example",
+            "https://user:pass@sonar.example",
+            "https://sonar.example?project=p",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                sonar_issues.fetch_issues("p", url, opener=lambda *_: self.fail("must not fetch"))
+
+    def test_redirects_cannot_leave_the_https_origin(self):
+        handler = sonar_issues._SameOriginHTTPSRedirectHandler()
+        request = urllib.request.Request("https://sonar.example/api/issues/search")
+        for url in ("http://sonar.example/api/issues/search", "https://evil.example/api/issues/search"):
+            with self.subTest(url=url), self.assertRaises(urllib.error.HTTPError):
+                handler.redirect_request(request, None, 302, "Found", {}, url)
+
+    def test_fetch_issues_refuses_the_paging_cap(self):
+        def opener(request, timeout=60):
+            return FakeResponse({"paging": {"total": 10_000}, "issues": [{"component": "p:a.py"}]})
+
+        with self.assertRaisesRegex(ValueError, "complete export"):
+            sonar_issues.fetch_issues("p", "https://sonar.example", opener=opener)
+
+    def test_main_reports_output_file_errors(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sonar_issues, "fetch_issues", return_value=(0, [])):
+            self.assertEqual(sonar_issues.main(["p", "--out", tmp]), 1)
 
 
 if __name__ == "__main__":
