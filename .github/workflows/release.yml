@@ -318,7 +318,6 @@ jobs:
       matrix:
         include:
           - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: x86, target: i686-pc-windows-msvc }
           - { arch: arm64, target: aarch64-pc-windows-msvc }
     env:
       CARGO_TERM_COLOR: always
@@ -1129,7 +1128,7 @@ jobs:
     name: Draft GitHub Release
     if: "!cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     permissions:
       contents: write
