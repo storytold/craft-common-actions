@@ -916,6 +916,11 @@ With Python 3 and PyYAML installed, run:
 python3 -m unittest discover -s tests -v
 ```
 
+GnuPG signing fixtures need local Unix sockets for their temporary agents. They
+report an explicit skip when a local sandbox denies socket creation or binding;
+the same restriction remains a failure on GitHub Actions. Other GPG errors are
+not skipped, and the hosted suite exercises the real protected-key fixture.
+
 The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
 custom test group, default build/test failures, missing/corrupt packages and font

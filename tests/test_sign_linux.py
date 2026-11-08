@@ -1,7 +1,9 @@
 """Sign a fake release's Linux packages with a throwaway key and verify every signature."""
 from pathlib import Path
+from contextlib import ExitStack
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
@@ -24,23 +26,36 @@ def have(*tools):
     return all(shutil.which(tool) for tool in tools)
 
 
+def require_agent_socket(home):
+    """Skip restricted local executors, without hiding GPG or hosted CI failures."""
+    path = home / "agent-socket-check"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.bind(str(path))
+    except PermissionError as error:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            raise
+        raise unittest.SkipTest(f"GnuPG agent needs Unix sockets: {error}") from error
+    finally:
+        path.unlink(missing_ok=True)
+
+
 @unittest.skipUnless(have("gpg", "gpgv"), "needs GnuPG")
 class SignLinuxTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.gnupg = self.root / "gnupg"
         self.gnupg.mkdir(mode=0o700)
+        require_agent_socket(self.gnupg)
         self.env = dict(os.environ, GNUPGHOME=str(self.gnupg), OCI_REGISTRY="ghcr.io/storytold/demo")
+        self.addCleanup(subprocess.run, ["gpgconf", "--kill", "all"], env=self.env, capture_output=True)
         self.gpg("--passphrase", "", "--quick-gen-key", "Release Test <release@invalid>", "ed25519", "sign", "never")
         listing = self.gpg("--with-colons", "--list-secret-keys").stdout
         self.env["SIGNING_FPR"] = next(line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr"))
         self.dist = self.root / "artifacts"
         self.dist.mkdir()
-
-    def tearDown(self):
-        subprocess.run(["gpgconf", "--kill", "all"], env=self.env, capture_output=True)
-        self.temp.cleanup()
 
     def gpg(self, *args):
         return subprocess.run(["gpg", "--batch", "--quiet", *args], env=self.env, capture_output=True, text=True, check=True)
@@ -155,14 +170,21 @@ class SigningWiringTests(unittest.TestCase):
     @unittest.skipUnless(have("gpg"), "needs GnuPG")
     def test_the_import_action_refuses_a_key_that_needs_a_passphrase(self):
         script = yaml.load(IMPORT.read_text(), Loader=yaml.BaseLoader)["runs"]["steps"][0]["run"]
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
             root = Path(directory)
             home = root / "gen"
             home.mkdir(mode=0o700)
+            require_agent_socket(home)
             gen = dict(os.environ, GNUPGHOME=str(home))
-            run = lambda *a: subprocess.run(["gpg", "--batch", "--quiet", *a], env=gen, capture_output=True, check=True).stdout
+            cleanup.callback(subprocess.run, ["gpgconf", "--kill", "all"], env=gen, capture_output=True)
+
+            def run(*args):
+                proc = subprocess.run(["gpg", "--batch", "--quiet", *args], env=gen, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, f"GPG fixture setup failed:\n{proc.stderr}")
+                return proc.stdout
+
             run("--passphrase", "secret", "--quick-gen-key", "Protected <p@invalid>", "ed25519", "sign", "never")
-            protected = run("--pinentry-mode", "loopback", "--passphrase", "secret", "--armor", "--export-secret-keys").decode()
+            protected = run("--pinentry-mode", "loopback", "--passphrase", "secret", "--armor", "--export-secret-keys")
             results = {}
             for case, key in {"protected": protected, "empty": ""}.items():
                 out = root / f"{case}.out"
@@ -170,14 +192,12 @@ class SigningWiringTests(unittest.TestCase):
                 out.write_text("")
                 env_file.write_text("")
                 (root / case).mkdir()
+                cleanup.callback(subprocess.run, ["gpgconf", "--kill", "all"], capture_output=True,
+                                 env=dict(os.environ, GNUPGHOME=str(root / case / "release-gnupg")))
                 proc = subprocess.run(["bash", "-e", "-c", script], capture_output=True, text=True,
                                       env=dict(os.environ, SIGNING_KEY=key, RUNNER_TEMP=str(root / case),
                                                GITHUB_OUTPUT=str(out), GITHUB_ENV=str(env_file)))
                 results[case] = (proc.returncode, out.read_text(), env_file.read_text(), proc.stdout)
-            subprocess.run(["gpgconf", "--kill", "all"], env=gen, capture_output=True)
-            for case in results:
-                subprocess.run(["gpgconf", "--kill", "all"], capture_output=True,
-                               env=dict(os.environ, GNUPGHOME=str(root / case / "release-gnupg")))
         self.assertNotEqual(results["protected"][0], 0)
         self.assertIn("without a passphrase", results["protected"][3])
         self.assertEqual(results["empty"][:3], (0, "enabled=false\n", ""))
