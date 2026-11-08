@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -23,19 +24,24 @@ ACTION = ROOT / "actions/packaging-lint/action.yml"
 
 
 def install_script():
+    """Read the current install step so tests exercise the shipped shell code."""
     action = yaml.load(ACTION.read_text(), Loader=yaml.BaseLoader)
     return next(step["run"] for step in action["runs"]["steps"]
                 if step.get("name") == "Install tools")
 
 
 class DownloadHandler(BaseHTTPRequestHandler):
+    """Serve release fixtures after any configured sequence of HTTP errors."""
+
     def __init__(self, *args, files, failures, requests, **kwargs):
+        """Share fixture payloads and request counters between connections."""
         self.files = files
         self.failures = failures
         self.requests = requests
         super().__init__(*args, **kwargs)
 
     def do_GET(self):
+        """Record an attempt and return the next configured status or payload."""
         name = self.path.rsplit("/", 1)[-1]
         self.requests[name] += 1
         failures = self.failures.get(name, [])
@@ -47,15 +53,19 @@ class DownloadHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, *args):
+        """Suppress fixture access logs while preserving subprocess diagnostics."""
         pass
 
 
 @unittest.skipUnless(shutil.which("curl"), "curl is required")
 class PackagingDownloadTests(unittest.TestCase):
+    """Verify retry bounds and verification failures without external downloads."""
+
     archive_name = "actionlint_0.0.1_linux_amd64.tar.gz"
     checksum_name = "actionlint_0.0.1_checksums.txt"
 
-    def run_install(self, failures=None, bad_checksum=False):
+    def run_install(self, failures=None, bad_checksum=False, checksum_entry=None):
+        """Run the install step against a disposable server and return its outcome."""
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as tar:
             data = b"fixture actionlint binary\n"
@@ -64,8 +74,9 @@ class PackagingDownloadTests(unittest.TestCase):
             tar.addfile(entry, io.BytesIO(data))
         payload = archive.getvalue()
         digest = "0" * 64 if bad_checksum else hashlib.sha256(payload).hexdigest()
+        entry_name = self.archive_name if checksum_entry is None else checksum_entry
         files = {self.archive_name: payload,
-                 self.checksum_name: f"{digest}  {self.archive_name}\n".encode()}
+                 self.checksum_name: f"{digest}  {entry_name}\n".encode()}
         requests = Counter()
         handler = partial(DownloadHandler, files=files, failures=failures or {}, requests=requests)
         with HTTPServer(("127.0.0.1", 0), handler) as server:
@@ -101,6 +112,7 @@ class PackagingDownloadTests(unittest.TestCase):
         return result, requests, extracted
 
     def test_transient_archive_failure_is_retried(self):
+        """A successful retry replaces the failed archive response before extraction."""
         result, requests, extracted = self.run_install({self.archive_name: [503]})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(requests[self.archive_name], 2)
@@ -108,12 +120,14 @@ class PackagingDownloadTests(unittest.TestCase):
         self.assertTrue(extracted)
 
     def test_transient_checksum_failure_is_retried(self):
+        """The optional checksum download recovers from a transient HTTP failure."""
         result, requests, extracted = self.run_install({self.checksum_name: [503]})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(requests[self.checksum_name], 2)
         self.assertTrue(extracted)
 
     def test_persistent_failure_stops_after_three_retries(self):
+        """Four failed attempts stop setup before fetching checksums or extracting."""
         result, requests, extracted = self.run_install({self.archive_name: [503] * 4})
         self.assertEqual(result.returncode, 22)
         self.assertEqual(requests[self.archive_name], 4)
@@ -121,18 +135,54 @@ class PackagingDownloadTests(unittest.TestCase):
         self.assertFalse(extracted)
 
     def test_missing_release_is_not_retried(self):
+        """A permanent HTTP 404 still fails immediately."""
         result, requests, extracted = self.run_install({self.archive_name: [404]})
         self.assertEqual(result.returncode, 22)
         self.assertEqual(requests[self.archive_name], 1)
         self.assertFalse(extracted)
 
     def test_checksum_mismatch_still_blocks_extraction(self):
+        """Retry support must not permit extraction of an unverified archive."""
         result, requests, extracted = self.run_install(bad_checksum=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("FAILED", result.stdout)
         self.assertFalse(extracted)
 
+    def test_missing_checksum_entry_is_reported(self):
+        """Name the missing archive when the checksum file has no matching entry."""
+        result, requests, extracted = self.run_install(checksum_entry="other.tar.gz")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"::error::missing checksum for {self.archive_name}", result.stdout)
+        self.assertFalse(extracted)
+
+    def test_checksum_entry_must_match_the_exact_archive_name(self):
+        """A similarly named file cannot supply the archive's checksum."""
+        result, requests, extracted = self.run_install(checksum_entry=self.archive_name + ".sig")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"::error::missing checksum for {self.archive_name}", result.stdout)
+        self.assertFalse(extracted)
+
+    def test_refused_connection_is_retried(self):
+        """A bound but non-listening loopback socket produces four refused attempts."""
+        command = next(line for line in install_script().splitlines()
+                       if line.strip().startswith("curl "))
+        command = command.replace("'=https'", "'=http'").replace("=https", "=http")
+        with socket.socket() as closed_port, tempfile.TemporaryDirectory() as directory:
+            # Reserve the port without listening, so another process cannot claim it.
+            closed_port.bind(("127.0.0.1", 0))
+            port = closed_port.getsockname()[1]
+            result = subprocess.run(
+                ["bash", "-e", "-c", command],
+                env={**os.environ, "RUNNER_TEMP": directory,
+                     "tar_url": f"http://127.0.0.1:{port}/archive.tar.gz",
+                     "NO_PROXY": "127.0.0.1", "no_proxy": "127.0.0.1"},
+                text=True, capture_output=True, timeout=30,
+            )
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(result.stderr.count("curl: (7)"), 4, result.stderr)
+
     def test_both_downloads_retain_https_and_finite_limits(self):
+        """Both release requests retain HTTPS restrictions and bounded retries."""
         downloads = [shlex.split(line) for line in install_script().splitlines()
                      if line.strip().startswith("curl ")]
         self.assertEqual(len(downloads), 2)
@@ -144,6 +194,7 @@ class PackagingDownloadTests(unittest.TestCase):
                     self.assertIn(option, args)
                     self.assertEqual(args[args.index(option) + 1], value)
             self.assertIn("-fsSL", args)
+            self.assertIn("--retry-connrefused", args)
 
 
 if __name__ == "__main__":
