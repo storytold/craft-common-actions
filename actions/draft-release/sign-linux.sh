@@ -32,7 +32,7 @@ check() { gpgv --quiet --keyring "$gpgv_keyring" "$@" 2>/dev/null || { echo "::e
 rpms=(*.rpm)
 if [ "${#rpms[@]}" -gt 0 ]; then
   # Ubuntu's rpm macros name /usr/bin/gpg2, which GnuPG 2.2+ no longer installs.
-  rpmsign --addsign --define "__gpg $(command -v gpg)" --define "_gpg_name $SIGNING_FPR" --define "_gpg_path $GNUPGHOME" \
+  rpmsign --resign --define "__gpg $(command -v gpg)" --define "_gpg_name $SIGNING_FPR" --define "_gpg_path $GNUPGHOME" \
     "${rpms[@]}" >/dev/null
   rpm --dbpath "$verify_home/rpmdb" --initdb
   rpmkeys --dbpath "$verify_home/rpmdb" --import release-signing-key.asc
