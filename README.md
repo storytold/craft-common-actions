@@ -863,6 +863,11 @@ with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
 the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
 does not run them.
 
+The scan job frees unused runner SDKs before either Rust coverage path. Sharded
+coverage merges and removes raw profiles before extracting the test archive, then
+releases the compressed archive and temporary binaries as they are consumed.
+Disk-space snapshots in the logs show headroom before cleanup and aggregation.
+
 The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
 successful cold builds after rollout and lower them when the evidence supports it.
@@ -910,6 +915,11 @@ With Python 3 and PyYAML installed, run:
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+GnuPG signing fixtures need local Unix sockets for their temporary agents. They
+report an explicit skip when a local sandbox denies socket creation or binding;
+the same restriction remains a failure on GitHub Actions. Other GPG errors are
+not skipped, and the hosted suite exercises the real protected-key fixture.
 
 The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
