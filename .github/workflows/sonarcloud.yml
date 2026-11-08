@@ -282,9 +282,13 @@ jobs:
           echo "CRAFT_FONTS_DIR=$CRAFT_FONTS_PATH" >> "$GITHUB_ENV"
           echo "CRAFT_FONTS_REQUIRED=1" >> "$GITHUB_ENV"
       - name: Free disk space
-        # The instrumented workspace build overflows the ~14 GB free on a stock runner.
-        if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        # Both a local coverage build and downloaded shard profiles plus the extracted test
+        # archive can overflow the free space on a stock runner. Clean before either path.
+        if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != ''
+        run: |
+          df -h . "$RUNNER_TEMP"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h . "$RUNNER_TEMP"
       - name: Install Linux build dependencies
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         uses: storytold/craft-common-actions/actions/install-apt-packages@main
@@ -347,11 +351,18 @@ jobs:
           set -euo pipefail
           toolchain="$(cat archive/rustc-release.txt)"
           llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
+          df -h . "$RUNNER_TEMP"
+          # Do not hold every raw profile beside the expanded archive. Retain the raw inputs
+          # until the merge succeeds, then release them before unpacking the test binaries.
+          "$llvm_bin/llvm-profdata" merge -sparse profraw/*.profraw -o coverage.profdata
+          rm -f profraw/*.profraw
+          df -h . "$RUNNER_TEMP"
           # Unpack outside the checkout: the scanner analyses everything under the workspace, and build
           # output (generated sources) there would be counted as duplicated code.
-          extracted="$RUNNER_TEMP/coverage-archive"
-          mkdir -p "$extracted"
+          extracted="$(mktemp -d "$RUNNER_TEMP/coverage-archive.XXXXXX")"
+          trap 'rm -rf "$extracted"' EXIT
           tar --zstd -xf archive/nextest-archive.tar.zst -C "$extracted"
+          rm -f archive/nextest-archive.tar.zst
           # Only test binaries run on the target; helpers and proc-macros are not instrumented profile sources.
           objects=()
           while IFS= read -r name; do
@@ -361,11 +372,11 @@ jobs:
             echo "::error::No test binaries found in the archive metadata"
             exit 1
           fi
-          "$llvm_bin/llvm-profdata" merge -sparse profraw/*.profraw -o coverage.profdata
           extra=()
           for object in "${objects[@]:1}"; do extra+=(-object "$object"); done
           "$llvm_bin/llvm-cov" export -format=lcov -instr-profile=coverage.profdata \
             "${objects[0]}" "${extra[@]}" -ignore-filename-regex="$COVERAGE_IGNORE" >lcov.info
+          rm -f coverage.profdata
       - name: Generate Python coverage
         if: steps.token.outputs.available == 'true' && (inputs.python-coverage-source != '' || inputs.python-coverage-script != '')
         shell: bash
