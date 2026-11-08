@@ -224,6 +224,14 @@ jobs:
             echo "::error::shard ${{ matrix.shard }} produced no coverage profiles"
             exit 1
           fi
+          # Keep the scan available without presenting tolerated test failures as a clean run.
+          if [ "$rc" -eq 100 ]; then
+            echo "::warning::Coverage shard ${{ matrix.shard }}/${{ inputs.shards }} has failing tests; coverage will still be scanned. See this job's test log."
+            result='**Tests failed.** Coverage will still be scanned; a green coverage job does not mean the tests passed. See the test log in this job for the failed tests and their diagnostics.'
+          else
+            result='**Tests passed.** Coverage profiles are available for the scan.'
+          fi
+          printf '### Coverage shard ${{ matrix.shard }}/${{ inputs.shards }}\n\n%s\n' "$result" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: profraw-${{ matrix.shard }}
