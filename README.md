@@ -95,7 +95,9 @@ somewhere users can check it independently. On first install, compare that finge
 The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
 builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
 stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
-of the script does with `--push`.
+of the script does with `--push`. When `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured
+(e.g. as organization secrets), the job dual-pushes the OCI layout to `docker.io/storytold/<app>`
+with the same version and stable architecture tags.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
