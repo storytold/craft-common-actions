@@ -690,7 +690,8 @@ jobs:
 Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
 `images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
 where an image needs it: `registry.digitalocean.com` when a DOCR image is listed, `ghcr.io` through
-the workflow token, and `dhi.io` when `dhi-login: true` and the Docker Hub secrets are provided.
+the workflow token, `docker.io` when Docker Hub images are listed (using `DOCKERHUB_USERNAME` and
+`DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true` and the Docker Hub secrets are provided.
 
 Both craft web images publish this way. `font-preview-service` fetches its font sources into the
 build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
