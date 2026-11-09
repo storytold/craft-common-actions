@@ -29,6 +29,10 @@ class DockerBuildWorkflowTests(unittest.TestCase):
         self.assertEqual(dh_step["with"]["password"], "${{ secrets.DOCKERHUB_TOKEN }}")
         self.assertFalse(any("DigitalOcean" in s.get("name", "") for s in steps))
 
+        buildx_index = next(i for i, s in enumerate(steps) if s.get("name") == "Set up Buildx")
+        dh_index = steps.index(dh_step)
+        self.assertLess(buildx_index, dh_index, "Set up Buildx must run before Docker Hub login")
+
     def test_dockerhub_login_in_merge_job(self):
         steps = WORKFLOW["jobs"]["merge"]["steps"]
         dh_step = next(
@@ -40,6 +44,10 @@ class DockerBuildWorkflowTests(unittest.TestCase):
         self.assertEqual(dh_step["with"]["username"], "${{ secrets.DOCKERHUB_USERNAME }}")
         self.assertEqual(dh_step["with"]["password"], "${{ secrets.DOCKERHUB_TOKEN }}")
         self.assertFalse(any("DigitalOcean" in s.get("name", "") for s in steps))
+
+        buildx_index = next(i for i, s in enumerate(steps) if s.get("name") == "Set up Buildx")
+        dh_index = steps.index(dh_step)
+        self.assertLess(buildx_index, dh_index, "Set up Buildx must run before Docker Hub login")
 
     def test_build_step_accepts_docker_io_repository(self):
         steps = WORKFLOW["jobs"]["build"]["steps"]
