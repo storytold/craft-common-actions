@@ -3,15 +3,15 @@ name: "Docker build"
 # Builds one image per entry in `platforms`, pushes every platform by digest to
 # each repository in `images`, then joins those digests into a single multi-arch
 # manifest per repository. This is how the two craft web images publish:
-# artcraft-services (8 binaries, a 64-core runner and a GHA layer cache) and
-# font-preview-service (multi-arch, DOCR plus a GHCR mirror).
+# artcraft-services (8 binaries, a 64-core runner and a GHA layer cache),
+# autocraft, and font-preview-service (multi-arch, GHCR and Docker Hub).
 #
 #   docker-publish:
 #     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
 #     with:
 #       images: |
-#         registry.digitalocean.com/artcraft/font-preview-service
 #         ghcr.io/storytold/font-preview-service
+#         docker.io/storytold/font-preview-service
 #     secrets: inherit
 #
 # The caller owns triggers, concurrency and the `packages: write` permission; a
@@ -20,7 +20,7 @@ on:
   workflow_call:
     inputs:
       images:
-        description: "Image repositories to push, one per line (registry.digitalocean.com/..., ghcr.io/... and/or docker.io/...)"
+        description: "Image repositories to push, one per line (ghcr.io/... and/or docker.io/...)"
         type: string
         required: true
       platforms:
@@ -87,9 +87,6 @@ on:
         required: false
         default: 60
     secrets:
-      DIGITALOCEAN_TOKEN:
-        description: "DigitalOcean token or DOCR robot with write access; used when an image lives in registry.digitalocean.com"
-        required: false
       DOCKERHUB_USERNAME:
         description: "Docker Hub user for dhi.io base images and docker.io pushes; only read when configured"
         required: false
@@ -145,14 +142,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Log in to the DigitalOcean Container Registry
-        if: ${{ contains(inputs.images, 'registry.digitalocean.com') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: registry.digitalocean.com
-          username: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          password: ${{ secrets.DIGITALOCEAN_TOKEN }}
-
       - name: Log in to GHCR
         if: ${{ contains(inputs.images, 'ghcr.io') }}
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
@@ -193,7 +182,7 @@ jobs:
             image="${image//[[:space:]]/}"
             [ -n "$image" ] || continue
             case "$image" in
-              registry.digitalocean.com/* | ghcr.io/* | docker.io/*) ;;
+              ghcr.io/* | docker.io/*) ;;
               *)
                 echo "error: unsupported image repository: $image" >&2
                 exit 1
@@ -263,14 +252,6 @@ jobs:
           path: ${{ runner.temp }}/digests
           pattern: digests-*
           merge-multiple: true
-
-      - name: Log in to the DigitalOcean Container Registry
-        if: ${{ contains(inputs.images, 'registry.digitalocean.com') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
-        with:
-          registry: registry.digitalocean.com
-          username: ${{ secrets.DIGITALOCEAN_TOKEN }}
-          password: ${{ secrets.DIGITALOCEAN_TOKEN }}
 
       - name: Log in to GHCR
         if: ${{ contains(inputs.images, 'ghcr.io') }}
