@@ -102,6 +102,20 @@ jobs:
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
+            # A large test crate's rustc (photocraft-ui-egui's lib tests) was SIGKILLed when the
+            # 12 GB guest ran out of memory late in a run. Cap the ZFS ARC (if the image uses ZFS),
+            # which otherwise holds on to the target dir's pages, and add a swap file when the
+            # guest has none, for short peaks. Both only warn if they fail.
+            if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
+              sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
+            fi
+            if [ -z "$(swapctl -l | sed 1d)" ]; then
+              if dd if=/dev/zero of=/var/swap0 bs=1m count=8192 status=none && chmod 0600 /var/swap0 &&
+                swapon "/dev/$(mdconfig -a -t vnode -f /var/swap0)"; then :; else
+                echo "::warning::could not add a swap file to the FreeBSD VM"
+              fi
+            fi
+            df -h / /var/tmp; swapctl -l; sysctl -n hw.physmem
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               # The host compiler and the aarch64 standard library come from the amd64 and
               # aarch64 lang/rust packages, which must be the same build. "latest" can build
