@@ -110,9 +110,12 @@ jobs:
               if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
                 sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
               fi
-              if [ -z "$(swapctl -l | sed 1d)" ]; then
+              # Only with 16 GB to spare (8 GB file + room for the build), and never leave a
+              # partial file behind: the swap file is optional, the build's disk space isn't.
+              if [ -z "$(swapctl -l | sed 1d)" ] && [ "$(df -k /var | awk 'NR==2 { print $4 }')" -ge 16777216 ]; then
                 if dd if=/dev/zero of=/var/swap0 bs=1m count=8192 status=none && chmod 0600 /var/swap0 &&
                   swapon "/dev/$(mdconfig -a -t vnode -f /var/swap0)"; then :; else
+                  rm -f /var/swap0
                   echo "::warning::could not add a swap file to the FreeBSD VM"
                 fi
               fi
