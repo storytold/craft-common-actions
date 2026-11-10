@@ -17,6 +17,15 @@ class DockerBuildWorkflowTests(unittest.TestCase):
         self.assertIn("DOCKERHUB_TOKEN", call["secrets"])
         self.assertNotIn("DIGITALOCEAN_TOKEN", call["secrets"])
 
+    def test_write_permission_is_job_scoped(self):
+        """Only the pushing jobs get `packages: write` (SonarCloud githubactions:S8233)."""
+        self.assertEqual(WORKFLOW["permissions"], {"contents": "read"})
+        for job in ("build", "merge"):
+            self.assertEqual(
+                WORKFLOW["jobs"][job]["permissions"],
+                {"contents": "read", "packages": "write"},
+            )
+
     def test_dockerhub_login_in_build_job(self):
         steps = WORKFLOW["jobs"]["build"]["steps"]
         dh_step = next(
