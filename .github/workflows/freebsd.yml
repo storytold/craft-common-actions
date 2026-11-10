@@ -106,6 +106,19 @@ jobs:
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
+            # A large test crate's rustc (photocraft-ui-egui's lib tests) was SIGKILLed when the
+            # 12 GB guest ran out of memory late in a run: the image's root is ZFS with no ARC
+            # limit, so the ARC kept the target dir's pages. Cap it. (No swap file: swap on a
+            # ZFS-backed file can hang FreeBSD under memory pressure; the image has a 1 GB swap
+            # partition.) Print disk, swap and memory so the next OOM is easy to diagnose.
+            if [ "$(uname -s)" = FreeBSD ]; then
+              if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
+                sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
+              fi
+              df -h / /var/tmp || true
+              swapctl -l || true
+              sysctl -n hw.physmem || true
+            fi
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               # The host compiler and the aarch64 standard library come from the amd64 and
               # aarch64 lang/rust packages, which must be the same build. "latest" can build
