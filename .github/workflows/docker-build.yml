@@ -93,13 +93,16 @@ on:
       DOCKERHUB_TOKEN:
         description: "Docker Hub token for dhi.io base images and docker.io pushes; only read when configured"
 
+# Read-only by default; each job that pushes to GHCR asks for `packages: write` itself.
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build:
     name: Build ${{ matrix.platform.platform }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: true
       matrix:
@@ -247,6 +250,9 @@ jobs:
   merge:
     name: Publish multi-arch manifests
     needs: build
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
