@@ -30,7 +30,7 @@ gpg --homedir "$verify_home" --batch --export >"$gpgv_keyring"
 check() { gpgv --quiet --keyring "$gpgv_keyring" "$@" 2>/dev/null || { echo "::error::bad signature: $1" >&2; exit 1; }; }
 
 rpms=(*.rpm)
-if [ "${#rpms[@]}" -gt 0 ]; then
+if [[ "${#rpms[@]}" -gt 0 ]]; then
   # Ubuntu's rpm macros name /usr/bin/gpg2, which GnuPG 2.2+ no longer installs.
   rpmsign --resign --define "__gpg $(command -v gpg)" --define "_gpg_name $SIGNING_FPR" --define "_gpg_path $GNUPGHOME" \
     "${rpms[@]}" >/dev/null
