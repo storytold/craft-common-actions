@@ -389,7 +389,7 @@ fi
     def test_release_workflow_rejects_unsupported_architectures_before_the_vm(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         steps = release["jobs"]["freebsd"]["steps"]
-        check = steps[0]
+        check = next(step for step in steps if step.get("name") == "Check the FreeBSD architecture")
         self.assertEqual(check["name"], "Check the FreeBSD architecture")
         self.assertEqual(check["env"]["ARCH"], "${{ matrix.arch }}")
         for arch, code in (("x86_64", 0), ("aarch64", 0), ("riscv64", 1), ("amd64", 1), ("", 1)):
