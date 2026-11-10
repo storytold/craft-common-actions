@@ -192,7 +192,9 @@ class SonarCloudTests(unittest.TestCase):
         self.assertTrue(any('nextest archive --workspace' in step.get('run', '') for step in build))
         tests = next(step for step in workflow['jobs']['coverage']['steps']
                      if step.get('name') == "Run this shard's tests")
-        self.assertIn('--partition count:${{ matrix.shard }}/${{ inputs.shards }}', tests['run'])
+        self.assertIn('--partition "count:$SHARD/$TOTAL_SHARDS"', tests['run'])
+        self.assertEqual(tests['env']['SHARD'], '${{ matrix.shard }}')
+        self.assertEqual(tests['env']['TOTAL_SHARDS'], '${{ inputs.shards }}')
         self.assertIn('--archive-file archive/nextest-archive.tar.zst', tests['run'])
         self.assertEqual(workflow['jobs']['coverage']['needs'], ['plan', 'build'])
 

@@ -127,7 +127,7 @@ fi
                         for key, value in configured.items() if key in forwarded})
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
-                       TARGET_ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
+                       TARGET_ARCH=arch, ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
             if cross_env:
                 (work / "guest/craft-cross").mkdir(parents=True)
                 (work / "guest/craft-cross/env").write_text("export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n")

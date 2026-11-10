@@ -76,6 +76,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -102,7 +104,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND"
+          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND ARCH"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
@@ -198,6 +200,8 @@ jobs:
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
       - name: Build and test
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           # Only rustup writes this; the lang/rust package installs into /usr/local/bin.
@@ -241,7 +245,7 @@ jobs:
                               *shlex.split(os.environ["CARGO_BUILD_EXTRA_ARGS"])])
           PY
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            if [ "${{ matrix.arch }}" = aarch64 ]; then
+            if [ "$ARCH" = aarch64 ]; then
               # The build above compiled every test target; an x86_64 guest cannot run them.
               echo "::notice title=FreeBSD aarch64::cross-compiled on x86_64: tests built, not run"
             elif [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
@@ -276,6 +280,8 @@ jobs:
       - name: Build and validate the FreeBSD package
         if: inputs.run-package-check && matrix.arch != 'aarch64'
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           [ ! -f "$HOME/.cargo/env" ] || . "$HOME/.cargo/env"
@@ -294,9 +300,9 @@ jobs:
           CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
           # Check every produced archive; an unmatched glob or unreadable tarball
           # must fail instead of turning a requested package check into a no-op.
-          for archive in dist/release/*-freebsd-${{ matrix.arch }}.tar.gz; do
+          for archive in dist/release/*-freebsd-$ARCH.tar.gz; do
             if [ ! -f "$archive" ]; then
-              echo "error: no FreeBSD ${{ matrix.arch }} package was produced" >&2
+              echo "error: no FreeBSD $ARCH package was produced" >&2
               exit 1
             fi
             tar -tzf "$archive"
