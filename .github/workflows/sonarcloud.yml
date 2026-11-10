@@ -74,14 +74,19 @@ jobs:
             api.github.com:443
             archive.ubuntu.com:80
             azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             objects.githubusercontent.com:443
+            pypi.org:443
             release-assets.githubusercontent.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
+            security.ubuntu.com:443
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
@@ -124,14 +129,19 @@ jobs:
             api.github.com:443
             archive.ubuntu.com:80
             azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             objects.githubusercontent.com:443
+            pypi.org:443
             release-assets.githubusercontent.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
+            security.ubuntu.com:443
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
@@ -214,14 +224,19 @@ jobs:
             api.github.com:443
             archive.ubuntu.com:80
             azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             objects.githubusercontent.com:443
+            pypi.org:443
             release-assets.githubusercontent.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
+            security.ubuntu.com:443
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
@@ -304,14 +319,19 @@ jobs:
             api.github.com:443
             archive.ubuntu.com:80
             azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             objects.githubusercontent.com:443
+            pypi.org:443
             release-assets.githubusercontent.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
+            security.ubuntu.com:443
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
