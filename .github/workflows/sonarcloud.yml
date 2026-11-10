@@ -71,7 +71,10 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            *.amazonaws.com:443
             *.crates.io:443
+            *.s3.amazonaws.com:443
+            *.s3.eu-central-1.amazonaws.com:443
             *.github.com:443
             *.githubusercontent.com:443
             *.microsoft.com:443
@@ -139,7 +142,10 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            *.amazonaws.com:443
             *.crates.io:443
+            *.s3.amazonaws.com:443
+            *.s3.eu-central-1.amazonaws.com:443
             *.github.com:443
             *.githubusercontent.com:443
             *.microsoft.com:443
@@ -247,7 +253,10 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            *.amazonaws.com:443
             *.crates.io:443
+            *.s3.amazonaws.com:443
+            *.s3.eu-central-1.amazonaws.com:443
             *.github.com:443
             *.githubusercontent.com:443
             *.microsoft.com:443
@@ -355,7 +364,10 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            *.amazonaws.com:443
             *.crates.io:443
+            *.s3.amazonaws.com:443
+            *.s3.eu-central-1.amazonaws.com:443
             *.github.com:443
             *.githubusercontent.com:443
             *.microsoft.com:443
