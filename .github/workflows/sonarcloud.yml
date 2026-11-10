@@ -84,6 +84,8 @@ jobs:
             objects.githubusercontent.com:443
             pypi.org:443
             release-assets.githubusercontent.com:443
+            keys.openpgp.org:443
+            keyserver.ubuntu.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
             security.ubuntu.com:443
@@ -139,6 +141,8 @@ jobs:
             objects.githubusercontent.com:443
             pypi.org:443
             release-assets.githubusercontent.com:443
+            keys.openpgp.org:443
+            keyserver.ubuntu.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
             security.ubuntu.com:443
@@ -234,6 +238,8 @@ jobs:
             objects.githubusercontent.com:443
             pypi.org:443
             release-assets.githubusercontent.com:443
+            keys.openpgp.org:443
+            keyserver.ubuntu.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
             security.ubuntu.com:443
@@ -329,6 +335,8 @@ jobs:
             objects.githubusercontent.com:443
             pypi.org:443
             release-assets.githubusercontent.com:443
+            keys.openpgp.org:443
+            keyserver.ubuntu.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
             security.ubuntu.com:443
