@@ -103,21 +103,13 @@ jobs:
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
             # A large test crate's rustc (photocraft-ui-egui's lib tests) was SIGKILLed when the
-            # 12 GB guest ran out of memory late in a run. Cap the ZFS ARC (if the image uses ZFS),
-            # which otherwise holds on to the target dir's pages, and add a swap file when the
-            # guest has none, for short peaks. Both only warn if they fail.
+            # 12 GB guest ran out of memory late in a run: the image's root is ZFS with no ARC
+            # limit, so the ARC kept the target dir's pages. Cap it. (No swap file: swap on a
+            # ZFS-backed file can hang FreeBSD under memory pressure; the image has a 1 GB swap
+            # partition.) Print disk, swap and memory so the next OOM is easy to diagnose.
             if [ "$(uname -s)" = FreeBSD ]; then
               if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
                 sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
-              fi
-              # Only with 16 GB to spare (8 GB file + room for the build), and never leave a
-              # partial file behind: the swap file is optional, the build's disk space isn't.
-              if [ -z "$(swapctl -l | sed 1d)" ] && [ "$(df -k /var | awk 'NR==2 { print $4 }')" -ge 16777216 ]; then
-                if dd if=/dev/zero of=/var/swap0 bs=1m count=8192 status=none && chmod 0600 /var/swap0 &&
-                  swapon "/dev/$(mdconfig -a -t vnode -f /var/swap0)"; then :; else
-                  rm -f /var/swap0
-                  echo "::warning::could not add a swap file to the FreeBSD VM"
-                fi
               fi
               df -h / /var/tmp || true
               swapctl -l || true
