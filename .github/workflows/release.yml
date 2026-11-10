@@ -153,6 +153,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Git dependencies come from storytold
         run: |
           set -euo pipefail
@@ -200,6 +202,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: v
         name: Resolve version
         uses: storytold/craft-common-actions/actions/resolve-version@main
@@ -249,6 +253,8 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -375,6 +381,8 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -460,6 +468,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -557,6 +567,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Export the app's build variables
         id: app-env
         # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
@@ -678,6 +690,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-linux-${{ matrix.arch }}
@@ -754,6 +768,8 @@ jobs:
               ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -786,7 +802,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ${{ steps.app-env.outputs.names }}"
+          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ARCH ${{ steps.app-env.outputs.names }}"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
@@ -871,6 +887,8 @@ jobs:
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
       - name: Build and package
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           # Only rustup writes this; the lang/rust package installs into /usr/local/bin.
@@ -896,7 +914,7 @@ jobs:
               set -- "$@" -p "$APP_NAME-cli"
             fi
             cargo build --release --locked "$@"
-            name="$APP_NAME-$VERSION-freebsd-${{ matrix.arch }}"
+            name="$APP_NAME-$VERSION-freebsd-$ARCH"
             mkdir -p "dist/release/$name"
             cp "target/$rel/$APP_NAME" "dist/release/$name/" 2>/dev/null || cp "/var/tmp/craft-target/$rel/$APP_NAME" "dist/release/$name/"
             if [ -f "target/$rel/$APP_NAME-cli" ]; then
@@ -919,15 +937,15 @@ jobs:
           for archive in dist/release/*-freebsd-*.tar.gz; do
             [ -f "$archive" ] || continue
             case "$archive" in
-              *-freebsd-${{ matrix.arch }}.tar.gz) found=1 ;;
+              *-freebsd-$ARCH.tar.gz) found=1 ;;
               *)
-                echo "error: $archive is not a FreeBSD ${{ matrix.arch }} archive; packaging/freebsd/package.sh must honor CARGO_BUILD_TARGET" >&2
+                echo "error: $archive is not a FreeBSD $ARCH archive; packaging/freebsd/package.sh must honor CARGO_BUILD_TARGET" >&2
                 exit 1
                 ;;
             esac
           done
           if [ -z "$found" ]; then
-            echo "error: no FreeBSD ${{ matrix.arch }} archive was produced" >&2
+            echo "error: no FreeBSD $ARCH archive was produced" >&2
             exit 1
           fi
       - name: Copy release archives from the VM
@@ -974,6 +992,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1050,6 +1070,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1148,6 +1170,8 @@ jobs:
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Load refreshed contributor credits
         if: inputs.contributors-artifact != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

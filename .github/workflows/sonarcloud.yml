@@ -327,6 +327,8 @@ jobs:
         env:
           # Each instrumented binary writes its profile here; the scan job merges them.
           LLVM_PROFILE_FILE: ${{ github.workspace }}/profraw/shard-${{ matrix.shard }}-%p-%m.profraw
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: ${{ inputs.shards }}
         run: |
           mkdir -p profraw
           # nextest exits 100 when tests fail. A red test must not hide the static analysis, so
@@ -335,13 +337,13 @@ jobs:
           # shard that runs nothing would scan an empty coverage report.
           rc=0
           cargo nextest run --archive-file archive/nextest-archive.tar.zst \
-            --partition count:${{ matrix.shard }}/${{ inputs.shards }} --no-fail-fast || rc=$?
+            --partition "count:$SHARD/$TOTAL_SHARDS" --no-fail-fast || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 100 ]; then
-            echo "::error::nextest could not run shard ${{ matrix.shard }} (exit $rc)"
+            echo "::error::nextest could not run shard $SHARD (exit $rc)"
             exit "$rc"
           fi
           if ! ls profraw/*.profraw >/dev/null 2>&1; then
-            echo "::error::shard ${{ matrix.shard }} produced no coverage profiles"
+            echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -575,6 +577,7 @@ jobs:
           export PYTHON_COVERAGE_SCRIPT_REAL="$test_script"
           coverage_config="$coverage_env/coverage.ini"
           # Environment substitution keeps paths literal and shares selection with reporting.
+          # shellcheck disable=SC2016
           printf '%s\n' '[run]' 'branch = true' 'source = ${PYTHON_COVERAGE_SOURCE_REAL}' 'omit = ${PYTHON_COVERAGE_SCRIPT_REAL}' > "$coverage_config"
           status=0
           "$coverage_env/bin/python" -m coverage run --rcfile="$coverage_config" "$test_script" || status=$?
