@@ -53,7 +53,7 @@ jobs:
           done < "$PWD/release-files"
 
       - name: Generate the CycloneDX SBOM
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        uses: step-security/sbom-action@28bb7d0d2869c9ab0e5571c93591747945819d39 # v0.24.2
         with:
           path: subjects
           format: cyclonedx-json
