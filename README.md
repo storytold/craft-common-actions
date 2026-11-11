@@ -47,6 +47,9 @@ The version defaults to the next minor after the last published release (`--part
 `--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
 Cargo.lock) and an authenticated `gh` whose account may update `release`.
 
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
+
 #### Caller Example:
 ```yaml
 name: Release
