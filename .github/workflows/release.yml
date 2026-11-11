@@ -84,6 +84,14 @@ on:
         type: boolean
         required: false
         default: false
+      dry-run:
+        description: >-
+          Build and check without releasing: no signing, no `release` environment, no macOS (its
+          larger runner is paid for), no Flatpak OCI push and no draft. For a nightly run on main
+          that finds release-only breakage (riscv64, Flatpak, FreeBSD, packaging) before release day.
+        type: boolean
+        required: false
+        default: false
 
     secrets:
       APPLE_CERTIFICATE:
@@ -214,9 +222,10 @@ jobs:
   macos:
     timeout-minutes: 90
     name: macOS universal
+    if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -336,7 +345,7 @@ jobs:
     name: Windows ${{ matrix.arch }}
     needs: [version]
     runs-on: windows-latest
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -446,7 +455,7 @@ jobs:
     needs: [version]
     # The signing key lives in the release environment, as it does for the macOS, Windows and
     # flatpak jobs; without this the Linux packages are built unsigned.
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -543,7 +552,7 @@ jobs:
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     permissions:
       contents: read
       packages: write
@@ -619,7 +628,7 @@ jobs:
           packaging/linux/flatpak-bundle.sh "$tarball"
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish Flatpak OCI layout to GHCR and Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !inputs.dry-run
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -1051,7 +1060,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1217,10 +1226,10 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
+    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     permissions:
       contents: write
     steps:
