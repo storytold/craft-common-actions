@@ -20,7 +20,7 @@ class TrainTests(unittest.TestCase):
             return repo, rc, "done"
 
         with mock.patch.object(release_train, "run_app", side_effect=fake):
-            code = release_train.main(argv + ["--logs", tempfile.mkdtemp()])
+            code = release_train.main(["--logs", tempfile.mkdtemp()] + argv)
         return code, calls
 
     def test_all_but_the_skipped_apps_with_the_flags_passed_on(self):
