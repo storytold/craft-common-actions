@@ -278,7 +278,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 job = data["jobs"]["freebsd"]
                 steps = job["steps"]
                 index = lambda name: next(i for i, step in enumerate(steps) if step.get("name") == name)
-                vm = next(step for step in steps if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
+                vm = next(step for step in steps if step.get("uses", "").startswith("step-security/freebsd-vm@"))
                 self.assertEqual(vm["with"]["copyback"], "false")
                 for variable in ("CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"):
                     self.assertIn(variable, vm["with"]["envs"].split())

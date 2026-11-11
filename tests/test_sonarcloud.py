@@ -22,7 +22,7 @@ class SonarCloudTests(unittest.TestCase):
         self.steps = workflow['jobs']['sonarcloud']['steps']
         self.validation = next(step for step in self.steps if step.get('id') == 'project')
         self.scan = next(step for step in self.steps
-                         if step.get('uses', '').startswith('SonarSource/sonarqube-scan-action@'))
+                         if step.get('uses', '').startswith('step-security/sonarqube-scan-action@'))
 
     def run_step(self, step, **env):
         with tempfile.TemporaryDirectory() as temp:

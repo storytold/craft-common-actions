@@ -134,7 +134,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
                 self.assertEqual(settings['path'], 'contributors')
                 build_steps = [i for i, s in enumerate(steps)
                                if 'cargo ' in s.get('run', '') or 'packaging/' in s.get('run', '')
-                               or 'vmactions/freebsd-vm@' in s.get('uses', '')]
+                               or 'step-security/freebsd-vm@' in s.get('uses', '')]
                 self.assertTrue(build_steps)
                 self.assertTrue(all(download < i for i in build_steps))
                 self.assertNotIn('continue-on-error', steps[download])
