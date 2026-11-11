@@ -368,7 +368,13 @@ action's version prefix.
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and
 `debug`/`release` artifacts are saved, excluding incremental state, Cargo
-credentials/config and Rust toolchains. Successful non-PR runs save caches on a best-effort basis; PRs
+credentials/config and Rust toolchains. A cross build passes its triple as `target`, and
+its `target/<triple>/<profile>` output is saved and restored too: without it, the aarch64
+release job kept only its build scripts and compiled everything else cold. `release.yml`
+keys its cache on the inputs that change the FreeBSD build (app name, architecture,
+craft-fonts ref and FreeBSD release), not on all its inputs: `contributors-artifact`
+names the run, so a key that held it could never be restored, and a `dry-run` shares
+the release's entry, so a dry run warms the cache a release restores. Successful non-PR runs save caches on a best-effort basis; PRs
 only restore. Restore, checkpoint and save failures are non-blocking; each phase has a 10-minute
 time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards

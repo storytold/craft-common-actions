@@ -35,7 +35,7 @@ class CargoCacheTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                         HOME=str(self.root / "home"), RUNNER_TEMP=str(self.root / "host"),
                         FIXTURE_GUEST=str(self.guest), REAL_RSYNC=shutil.which("rsync"),
-                        CACHE_PHASE="restore", CACHE_PROFILE="debug", CACHE_CAN_SAVE="true",
+                        CACHE_PHASE="restore", CACHE_PROFILE="debug", CACHE_TARGET="", CACHE_CAN_SAVE="true",
                         CACHE_CONFIGURATION='{"features":"heif","fonts":"abc"}',
                         CACHE_SOURCE_HASH="lock-and-build-config", GITHUB_SHA="commit1",
                         GITHUB_WORKSPACE=str(self.root),
@@ -234,6 +234,33 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         self.transfer("save")
         self.assertEqual((self.cache / "target/release/app").read_text(), "cached-release")
 
+    def test_cross_target_round_trip_keeps_the_triple_directory(self):
+        triple = "aarch64-unknown-freebsd"
+        self.write(self.cache, "target/release/build/dependency/output", "host-build-script")
+        self.write(self.cache, f"target/{triple}/release/deps/libdependency.rlib", "cached-cross")
+        self.transfer("restore", CACHE_PROFILE="release", CACHE_TARGET=triple)
+        self.assertEqual((self.guest / "var/tmp/craft-target/release/build/dependency/output").read_text(), "host-build-script")
+        self.assertEqual((self.guest / f"var/tmp/craft-target/{triple}/release/deps/libdependency.rlib").read_text(), "cached-cross")
+        self.write(self.guest, f"var/tmp/craft-target/{triple}/release/app", "cross-release")
+        self.write(self.guest, f"var/tmp/craft-target/{triple}/release/incremental/state", "discard")
+        self.transfer("save", CACHE_PROFILE="release", CACHE_TARGET=triple)
+        self.assertEqual((self.cache / f"target/{triple}/release/app").read_text(), "cross-release")
+        self.assertEqual((self.cache / f"target/{triple}/release/deps/libdependency.rlib").read_text(), "cached-cross")
+        self.assertFalse((self.cache / f"target/{triple}/release/incremental").exists())
+        self.assertEqual((self.cache / "target/release/build/dependency/output").read_text(), "host-build-script")
+
+    def test_native_build_leaves_cross_directories_alone(self):
+        self.write(self.cache, "target/aarch64-unknown-freebsd/release/app", "other-arch")
+        self.transfer("restore", CACHE_PROFILE="release")
+        self.assertFalse((self.guest / "var/tmp/craft-target/aarch64-unknown-freebsd").exists())
+
+    def test_target_must_be_a_plain_triple(self):
+        for target in ("../../etc", "aarch64 unknown", "a;rm -rf /", "Aarch64/x"):
+            with self.subTest(target=target):
+                result = self.run_script(TRANSFER, CACHE_PROFILE="release", CACHE_TARGET=target)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid cache target", result.stderr)
+
     def test_transport_failure_is_visible(self):
         self.tool("rsync", "import sys\nsys.exit(23)\n")
         result = self.run_script(TRANSFER)
@@ -241,6 +268,32 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
 
 
 class WorkflowCacheIntegrationTests(unittest.TestCase):
+    # Release inputs that do not change what the FreeBSD job compiles, so they stay out of the
+    # cache key. contributors-artifact names the run itself, and a key that held it could never
+    # be restored by a later run; dry-run must share the release's entry so a dry run warms it.
+    RELEASE_INPUTS_OUTSIDE_THE_KEY = {
+        "app-title", "web-craft-fonts", "version", "contributors-artifact", "has-web", "has-riscv64",
+        "has-freebsd", "has-arch", "wix-version", "nfpm-version", "trunk-version",
+        "freebsd-architectures", "has-server", "dry-run",
+    }
+
+    def test_release_cache_key_names_every_input_that_changes_the_freebsd_build(self):
+        data = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        inputs = set(data["on"]["workflow_call"]["inputs"])
+        steps = data["jobs"]["freebsd"]["steps"]
+        cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]
+        self.assertEqual(len(cache_steps), 2)
+        for step in cache_steps:
+            configuration = step["with"]["configuration"]
+            self.assertNotIn("toJSON(inputs)", configuration)
+            self.assertIn("matrix.arch", configuration)
+            keyed = {name for name in inputs if f"inputs.{name})" in configuration}
+            # A new input must be put in the key or listed above as not affecting the build.
+            self.assertEqual(keyed | self.RELEASE_INPUTS_OUTSIDE_THE_KEY, inputs)
+            self.assertFalse(keyed & self.RELEASE_INPUTS_OUTSIDE_THE_KEY)
+            self.assertEqual(step["with"]["target"],
+                             "${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}")
+
     def test_restore_tries_the_exact_revision_then_a_compatible_one(self):
         restore = next(step for step in ACTION["runs"]["steps"]
                        if step.get("uses", "").startswith("actions/cache/restore@"))
@@ -296,7 +349,11 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 self.assertIn("steps.cargo-cache.outputs.key != ''", save["if"])
                 self.assertIn("steps.cargo-cache.outcome", build["run"])
                 self.assertIn("pull_request", save["if"])
-                self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
+                if filename == "freebsd.yml":
+                    self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
+                else:
+                    self.assertEqual(restore["with"]["configuration"], save["with"]["configuration"])
+                    self.assertEqual(restore["with"]["target"], save["with"]["target"])
                 if filename == "release.yml":
                     self.assertEqual(job["strategy"]["matrix"]["arch"], "${{ fromJSON(inputs.freebsd-architectures) }}")
                     self.assertEqual(restore["with"]["profile"], "release")

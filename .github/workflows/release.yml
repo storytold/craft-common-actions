@@ -894,7 +894,11 @@ jobs:
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
       - name: Build and package
         shell: freebsd {0}
@@ -978,7 +982,11 @@ jobs:
         with:
           phase: save
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
           key: ${{ steps.cargo-cache.outputs.key }}
 
