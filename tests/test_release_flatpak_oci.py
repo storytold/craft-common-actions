@@ -98,8 +98,8 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.log.read_text(), "")
 
-    def test_the_step_never_runs_for_a_pull_request(self):
-        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request'")
+    def test_the_step_never_runs_for_a_pull_request_or_a_dry_run(self):
+        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request' && !inputs.dry-run")
 
     def test_dockerhub_credentials_trigger_dual_push_for_stable_release(self):
         result = self.publish("1.2.0", "refs/heads/release", DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
