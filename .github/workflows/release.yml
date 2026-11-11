@@ -84,6 +84,15 @@ on:
         type: boolean
         required: false
         default: false
+      publish:
+        description: >-
+          Publish the draft when the run is done, instead of leaving it for a maintainer: only on
+          the release branch, only when no build job failed or was cancelled, and only when the
+          draft has at least as many assets as the last published release (a skipped job leaves the
+          run green).
+        type: boolean
+        required: false
+        default: false
       dry-run:
         description: >-
           Build and check without releasing: no signing, no `release` environment, no macOS (its
@@ -1244,3 +1253,27 @@ jobs:
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
+      - name: Publish the release
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.version.outputs.version }}
+          CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
+        run: |
+          set -euo pipefail
+          if [ "$CANCELLED" != false ]; then
+            echo "::error::a build job was cancelled: $TAG stays a draft"
+            exit 1
+          fi
+          now="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
+            before="$(gh release view "$last" --json assets --jq '.assets | length')"
+            if [ "$now" -lt "$before" ]; then
+              echo "::error::$TAG has $now assets where $last had $before: it stays a draft"
+              exit 1
+            fi
+          fi
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"
