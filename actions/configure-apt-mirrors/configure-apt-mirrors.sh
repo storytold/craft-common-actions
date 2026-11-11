@@ -17,7 +17,8 @@
 # A job whose Harden-Runner policy blocks egress must allow these hosts on port 443:
 #   amd64: mirrors.edge.kernel.org, mirrors.dotsrc.org
 #   arm64: mirrors.dotsrc.org, ftp.tu-chemnitz.de
-# A blocked mirror only fails its check and goes to the end of the list.
+# A blocked mirror only fails its check and goes to the end of the list. apt's SRV lookups
+# (_https._tcp.<host>) are turned off: Harden-Runner blocks those names, and apt does not need them.
 set -euo pipefail
 
 # CRAFT_APT_ROOT and CRAFT_APT_ARCH stand in for / and the dpkg architecture in tests.
@@ -96,6 +97,8 @@ ordered+=("${late[@]}")
   done
 } > "$results/list"
 install -m 0644 "$results/list" "$apt_dir/$list_name"
+mkdir -p "$apt_dir/apt.conf.d"
+echo 'Acquire::EnableSrvRecords "false";' > "$apt_dir/apt.conf.d/99craft-no-srv"
 
 # Each Ubuntu archive URI (or the image's own mirror list) becomes the new list. A deb822 URIs
 # field naming several of them keeps one copy. Brackets, not backslashes: awk -v would eat those.
