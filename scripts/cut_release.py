@@ -53,6 +53,33 @@ def next_version(last: str, part: str) -> str:
     raise ValueError(f"unknown part {part!r}")
 
 
+def version_key(v: str) -> tuple:
+    """Sort key for versions: numbers compared as numbers, a prerelease before its release."""
+    m = SEMVER.match(v.removeprefix("v"))
+    if not m:
+        raise ValueError(f"{v!r} is not a version like 1.2.3")
+    return (int(m[1]), int(m[2]), int(m[3]), 0 if m[4] else 1, m[4] or "")
+
+
+REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+SHA = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def check_args(repo: str, version: str | None, commit: str | None, workflow: str, title: str | None) -> None:
+    """Refuse values that git or gh could read as options, or that break a commit message,
+    before any command runs."""
+    if not REPO.match(repo):
+        raise SystemExit(f"{repo!r} is not owner/name")
+    if version is not None and not SEMVER.match(version):
+        raise SystemExit(f"{version!r} is not a version like 1.2.3 or 1.2.3-rc.1")
+    if commit is not None and not SHA.match(commit):
+        raise SystemExit(f"{commit!r} is not a commit hash")
+    if not workflow or workflow.startswith("-") or "\n" in workflow:
+        raise SystemExit(f"{workflow!r} is not a workflow name")
+    if title is not None and (not title.strip() or title.startswith("-") or "\n" in title):
+        raise SystemExit(f"{title!r} is not an app title")
+
+
 def _read(path: Path) -> tuple[str, bool]:
     raw = path.read_bytes().decode("utf-8")
     return raw.replace("\r\n", "\n"), raw.count("\r\n") > raw.count("\n") // 2
@@ -77,8 +104,12 @@ def workspace_version(root: Path) -> str:
     raise ValueError("Cargo.toml has no [workspace.package] version")
 
 
-def bump_cargo(root: Path, new: str) -> tuple[str, int, int]:
-    """Set the workspace version to `new`. Returns (old version, Cargo.toml lines, lock packages)."""
+def bump_cargo(root: Path, new: str, members: set[str] | None = None) -> tuple[str, int, int]:
+    """Set the workspace version to `new`. Returns (old version, Cargo.toml lines, lock packages).
+
+    `members` names the workspace's own packages (`cargo metadata --no-deps`): only their
+    Cargo.lock entries change, not a local path dependency's outside the workspace that happens
+    to share the version. Without it every source-less entry at the old version counts as one."""
     if not SEMVER.match(new):
         raise ValueError(f"{new!r} is not a version like 1.2.3 or 1.2.3-rc.1")
     old = workspace_version(root)
@@ -91,8 +122,9 @@ def bump_cargo(root: Path, new: str) -> tuple[str, int, int]:
         if header:
             section = header[1].strip()
             continue
-        if section == "workspace.package" and re.match(rf'^version\s*=\s*"{re.escape(old)}"\s*$', line):
-            lines[i] = f'version = "{new}"'
+        if section == "workspace.package" and re.match(rf'^version\s*=\s*"{re.escape(old)}"', line):
+            # Only the value: a trailing comment stays.
+            lines[i] = re.sub(rf'^(version\s*=\s*"){re.escape(old)}"', lambda m: f'{m[1]}{new}"', line)
             changed += 1
         elif "path = " in line and f'version = "{old}"' in line:
             lines[i] = line.replace(f'version = "{old}"', f'version = "{new}"')
@@ -108,6 +140,9 @@ def bump_cargo(root: Path, new: str) -> tuple[str, int, int]:
             # Registry and git packages carry a source; the workspace's own packages don't.
             if any(f.startswith("source = ") for f in fields):
                 continue
+            name = next((f[len('name = "'):-1] for f in fields if f.startswith('name = "')), None)
+            if members is not None and name not in members:
+                continue
             for j, f in enumerate(fields):
                 if f == f'version = "{old}"':
                     fields[j] = f'version = "{new}"'
@@ -118,9 +153,15 @@ def bump_cargo(root: Path, new: str) -> tuple[str, int, int]:
     return old, changed, packages
 
 
-def bump(root: Path, new: str, run=subprocess.run) -> str:
+def workspace_members(root: Path) -> set[str]:
+    """The workspace's own package names."""
+    meta = json.loads(sh("cargo", "metadata", "--no-deps", "--format-version", "1", cwd=root))
+    return {p["name"] for p in meta["packages"]}
+
+
+def bump(root: Path, new: str, run=subprocess.run, members: set[str] | None = None) -> str:
     """The whole bump: Cargo files, then the repository's own hook. Returns the old version."""
-    old, _, _ = bump_cargo(root, new)
+    old, _, _ = bump_cargo(root, new, members)
     hook = root / HOOK
     if hook.exists():
         run(["bash", HOOK, old, new], cwd=root, check=True)
@@ -163,10 +204,9 @@ def green_main(repo: str, workflow: str) -> str:
 
 
 def cargo_check(root: Path) -> None:
-    if shutil.which("cargo") is None:
-        say("cargo not found: Cargo.lock not checked against the manifests")
-        return
-    sh("cargo", "metadata", "--locked", "--no-deps", "--format-version", "1", cwd=root)
+    """Cargo.lock still matches the manifests. Resolving, without --no-deps: only resolution
+    checks the lock file against the path dependencies' versions."""
+    sh("cargo", "metadata", "--locked", "--format-version", "1", cwd=root)
 
 
 def commit(root: Path, message: str) -> str:
@@ -174,7 +214,7 @@ def commit(root: Path, message: str) -> str:
     return sh("git", "rev-parse", "HEAD", cwd=root)
 
 
-def wait_and_publish(repo: str, sha: str, tag: str) -> None:
+def wait_and_publish(repo: str, sha: str, tag: str, previous: str = "", allow_fewer: bool = False) -> None:
     rid = None
     for _ in range(40):
         rows = gh_json("run", "list", "-R", repo, "--workflow", "release.yml", "--branch", "release",
@@ -196,6 +236,13 @@ def wait_and_publish(repo: str, sha: str, tag: str) -> None:
     draft = gh_json("release", "view", tag, "-R", repo, "--json", "isDraft,assets")
     if not draft["isDraft"] or not draft["assets"]:
         raise SystemExit(f"{tag} is not a draft with assets; not publishing")
+    # A build job that is skipped (an app turning a platform off, or anything else) leaves the
+    # run green, so the draft must carry at least as many assets as the last release.
+    if previous:
+        before = len(gh_json("release", "view", previous, "-R", repo, "--json", "assets")["assets"])
+        if len(draft["assets"]) < before and not allow_fewer:
+            raise SystemExit(f"{tag} has {len(draft['assets'])} assets where {previous} had {before}: not publishing. "
+                             f"Check the run, then publish by hand or rerun with --allow-fewer-assets.")
     sh("gh", "release", "edit", tag, "-R", repo, "--draft=false")
     say(f"published https://github.com/{repo}/releases/tag/{tag} ({len(draft['assets'])} assets)")
 
@@ -213,8 +260,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--title", help="the app's name in commit and PR titles (default: from the last release)")
     p.add_argument("--no-sync", action="store_true", help="don't open the pull request that brings the bump to main")
     p.add_argument("--publish", action="store_true", help="wait for release.yml and publish the draft")
+    p.add_argument("--allow-fewer-assets", action="store_true",
+                   help="publish a draft with fewer assets than the last release")
     p.add_argument("--dry-run", action="store_true", help="prepare everything, push nothing")
     a = p.parse_args(argv)
+    check_args(a.repo, a.version, a.commit, a.gate_workflow, a.title)
+    for tool in ("git", "gh", "cargo"):
+        if shutil.which(tool) is None:
+            raise SystemExit(f"{tool} is needed")
 
     last, title = last_release(a.repo) if not (a.version and a.title) else ("", a.title)
     title = a.title or title
@@ -229,8 +282,8 @@ def main(argv: list[str] | None = None) -> int:
         sh("git", "fetch", "-q", "origin", "main", "release", cwd=work)
         if subprocess.run(["git", "merge-base", "--is-ancestor", sha, "origin/main"], cwd=work).returncode:
             raise SystemExit(f"{sha} is not on main")
-        sh("git", "checkout", "-q", sha, cwd=work)
-        old = bump(work, version)
+        sh("git", "checkout", "-q", "--detach", sha, cwd=work)
+        old = bump(work, version, members=workspace_members(work))
         cargo_check(work)
         bumped = commit(work, f"Release: {title} {tag}")
         say(f"bumped {old} -> {version}")
@@ -240,6 +293,7 @@ def main(argv: list[str] | None = None) -> int:
            bumped, cwd=work)
         if workspace_version(work) != version:
             raise SystemExit("release is not at the new version after the merge")
+        cargo_check(work)
         left = sh("git", "diff", "--stat", bumped, "HEAD", cwd=work)
         if left:
             say(f"release keeps changes main doesn't have:\n{left}")
@@ -248,10 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         sync = None
         if not a.no_sync:
             sh("git", "checkout", "-q", "-B", f"release-sync-{version}", "origin/main", cwd=work)
-            if workspace_version(work) == version:
-                say(f"main is at {version} already: no sync pull request")
+            on_main = workspace_version(work)
+            if version_key(on_main) >= version_key(version):
+                say(f"main is at {on_main}, not behind {version}: no sync pull request")
             else:
-                bump(work, version)
+                bump(work, version, members=workspace_members(work))
                 cargo_check(work)
                 sync = commit(work, f"Release: {title} {tag} on main")
 
@@ -267,10 +322,14 @@ def main(argv: list[str] | None = None) -> int:
                      f"Brings the {tag} version bump to main. The release was cut from {sha} with "
                      f"`scripts/cut_release.py` (storytold/craft-common-actions); this changes only version strings.")
             say(f"sync PR {url}")
-            if subprocess.run(["gh", "pr", "merge", url, "--auto", "--squash"], capture_output=True).returncode == 0:
+            merge = subprocess.run(["gh", "pr", "merge", url, "--auto", "--squash"], capture_output=True, text=True)
+            if merge.returncode == 0:
                 say("auto-merge is on for the sync PR")
+            else:
+                say(f"WARNING: auto-merge could not be turned on ({merge.stderr.strip()}). Merge {url} by hand "
+                    f"once its checks pass, or main stays behind the release.")
         if a.publish:
-            wait_and_publish(a.repo, head, tag)
+            wait_and_publish(a.repo, head, tag, last, a.allow_fewer_assets)
         return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)

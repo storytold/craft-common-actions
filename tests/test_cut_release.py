@@ -63,6 +63,26 @@ class NextVersion(unittest.TestCase):
             cut_release.next_version("nightly", "minor")
 
 
+class Versions(unittest.TestCase):
+    def test_compared_as_numbers_with_prereleases_first(self):
+        key = cut_release.version_key
+        self.assertGreater(key("0.10.0"), key("0.9.0"))
+        self.assertGreater(key("v0.22.0"), key("0.21.0"))
+        self.assertLess(key("0.21.0-rc.1"), key("0.21.0"))
+        self.assertEqual(key("0.21.0"), key("v0.21.0"))
+
+
+class Arguments(unittest.TestCase):
+    def test_what_could_reach_git_or_gh_as_an_option_is_refused(self):
+        ok = dict(repo="storytold/pdfcraft", version="0.21.0", commit="5ff567a4a2", workflow="CI", title="PdfCraft")
+        cut_release.check_args(**ok)
+        for field, bad in [("repo", "--upload-pack=x"), ("repo", "storytold"), ("version", "--force"),
+                           ("version", "0.21"), ("commit", "--output=/tmp/x"), ("commit", "HEAD~1"),
+                           ("workflow", "-x"), ("title", "-m evil"), ("title", "two\nlines")]:
+            with self.assertRaises(SystemExit, msg=f"{field}={bad!r}"):
+                cut_release.check_args(**{**ok, field: bad})
+
+
 class Bump(unittest.TestCase):
     def repo(self, toml=CARGO_TOML, lock=CARGO_LOCK, crlf=False):
         d = Path(tempfile.mkdtemp())
@@ -109,6 +129,21 @@ class Bump(unittest.TestCase):
         old = cut_release.bump(d, "0.21.0", run=lambda cmd, **kw: calls.append((cmd, kw["cwd"])))
         self.assertEqual(old, "0.18.1")
         self.assertEqual(calls, [(["bash", cut_release.HOOK, "0.18.1", "0.21.0"], d)])
+
+    def test_a_comment_after_the_workspace_version_stays(self):
+        d = self.repo(toml=CARGO_TOML.replace('version = "0.18.1"\nedition', 'version = "0.18.1" # the release\nedition'))
+        cut_release.bump_cargo(d, "0.21.0")
+        self.assertIn('version = "0.21.0" # the release', (d / "Cargo.toml").read_text())
+        self.assertEqual(cut_release.workspace_version(d), "0.21.0")
+
+    def test_given_the_members_only_their_lock_entries_change(self):
+        # A local path dependency outside the workspace keeps its version even when it matches.
+        d = self.repo()
+        _, _, packages = cut_release.bump_cargo(d, "0.21.0", members={"demo"})
+        lock = (d / "Cargo.lock").read_text()
+        self.assertEqual(packages, 1)
+        self.assertIn('name = "demo"\nversion = "0.21.0"', lock)
+        self.assertIn('name = "demo-geom"\nversion = "0.18.1"', lock)
 
     def test_no_hook_no_call(self):
         d = self.repo()
