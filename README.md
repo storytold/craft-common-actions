@@ -497,6 +497,12 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
   only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. Test, binary and
   proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
+  sccache's cache starts afresh when `cache-version` or any `Cargo.toml`, `build.rs` or
+  `clippy.toml` changes, because its key leaves out settings that only change diagnostics
+  (`--check-cfg` declarations, clippy's configuration). It also can't see files a procedural
+  macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
+  such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
+  `env` sets the cache's version instead;
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only

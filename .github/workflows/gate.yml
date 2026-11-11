@@ -79,7 +79,7 @@ on:
         required: false
         default: true
       sccache:
-        description: "Also cache the workspace crates' compiled libraries (which rust-cache leaves out) with sccache in the GitHub Actions cache. It writes where the dependency cache is saved (pushes to the default branch, opted-in manual runs); other runs read those entries. SCCACHE_GHA_RW_MODE in `env` overrides that. Test executables are never cached"
+        description: "Also cache the workspace crates' compiled libraries (which rust-cache leaves out) with sccache in the GitHub Actions cache. It writes where the dependency cache is saved (pushes to the default branch, opted-in manual runs); other runs read those entries. SCCACHE_GHA_RW_MODE in `env` overrides that. Test executables are never cached. Its cache starts afresh when cache-version or a Cargo.toml, build.rs or clippy.toml changes; bump cache-version when files a procedural macro reads change (see the README)"
         type: boolean
         required: false
         default: false
@@ -283,9 +283,16 @@ jobs:
         shell: bash
         env:
           WRITES: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          # sccache's key leaves out lint settings that only change diagnostics (`--check-cfg`,
+          # clippy.toml), so a cached compile would replay its old warnings. A change to the files
+          # that declare them, or to cache-version, starts a fresh sccache cache instead.
+          VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '**/clippy.toml', '**/.clippy.toml') }}
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+            echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
           if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
             echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
           fi
