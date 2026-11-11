@@ -35,6 +35,14 @@ done
 printf 'Origin: Ubuntu\\nDate: %s\\n %s main/binary-riscv64/Packages.xz\\n' "$date" "$RANDOM" > "$out"
 """
 
+# cloud-init that, like the real one on 11 Nov 2026, writes the image's ubuntu.sources (from
+# IMAGE_SOURCES) just before `status --wait` returns.
+FAKE_CLOUD_INIT = """#!/bin/bash
+[ "$*" = "status --wait" ] || exit 2
+sleep "${CLOUD_INIT_DELAY:-0}"
+cp "$IMAGE_SOURCES" "$CRAFT_APT_ROOT/etc/apt/sources.list.d/ubuntu.sources"
+"""
+
 UBUNTU_HOSTS = 'archive.ubuntu.com security.ubuntu.com ports.ubuntu.com azure.archive.ubuntu.com'
 
 NOBLE_SOURCES = """Types: deb
@@ -73,7 +81,7 @@ KERNEL = lists('https://mirrors.edge.kernel.org/ubuntu', 'https://mirrors.edge.k
 
 
 class SelectMirrorsTests(unittest.TestCase):
-    def select(self, files=None, down='', stale='', runs=1):
+    def select(self, files=None, down='', stale='', runs=1, cloud_init=False):
         files = {'etc/apt/sources.list.d/ubuntu.sources': NOBLE_SOURCES} if files is None else files
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / 'root'
@@ -85,11 +93,17 @@ class SelectMirrorsTests(unittest.TestCase):
             bin_dir.mkdir()
             (bin_dir / 'curl').write_text(FAKE_CURL, newline='\n')
             (bin_dir / 'curl').chmod(0o755)
+            (bin_dir / 'cloud-init').write_text(FAKE_CLOUD_INIT, newline='\n')
+            (bin_dir / 'cloud-init').chmod(0o755)
+            image_sources = Path(tmpdir) / 'image.sources'
+            image_sources.write_text(NOBLE_SOURCES, newline='\n')
             for _ in range(runs):
                 res = subprocess.run(
                     ['bash', str(SCRIPT)],
                     env={**os.environ, 'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
-                         'CRAFT_APT_ROOT': str(root), 'DOWN': down, 'STALE': stale},
+                         'CRAFT_APT_ROOT': str(root), 'DOWN': down, 'STALE': stale,
+                         'IMAGE_SOURCES': str(image_sources),
+                         'CRAFT_CLOUD_INIT': str(bin_dir / 'cloud-init') if cloud_init else 'no-cloud-init-here'},
                     capture_output=True, text=True, timeout=60)
                 self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             parts = root / 'etc/apt/sources.list.d'
@@ -131,6 +145,10 @@ class SelectMirrorsTests(unittest.TestCase):
         sources = image['etc/apt/sources.list.d/ubuntu.sources']
         self.assertEqual(sources.count('Enabled: no'), 2)
         self.assertEqual(sources.replace('Enabled: no\n', ''), NOBLE_SOURCES)
+
+    def test_cloud_init_re_enabling_the_image_sources_is_waited_out(self):
+        _, _, image = self.select(cloud_init=True)
+        self.assertEqual(image['etc/apt/sources.list.d/ubuntu.sources'].count('Enabled: no'), 2)
 
     def test_one_line_image_sources_are_commented_out(self):
         _, _, image = self.select({'etc/apt/sources.list': '# comment\n'

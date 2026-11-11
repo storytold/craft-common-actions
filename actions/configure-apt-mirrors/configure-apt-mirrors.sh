@@ -21,6 +21,9 @@
 # (_https._tcp.<host>) are turned off: Harden-Runner blocks those names, and apt does not need them.
 set -euo pipefail
 
+# cloud-init may still be about to write ubuntu.sources; changing it before then is undone.
+"$(dirname "${BASH_SOURCE[0]}")/wait-for-cloud-init.sh"
+
 # CRAFT_APT_ROOT and CRAFT_APT_ARCH stand in for / and the dpkg architecture in tests.
 root=${CRAFT_APT_ROOT:-}
 apt_dir="$root/etc/apt"
