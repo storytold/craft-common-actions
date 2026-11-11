@@ -582,6 +582,8 @@ jobs:
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/linux
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
       - name: Install flatpak-builder
         run: |
           sudo apt-get update

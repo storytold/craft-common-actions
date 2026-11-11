@@ -1,0 +1,9 @@
+name: "Configure apt mirrors"
+description: "Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com (kernel.org and dotsrc.org for amd64, dotsrc.org and TU Chemnitz for arm), with the mirrors that answer first. Run it before apt-get update; install-apt-packages already does."
+
+runs:
+  using: "composite"
+  steps:
+    - name: Configure apt mirrors
+      shell: bash
+      run: sudo "$GITHUB_ACTION_PATH/configure-apt-mirrors.sh"

@@ -20,6 +20,7 @@ runs:
           echo "::error::invalid actionlint-version '$version'"
           exit 1
         fi
+        sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends shellcheck desktop-file-utils appstream libxml2-utils python3-yaml
         # GitHub release downloads can return transient 503s before lint starts.

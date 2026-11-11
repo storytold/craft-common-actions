@@ -47,6 +47,9 @@ jobs:
           name: release-linux-${{ matrix.arch }}
           path: dist/linux
 
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
+
       - name: Install Flatpak and Skopeo
         run: |
           sudo apt-get update
