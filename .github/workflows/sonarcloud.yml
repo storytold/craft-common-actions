@@ -603,6 +603,7 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
       - name: Generate JavaScript/TypeScript coverage
+        id: node-coverage
         if: steps.token.outputs.available == 'true' && inputs.node-coverage-script != ''
         shell: bash
         env:
@@ -615,7 +616,10 @@ jobs:
             exit 1
           fi
           npm ci --ignore-scripts --no-audit --no-fund
-          npm run --silent -- "$NODE_COVERAGE_SCRIPT"
+          # Like the Rust coverage, a red test still lets the scan measure what ran; the job fails after it.
+          status=0
+          npm run --silent -- "$NODE_COVERAGE_SCRIPT" || status=$?
+          echo "status=$status" >>"$GITHUB_OUTPUT"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
@@ -628,3 +632,10 @@ jobs:
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
             "-Dsonar.cpd.exclusions=**/i18n/**"
+      - name: Fail on JavaScript/TypeScript test failures
+        if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
+        env:
+          NODE_COVERAGE_STATUS: ${{ steps.node-coverage.outputs.status }}
+        run: |
+          echo "::error::node-coverage-script exited with status $NODE_COVERAGE_STATUS"
+          exit 1
