@@ -35,6 +35,8 @@ jobs:
             azure.archive.ubuntu.com:80
             azure.archive.ubuntu.com:443
             github.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443

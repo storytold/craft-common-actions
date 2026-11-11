@@ -15,7 +15,7 @@
 # install-riscv64-cross pins amd64 and riscv64 to one pair of mirrors so both architectures match.
 #
 # A job whose Harden-Runner policy blocks egress must allow these hosts on port 443:
-#   amd64: mirrors.edge.kernel.org, mirrors.dotsrc.org
+#   amd64: mirrors.edge.kernel.org, mirrors.dotsrc.org (the workflows allow *.kernel.org, *.dotsrc.org)
 #   arm64: mirrors.dotsrc.org, ftp.tu-chemnitz.de
 # A blocked mirror only fails its check and goes to the end of the list. apt's SRV lookups
 # (_https._tcp.<host>) are turned off: Harden-Runner blocks those names, and apt does not need them.

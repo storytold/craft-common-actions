@@ -123,6 +123,8 @@ jobs:
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
@@ -196,6 +198,8 @@ jobs:
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
@@ -319,6 +323,8 @@ jobs:
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
@@ -434,6 +440,8 @@ jobs:
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443

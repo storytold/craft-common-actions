@@ -38,6 +38,8 @@ jobs:
             archive.ubuntu.com:443
             azure.archive.ubuntu.com:443
             security.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
