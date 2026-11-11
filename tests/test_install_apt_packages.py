@@ -214,6 +214,14 @@ for down in ${DOWN:-}; do
 done
 """
 
+# cloud-init that, like the real one on 11 Nov 2026, writes the image's ubuntu.sources (from
+# IMAGE_SOURCES) just before `status --wait` returns.
+FAKE_CLOUD_INIT = """#!/bin/bash
+[ "$*" = "status --wait" ] || exit 2
+sleep "${CLOUD_INIT_DELAY:-0}"
+cp "$IMAGE_SOURCES" "$CRAFT_APT_ROOT/etc/apt/sources.list.d/ubuntu.sources"
+"""
+
 UBUNTU_HOSTS = 'azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com'
 
 NOBLE_SOURCES = """Types: deb
@@ -255,7 +263,7 @@ RISCV_LIST = 'deb [arch=amd64] https://archive.ubuntu.com/ubuntu noble main univ
 class ConfigureAptMirrorsTests(unittest.TestCase):
     """configure-apt-mirrors.sh against a fake /etc and a fake curl."""
 
-    def configure(self, files, arch='amd64', codename='noble', down='', runs=1):
+    def configure(self, files, arch='amd64', codename='noble', down='', runs=1, cloud_init=False):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / 'root'
             files = {'etc/os-release': f'NAME="Ubuntu"\nVERSION_CODENAME={codename}\n', **files}
@@ -268,12 +276,17 @@ class ConfigureAptMirrorsTests(unittest.TestCase):
             (bin_dir / 'curl').chmod(0o755)
             curl_log = Path(tmpdir) / 'curl.log'
             curl_log.touch()
+            (bin_dir / 'cloud-init').write_text(FAKE_CLOUD_INIT, newline='\n')
+            (bin_dir / 'cloud-init').chmod(0o755)
+            image_sources = Path(tmpdir) / 'image.sources'
+            image_sources.write_text(NOBLE_SOURCES, newline='\n')
             for _ in range(runs):
                 res = subprocess.run(
                     ['bash', str(MIRRORS)],
                     env={**os.environ, 'PATH': f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
                          'CRAFT_APT_ROOT': str(root), 'CRAFT_APT_ARCH': arch, 'DOWN': down,
-                         'CURL_LOG': str(curl_log)},
+                         'CURL_LOG': str(curl_log), 'IMAGE_SOURCES': str(image_sources),
+                         'CRAFT_CLOUD_INIT': str(bin_dir / 'cloud-init') if cloud_init else 'no-cloud-init-here'},
                     capture_output=True, text=True, timeout=60)
                 self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
             mirror_list = root / 'etc/apt/craft-apt-mirrors.txt'
@@ -311,6 +324,13 @@ class ConfigureAptMirrorsTests(unittest.TestCase):
         ])
         self.assertIn('::warning::configure-apt-mirrors: http://azure.archive.ubuntu.com/ubuntu/ did not serve '
                       'noble/InRelease (curl: (6) Could not resolve host: azure.archive.ubuntu.com', res.stdout)
+
+    def test_cloud_init_rewriting_the_sources_is_waited_out(self):
+        res, out = self.configure({'etc/apt/apt-mirrors.txt': IMAGE_MIRRORS,
+                                   'etc/apt/sources.list.d/ubuntu.sources': NOBLE_SOURCES},
+                                  cloud_init=True)
+        self.assertEqual(out['etc/apt/sources.list.d/ubuntu.sources'], NOBLE_SOURCES.replace(
+            'mirror+file:/etc/apt/apt-mirrors.txt', 'mirror+file:/etc/apt/craft-apt-mirrors.txt'))
 
     def test_deb822_sources_read_the_new_list_and_keep_their_other_fields(self):
         _, out = self.configure({'etc/apt/apt-mirrors.txt': IMAGE_MIRRORS,
@@ -390,6 +410,40 @@ class AllowedMirrorTests(unittest.TestCase):
                             with self.subTest(workflow=workflow.name, job=name, host=host):
                                 self.assertIn(f'{host}:443', allowed)
         self.assertGreaterEqual(checked, 8)
+
+
+WAIT = ROOT / 'actions/configure-apt-mirrors/wait-for-cloud-init.sh'
+
+
+class WaitForCloudInitTests(unittest.TestCase):
+    def wait(self, body, limit='300'):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fake = Path(tmpdir) / 'cloud-init'
+            fake.write_text('#!/bin/bash\n' + body, newline='\n')
+            fake.chmod(0o755)
+            return subprocess.run(['bash', str(WAIT)], capture_output=True, text=True, timeout=60,
+                                  env={**os.environ, 'CRAFT_CLOUD_INIT': str(fake),
+                                       'CRAFT_CLOUD_INIT_TIMEOUT': limit})
+
+    def test_waits_until_cloud_init_is_done(self):
+        res = self.wait('[ "$*" = "status --wait" ] && sleep 2\n')
+        self.assertEqual(res.returncode, 0)
+        self.assertRegex(res.stdout, r'Waited [23]s for cloud-init')
+
+    def test_a_cloud_init_that_never_finishes_only_warns(self):
+        res = self.wait('sleep 30\n', limit='1')
+        self.assertEqual(res.returncode, 0)
+        self.assertIn('::warning::cloud-init was still running after 1s', res.stdout)
+
+    def test_a_cloud_init_that_reports_an_error_does_not_fail_the_job(self):
+        res = self.wait('exit 1\n')
+        self.assertEqual(res.returncode, 0)
+        self.assertEqual(res.stdout, '')
+
+    def test_without_cloud_init_it_returns_at_once(self):
+        res = subprocess.run(['bash', str(WAIT)], capture_output=True, text=True, timeout=10,
+                             env={**os.environ, 'CRAFT_CLOUD_INIT': 'no-cloud-init-here'})
+        self.assertEqual((res.returncode, res.stdout), (0, ''))
 
 
 if __name__ == '__main__':

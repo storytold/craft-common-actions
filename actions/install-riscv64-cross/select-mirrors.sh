@@ -20,6 +20,9 @@
 # installs from, and the image's mirrors would only add a second snapshot to mix in.
 set -euo pipefail
 
+# cloud-init may still be about to write ubuntu.sources (and re-enable it); wait for it first.
+"$(dirname "${BASH_SOURCE[0]}")/../configure-apt-mirrors/wait-for-cloud-init.sh"
+
 # CRAFT_APT_ROOT stands in for / in tests.
 root=${CRAFT_APT_ROOT:-}
 apt_dir="$root/etc/apt"
