@@ -12,7 +12,7 @@
 # archive signed with Ubuntu's key, which apt checks wherever the files come from.
 #
 # Only the image's own source files change. A list another action adds keeps its own URIs:
-# install-riscv64-cross pins amd64 to archive.ubuntu.com so both architectures match.
+# install-riscv64-cross pins amd64 and riscv64 to one pair of mirrors so both architectures match.
 #
 # A job whose Harden-Runner policy blocks egress must allow these hosts on port 443:
 #   amd64: mirrors.edge.kernel.org, mirrors.dotsrc.org

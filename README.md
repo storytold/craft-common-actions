@@ -756,7 +756,7 @@ Individual actions are also available for composing custom pipelines:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
 - `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
-- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
+- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
