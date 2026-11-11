@@ -52,6 +52,8 @@ jobs:
             security.ubuntu.com:443
             ports.ubuntu.com:80
             ports.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             ftp.tu-chemnitz.de:443
