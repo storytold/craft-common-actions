@@ -280,6 +280,8 @@ class ConfigureAptMirrorsTests(unittest.TestCase):
             result = {name: (root / name).read_text() for name in files}
             result['list'] = mirror_list.read_text().splitlines() if mirror_list.exists() else None
             result['curl'] = curl_log.read_text().split()
+            srv = root / 'etc/apt/apt.conf.d/99craft-no-srv'
+            result['srv'] = srv.read_text() if srv.exists() else None
             return res, result
 
     def test_healthy_mirrors_keep_the_image_order_then_the_fallbacks(self):
@@ -294,6 +296,7 @@ class ConfigureAptMirrorsTests(unittest.TestCase):
         ])
         self.assertIn('https://mirrors.edge.kernel.org/ubuntu/dists/noble/InRelease', out['curl'])
         self.assertNotIn('::warning::', res.stdout)
+        self.assertEqual(out['srv'], 'Acquire::EnableSrvRecords "false";\n')
 
     def test_mirrors_outside_ubuntu_com_lead_when_it_is_down(self):
         res, out = self.configure({'etc/apt/apt-mirrors.txt': IMAGE_MIRRORS,
