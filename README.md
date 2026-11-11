@@ -26,6 +26,30 @@ Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
 new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
 `CRAFT_ANYTHING`).
 
+#### Cutting a release
+
+`scripts/cut_release.py <owner/app>` cuts a release without a version-bump pull request, so a
+change of version strings never waits on the full CI of a pull request:
+
+1. It takes the newest commit on main whose `CI` run for a push passed (`--commit` picks another;
+   `--gate-workflow` names another workflow).
+2. It commits the version bump there: `[workspace.package] version`, the internal path
+   dependencies, and Cargo.lock's entries for the workspace's own packages. A repository with
+   other files that name the version adds `packaging/set-version.sh <old> <new>`.
+3. It merges that into `release` (main's version lines win) and pushes, which starts the app's
+   `release.yml`.
+4. It opens a pull request that brings the same bump to main, with auto-merge on where the
+   repository allows it. The release doesn't wait for it.
+5. With `--publish` it waits for `release.yml` and publishes the draft once every job passed and
+   the draft has assets. Otherwise it stops after the push.
+
+The version defaults to the next minor after the last published release (`--part patch`, or
+`--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
+Cargo.lock) and an authenticated `gh` whose account may update `release`.
+
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
+
 #### Caller Example:
 ```yaml
 name: Release
