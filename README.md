@@ -492,7 +492,11 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
   table; dependency, version and comment edits do not discard reusable dependency artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
-  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
+- with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
+  library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
+  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. Test, binary and
+  proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -866,7 +870,8 @@ with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
 the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
 does not run them.
 
-The scan job frees unused runner SDKs before either Rust coverage path. Sharded
+The scan job frees unused runner SDKs before either Rust coverage path. The archive build
+frees them in the background, so the build starts at once. Sharded
 coverage merges and removes raw profiles before extracting the test archive, then
 releases the compressed archive and temporary binaries as they are consumed.
 Disk-space snapshots in the logs show headroom before cleanup and aggregation.
