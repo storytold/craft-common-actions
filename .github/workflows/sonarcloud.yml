@@ -28,6 +28,19 @@ on:
         type: string
         required: false
         default: ""
+      node-coverage-script:
+        description: >-
+          Optional npm script that runs the JavaScript/TypeScript tests with coverage (e.g. test:coverage),
+          after `npm ci --ignore-scripts`. Point sonar.javascript.lcov.reportPaths at its lcov report in
+          sonar-project.properties.
+        type: string
+        required: false
+        default: ""
+      node-version:
+        description: "Node.js version for node-coverage-script"
+        type: string
+        required: false
+        default: "22"
       timeout-minutes:
         description: "Maximum job runtime, including coverage generation and the scan"
         type: number
@@ -394,6 +407,7 @@ jobs:
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
+            registry.npmjs.org:443
             release-assets.githubusercontent.com:443
             scanner.sonarcloud.io:443
             security.ubuntu.com:80
@@ -583,6 +597,29 @@ jobs:
           "$coverage_env/bin/python" -m coverage run --rcfile="$coverage_config" "$test_script" || status=$?
           "$coverage_env/bin/python" -m coverage xml --rcfile="$coverage_config" -o python-coverage.xml
           exit "$status"
+      - name: Set up Node.js for coverage
+        if: steps.token.outputs.available == 'true' && inputs.node-coverage-script != ''
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Generate JavaScript/TypeScript coverage
+        id: node-coverage
+        if: steps.token.outputs.available == 'true' && inputs.node-coverage-script != ''
+        shell: bash
+        env:
+          NODE_COVERAGE_SCRIPT: ${{ inputs.node-coverage-script }}
+        run: |
+          set -euo pipefail
+          # An npm script name only: the input is passed to `npm run`, never to a shell.
+          if [[ ! "$NODE_COVERAGE_SCRIPT" =~ ^[A-Za-z0-9][A-Za-z0-9:_.-]*$ ]]; then
+            echo "::error::node-coverage-script must be an npm script name, got '$NODE_COVERAGE_SCRIPT'"
+            exit 1
+          fi
+          npm ci --ignore-scripts --no-audit --no-fund
+          # Like the Rust coverage, a red test still lets the scan measure what ran; the job fails after it.
+          status=0
+          npm run --silent -- "$NODE_COVERAGE_SCRIPT" || status=$?
+          echo "status=$status" >>"$GITHUB_OUTPUT"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
         uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
@@ -595,3 +632,10 @@ jobs:
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
             "-Dsonar.cpd.exclusions=**/i18n/**"
+      - name: Fail on JavaScript/TypeScript test failures
+        if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
+        env:
+          NODE_COVERAGE_STATUS: ${{ steps.node-coverage.outputs.status }}
+        run: |
+          echo "::error::node-coverage-script exited with status $NODE_COVERAGE_STATUS"
+          exit 1
