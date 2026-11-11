@@ -103,6 +103,14 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/tables.rs,crates/core/src/region.rs\n')
 
+    def test_duplication_exclusions_are_read_as_the_scanner_reads_them(self):
+        for line in ('sonar.cpd.exclusions = **/table?.rs', 'sonar.cpd.exclusions:**/table?.rs',
+                     '  sonar.cpd.exclusions=**/table?.rs  ', 'sonar.cpd.exclusions=**/table?.rs\r'):
+            with self.subTest(line=line):
+                result, output = self.run_validation_with_properties(f'sonar.organization=x\r\n{line}\n')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/table?.rs\n')
+
     def test_duplication_exclusions_cannot_publish_scanner_arguments(self):
         for value in ('a" -Dsonar.host.url="https://attacker.invalid', 'a b', '$(touch injected)', "a'b"):
             with self.subTest(value=value):

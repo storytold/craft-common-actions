@@ -488,11 +488,12 @@ jobs:
           cpd='**/i18n/**'
           own=""
           if [[ -f sonar-project.properties ]]; then
-            own=$(sed -n 's/^sonar\.cpd\.exclusions=//p' sonar-project.properties | tail -n 1)
+            # Properties syntax: optional blanks around `=` or `:`, and a CRLF file leaves a trailing \r.
+            own=$(sed -n 's/^[ \t]*sonar\.cpd\.exclusions[ \t]*[=:][ \t]*//p' sonar-project.properties | tail -n 1 | sed 's/[ \t\r]*$//')
           fi
           if [[ -n "$own" ]]; then
-            if [[ ! "$own" =~ ^[a-zA-Z0-9_.*/,-]+$ ]]; then
-              echo "::error::Invalid sonar.cpd.exclusions in sonar-project.properties: only letters, digits, and _ . * / , - are allowed."
+            if [[ ! "$own" =~ ^[a-zA-Z0-9_.*?/,-]+$ ]]; then
+              echo "::error::Invalid sonar.cpd.exclusions in sonar-project.properties: only letters, digits, and _ . * ? / , - are allowed."
               exit 1
             fi
             cpd="$cpd,$own"
