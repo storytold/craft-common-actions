@@ -248,7 +248,7 @@ https://archive.ubuntu.com/ubuntu/\tpriority:2
 https://security.ubuntu.com/ubuntu/\tpriority:3
 """
 
-# What install-riscv64-cross adds: it must keep reading amd64 from archive.ubuntu.com.
+# What install-riscv64-cross adds: its amd64 source must stay paired with its riscv64 source.
 RISCV_LIST = 'deb [arch=amd64] https://archive.ubuntu.com/ubuntu noble main universe\n'
 
 
