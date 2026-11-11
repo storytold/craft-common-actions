@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import re
 import subprocess
 import sys
 import time
@@ -25,6 +26,28 @@ APPS = [
     "lightcraft", "materialcraft", "pdfcraft", "photocraft", "soundcraft", "texturecraft", "vectorcraft",
     "wordcraft",
 ]
+
+
+REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# cut_release.py's options a train may pass on, and the values they may take.
+FLAGS = {"--publish", "--dry-run", "--no-sync", "--allow-fewer-assets"}
+VALUED = {"--part": re.compile(r"^(minor|patch)$"), "--gate-workflow": re.compile(r"^[A-Za-z0-9 ._()-]+$")}
+
+
+def check(repos: list[str], extra: list[str]) -> None:
+    """Only owner/name repos and known cut_release.py options reach the subprocess."""
+    for repo in repos:
+        if not REPO.match(repo):
+            raise SystemExit(f"{repo!r} is not owner/name")
+    i = 0
+    while i < len(extra):
+        opt = extra[i]
+        if opt in FLAGS:
+            i += 1
+        elif opt in VALUED and i + 1 < len(extra) and VALUED[opt].match(extra[i + 1]):
+            i += 2
+        else:
+            raise SystemExit(f"{opt!r} is not an option a train passes to cut_release.py")
 
 
 def run_app(repo: str, extra: list[str], logs: Path) -> tuple[str, int, str]:
@@ -56,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     if not repos:
         p.error("name the apps, or pass --all")
     extra += ["--publish"] * a.publish + ["--dry-run"] * a.dry_run
+    check(repos, extra)
     logs = Path(a.logs)
     logs.mkdir(parents=True, exist_ok=True)
 

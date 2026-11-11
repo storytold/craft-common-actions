@@ -31,6 +31,14 @@ class TrainTests(unittest.TestCase):
         self.assertNotIn("storytold/figcraft", repos)
         self.assertTrue(all(extra == ["--part", "patch", "--publish"] for _, extra in calls))
 
+    def test_only_owner_name_repos_and_known_options_reach_cut_release(self):
+        release_train.check(["storytold/pdfcraft"], ["--part", "patch", "--publish", "--gate-workflow", "CI"])
+        for repos, extra in [(["--upload-pack=x"], []), (["pdfcraft"], []),
+                             (["storytold/pdfcraft"], ["--commit", "abc"]), (["storytold/pdfcraft"], ["--part", "major"]),
+                             (["storytold/pdfcraft"], ["--version"])]:
+            with self.assertRaises(SystemExit, msg=f"{repos} {extra}"):
+                release_train.check(repos, extra)
+
     def test_one_stopped_app_fails_the_train(self):
         code, _ = self.run_train(["storytold/pdfcraft"], rc=1)
         self.assertEqual(code, 1)
