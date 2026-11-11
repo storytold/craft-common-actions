@@ -483,7 +483,22 @@ jobs:
             echo "::error::Invalid SonarCloud project key: must start with an alphanumeric character or underscore and contain only letters, digits, dash, underscore, period or colon (max 400 characters)."
             exit 1
           fi
-          printf 'key=%s\n' "$PROJECT_KEY" >>"$GITHUB_OUTPUT"
+          # A -D argument replaces the same property in sonar-project.properties, so the repository's
+          # own duplication exclusions are appended to the shared one here.
+          cpd='**/i18n/**'
+          own=""
+          if [[ -f sonar-project.properties ]]; then
+            # Properties syntax: optional blanks around `=` or `:`, and a CRLF file leaves a trailing \r.
+            own=$(sed -n 's/^[ \t]*sonar\.cpd\.exclusions[ \t]*[=:][ \t]*//p' sonar-project.properties | tail -n 1 | sed 's/[ \t\r]*$//')
+          fi
+          if [[ -n "$own" ]]; then
+            if [[ ! "$own" =~ ^[a-zA-Z0-9_.*?/,-]+$ ]]; then
+              echo "::error::Invalid sonar.cpd.exclusions in sonar-project.properties: only letters, digits, and _ . * ? / , - are allowed."
+              exit 1
+            fi
+            cpd="$cpd,$own"
+          fi
+          printf 'key=%s\ncpd=%s\n' "$PROJECT_KEY" "$cpd" >>"$GITHUB_OUTPUT"
       - name: Check out craft-fonts
         if: steps.token.outputs.available == 'true' && inputs.shards <= 1
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -681,7 +696,7 @@ jobs:
             "-Dsonar.projectKey=${{ steps.project.outputs.key }}"
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
-            "-Dsonar.cpd.exclusions=**/i18n/**"
+            "-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"
       - name: Fail on JavaScript/TypeScript test failures
         if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
         env:

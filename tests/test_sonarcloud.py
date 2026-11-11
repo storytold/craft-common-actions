@@ -41,7 +41,7 @@ class SonarCloudTests(unittest.TestCase):
             with self.subTest(key=key):
                 result, output = self.run_step(self.validation, PROJECT_KEY=key)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(output, f'key={key}\n')
+                self.assertEqual(output, f'key={key}\ncpd=**/i18n/**\n')
 
     def test_invalid_keys_cannot_publish_scanner_arguments(self):
         for key in (
@@ -80,8 +80,44 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(
             self.scan['with']['args'].splitlines()[0],
             '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold '
-            '-Dsonar.rust.lcov.reportPaths=lcov.info "-Dsonar.cpd.exclusions=**/i18n/**"',
+            '-Dsonar.rust.lcov.reportPaths=lcov.info '
+            '"-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"',
         )
+
+    def run_validation_with_properties(self, properties):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'sonar-project.properties').write_text(properties)
+            output = Path(temp) / 'output'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', self.validation['run']],
+                cwd=temp,
+                env={**os.environ, 'PROJECT_KEY': 'storytold_x', 'LC_ALL': 'C', 'GITHUB_OUTPUT': str(output)},
+                capture_output=True,
+                text=True,
+            )
+            return result, output.read_text() if output.exists() else ''
+
+    def test_repository_duplication_exclusions_are_appended(self):
+        result, output = self.run_validation_with_properties(
+            'sonar.projectKey=storytold_x\nsonar.cpd.exclusions=**/tables.rs,crates/core/src/region.rs\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/tables.rs,crates/core/src/region.rs\n')
+
+    def test_duplication_exclusions_are_read_as_the_scanner_reads_them(self):
+        for line in ('sonar.cpd.exclusions = **/table?.rs', 'sonar.cpd.exclusions:**/table?.rs',
+                     '  sonar.cpd.exclusions=**/table?.rs  ', 'sonar.cpd.exclusions=**/table?.rs\r'):
+            with self.subTest(line=line):
+                result, output = self.run_validation_with_properties(f'sonar.organization=x\r\n{line}\n')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/table?.rs\n')
+
+    def test_duplication_exclusions_cannot_publish_scanner_arguments(self):
+        for value in ('a" -Dsonar.host.url="https://attacker.invalid', 'a b', '$(touch injected)', "a'b"):
+            with self.subTest(value=value):
+                result, output = self.run_validation_with_properties(f'sonar.cpd.exclusions={value}\n')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('::error::', result.stdout)
+                self.assertEqual(output, '')
 
     def test_coverage_is_generated_before_the_scan_imports_it(self):
         coverage = next(step for step in self.steps if step.get('id') == 'coverage')
