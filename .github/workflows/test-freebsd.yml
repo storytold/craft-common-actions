@@ -47,5 +47,18 @@ jobs:
         uses: ./actions/configure-apt-mirrors
       - name: Install YAML parser
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo
+      # On 11 Nov 2026 one run found no candidate for tcsh or debsigs right after an update that
+      # fetched every index, while the runs before and after passed. These answer whether apt
+      # read those indexes, and whether this CPU runs the amd64v3 packages they list.
+      - name: Show why apt found no candidate
+        if: failure()
+        run: |
+          set +e
+          apt-cache policy tcsh debsigs
+          apt-config dump | grep -iE 'architecture|variant'
+          ls -l /var/lib/apt/lists/ | grep -E 'universe.*Packages'
+          grep -m1 'model name' /proc/cpuinfo
+          echo "avx2 cores: $(grep -c avx2 /proc/cpuinfo)"
+          /lib64/ld-linux-x86-64.so.2 --help | grep -A6 'glibc-hwcaps'
       - name: Exercise failing tests, package validation and required fonts
         run: /usr/bin/python3 -m unittest discover -s tests -v
