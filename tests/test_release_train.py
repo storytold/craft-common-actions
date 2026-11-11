@@ -1,5 +1,6 @@
 """scripts/release_train.py: which apps a train releases, and what it passes on."""
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,8 +20,13 @@ class TrainTests(unittest.TestCase):
             calls.append((repo, extra))
             return repo, rc, "done"
 
-        with mock.patch.object(release_train, "run_app", side_effect=fake):
-            code = release_train.main(["--logs", tempfile.mkdtemp()] + argv)
+        cwd = os.getcwd()
+        os.chdir(tempfile.mkdtemp())
+        try:
+            with mock.patch.object(release_train, "run_app", side_effect=fake):
+                code = release_train.main(["--logs", "logs"] + argv)
+        finally:
+            os.chdir(cwd)
         return code, calls
 
     def test_all_but_the_skipped_apps_with_the_flags_passed_on(self):
@@ -38,6 +44,17 @@ class TrainTests(unittest.TestCase):
                              (["storytold/pdfcraft"], ["--version"])]:
             with self.assertRaises(SystemExit, msg=f"{repos} {extra}"):
                 release_train.check(repos, extra)
+
+    def test_the_log_folder_stays_inside_the_current_directory(self):
+        cwd = os.getcwd()
+        os.chdir(tempfile.mkdtemp())
+        try:
+            self.assertEqual(release_train.logs_dir("logs/today"), Path.cwd().resolve() / "logs" / "today")
+            for bad in ["/tmp/x", "../outside", "logs/../../x", "C:/Windows", "a b"]:
+                with self.assertRaises(SystemExit, msg=bad):
+                    release_train.logs_dir(bad)
+        finally:
+            os.chdir(cwd)
 
     def test_one_stopped_app_fails_the_train(self):
         code, _ = self.run_train(["storytold/pdfcraft"], rc=1)
