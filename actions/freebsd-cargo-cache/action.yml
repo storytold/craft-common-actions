@@ -16,6 +16,11 @@ inputs:
   key:
     description: Primary key returned by the restore invocation (package/save)
     default: ""
+  target:
+    description: >-
+      Rust target triple of a cross build (e.g. aarch64-unknown-freebsd), whose output Cargo
+      writes to target/<triple>/<profile> rather than target/<profile>. Empty for a native build.
+    default: ""
 outputs:
   key:
     description: Primary cache key for the subsequent save invocation
@@ -77,6 +82,7 @@ runs:
       env:
         CACHE_PHASE: ${{ inputs.phase }}
         CACHE_PROFILE: ${{ inputs.profile }}
+        CACHE_TARGET: ${{ inputs.target }}
         # PRs may restore their base branch's cache, but never write it.
         CACHE_CAN_SAVE: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' }}
       run: |
@@ -85,6 +91,7 @@ runs:
         # host archive outside that tree to avoid a second copy inside the VM.
         cache="$HOME/.cache/craft-freebsd-cargo"
         case "$CACHE_PROFILE" in debug|release) ;; *) echo 'invalid cache profile' >&2; exit 1 ;; esac
+        case "$CACHE_TARGET" in *[!a-z0-9_-]*) echo 'invalid cache target' >&2; exit 1 ;; esac
         ssh_args='ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=60 -o ConnectTimeout=120'
         remote_rsync='env PATH=/usr/local/bin:/usr/bin:/bin rsync'
         push() {
@@ -123,6 +130,13 @@ runs:
             push git /var/tmp/craft-cargo/git
             # Do not load both profiles into the space-constrained VM at once.
             push "target/$CACHE_PROFILE" "/var/tmp/craft-target/$CACHE_PROFILE"
+            # A cross build keeps only its build scripts and proc macros in target/<profile>;
+            # everything it builds for the target is under target/<triple>/<profile>.
+            if [ -n "$CACHE_TARGET" ]; then
+              # shellcheck disable=SC2029
+              ssh freebsd "mkdir -p /var/tmp/craft-target/$CACHE_TARGET/$CACHE_PROFILE"
+              push "target/$CACHE_TARGET/$CACHE_PROFILE" "/var/tmp/craft-target/$CACHE_TARGET/$CACHE_PROFILE"
+            fi
             ;;
           package)
             if [ "$CACHE_CAN_SAVE" = true ]; then
@@ -137,8 +151,9 @@ runs:
             # excluded. Keep the debug checkpoint when packaging removed it.
             pull registry /var/tmp/craft-cargo/registry
             pull git /var/tmp/craft-cargo/git
-            for profile in debug release; do
-              # profile is one of the two literal directory names above.
+            for profile in debug release ${CACHE_TARGET:+"$CACHE_TARGET/debug" "$CACHE_TARGET/release"}; do
+              # profile is one of the literal directory names above, under the validated triple
+              # for a cross build.
               # shellcheck disable=SC2029
               if ssh freebsd "test -d /var/tmp/craft-target/$profile"; then
                 pull "target/$profile" "/var/tmp/craft-target/$profile"
