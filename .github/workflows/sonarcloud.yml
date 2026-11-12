@@ -97,6 +97,8 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
             *.amazonaws.com:443
             *.crates.io:443
@@ -109,8 +111,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -118,6 +118,7 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
@@ -172,6 +173,8 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
             *.amazonaws.com:443
             *.crates.io:443
@@ -184,8 +187,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -193,6 +194,7 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
@@ -297,6 +299,8 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
             *.amazonaws.com:443
             *.crates.io:443
@@ -309,8 +313,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -318,6 +320,7 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
@@ -414,6 +417,8 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
             *.amazonaws.com:443
             *.crates.io:443
@@ -426,8 +431,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -435,6 +438,7 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
