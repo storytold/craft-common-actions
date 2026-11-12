@@ -36,6 +36,25 @@ class ShardStatusTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertNotEqual(self.run_check({1: '0\n', 2: value}).returncode, 0)
 
+    def test_shard_records_test_exit_code_without_losing_coverage(self):
+        shard_step = next(s for s in self.workflow['jobs']['coverage']['steps']
+                          if s.get('name') == "Run this shard's tests")
+        for status in (0, 100, 101):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                binary = root / 'cargo'
+                binary.write_text('#!/bin/bash\nmkdir -p profraw\ntouch profraw/test.profraw\nexit "$FAKE_EXIT"\n')
+                binary.chmod(0o755)
+                result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', shard_step['run']],
+                                        cwd=tmp, env={**os.environ, 'SHARD': '1', 'TOTAL_SHARDS': '2',
+                                                     'FAKE_EXIT': str(status), 'PATH': f"{tmp}:{os.environ['PATH']}"},
+                                        capture_output=True, text=True)
+                if status in (0, 100):
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual((root / 'profdata/shard-1.status').read_text(), f'{status}\n')
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+
     def test_scan_precedes_failure_and_status_survives_profile_cleanup(self):
         scan = next(s for s in self.steps if s.get('name') == 'SonarCloud Scan')
         self.assertLess(self.steps.index(scan), self.steps.index(self.check))

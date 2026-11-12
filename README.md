@@ -893,12 +893,15 @@ This step requires the Sonar token, so token-independent CI should also run the 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
 that archive, merges its own raw profiles into one sparse `.profdata` with the
-rustup `llvm-profdata`, and uploads only that; the scan job merges the shard
+rustup `llvm-profdata`, and uploads that plus a small test-exit-status file; the scan job merges the shard
 profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
 cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+Ordinary test failures still allow coverage and static analysis to upload, but then
+fail the scan job. Missing shard status also fails closed; a green analysis job
+must not conceal failed tests. The single-shard Rust path is unchanged.
 
 The scan job frees unused runner SDKs before either Rust coverage path. Sharded
 coverage merges and removes the shard profiles before extracting the test archive, then
