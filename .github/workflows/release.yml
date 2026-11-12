@@ -344,14 +344,16 @@ jobs:
     timeout-minutes: 90
     name: Windows ${{ matrix.arch }}
     needs: [version]
-    runs-on: windows-latest
+    # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
+    # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
+    runs-on: ${{ matrix.runner }}
     environment: ${{ !inputs.dry-run && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: arm64, target: aarch64-pc-windows-msvc }
+          - { arch: x64, target: x86_64-pc-windows-msvc, runner: windows-latest }
+          - { arch: arm64, target: aarch64-pc-windows-msvc, runner: windows-11-arm }
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
