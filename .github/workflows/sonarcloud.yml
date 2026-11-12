@@ -94,7 +94,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: block
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
@@ -140,7 +140,7 @@ jobs:
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Build shard matrix
@@ -172,7 +172,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: block
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
@@ -218,7 +218,7 @@ jobs:
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Check out craft-fonts
@@ -246,10 +246,10 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
+      - uses: step-security/taiki-e-install-action@v2.87.32
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.150
-      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      - uses: step-security/rust-cache@v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Provision pinned PDF test fonts
@@ -281,7 +281,7 @@ jobs:
       - name: Record the toolchain that built the archive
         run: |
           rustc -vV | sed -n 's/^release: //p' > rustc-release.txt
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: nextest-archive
           path: |
@@ -300,7 +300,7 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: block
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
@@ -346,7 +346,7 @@ jobs:
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Check out craft-fonts
@@ -368,10 +368,10 @@ jobs:
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
             libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev
             libgl1-mesa-dev mesa-vulkan-drivers
-      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
+      - uses: step-security/taiki-e-install-action@v2.87.32
         with:
           tool: cargo-nextest@0.9.150
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - uses: actions/download-artifact@v8.0.2
         with:
           name: nextest-archive
           path: archive
@@ -437,7 +437,7 @@ jobs:
           rm -rf profraw merge-errors.txt
           echo "Merged profile: $(du -sh "profdata/shard-$SHARD.profdata" | cut -f1)"
           df -h .
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: profdata-${{ matrix.shard }}
           path: profdata/
@@ -453,7 +453,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: block
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
@@ -500,7 +500,7 @@ jobs:
             sonarcloud.io:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -578,11 +578,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
+      - uses: step-security/taiki-e-install-action@v2.87.32
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           tool: cargo-llvm-cov
-      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      - uses: step-security/rust-cache@v2.9.2
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -616,7 +616,7 @@ jobs:
             --ignore-filename-regex "$COVERAGE_IGNORE"
       - name: Download shard profiles and archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           # One merged profile per shard (shard-N.profdata), never the raw profiles.
           pattern: profdata-*
@@ -624,7 +624,7 @@ jobs:
           merge-multiple: true
       - name: Download test archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: nextest-archive
           path: archive
@@ -710,7 +710,7 @@ jobs:
           exit "$status"
       - name: Set up Node.js for coverage
         if: steps.token.outputs.available == 'true' && inputs.node-coverage-script != ''
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        uses: actions/setup-node@v7.1.0
         with:
           node-version: ${{ inputs.node-version }}
       - name: Generate JavaScript/TypeScript coverage
@@ -733,7 +733,7 @@ jobs:
           echo "status=$status" >>"$GITHUB_OUTPUT"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
-        uses: step-security/sonarqube-scan-action@c2312f8888f2bff4220bd815febb9d4a7cb32433 # v8.2.1
+        uses: step-security/sonarqube-scan-action@v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
