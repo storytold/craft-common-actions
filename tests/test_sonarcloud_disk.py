@@ -74,10 +74,10 @@ class SonarCloudDiskTests(unittest.TestCase):
             runner_temp.mkdir()
             sentinel = runner_temp / 'keep-unrelated.txt'
             sentinel.write_text('keep')
-            profiles = workspace / 'profraw'
+            profiles = workspace / 'profdata'
             profiles.mkdir()
-            for name in ('one', 'two'):
-                (profiles / f'{name}.profraw').write_text(name)
+            for shard in ('1', '2'):
+                (profiles / f'shard-{shard}.profdata').write_text(shard)
             archive = workspace / 'archive'
             archive.mkdir()
             (archive / 'rustc-release.txt').write_text('1.99.1\n')
@@ -109,13 +109,14 @@ with open(os.environ['CALLS'], 'a') as calls:
 if name == 'rustup':
     print(os.environ['SYSROOT'] if '--print' in args else 'host: test-host')
 elif name == 'llvm-profdata':
-    assert list(pathlib.Path('profraw').glob('*.profraw'))
+    assert args[:2] == ['merge', '-sparse'], args
+    assert sorted(args[2:4]) == ['profdata/shard-1.profdata', 'profdata/shard-2.profdata'], args
     if failure == 'merge':
         sys.exit(7)
     pathlib.Path(args[args.index('-o') + 1]).write_text('merged profile')
 elif name == 'tar':
     assert pathlib.Path('coverage.profdata').is_file()
-    assert not list(pathlib.Path('profraw').glob('*.profraw'))
+    assert not list(pathlib.Path('profdata').glob('*.profdata'))
     if failure == 'extract':
         (pathlib.Path(args[args.index('-C') + 1]) / 'partial').write_text('partial extract')
         sys.exit(8)
@@ -142,7 +143,7 @@ elif name == 'llvm-cov':
             return {
                 'result': result,
                 'calls': calls.read_text().splitlines(),
-                'raw_profiles': sorted(path.name for path in profiles.glob('*.profraw')),
+                'shard_profiles': sorted(path.name for path in profiles.glob('*.profdata')),
                 'archive_exists': archive_file.exists(),
                 'merged_exists': (workspace / 'coverage.profdata').exists(),
                 'extracted': list(runner_temp.glob('coverage-archive*')),
@@ -155,7 +156,7 @@ elif name == 'llvm-cov':
         observed = self.run_combine()
         self.assertEqual(observed['result'].returncode, 0, observed['result'].stderr)
         self.assertLess(observed['calls'].index('llvm-profdata'), observed['calls'].index('tar'))
-        self.assertEqual(observed['raw_profiles'], [])
+        self.assertEqual(observed['shard_profiles'], [])
         self.assertFalse(observed['archive_exists'])
         self.assertFalse(observed['merged_exists'])
         self.assertEqual(observed['extracted'], [])
@@ -165,7 +166,7 @@ elif name == 'llvm-cov':
     def test_failed_profile_merge_preserves_inputs_and_never_extracts(self):
         observed = self.run_combine('merge')
         self.assertEqual(observed['result'].returncode, 7, observed['result'].stderr)
-        self.assertEqual(observed['raw_profiles'], ['one.profraw', 'two.profraw'])
+        self.assertEqual(observed['shard_profiles'], ['shard-1.profdata', 'shard-2.profdata'])
         self.assertTrue(observed['archive_exists'])
         self.assertNotIn('tar', observed['calls'])
         self.assertEqual(observed['extracted'], [])

@@ -398,11 +398,44 @@ jobs:
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
+      - name: Install LLVM tools for the archive's toolchain
+        run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
+      - name: Merge this shard's profiles
+        # Raw profiles of a large workspace run to tens of gigabytes per shard; the scan job cannot
+        # hold every shard's at once. One sparse indexed profile per shard is a small fraction of that.
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          toolchain="$(cat archive/rustc-release.txt)"
+          llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
+          echo "Raw profiles: $(du -sh profraw | cut -f1) in $(find profraw -name '*.profraw' | wc -l) files"
+          df -h .
+          mkdir -p profdata
+          # failure-mode=any stops on any unreadable input. A profile cut short (a test process that
+          # crashed while writing it, or a full disk) fails this shard and names the file, instead of
+          # being uploaded and failing the scan's merge later with no shard to look at.
+          status=0
+          "$llvm_bin/llvm-profdata" merge -sparse --failure-mode=any profraw/*.profraw \
+            -o "profdata/shard-$SHARD.profdata" 2>merge-errors.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            cat merge-errors.txt >&2
+            sed -n 's/^warning: \(.*\.profraw\): \(.*\)$/\1: \2/p' merge-errors.txt | while IFS= read -r bad; do
+              echo "::error::shard $SHARD wrote a truncated or corrupt coverage profile: $bad"
+            done
+            echo "::error::llvm-profdata could not merge shard $SHARD's profiles (exit $status)"
+            rm -rf profdata
+            exit "$status"
+          fi
+          rm -rf profraw merge-errors.txt
+          echo "Merged profile: $(du -sh "profdata/shard-$SHARD.profdata" | cut -f1)"
+          df -h .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: profraw-${{ matrix.shard }}
-          path: profraw/
-          if-no-files-found: ignore
+          name: profdata-${{ matrix.shard }}
+          path: profdata/
+          if-no-files-found: error
           retention-days: 1
 
   sonarcloud:
@@ -577,8 +610,9 @@ jobs:
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: profraw-*
-          path: profraw
+          # One merged profile per shard (shard-N.profdata), never the raw profiles.
+          pattern: profdata-*
+          path: profdata
           merge-multiple: true
       - name: Download test archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
@@ -597,10 +631,10 @@ jobs:
           toolchain="$(cat archive/rustc-release.txt)"
           llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
           df -h . "$RUNNER_TEMP"
-          # Do not hold every raw profile beside the expanded archive. Retain the raw inputs
+          # Each shard merged its own raw profiles; combine those. Retain the shard profiles
           # until the merge succeeds, then release them before unpacking the test binaries.
-          "$llvm_bin/llvm-profdata" merge -sparse profraw/*.profraw -o coverage.profdata
-          rm -f profraw/*.profraw
+          "$llvm_bin/llvm-profdata" merge -sparse profdata/*.profdata -o coverage.profdata
+          rm -f profdata/*.profdata
           df -h . "$RUNNER_TEMP"
           # Unpack outside the checkout: the scanner analyses everything under the workspace, and build
           # output (generated sources) there would be counted as duplicated code.
