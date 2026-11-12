@@ -100,6 +100,8 @@ jobs:
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
           # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -176,6 +178,8 @@ jobs:
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
           # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -302,6 +306,8 @@ jobs:
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
           # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -453,6 +459,8 @@ jobs:
           # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
           # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
