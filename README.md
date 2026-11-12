@@ -145,7 +145,7 @@ With `windows-launch-check: true`, the x64 and x86 Windows jobs install the MSI 
 start every program in it the same way, through a scheduled task running as SYSTEM:
 
 - the main app (`<app-name>.exe`, or `windows-main-exe`) must still be running after 30 seconds
-  or exit 0;
+  or exit 0. Exactly one installed program may have that name; with two, the check fails;
 - other programs (CLIs, helpers) fail only on a crash (exit 101 or an NTSTATUS code). A CLI that
   prints its usage and exits 1 or 2 passes.
 

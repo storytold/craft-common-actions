@@ -117,10 +117,18 @@ $task = 'craft-launch-check'
 try {
   $exes = @(Get-InstalledExes | Where-Object { $before -notcontains $_ })
   if (-not $exes) { Write-Output "::error::Installing $(Split-Path $Msi -Leaf) added no .exe"; exit 1 }
-  if (-not ($exes | Where-Object { (Split-Path $_ -Leaf) -ieq $MainExe })) {
+  $mains = @($exes | Where-Object { (Split-Path $_ -Leaf) -ieq $MainExe })
+  if (-not $mains) {
     Write-Output "::error::$MainExe is not among the installed programs: $(($exes | ForEach-Object { Split-Path $_ -Leaf }) -join ', ')"
     exit 1
   }
+  # The main app is held to exit 0, the other programs only to not crash, so a helper that shares
+  # the main app's file name would be judged as the main app. Refuse to guess which one it is.
+  if ($mains.Count -gt 1) {
+    Write-Output "::error::More than one installed program is named ${MainExe}: $($mains -join ', '). Set main-exe to a name only the main app has."
+    exit 1
+  }
+  $mainPath = $mains[0]
 
   Write-Summary "### Launch check: $(Split-Path $Msi -Leaf)"
   Write-Summary ""
@@ -148,7 +156,7 @@ try {
     Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction SilentlyContinue
 
     $result = if (Test-Path "$base.result") { (Get-Content "$base.result" -TotalCount 1).Trim() } else { 'no result' }
-    $isMain = $leaf -ieq $MainExe
+    $isMain = $exe -eq $mainPath
     $ok = switch -Regex ($result) {
       '^running$' { $true; break }
       '^exit (-?\d+)$' { $code = [int]$Matches[1]; if ($isMain) { $code -eq 0 } else { -not (Test-IsCrash $code) }; break }
