@@ -390,8 +390,8 @@ jobs:
         run: |
           mkdir -p profraw
           # nextest exits 100 when tests fail. A red test must not hide the static analysis, so
-          # that alone keeps the job green. Any other exit means the shard could not run its
-          # tests at all (for example a test binary nextest cannot list): fail the job, because a
+          # record that status for the scan job to fail after uploading analysis. Any other exit
+          # means the shard could not run its tests at all (for example a test binary nextest cannot list): fail the job, because a
           # shard that runs nothing would scan an empty coverage report.
           rc=0
           cargo nextest run --archive-file archive/nextest-archive.tar.zst \
@@ -400,6 +400,8 @@ jobs:
             echo "::error::nextest could not run shard $SHARD (exit $rc)"
             exit "$rc"
           fi
+          mkdir -p profdata
+          printf '%s\n' "$rc" > "profdata/shard-$SHARD.status"
           if ! ls profraw/*.profraw >/dev/null 2>&1; then
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
@@ -750,3 +752,25 @@ jobs:
         run: |
           echo "::error::node-coverage-script exited with status $NODE_COVERAGE_STATUS"
           exit 1
+      - name: Fail on Rust shard test failures
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        shell: bash
+        env:
+          TOTAL_SHARDS: ${{ inputs.shards }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for ((shard=1; shard<=TOTAL_SHARDS; shard++)); do
+            path="profdata/shard-$shard.status"
+            if [ ! -f "$path" ]; then
+              echo "::error::Missing test status for coverage shard $shard"
+              failed=1
+              continue
+            fi
+            status="$(cat "$path")"
+            if [ "$status" != 0 ]; then
+              echo "::error::Coverage shard $shard tests failed (exit $status); analysis was still uploaded"
+              failed=1
+            fi
+          done
+          exit "$failed"
