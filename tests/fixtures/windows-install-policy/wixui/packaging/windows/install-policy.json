@@ -1,0 +1,65 @@
+{
+  "id": "fixturewixui",
+  "name": "FixtureWixUi",
+  "upgradeCode": "3A7303C4-C6ED-45A7-BF54-2C665A89312A",
+  "sources": [
+    "fixturewixui.wxs"
+  ],
+  "icon": "../fixture.ico",
+  "localization": [
+    "fixturewixui.en-us.wxl"
+  ],
+  "extensions": [
+    "UI",
+    "Util"
+  ],
+  "payloads": [
+    "fixturewixui-cli.exe",
+    "fixturewixui.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\fixturewixui.exe",
+      "",
+      "[#FixtureWixUiExe]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureWixUi",
+      "InstallDir",
+      "[INSTALLFOLDER]"
+    ],
+    [
+      "-1",
+      "Software\\FixtureWixUi",
+      "DesktopShortcut",
+      "#1"
+    ],
+    [
+      "-1",
+      "Software\\Classes\\FixtureWixUi.Image\\shell\\open\\command",
+      "",
+      "\"[#FixtureWixUiExe]\" \"%1\""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\.png\\OpenWithProgids",
+      "FixtureWixUi.Image",
+      ""
+    ],
+    [
+      "-1",
+      "Software\\Classes\\Applications\\fixturewixui.exe",
+      "FriendlyAppName",
+      "FixtureWixUi"
+    ]
+  ],
+  "mode": "dualScope",
+  "skipsLicencePage": true,
+  "wixVariables": {
+    "DocsDir": "@folder",
+    "BannerBmp": "@bitmap 493x58",
+    "DialogBmp": "@bitmap 493x312"
+  }
+}
