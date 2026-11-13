@@ -912,6 +912,9 @@ cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+Each shard links the build job's target directory to its extracted copy of the
+archive, so tests that run a workspace binary through
+`env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.
 Ordinary test failures still allow coverage and static analysis to upload, but then
 fail the scan job. Missing shard status also fails closed; a green analysis job
 must not conceal failed tests. The single-shard Rust path is unchanged.
