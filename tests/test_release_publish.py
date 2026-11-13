@@ -28,7 +28,7 @@ else:
 
 
 class PublishTests(unittest.TestCase):
-    def run_step(self, now, before, last="v0.20.0", cancelled="false"):
+    def run_step(self, now, before, last="v0.20.0", cancelled="false", with_summary=False):
         with tempfile.TemporaryDirectory() as d:
             tools = Path(d) / 'tools'
             tools.mkdir()
@@ -40,7 +40,8 @@ class PublishTests(unittest.TestCase):
                        NOW=str(now), BEFORE=str(before), LAST=last, CANCELLED=cancelled,
                        EDITED=str(edited), GITHUB_STEP_SUMMARY=str(summary))
             r = subprocess.run(['bash', '-c', STEP['run']], env=env, capture_output=True, text=True)
-            return r, edited.read_text() if edited.exists() else ''
+            out = (r, edited.read_text() if edited.exists() else '')
+            return out + (summary.read_text() if summary.exists() else '',) if with_summary else out
 
     def test_only_on_the_release_branch_when_asked_and_not_in_a_dry_run(self):
         self.assertEqual(STEP['if'], "inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'")
@@ -53,10 +54,14 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(edited, 'release edit v0.21.0 --draft=false')
 
     def test_fewer_assets_than_the_last_release_stays_a_draft(self):
-        r, edited = self.run_step(now=44, before=50)
+        r, edited, summary = self.run_step(now=44, before=50, with_summary=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn('stays a draft', r.stdout)
+        self.assertIn('Not published: v0.21.0 has 44 assets where v0.20.0 had 50', summary)
         self.assertEqual(edited, '')
+
+    def test_the_baseline_is_the_most_recently_published_release(self):
+        self.assertIn("sort_by(.publishedAt) | last", STEP['run'])
 
     def test_a_cancelled_build_job_stays_a_draft(self):
         r, edited = self.run_step(now=50, before=50, cancelled='true')

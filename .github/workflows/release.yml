@@ -1262,17 +1262,21 @@ jobs:
           CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
         run: |
           set -euo pipefail
-          if [ "$CANCELLED" != false ]; then
-            echo "::error::a build job was cancelled: $TAG stays a draft"
+          refuse() {
+            echo "::error::$1"
+            echo "Not published: $1" >> "$GITHUB_STEP_SUMMARY"
             exit 1
+          }
+          if [ "$CANCELLED" != false ]; then
+            refuse "a build job was cancelled: $TAG stays a draft"
           fi
           now="$(gh release view "$TAG" --json assets --jq '.assets | length')"
-          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')"
+          # The most recently published release; gh lists by creation, not publication.
+          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | last | .tagName // ""')"
           if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
             before="$(gh release view "$last" --json assets --jq '.assets | length')"
             if [ "$now" -lt "$before" ]; then
-              echo "::error::$TAG has $now assets where $last had $before: it stays a draft"
-              exit 1
+              refuse "$TAG has $now assets where $last had $before: it stays a draft"
             fi
           fi
           gh release edit "$TAG" --draft=false
