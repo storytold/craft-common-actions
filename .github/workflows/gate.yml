@@ -83,6 +83,11 @@ on:
         type: boolean
         required: false
         default: true
+      sccache:
+        description: "Also cache the workspace crates' compiled libraries (which rust-cache leaves out) with sccache in the GitHub Actions cache. It writes where the dependency cache is saved (pushes to the default branch, opted-in manual runs); other runs read those entries. SCCACHE_GHA_RW_MODE in `env` overrides that. Test executables are never cached. Its cache starts afresh when cache-version, a Cargo.toml or a build.rs changes; bump cache-version when files a procedural macro reads change (see the README)"
+        type: boolean
+        required: false
+        default: false
       cache-version:
         description: "Bump to start the dependency cache afresh"
         type: string
@@ -278,6 +283,33 @@ jobs:
           key: ${{ steps.cache-profile.outputs.key }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: true
+
+      # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
+      - name: Install sccache
+        if: inputs.sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Use sccache
+        if: inputs.sccache
+        shell: bash
+        env:
+          WRITES: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          # sccache leaves `--check-cfg` out of its key, so after a change to the expected cfgs a
+          # cached compile would replay its old `unexpected_cfgs` warnings. A change to the files
+          # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
+          # fresh sccache cache instead.
+          VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+            echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
 
       - name: Caller setup
         if: inputs.setup-command != ''
