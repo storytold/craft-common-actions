@@ -164,5 +164,81 @@ class ProfileCacheTests(unittest.TestCase):
         self.assertRegex(self.key('[workspace]\nmembers = []'), r'^key=[a-f0-9]{64}\n$')
 
 
+
+class FileCacheTests(unittest.TestCase):
+    NAMES = [s.get('name') for s in STEPS]
+
+    def key(self, glob, hash_):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'output')
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-c', step('File cache key')['run']],
+                cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'GLOB': glob, 'HASH': hash_, 'PREFIX': 'v1-files-Linux',
+                     'GITHUB_OUTPUT': str(output)})
+            return result.returncode, output.read_text() if output.exists() else ''
+
+    def test_is_off_by_default(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['file-cache-paths']['default'], '')
+        for name in ('File cache key', 'Restore cached files', 'Hash restored files', 'Save cached files'):
+            with self.subTest(step=name):
+                self.assertIn("inputs.file-cache-paths != ''", step(name)['if'])
+
+    def test_restores_before_the_gate_and_saves_after(self):
+        self.assertLess(self.NAMES.index('Restore cached files'), self.NAMES.index('Hash restored files'))
+        self.assertLess(self.NAMES.index('Hash restored files'), self.NAMES.index('Gate'))
+        self.assertGreater(self.NAMES.index('Save cached files'), self.NAMES.index('Gate'))
+        restore, save = step('Restore cached files')['with'], step('Save cached files')['with']
+        self.assertEqual(restore['path'], save['path'])
+        self.assertNotIn('restore-keys', save)
+
+    def test_each_save_gets_its_own_key(self):
+        # A cache entry can never be overwritten, so a fixed key could never replace a damaged one.
+        self.assertEqual(step('Save cached files')['with']['key'],
+                         '${{ steps.file-cache.outputs.key }}-${{ github.run_id }}-${{ github.run_attempt }}')
+
+    def test_restores_the_newest_for_the_key_files_then_under_the_prefix(self):
+        restore = step('Restore cached files')['with']
+        self.assertEqual(restore['restore-keys'].splitlines(),
+                         ['${{ steps.file-cache.outputs.key }}-', '${{ steps.file-cache.outputs.prefix }}'])
+
+    def test_saves_what_the_gate_changed(self):
+        self.assertEqual(step('Hash restored files')['env']['HASH'], '${{ hashFiles(inputs.file-cache-paths) }}')
+        condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
+        self.assertIn("steps.file-cache-restore.outputs.cache-matched-key == ''", condition)
+        self.assertIn("!startsWith(steps.file-cache-restore.outputs.cache-matched-key, "
+                      "format('{0}-', steps.file-cache.outputs.key))", condition)
+        self.assertIn('hashFiles(inputs.file-cache-paths) != steps.file-cache-restored.outputs.hash', condition)
+        self.assertNotIn('cache-hit', condition)
+
+    def test_file_cache_version_rotates_only_the_file_cache(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['file-cache-version']['default'], 'v1')
+        self.assertIn('${{ inputs.file-cache-version }}', step('File cache key')['env']['PREFIX'])
+        rust = next(s for s in STEPS if s.get('uses', '').startswith('Swatinem/rust-cache@'))
+        self.assertNotIn('file-cache-version', str(rust))
+
+    def test_saves_under_the_dependency_cache_rule(self):
+        condition = re.sub(r'\s+', ' ', step('Save cached files')['if'])
+        self.assertIn("github.event_name != 'pull_request'", condition)
+        self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
+        self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
+
+    def test_saves_only_after_a_passing_gate(self):
+        condition = step('Save cached files')['if'].strip()
+        self.assertTrue(condition.startswith('success()'), condition)
+        self.assertNotIn('always()', condition)
+        self.assertNotIn('cancelled()', condition)
+
+    def test_key_is_the_prefix_and_hash(self):
+        self.assertEqual(self.key('ATTRIBUTION.toml', 'ab' * 32),
+                         (0, f"prefix=v1-files-Linux-\nkey=v1-files-Linux-{'ab' * 32}\n"))
+
+    def test_a_glob_that_matches_nothing_fails(self):
+        self.assertEqual(self.key('missing.toml', '')[0], 1)
+        self.assertEqual(self.key('', '')[0], 1)
+
+
 if __name__ == '__main__':
     unittest.main()
