@@ -4,7 +4,7 @@
 The bytes inside a block are the normalized standards file. The recorded sha256
 must match those bytes, and those bytes must match the file at the recorded
 commit on craft-contrib main. A digest rewritten to suit an edit does not pass.
-An intact older commit warns. A missing source is "could not check".
+An intact older commit warns only when the normalized standards file changed on main. A missing source is "could not check".
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ SOURCES = {
     "rust": "standards/house-rules-rust.md",
 }
 START = re.compile(
-    r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->\n"
+    r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->(?:\r\n|\r|\n)"
 )
 END = "<!-- craft-house-rules:end -->"
+MARKER = re.compile(r"<!--\s*craft-house-rules:")
 
 
 def normalize(text: str) -> str:
@@ -38,19 +39,46 @@ def digest(text: str) -> str:
     return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()
 
 
+def without_fenced_examples(text: str) -> str:
+    """Mask Markdown fences without changing offsets used for byte-preserving writes."""
+    result = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        if fence is None:
+            opening = re.match(r" {0,3}(`{3,}|~{3,})([^\r\n]*)", line)
+            if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+                fence = opening[1]
+            else:
+                result.append(line)
+                continue
+        else:
+            closing = re.fullmatch(r" {0,3}" + re.escape(fence[0]) +
+                                   r"{" + str(len(fence)) + r",}[ \t]*(?:\r\n|\r|\n)?", line)
+            if closing:
+                fence = None
+        result.append("".join(c if c in "\r\n" else " " for c in line))
+    return "".join(result)
+
+
 def parse_blocks(text: str):
     """Return (blocks, spans). A span is the half-open range of one block in `text`."""
-    text = normalize(text)
+    markers = without_fenced_examples(text)
     blocks = []
     spans = []
     position = 0
     while True:
-        match = START.search(text, position)
-        if match is None:
+        marker = MARKER.search(markers, position)
+        if marker is None:
             break
-        end_at = text.find(END, match.end())
-        if end_at < 0:
+        match = START.match(text, marker.start())
+        if match is None:
+            raise ValueError("house rules: malformed or unexpected block marker")
+        closing = MARKER.search(markers, match.end())
+        if closing is None:
             raise ValueError(f"house rules: {match.group(1)} block is not closed")
+        end_at = closing.start()
+        if not text.startswith(END, end_at):
+            raise ValueError("house rules: nested or malformed block marker")
         body = text[match.end() : end_at]
         blocks.append(
             {
@@ -60,8 +88,13 @@ def parse_blocks(text: str):
                 "body": body,
             }
         )
-        spans.append((match.start(), end_at + len(END)))
         position = end_at + len(END)
+        # The marker's line ending belongs to the generated block, not local text.
+        if text.startswith("\r\n", position):
+            position += 2
+        elif text[position:position + 1] in ("\r", "\n"):
+            position += 1
+        spans.append((match.start(), position))
     return blocks, spans
 
 
@@ -90,11 +123,24 @@ def commit_sha(raw: str) -> str | None:
 
 
 def git(source: str, args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", "-C", source, *args],
-        capture_output=True,
-        text=True,
-    )
+    command = ["git", "-C", source, *args]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        return subprocess.CompletedProcess(command, 128, "", str(error))
+
+
+def main_sha(source: str) -> str | None:
+    """Prefer fetched origin/main, falling back to local main; never trust HEAD."""
+    for ref in ("refs/remotes/origin/main", "refs/heads/main"):
+        exists = git(source, ["show-ref", "--verify", "--quiet", ref])
+        if exists.returncode == 1:
+            continue
+        if exists.returncode != 0:
+            return None
+        result = git(source, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+        return commit_sha(result.stdout) if result.returncode == 0 else None
+    return None
 
 
 def revision_state(source: str, sha: str) -> str:
@@ -102,28 +148,22 @@ def revision_state(source: str, sha: str) -> str:
     recorded = commit_sha(sha)
     if recorded is None:
         return "missing"
-    head = git(source, ["rev-parse", "HEAD"])
-    if head.returncode != 0:
-        return "missing"
-    head_sha_value = commit_sha(head.stdout)
-    if head_sha_value is None:
+    main = main_sha(source)
+    if main is None:
         return "missing"
     if git(source, ["cat-file", "-e", f"{recorded}^{{commit}}"]).returncode != 0:
         return "missing"
-    if head_sha_value == recorded:
+    if main == recorded:
         return "identical"
-    if git(source, ["merge-base", "--is-ancestor", recorded, "HEAD"]).returncode == 0:
+    ancestry = git(source, ["merge-base", "--is-ancestor", recorded, main])
+    if ancestry.returncode == 0:
         return "older"
-    return "not-on-main"
+    return "not-on-main" if ancestry.returncode == 1 else "missing"
 
 
-def file_at_head(source: str, path: str) -> str | None:
-    if path not in SOURCES.values():
-        return None
-    shown = git(source, ["show", f"HEAD:{path}"])
-    if shown.returncode != 0:
-        return None
-    return shown.stdout
+def file_at_main(source: str, path: str) -> str | None:
+    main = main_sha(source)
+    return file_at(source, main, path) if main is not None else None
 
 
 def file_at(source: str, sha: str, path: str) -> str | None:
@@ -156,7 +196,7 @@ def judge_block(source: str, block: dict) -> tuple[str | None, str | None]:
         return f"house rules: {block['name']} block does not match {path} at {block['source']}", None
     if state != "older":
         return None, None
-    current = file_at_head(source, path)
+    current = file_at_main(source, path)
     if current is None:
         return f"house rules: could not check {block['name']} at main", None
     if normalize(current) != body:
@@ -191,33 +231,39 @@ def check_file(agents: str, source: Path, require_rust: bool) -> tuple[list[str]
     return failures, warnings
 
 
-def head_sha(source: str) -> str:
-    result = git(source, ["rev-parse", "HEAD"])
-    recorded = commit_sha(result.stdout) if result.returncode == 0 else None
+def source_sha(source: str) -> str:
+    recorded = main_sha(source)
     if recorded is None:
         raise RuntimeError("house rules: could not read the source revision")
     return recorded
 
 
 def apply_blocks(agents: str, rendered: list[str]) -> str:
-    text = normalize(agents) if agents else ""
-    try:
-        _, spans = parse_blocks(text) if text else ([], [])
-    except ValueError:
-        spans = []
-    insertion = "".join(rendered)
+    """Replace only generated spans; keep all surrounding local text verbatim."""
+    blocks, spans = parse_blocks(agents) if agents else ([], [])
+    replacements = {}
+    for text in rendered:
+        generated, _ = parse_blocks(text)
+        replacements[generated[0]["name"]] = text
     if not spans:
-        rest = text
-        if rest and not rest.startswith("\n"):
-            rest = "\n" + rest
-        return insertion + rest
-    start = spans[0][0]
-    end = spans[-1][1]
-    # Drop a single trailing newline that belonged to the last rendered block.
-    suffix = text[end:]
-    if suffix.startswith("\n"):
-        suffix = suffix[1:]
-    return text[:start] + insertion + suffix
+        bom = "\ufeff" if agents.startswith("\ufeff") else ""
+        local = agents[len(bom):]
+        separator = "\n" if local and not local.startswith(("\n", "\r")) else ""
+        return bom + "".join(rendered) + separator + local
+    names = [block["name"] for block in blocks]
+    if len(set(names)) != len(names):
+        raise ValueError("house rules: a block name is repeated")
+    if any(name not in SOURCES for name in names):
+        raise ValueError("house rules: refusing to replace an unknown block")
+    pieces = []
+    position = 0
+    for block, (start, end) in zip(blocks, spans):
+        pieces.append(agents[position:start])
+        pieces.append(replacements.pop(block["name"], ""))
+        position = end
+    pieces.extend(replacements.values())
+    pieces.append(agents[position:])
+    return "".join(pieces)
 
 
 def agents_file(raw: str) -> Path:
@@ -235,7 +281,7 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
     checkout = checkout_path(str(source))
     if checkout is None:
         raise RuntimeError("house rules: could not read the craft-contrib checkout")
-    sha = head_sha(checkout)
+    sha = source_sha(checkout)
     names = ["core", "rust"] if require_rust else ["core"]
     rendered = []
     for name in names:
@@ -245,8 +291,13 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
         rendered.append(render(name, sha, content))
     path = agents_file(str(directory))
     # The existing file is preserved around the blocks. Its text is not a path.
-    current = path.read_text(encoding="utf-8") if path.is_file() else ""
-    path.write_text(apply_blocks(current, rendered), encoding="utf-8")  # NOSONAR
+    current = ""
+    if path.is_file():
+        with path.open(encoding="utf-8", newline="") as handle:
+            current = handle.read()
+    updated = apply_blocks(current, rendered)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)  # NOSONAR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -261,7 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "write":
         try:
             write_agents(directory, source, args.require_rust)
-        except RuntimeError as error:
+        except (RuntimeError, ValueError) as error:
             print(error)
             return 2
         return 0
