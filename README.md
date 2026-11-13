@@ -779,6 +779,13 @@ owner's permissions. Tags default to the branch name, the semver tag and `latest
 branch, and the `tags` input replaces those metadata-action rules. `timeout-minutes` (default 60)
 bounds each platform build; the manifest merge has its own 15-minute limit.
 
+### 12. `lockfile.yml`
+
+Fails when `.github/workflows/actions.lock` disagrees with the workflows, or when a locked pin no
+longer resolves upstream. Every repository with workflows runs it, and Dependabot regenerates the
+lockfile in its own action-update pull requests. Callers copy the workflow from here; see
+[Keeping `actions.lock` current](docs/actions-lock.md) for the local command and the pinning rules.
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:

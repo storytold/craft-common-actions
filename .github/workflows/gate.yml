@@ -124,7 +124,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: audit
           allowed-endpoints: >
@@ -158,13 +158,13 @@ jobs:
             security.ubuntu.com:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: storytold/craft-fonts
           ref: ${{ inputs.craft-fonts-ref }}
@@ -245,7 +245,7 @@ jobs:
 
       - name: Install cargo tools
         if: inputs.tools != ''
-        uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
+        uses: step-security/taiki-e-install-action@v2.87.32
         with:
           tool: ${{ inputs.tools }}
 
@@ -272,7 +272,7 @@ jobs:
 
       # Default-branch writes remain the default. Maintainers can explicitly opt manual
       # branch runs into branch-scoped writes; pull-request runs never save a cache.
-      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      - uses: step-security/rust-cache@v2.9.2
         with:
           prefix-key: ${{ inputs.cache-version }}-rust
           key: ${{ steps.cache-profile.outputs.key }}
