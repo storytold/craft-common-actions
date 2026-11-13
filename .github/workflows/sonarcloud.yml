@@ -225,6 +225,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -353,6 +355,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -574,6 +578,9 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        if: steps.token.outputs.available == 'true' && inputs.shards <= 1
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != '' && steps.token.outputs.available == 'true' && inputs.shards <= 1
         shell: bash

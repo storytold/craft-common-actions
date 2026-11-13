@@ -143,6 +143,21 @@ class SonarCloudTests(unittest.TestCase):
                         else:
                             self.assertRegex(step['uses'], r'^[^@]+@[0-9a-f]{40}$')
 
+    def test_caller_i18n_is_available_before_each_coverage_run(self):
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        for job, runner_name in [('build', 'Build instrumented test archive'),
+                                 ('coverage', "Run this shard's tests"),
+                                 ('sonarcloud', 'Generate Rust coverage')]:
+            steps = workflow['jobs'][job]['steps']
+            checkout = next(step for step in steps if step.get('name') == 'Check out craft-i18n')
+            runner = next(step for step in steps if step.get('name') == runner_name)
+            self.assertEqual(checkout['uses'], 'storytold/craft-common-actions/actions/checkout-craft-i18n@main')
+            self.assertLess(steps.index(checkout), steps.index(runner))
+            if job == 'sonarcloud':
+                self.assertIn('inputs.shards <= 1', checkout['if'])
+                self.assertIn("steps.token.outputs.available == 'true'", checkout['if'])
+
     def test_archive_build_has_the_same_fonts_as_runtime(self):
         workflow = yaml.load(
             (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
