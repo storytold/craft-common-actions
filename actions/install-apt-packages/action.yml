@@ -57,6 +57,7 @@ runs:
         # Seconds one attempt at a mirror download may take, and how many attempts are made.
         APT_NETWORK_TIMEOUT: "300"
         APT_NETWORK_ATTEMPTS: "3"
+        CONFIGURE_MIRRORS: ${{ github.action_path }}/../configure-apt-mirrors/configure-apt-mirrors.sh
       run: |
         set -euo pipefail
         debs="$HOME/.cache/craft-apt-debs"
@@ -72,9 +73,14 @@ runs:
         # Acquire timeouts don't end a connection that stays open and sends nothing: one such
         # stall held a job for 58 minutes until its own timeout. So each mirror download also has
         # a wall-clock limit and is retried. Only downloads are limited; dpkg is never killed.
+        # Before each attempt the mirrors are checked again (configure-apt-mirrors): one that
+        # stopped answering moves to the end of the list, and mirrors outside ubuntu.com take
+        # over when no ubuntu.com host resolves. Without the check, every attempt spent its
+        # time on the same dead names.
         network() {
           local attempt status
           for ((attempt = 1; ; attempt++)); do
+            sudo "$CONFIGURE_MIRRORS" || echo "::warning::install-apt-packages: configuring the apt mirrors failed; keeping the current sources"
             status=0
             sudo timeout --kill-after=30 "$APT_NETWORK_TIMEOUT" apt-get "${opts[@]}" "$@" || status=$?
             if [ "$status" -eq 0 ] || [ "$attempt" -ge "$APT_NETWORK_ATTEMPTS" ]; then

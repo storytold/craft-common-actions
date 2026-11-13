@@ -26,6 +26,30 @@ Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
 new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
 `CRAFT_ANYTHING`).
 
+#### Cutting a release
+
+`scripts/cut_release.py <owner/app>` cuts a release without a version-bump pull request, so a
+change of version strings never waits on the full CI of a pull request:
+
+1. It takes the newest commit on main whose `CI` run for a push passed (`--commit` picks another;
+   `--gate-workflow` names another workflow).
+2. It commits the version bump there: `[workspace.package] version`, the internal path
+   dependencies, and Cargo.lock's entries for the workspace's own packages. A repository with
+   other files that name the version adds `packaging/set-version.sh <old> <new>`.
+3. It merges that into `release` (main's version lines win) and pushes, which starts the app's
+   `release.yml`.
+4. It opens a pull request that brings the same bump to main, with auto-merge on where the
+   repository allows it. The release doesn't wait for it.
+5. With `--publish` it waits for `release.yml` and publishes the draft once every job passed and
+   the draft has assets. Otherwise it stops after the push.
+
+The version defaults to the next minor after the last published release (`--part patch`, or
+`--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
+Cargo.lock) and an authenticated `gh` whose account may update `release`.
+
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
+
 #### Caller Example:
 ```yaml
 name: Release
@@ -95,7 +119,9 @@ somewhere users can check it independently. On first install, compare that finge
 The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
 builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
 stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
-of the script does with `--push`.
+of the script does with `--push`. When `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured
+(e.g. as organization secrets), the job dual-pushes the OCI layout to `docker.io/storytold/<app>`
+with the same version and stable architecture tags.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
@@ -366,7 +392,13 @@ action's version prefix.
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and
 `debug`/`release` artifacts are saved, excluding incremental state, Cargo
-credentials/config and Rust toolchains. Successful non-PR runs save caches on a best-effort basis; PRs
+credentials/config and Rust toolchains. A cross build passes its triple as `target`, and
+its `target/<triple>/<profile>` output is saved and restored too: without it, the aarch64
+release job kept only its build scripts and compiled everything else cold. `release.yml`
+keys its cache on the inputs that change the FreeBSD build (app name, architecture,
+craft-fonts ref and FreeBSD release), not on all its inputs: `contributors-artifact`
+names the run, so a key that held it could never be restored, and a `dry-run` shares
+the release's entry, so a dry run warms the cache a release restores. Successful non-PR runs save caches on a best-effort basis; PRs
 only restore. Restore, checkpoint and save failures are non-blocking; each phase has a 10-minute
 time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards
@@ -481,6 +513,8 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
+- an optional `setup-command` run from the repository root before the gate, for fetching pinned
+  test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -508,6 +542,11 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
       tools: trunk@0.21.14
       command: packaging/web/package.sh
 ```
+
+`setup-command` is also passed through the environment, then run with Bash from the checkout root.
+Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
+fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
+gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
 
 #### Caller Example:
 ```yaml
@@ -687,8 +726,9 @@ jobs:
 
 Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
 `images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
-where an image needs it: `registry.digitalocean.com` when a DOCR image is listed, `ghcr.io` through
-the workflow token, and `dhi.io` when `dhi-login: true` and the Docker Hub secrets are provided.
+where an image needs it: `ghcr.io` through the workflow token, `docker.io` when Docker Hub images
+are listed (using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true`
+and the Docker Hub secrets are provided.
 
 Both craft web images publish this way. `font-preview-service` fetches its font sources into the
 build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
@@ -718,8 +758,8 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
     with:
       images: |
-        registry.digitalocean.com/artcraft/artcraft-services
         ghcr.io/storytold/artcraft-services
+        docker.io/storytold/artcraft-services
       platforms: '[{"platform":"linux/amd64","runner":"github-ubuntu-64core"}]'
       dockerfile: build/service_cpu.Dockerfile
       build-args: |
@@ -752,7 +792,8 @@ Individual actions are also available for composing custom pipelines:
     with:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
-- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
+- `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
+- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
@@ -844,10 +885,11 @@ so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
 failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
 
-Sharded Rust coverage continues after test failures so SonarCloud can still analyse the code.
-Each shard reports its test outcome in the job summary; failing tests also produce a warning
-annotation pointing to the test log. A green coverage job therefore does not mean all tests passed.
-Runner errors and missing coverage profiles still fail the shard.
+Sharded Rust coverage continues after test failures when the shard produced coverage profiles, so
+SonarCloud can still analyse the code. Each shard reports its test outcome in the job summary;
+failing tests also produce a warning annotation pointing to the test log. A green coverage job
+therefore does not mean all tests passed. If a shard produces no profiles, its summary records
+that the scan cannot include it and the shard fails. Runner errors also fail the shard.
 
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
@@ -863,13 +905,19 @@ This step requires the Sonar token, so token-independent CI should also run the 
 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
-that archive and uploads its profile data, and the scan job merges the profiles
-with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
-the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
-does not run them.
+that archive, merges its own raw profiles into one sparse `.profdata` with the
+rustup `llvm-profdata`, and uploads that plus a small test-exit-status file; the scan job merges the shard
+profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
+cannot read (for example one cut short by a test process that crashed while
+writing it) fails its shard and is named in an error annotation, rather than
+reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
+Sharded runs skip doctests, because nextest does not run them.
+Ordinary test failures still allow coverage and static analysis to upload, but then
+fail the scan job. Missing shard status also fails closed; a green analysis job
+must not conceal failed tests. The single-shard Rust path is unchanged.
 
 The scan job frees unused runner SDKs before either Rust coverage path. Sharded
-coverage merges and removes raw profiles before extracting the test archive, then
+coverage merges and removes the shard profiles before extracting the test archive, then
 releases the compressed archive and temporary binaries as they are consumed.
 Disk-space snapshots in the logs show headroom before cleanup and aggregation.
 

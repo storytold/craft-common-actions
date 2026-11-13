@@ -51,7 +51,7 @@ Path('args.json').write_text(json.dumps(sys.argv[1:]))
             configured = {**job.get('env', {}), **step.get('env', {})}
             if job_name == 'freebsd':
                 vm = next(item for item in job['steps']
-                          if item.get('uses', '').startswith('vmactions/freebsd-vm@'))
+                          if item.get('uses', '').startswith('step-security/freebsd-vm@'))
                 forwarded = vm['with']['envs'].split()
                 configured = {key: value for key, value in configured.items() if key in forwarded}
             env.update({key: value.replace(EXPRESSION, app_name)
