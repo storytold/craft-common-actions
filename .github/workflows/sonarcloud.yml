@@ -580,6 +580,7 @@ jobs:
           ref: ${{ inputs.fonts-ref }}
       - name: Check out craft-i18n
         if: steps.token.outputs.available == 'true' && inputs.shards <= 1
+        id: i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != '' && steps.token.outputs.available == 'true' && inputs.shards <= 1
@@ -763,6 +764,15 @@ jobs:
           status=0
           npm run --silent -- "$NODE_COVERAGE_SCRIPT" || status=$?
           echo "status=$status" >>"$GITHUB_OUTPUT"
+      # The checkout is a build input, not caller source. Moving it after all coverage runs
+      # prevents an unsharded scan from counting another repository's files as this project.
+      - name: Move craft-i18n outside scan workspace
+        if: steps.i18n.outputs.rev != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(mktemp -d "$RUNNER_TEMP/craft-i18n.XXXXXX")"
+          mv -- "$GITHUB_WORKSPACE/craft-i18n" "$destination/checkout"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
         uses: step-security/sonarqube-scan-action@c2312f8888f2bff4220bd815febb9d4a7cb32433 # v8.2.1
