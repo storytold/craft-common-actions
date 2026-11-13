@@ -92,6 +92,16 @@ on:
         type: boolean
         required: false
         default: false
+      attest:
+        # A called workflow can never request more than its caller grants, so the caller's
+        # permissions: block decides whether this can run.
+        description: >-
+          Attest the release files and a CycloneDX SBOM with Sigstore once the draft release
+          exists (the default). The caller must grant `id-token: write`, `attestations: write`
+          and `contents: write`; set false for an app that does not.
+        type: boolean
+        required: false
+        default: true
 
     secrets:
       APPLE_CERTIFICATE:
@@ -1254,3 +1264,19 @@ jobs:
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
+
+  supply-chain:
+    name: SBOM and signatures
+    needs: [version, release]
+    # Only once the draft exists: the SBOM is attached to it. A dry run publishes
+    # nothing, so it has nothing to attest. Called from this repository rather
+    # than by tag, so it runs at the same commit as the rest of the release.
+    if: ${{ inputs.attest && !cancelled() && needs.release.result == 'success' }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    uses: ./.github/workflows/supply-chain.yml
+    with:
+      version: ${{ needs.version.outputs.version }}

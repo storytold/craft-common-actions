@@ -81,6 +81,11 @@ on:
         type: boolean
         required: false
         default: false
+      attest:
+        description: "Attest each published image's manifest digest with SLSA build provenance after the merge, attaching it in GHCR; the caller must grant id-token: write, attestations: write and artifact-metadata: write"
+        type: boolean
+        required: false
+        default: true
       timeout-minutes:
         description: "Time limit for each platform build"
         type: number
@@ -195,9 +200,10 @@ jobs:
                 exit 1
                 ;;
             esac
-            # No provenance attestation: it names the registry it was pushed to,
-            # so each repository would get a different digest and the merge job
-            # could not tag one manifest for both.
+            # buildx provenance stays off: it names the registry it was pushed
+            # to, so each repository would get a different digest and the merge
+            # job could not tag one manifest for both. The attest job attaches
+            # provenance to the published digest instead.
             args=(--platform "$PLATFORM" --file "$BUILD_DOCKERFILE" --provenance=false)
             if [ -n "$BUILD_TARGET" ]; then args+=(--target "$BUILD_TARGET"); fi
             if [ -n "$CACHE_FROM" ]; then args+=(--cache-from "$CACHE_FROM"); fi
@@ -255,6 +261,9 @@ jobs:
       packages: write
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      # JSON [{"image": ..., "digest": ...}] for each repository tagged here.
+      subjects: ${{ steps.publish.outputs.subjects }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@v2.22.4
@@ -293,6 +302,7 @@ jobs:
           tags: ${{ inputs.tags }}
 
       - name: Create manifest lists and push
+        id: publish
         shell: bash
         working-directory: ${{ runner.temp }}/digests
         env:
@@ -300,24 +310,79 @@ jobs:
           TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
+          # One attestation subject per repository published here.
+          subjects="[]"
           # metadata-action emits "<repo>:<tag>" for every image, so each
           # registry only receives the tags that belong to it.
           while IFS= read -r repo; do
             repo="${repo//[[:space:]]/}"
             [ -n "$repo" ] || continue
-            tag_args=()
+            repo_tags=()
             while IFS= read -r tag; do
               case "$tag" in
-                "$repo":*) tag_args+=(--tag "$tag") ;;
+                "$repo":*) repo_tags+=("$tag") ;;
               esac
             done <<< "$TAGS"
-            if [ "${#tag_args[@]}" -eq 0 ]; then
+            if [ "${#repo_tags[@]}" -eq 0 ]; then
               echo "no tags for $repo on this ref; skipping"
               continue
             fi
+            tag_args=()
+            for tag in "${repo_tags[@]}"; do tag_args+=(--tag "$tag"); done
             refs=()
             for digest in *; do
               refs+=("${repo}@sha256:${digest}")
             done
             docker buildx imagetools create "${tag_args[@]}" "${refs[@]}"
+            # Read the index digest back from the registry rather than recompute
+            # it: this is exactly the digest the attestation names.
+            index="$(docker buildx imagetools inspect "${repo_tags[0]}" --format '{{json .Manifest}}' | jq -r '.digest // empty')"
+            if [ -z "$index" ]; then
+              echo "error: could not read the manifest digest of ${repo_tags[0]}" >&2
+              exit 1
+            fi
+            subjects="$(jq -c --arg image "$repo" --arg digest "$index" '. + [{image: $image, digest: $digest}]' <<< "$subjects")"
+            echo "$repo -> $index"
           done <<< "$IMAGES"
+          echo "subjects=$subjects" >> "$GITHUB_OUTPUT"
+
+  attest:
+    name: Attest ${{ matrix.image }}
+    needs: merge
+    # An empty matrix cannot start a job, so a ref that tagged nothing skips this.
+    if: ${{ inputs.attest && needs.merge.outputs.subjects != '[]' }}
+    permissions:
+      contents: read
+      # Reaches into GHCR to attach the attestation; also what docker login writes.
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.merge.outputs.subjects) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@v2.22.4
+        with:
+          egress-policy: audit
+      # actions/attest pushes the attestation with the credentials docker login
+      # wrote. Only GHCR serves the referrers API, so a Docker Hub image keeps
+      # the GitHub-side attestation for the same digest.
+      - name: Log in to the registry
+        uses: step-security/docker-login-action@v4.6.0
+        with:
+          registry: ${{ startsWith(matrix.image, 'ghcr.io/') && 'ghcr.io' || 'docker.io' }}
+          username: ${{ startsWith(matrix.image, 'ghcr.io/') && github.actor || secrets.DOCKERHUB_USERNAME }}
+          password: ${{ startsWith(matrix.image, 'ghcr.io/') && secrets.GITHUB_TOKEN || secrets.DOCKERHUB_TOKEN }}
+      - name: Attest the published image
+        uses: actions/attest@v4.2.2
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ matrix.digest }}
+          push-to-registry: ${{ startsWith(matrix.image, 'ghcr.io/') }}
+          create-storage-record: ${{ startsWith(matrix.image, 'ghcr.io/') }}
+

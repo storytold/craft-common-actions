@@ -1,4 +1,4 @@
-"""The supply-chain workflow stays opt-in so current release callers keep working."""
+"""Every release attests its files and SBOM, unless the caller opts out."""
 
 import os
 from pathlib import Path
@@ -19,18 +19,28 @@ def load(path):
     return yaml.load(path.read_text(), Loader=yaml.BaseLoader)
 
 
-class SupplyChainOptInTests(unittest.TestCase):
+class SupplyChainTests(unittest.TestCase):
     def setUp(self):
         self.release = load(RELEASE)
         self.supply = load(SUPPLY)
 
-    def test_release_workflow_does_not_call_supply_chain(self):
-        text = RELEASE.read_text()
-        self.assertNotIn("supply-chain.yml", text)
-        self.assertNotIn("id-token", text)
-        self.assertNotIn("attestations:", text)
+    def test_release_workflow_runs_supply_chain_itself(self):
+        # The app no longer adds a second job; a caller only grants the permissions.
+        job = self.release["jobs"]["supply-chain"]
+        self.assertEqual(job["uses"], "./.github/workflows/supply-chain.yml")
+        self.assertEqual(job["permissions"]["contents"], "write")
+        self.assertEqual(job["permissions"]["id-token"], "write")
+        self.assertEqual(job["permissions"]["attestations"], "write")
+        self.assertIn("release", job["needs"])
+        self.assertIn("needs.release.result == 'success'", job["if"])
+        self.assertIn("!cancelled()", job["if"])
 
-    def test_release_exposes_version_for_an_optional_follow_up_job(self):
+    def test_attestation_can_be_turned_off(self):
+        spec = self.release["on"]["workflow_call"]["inputs"]["attest"]
+        self.assertEqual((spec["type"], spec["default"]), ("boolean", "true"))
+        self.assertIn("inputs.attest", self.release["jobs"]["supply-chain"]["if"])
+
+    def test_release_exposes_version_for_the_attestation_job(self):
         outputs = self.release["on"]["workflow_call"]["outputs"]
         self.assertIn("version", outputs)
         self.assertIn("jobs.version.outputs.version", outputs["version"]["value"])
