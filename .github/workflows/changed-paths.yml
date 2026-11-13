@@ -14,11 +14,19 @@ name: "Changed paths"
 # Pull requests compare the merge commit with its first parent (the base tip GitHub merged into),
 # so only the pull request's own changes count; pushes compare `before` with the pushed commit.
 # Anything else (a manual or scheduled run, a new branch, a push whose `before` is gone) matches.
+#
+# With `since-passed`, a push counts only what it changed besides moving the base (the files that
+# differ from `before`'s change replayed onto the new base), and only once the caller's run on
+# `before` passed (see the input). Merging the base
+# branch into a pull request then counts only the files whose conflicts it resolved: any merge
+# that leaves the pull request's own changes as they were matches nothing, so a passing run no
+# longer means the pull request passed on the current base. The fetches are anonymous, so in a
+# private repository it never skips.
 on:
   workflow_call:
     inputs:
       paths:
-        description: "Bash glob patterns, one per line, matched against repository-relative paths; `*` also matches `/`, so crates/ui-egui/* covers the whole crate"
+        description: "Bash glob patterns, one per line, matched against repository-relative paths; `*` also matches `/`, so crates/ui-egui/* covers the whole crate, and `[[ == ]]` takes extended patterns, so `!(*.md)` matches every file that isn't Markdown"
         type: string
         required: true
       label:
@@ -26,6 +34,11 @@ on:
         type: string
         required: false
         default: ""
+      since-passed:
+        description: "On a push to a pull request, count only the files that differ from `before`'s change replayed onto the new base, when the caller workflow's run on `before` passed; on a push to a branch, match unless that run passed. Needs `actions: read` from the caller"
+        type: boolean
+        required: false
+        default: false
     outputs:
       matched:
         description: "'true' when a changed path matches, the pull request has `label`, or the run is not a pull request or push"
@@ -34,8 +47,9 @@ on:
         description: "Why: the first matching path, the label, or the event"
         value: ${{ jobs.changes.outputs.reason }}
 
-permissions:
-  contents: read
+# No permissions of its own: the job has what the caller grants, `contents: read`, and
+# `actions: read` as well for `since-passed` (a called workflow can't ask for more than its caller
+# grants, so declaring it here would stop every caller that doesn't).
 
 jobs:
   changes:
@@ -63,10 +77,16 @@ jobs:
         shell: bash
         env:
           EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
           LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
           BEFORE: ${{ github.event.before }}
           PATTERNS: ${{ inputs.paths }}
           LABEL: ${{ inputs.label }}
+          SINCE_PASSED: ${{ inputs.since-passed }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          # only for since-passed, which reads the run on `before`
+          GH_TOKEN: ${{ inputs.since-passed && github.token || '' }}
         run: |
           set -euo pipefail
           result() {
@@ -76,26 +96,70 @@ jobs:
             echo "matched=$1 ($reason)"
             exit 0
           }
+          fetch_before() {
+            git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+              || git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$BEFORE"
+          }
+          # Whether the caller workflow's run on `before` passed.
+          before_passed() {
+            local workflow=${WORKFLOW_REF#"$REPOSITORY/"} paths
+            workflow=${workflow%%@*}
+            if ! paths=$(gh api "repos/$REPOSITORY/actions/runs?head_sha=$BEFORE&status=success&per_page=100" \
+              --jq '.workflow_runs[].path' 2>&1); then
+              # a missing `actions: read` (403) or an API error: say so rather than skip quietly
+              echo "::warning title=since-passed::could not read the runs on $BEFORE: ${paths//[$'\n\r']/ }"
+              return 1
+            fi
+            grep -qxF -- "$workflow" <<< "$paths"
+          }
+          # The files whose content in the pull request's head (HEAD^2) differs from `before`'s
+          # change replayed onto the head's merge base with the base branch: what this push
+          # changed besides moving the base. A file the replay can't merge keeps its conflict
+          # markers, so a resolved conflict counts. Fails when a commit can't be fetched.
+          changed_since_before() {
+            local head base history before_base head_base replayed
+            head=$(git rev-parse HEAD^2) && base=$(git rev-parse HEAD^1) || return 1
+            # Merge bases from the commits alone (no trees), in a repository of their own.
+            history=$(mktemp -d)
+            git init --quiet --bare "$history" || return 1
+            git -C "$history" fetch --quiet --no-tags --filter=tree:0 "$(git remote get-url origin)" \
+              "$base" "$head" "$BEFORE" || return 1
+            before_base=$(git -C "$history" merge-base "$base" "$BEFORE") \
+              && head_base=$(git -C "$history" merge-base "$base" "$head") || return 1
+            git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$BEFORE" "$before_base" "$head_base" \
+              || return 1
+            # exit status 1: merged with conflicts, still a tree (its oid is the first line)
+            replayed=$(git merge-tree --write-tree --no-messages --merge-base="$before_base" "$head_base" "$BEFORE") \
+              || [ $? -eq 1 ] || return 1
+            git diff -z --name-only --no-renames "${replayed%%$'\n'*}" "$head"
+          }
+          since=
+          changed=$(mktemp)
           case "$EVENT" in
             pull_request)
               if [ -n "$LABEL" ] && printf '%s' "${LABELS:-[]}" | jq -e --arg l "$LABEL" 'index($l) != null' >/dev/null; then
                 result true "label $LABEL"
               fi
               base=HEAD^1
+              if [ "$SINCE_PASSED" = true ] && [ "$ACTION" = synchronize ] && [ -n "${BEFORE//0/}" ] && before_passed \
+                && changed_since_before > "$changed"; then
+                since=" since $BEFORE, whose run passed"
+              fi
               ;;
             push)
               if [ -z "${BEFORE//0/}" ]; then result true "push without a previous commit"; fi
-              if ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
-                && ! git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$BEFORE"; then
+              if ! fetch_before; then
                 result true "push from $BEFORE, which could not be fetched"
+              fi
+              if [ "$SINCE_PASSED" = true ] && ! before_passed; then
+                result true "push from $BEFORE, whose run did not pass (or could not be read)"
               fi
               base=$BEFORE
               ;;
             *) result true "event $EVENT" ;;
           esac
           # NUL-separated: --name-only alone quotes paths with non-ASCII bytes, tabs or quotes.
-          changed=$(mktemp)
-          git diff -z --name-only --no-renames "$base" HEAD > "$changed"
+          [ -n "$since" ] || git diff -z --name-only --no-renames "$base" HEAD > "$changed"
           while IFS= read -r -d '' file; do
             [ -n "$file" ] || continue
             while IFS= read -r pattern; do
@@ -104,7 +168,7 @@ jobs:
               [ -n "$pattern" ] || continue
               # Unquoted on purpose: the pattern is a glob.
               # shellcheck disable=SC2053
-              if [[ $file == $pattern ]]; then result true "$file matches $pattern"; fi
+              if [[ $file == $pattern ]]; then result true "$file matches $pattern$since"; fi
             done <<< "$PATTERNS"
           done < "$changed"
-          result false "no changed path matches"
+          result false "no changed path matches$since"

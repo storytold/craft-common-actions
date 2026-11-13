@@ -656,7 +656,29 @@ expensive job, such as a Windows gate leg, only when it can matter. Pull request
 merge commit with its first parent, so only the pull request's own changes count; pushes compare
 `before` with the pushed commit; any other event, a new branch, or a `before` that can't be fetched
 matches. The checkout is two commits deep, a blobless partial clone that checks out only `.github`
-and the root-level files.
+and the root-level files. Patterns are matched by bash's `[[ == ]]`, which takes extended patterns,
+so `!(*.md)` matches every file that isn't Markdown.
+
+`since-passed: true` drops reruns of code that already passed. On a push to a pull request whose
+previous head's run of the calling workflow passed, only the files that differ between the new head
+and the previous head's change replayed onto the new head's merge base (`git merge-tree`) count: what
+the push changed besides moving the base. Merging the base branch in counts only the conflicts it
+resolved, since a file the replay can't merge keeps its conflict markers. On a push to a branch, the run on `before` must have passed, or it matches. The
+caller grants `actions: read` to read that run; without it, or when a commit can't be fetched, the
+whole pull request counts. The workflow declares no permissions, so a caller that grants only
+`contents: read` keeps working; callers should set their own `permissions`.
+
+This skips any merge of the base branch that leaves the pull request's own changes as they were,
+not only one that resolved conflicts in docs: a green run then means the pull request's code
+passed, on the base it was last tested with, and the base branch's own push run tests the two
+together once it merges. The fetches are anonymous (the checkout keeps no credentials), so in a
+private repository `since-passed` never skips. The replay needs git 2.40 or later
+(`git merge-tree --merge-base`, as on GitHub's runners); with an older git it fails and the whole
+pull request counts. In the caller, gate on `!cancelled() && needs.<job>.outputs.matched != 'false'`,
+so a failed scope job runs the job rather than skipping it; the run still concludes as failed
+(a reusable-workflow job can't `continue-on-error`), so `cut_release.py` won't take that commit. A skipped job that calls a reusable workflow reports only its own check
+(`gate`), not the called workflow's (`gate / gate (ubuntu-24.04)`): a branch protection rule that
+requires the latter waits forever on a skipped run, so require the caller's check instead.
 
 To let adding the label start the job, list `labeled` in the caller's `pull_request` types and keep
 that workflow's concurrency group separate from the main gate's, so a label never cancels it.
@@ -678,6 +700,24 @@ jobs:
     with:
       os: '["windows-latest"]'
       windows-command: cargo test -p my-windows-crate
+```
+
+The gate skipped when a push changes only docs:
+```yaml
+jobs:
+  scope:
+    permissions:
+      contents: read
+      actions: read
+    uses: storytold/craft-common-actions/.github/workflows/changed-paths.yml@main
+    with:
+      # every file but Markdown
+      paths: '!(*.md)'
+      since-passed: true
+  gate:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.matched != 'false' }}
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
 ```
 
 ### 9. `git-sources.yml`
