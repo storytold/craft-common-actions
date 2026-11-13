@@ -513,6 +513,8 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
+- an optional `setup-command` run from the repository root before the gate, for fetching pinned
+  test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -540,6 +542,11 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
       tools: trunk@0.21.14
       command: packaging/web/package.sh
 ```
+
+`setup-command` is also passed through the environment, then run with Bash from the checkout root.
+Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
+fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
+gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
 
 #### Caller Example:
 ```yaml
