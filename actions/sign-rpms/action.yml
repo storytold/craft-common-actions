@@ -1,0 +1,61 @@
+name: "Sign RPM packages"
+description: "Signs every .rpm in a directory with the key imported by import-signing-key and verifies each signature; needs GNUPGHOME, SIGNING_FPR and SIGNING_PUBKEY in the environment"
+
+inputs:
+  path:
+    description: "Directory holding the .rpm files"
+    required: false
+    default: "dist/release"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install rpm
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v rpm >/dev/null 2>&1; then
+          sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm
+        fi
+
+    - name: Sign and verify
+      shell: bash
+      env:
+        RPM_DIR: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if [ -z "${GNUPGHOME:-}" ] || [ -z "${SIGNING_FPR:-}" ]; then
+          echo "::error::GNUPGHOME/SIGNING_FPR are empty; run import-signing-key first."
+          exit 1
+        fi
+
+        shopt -s nullglob
+        rpms=("$RPM_DIR"/*.rpm)
+        if [ "${#rpms[@]}" -eq 0 ]; then
+          echo "::error::No .rpm files in $RPM_DIR to sign."
+          exit 1
+        fi
+
+        # Ubuntu's rpm shells out to /usr/bin/gpg2, a path only Fedora's gnupg2 provides.
+        gpg_bin="$(command -v gpg)"
+        # rpm only calls a signature good once the key is in its own database, and it wants an
+        # armored key, not the binary export import-signing-key also produces.
+        pubkey="${RUNNER_TEMP:-/tmp}/rpm-signing-key.asc"
+        gpg --batch --armor --export "$SIGNING_FPR" >"$pubkey"
+        rpm --import "$pubkey"
+
+        for pkg in "${rpms[@]}"; do
+          rpm --addsign \
+            --define "__gpg $gpg_bin" \
+            --define "_gpg_name $SIGNING_FPR" \
+            --define "_gpg_digest_algo sha256" \
+            "$pkg" >/dev/null
+          if ! rpmkeys --checksig "$pkg" 2>&1 | grep -q "signatures OK"; then
+            echo "::error::${pkg##*/} is not signed by $SIGNING_FPR"
+            rpmkeys --checksig "$pkg" 2>&1 || true
+            exit 1
+          fi
+          echo "signed ${pkg##*/}"
+        done

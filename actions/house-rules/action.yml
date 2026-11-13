@@ -1,0 +1,35 @@
+name: Check house rules
+description: >-
+  Fail unless the AGENTS.md house-rules blocks match craft-contrib at the commit they name,
+  and that commit is on main. An intact older commit warns.
+
+inputs:
+  working-directory:
+    description: "Directory that contains AGENTS.md"
+    required: false
+    default: "."
+  source:
+    description: "Checkout of storytold/craft-contrib with main history"
+    required: true
+  require-rust:
+    description: "Require the Rust block as well as the core block"
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: House rules match craft-contrib
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/house_rules.py
+        WORKSPACE_DIR: ${{ inputs.working-directory }}
+        SOURCE_DIR: ${{ inputs.source }}
+        REQUIRE_RUST: ${{ inputs.require-rust }}
+      run: |
+        set -euo pipefail
+        args=(python3 "$CHECK_PATH" check --directory "$WORKSPACE_DIR" --source "$SOURCE_DIR")
+        if [ "$REQUIRE_RUST" = "true" ]; then
+          args+=(--require-rust)
+        fi
+        "${args[@]}"

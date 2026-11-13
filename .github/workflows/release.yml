@@ -27,6 +27,11 @@ on:
         type: string
         required: false
         default: ""
+      contributors-artifact:
+        description: "Optional contributor snapshot artifact from refresh-contributors.yml in this workflow run; installed before every source build"
+        type: string
+        required: false
+        default: ""
       has-web:
         description: "Whether to build the WebAssembly (wasm) release"
         type: boolean
@@ -79,6 +84,23 @@ on:
         type: boolean
         required: false
         default: false
+      publish:
+        description: >-
+          Publish the draft when the run is done, instead of leaving it for a maintainer: only on
+          the release branch, only when no build job failed or was cancelled, and only when the
+          draft has at least as many assets as the last published release (a skipped job leaves the
+          run green).
+        type: boolean
+        required: false
+        default: false
+      dry-run:
+        description: >-
+          Build and check without releasing: no signing, no `release` environment, no macOS (its
+          larger runner is paid for), no Flatpak OCI push and no draft. For a nightly run on main
+          that finds release-only breakage (riscv64, Flatpak, FreeBSD, packaging) before release day.
+        type: boolean
+        required: false
+        default: false
 
     secrets:
       APPLE_CERTIFICATE:
@@ -109,6 +131,16 @@ on:
         required: false
       AZURE_CERT_PROFILE:
         required: false
+      # ASCII-armored OpenPGP secret key without a passphrase (a signing subkey is enough). It signs
+      # every Linux package format, the Flatpak bundle's commit and OCI image, and SHA256SUMS.txt.
+      LINUX_SIGNING_KEY:
+        required: false
+      DOCKERHUB_USERNAME:
+        description: "Username for publishing Flatpak OCI layouts to Docker Hub"
+        required: false
+      DOCKERHUB_TOKEN:
+        description: "Personal access token for publishing Flatpak OCI layouts to Docker Hub"
+        required: false
 
     outputs:
       version:
@@ -133,7 +165,13 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Git dependencies come from storytold
         run: |
           set -euo pipefail
@@ -176,7 +214,13 @@ jobs:
       date: ${{ steps.v.outputs.date }}
       prerelease: ${{ steps.v.outputs.prerelease }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: v
         name: Resolve version
         uses: storytold/craft-common-actions/actions/resolve-version@main
@@ -187,9 +231,10 @@ jobs:
   macos:
     timeout-minutes: 90
     name: macOS universal
+    if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -197,50 +242,12 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       # A signed job reads only the secrets the caller lists in its `secrets:` block; values come
       # from the repo's `release` environment. An unlisted name is empty, and the app's packaging
       # would then warn and ship unsigned, so on the release branch fail here instead.
@@ -264,6 +271,23 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -271,11 +295,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-macos-universal
       - name: Apply version override
@@ -301,7 +325,17 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: packaging/macos/verify.sh --arch universal
+        run: |
+          for attempt in 1 2 3 4; do
+            if packaging/macos/verify.sh --arch universal; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              exit 1
+            fi
+            echo "macOS verification failed (attempt $attempt of 4); retrying in 20 seconds" >&2
+            sleep 20
+          done
       - name: Note missing macOS verification
         if: github.ref == 'refs/heads/release' && hashFiles('packaging/macos/verify.sh') == ''
         run: echo "::warning::packaging/macos/verify.sh is missing, so this release was not checked for a signature or notarization ticket."
@@ -319,15 +353,16 @@ jobs:
     timeout-minutes: 90
     name: Windows ${{ matrix.arch }}
     needs: [version]
-    runs-on: windows-latest
-    environment: release
+    # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
+    # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
+    runs-on: ${{ matrix.runner }}
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: x86, target: i686-pc-windows-msvc }
-          - { arch: arm64, target: aarch64-pc-windows-msvc }
+          - { arch: x64, target: x86_64-pc-windows-msvc, runner: windows-latest }
+          - { arch: arm64, target: aarch64-pc-windows-msvc, runner: windows-11-arm }
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -335,50 +370,12 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       # See the macOS job: unlisted secrets are empty, and the build would ship unsigned.
       # Signing needs either the PFX pair or all six Azure Trusted Signing values.
       - name: Require signing secrets on the release branch
@@ -404,6 +401,23 @@ jobs:
             exit 1
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -411,11 +425,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-windows-${{ matrix.arch }}
       - name: Apply version override
@@ -450,6 +464,9 @@ jobs:
     timeout-minutes: 90
     name: Linux ${{ matrix.arch }}
     needs: [version]
+    # The signing key lives in the release environment, as it does for the macOS, Windows and
+    # flatpak jobs; without this the Linux packages are built unsigned.
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -464,51 +481,30 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -520,10 +516,10 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: ${{ inputs.nfpm-version }}
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-linux-${{ matrix.arch }}
       - name: Apply version override
@@ -534,6 +530,17 @@ jobs:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
         run: packaging/linux/package.sh
+      - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
+        id: linux_signing
+        uses: storytold/craft-common-actions/actions/import-signing-key@main
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
+      - name: Sign the RPM packages
+        if: steps.linux_signing.outputs.enabled == 'true'
+        uses: storytold/craft-common-actions/actions/sign-rpms@main
+        with:
+          path: dist/release
       - name: Check the packages
         run: |
           dpkg-deb --info dist/release/*.deb || true
@@ -555,6 +562,11 @@ jobs:
     name: Flatpak ${{ matrix.arch }}
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
+    # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -565,63 +577,48 @@ jobs:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
+      OCI_SIGNATURES_READY: ${{ vars.LINUX_OCI_SIGNATURES_READY }}
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/linux
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
       - name: Install flatpak-builder
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+          # elfutils is only a Recommends of flatpak-builder, but flatpak-builder runs its eu-strip
+          # on every module it builds with debuginfo, such as the apps' cups-client.
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
+        # flatpak-bundle.sh signs the commit and embeds the public key when SIGNING_FPR is set.
+        uses: storytold/craft-common-actions/actions/import-signing-key@main
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
       - name: Build the Flatpak bundle
+        id: flatpak_bundle
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -640,10 +637,64 @@ jobs:
           fi
           tarball="${tarballs[0]}"
           packaging/linux/flatpak-bundle.sh "$tarball"
+          printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
+      - name: Publish Flatpak OCI layout to GHCR and Docker Hub
+        if: github.event_name != 'pull_request' && !inputs.dry-run
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          TARBALL: ${{ steps.flatpak_bundle.outputs.tarball }}
+        run: |
+          if [ -x packaging/linux/flatpak-oci.sh ]; then
+            REGISTRY="${REGISTRY,,}"
+            creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
+            # The app's script only builds the layout; the tags are pushed here. Older copies of
+            # flatpak-oci.sh move stable-<arch> on every --push, so a prerelease or a test run
+            # from any branch would become what stable-<arch> clients install.
+            packaging/linux/flatpak-oci.sh "$TARBALL"
+            base="$(basename "$TARBALL" .tar.gz)"
+            layout="dist/release/$base-oci"
+            if [ ! -d "$layout" ]; then
+              echo "::error::packaging/linux/flatpak-oci.sh did not write the OCI layout $layout"
+              exit 1
+            fi
+            echo "==> Pushing to $REGISTRY:$RELEASE_VERSION-$ARCH"
+            skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:$RELEASE_VERSION-$ARCH"
+            # Only a stable version built from the release branch may move the stable tag.
+            if [[ "$RELEASE_VERSION" != *-* && "$GITHUB_REF" == refs/heads/release ]]; then
+              echo "==> Pushing to $REGISTRY:stable-$ARCH"
+              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:stable-$ARCH"
+            else
+              echo "Leaving $REGISTRY:stable-$ARCH unchanged: $RELEASE_VERSION from $GITHUB_REF is not a stable release-branch build"
+            fi
+            # The pushed manifest, byte for byte: the release job signs its digest for Flatpak's
+            # signature lookaside, and the release keeps it so the digest can be checked.
+            skopeo inspect --raw --creds "$creds" \
+              "docker://$REGISTRY:$RELEASE_VERSION-$ARCH" >"dist/release/$base.oci-manifest.json"
+
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              dh_registry="docker.io/storytold/${REGISTRY##*/}"
+              dh_creds="$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN"
+              echo "==> Pushing to $dh_registry:$RELEASE_VERSION-$ARCH"
+              skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:$RELEASE_VERSION-$ARCH"
+              if [[ "$RELEASE_VERSION" != *-* && "$GITHUB_REF" == refs/heads/release ]]; then
+                echo "==> Pushing to $dh_registry:stable-$ARCH"
+                skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:stable-$ARCH"
+              else
+                echo "Leaving $dh_registry:stable-$ARCH unchanged: $RELEASE_VERSION from $GITHUB_REF is not a stable release-branch build"
+              fi
+            fi
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-flatpak-${{ matrix.arch }}
-          path: dist/release/*.flatpak
+          path: |
+            dist/release/*.flatpak
+            dist/release/*.oci-manifest.json
           if-no-files-found: error
 
   arch:
@@ -656,7 +707,13 @@ jobs:
       matrix:
         arch: [x86_64, aarch64]
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-linux-${{ matrix.arch }}
@@ -713,50 +770,12 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - name: Check the FreeBSD architecture
         env:
           ARCH: ${{ matrix.arch }}
@@ -771,6 +790,23 @@ jobs:
               ;;
           esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -779,7 +815,7 @@ jobs:
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Start the FreeBSD VM
-        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
           # Always an x86_64 guest, which KVM accelerates: aarch64 is cross-compiled in it,
@@ -788,7 +824,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION CADCRAFT_VERSION CADCRAFT_BUILD_DATE CADCRAFT_BUILD_SHA ARTCRAFT_LAUNCHER_VERSION ARTCRAFT_LAUNCHER_BUILD_DATE ARTCRAFT_LAUNCHER_BUILD_SHA DECKCRAFT_VERSION DECKCRAFT_BUILD_DATE DECKCRAFT_BUILD_SHA DESIGNCRAFT_VERSION DESIGNCRAFT_BUILD_DATE DESIGNCRAFT_BUILD_SHA EFFECTCRAFT_VERSION EFFECTCRAFT_BUILD_DATE EFFECTCRAFT_BUILD_SHA FILMCRAFT_VERSION FILMCRAFT_BUILD_DATE FILMCRAFT_BUILD_SHA GRIDCRAFT_VERSION GRIDCRAFT_BUILD_DATE GRIDCRAFT_BUILD_SHA LIGHTCRAFT_VERSION LIGHTCRAFT_BUILD_DATE LIGHTCRAFT_BUILD_SHA PDFCRAFT_VERSION PDFCRAFT_BUILD_DATE PDFCRAFT_BUILD_SHA PHOTOCRAFT_VERSION PHOTOCRAFT_BUILD_DATE PHOTOCRAFT_BUILD_SHA SOUNDCRAFT_VERSION SOUNDCRAFT_BUILD_DATE SOUNDCRAFT_BUILD_SHA VECTORCRAFT_VERSION VECTORCRAFT_BUILD_DATE VECTORCRAFT_BUILD_SHA WORDCRAFT_VERSION WORDCRAFT_BUILD_DATE WORDCRAFT_BUILD_SHA FIGCRAFT_VERSION FIGCRAFT_BUILD_DATE FIGCRAFT_BUILD_SHA"
+          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ARCH ${{ steps.app-env.outputs.names }}"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
@@ -869,10 +905,16 @@ jobs:
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
       - name: Build and package
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           # Only rustup writes this; the lang/rust package installs into /usr/local/bin.
@@ -898,7 +940,7 @@ jobs:
               set -- "$@" -p "$APP_NAME-cli"
             fi
             cargo build --release --locked "$@"
-            name="$APP_NAME-$VERSION-freebsd-${{ matrix.arch }}"
+            name="$APP_NAME-$VERSION-freebsd-$ARCH"
             mkdir -p "dist/release/$name"
             cp "target/$rel/$APP_NAME" "dist/release/$name/" 2>/dev/null || cp "/var/tmp/craft-target/$rel/$APP_NAME" "dist/release/$name/"
             if [ -f "target/$rel/$APP_NAME-cli" ]; then
@@ -921,15 +963,15 @@ jobs:
           for archive in dist/release/*-freebsd-*.tar.gz; do
             [ -f "$archive" ] || continue
             case "$archive" in
-              *-freebsd-${{ matrix.arch }}.tar.gz) found=1 ;;
+              *-freebsd-$ARCH.tar.gz) found=1 ;;
               *)
-                echo "error: $archive is not a FreeBSD ${{ matrix.arch }} archive; packaging/freebsd/package.sh must honor CARGO_BUILD_TARGET" >&2
+                echo "error: $archive is not a FreeBSD $ARCH archive; packaging/freebsd/package.sh must honor CARGO_BUILD_TARGET" >&2
                 exit 1
                 ;;
             esac
           done
           if [ -z "$found" ]; then
-            echo "error: no FreeBSD ${{ matrix.arch }} archive was produced" >&2
+            echo "error: no FreeBSD $ARCH archive was produced" >&2
             exit 1
           fi
       - name: Copy release archives from the VM
@@ -951,7 +993,11 @@ jobs:
         with:
           phase: save
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
           key: ${{ steps.cargo-cache.outputs.key }}
 
@@ -969,56 +1015,35 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-web
       - uses: storytold/craft-common-actions/actions/install-trunk@main
@@ -1054,6 +1079,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1067,51 +1093,30 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      CADCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      CADCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      CADCRAFT_BUILD_SHA: ${{ github.sha }}
-      ARTCRAFT_LAUNCHER_VERSION: ${{ needs.version.outputs.version }}
-      ARTCRAFT_LAUNCHER_BUILD_DATE: ${{ needs.version.outputs.date }}
-      ARTCRAFT_LAUNCHER_BUILD_SHA: ${{ github.sha }}
-      DECKCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DECKCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DECKCRAFT_BUILD_SHA: ${{ github.sha }}
-      DESIGNCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      DESIGNCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      DESIGNCRAFT_BUILD_SHA: ${{ github.sha }}
-      EFFECTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      EFFECTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      EFFECTCRAFT_BUILD_SHA: ${{ github.sha }}
-      FILMCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FILMCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FILMCRAFT_BUILD_SHA: ${{ github.sha }}
-      GRIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      GRIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      GRIDCRAFT_BUILD_SHA: ${{ github.sha }}
-      LIGHTCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      LIGHTCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      LIGHTCRAFT_BUILD_SHA: ${{ github.sha }}
-      PDFCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PDFCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PDFCRAFT_BUILD_SHA: ${{ github.sha }}
-      PHOTOCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      PHOTOCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      PHOTOCRAFT_BUILD_SHA: ${{ github.sha }}
-      SOUNDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      SOUNDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      SOUNDCRAFT_BUILD_SHA: ${{ github.sha }}
-      VECTORCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      VECTORCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      VECTORCRAFT_BUILD_SHA: ${{ github.sha }}
-      WORDCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      WORDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      WORDCRAFT_BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
       INPUT_VERSION: ${{ inputs.version }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -1119,11 +1124,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: riscv64gc-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-linux-riscv64
       - name: Apply version override
@@ -1149,6 +1154,17 @@ jobs:
           EMULATOR: qemu-riscv64
           QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
         run: packaging/linux/package.sh --formats "deb rpm tar"
+      - name: Import the Linux signing key
+        if: github.ref == 'refs/heads/release'
+        id: linux_signing
+        uses: storytold/craft-common-actions/actions/import-signing-key@main
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
+      - name: Sign the RPM packages
+        if: steps.linux_signing.outputs.enabled == 'true'
+        uses: storytold/craft-common-actions/actions/sign-rpms@main
+        with:
+          path: dist/release
       - name: Check the packages
         run: |
           dpkg-deb --info dist/release/*-linux-riscv64.deb 2>/dev/null || true
@@ -1178,17 +1194,35 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      FIGCRAFT_VERSION: ${{ needs.version.outputs.version }}
-      FIGCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
-      FIGCRAFT_BUILD_SHA: ${{ github.sha }}
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Load refreshed contributor credits
+        if: inputs.contributors-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.contributors-artifact }}
+          path: contributors
+      - name: Export the app's build variables
+        id: app-env
+        # <PREFIX>_VERSION, _BUILD_DATE and _BUILD_SHA, with the prefix the app's packaging/env.sh
+        # reads, so this workflow lists no apps and a new app needs no change here.
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.version }}
+          date: ${{ needs.version.outputs.date }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-server-${{ matrix.arch }}
       - name: Apply version override
@@ -1211,16 +1245,49 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
+    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
-    runs-on: ubuntu-latest
-    environment: release
+    runs-on: ubuntu-24.04
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     permissions:
       contents: write
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: storytold/craft-common-actions/actions/draft-release@main
         with:
           version: ${{ needs.version.outputs.version }}
           app-title: ${{ inputs.app-title }}
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
+      - name: Publish the release
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.version.outputs.version }}
+          CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
+        run: |
+          set -euo pipefail
+          refuse() {
+            echo "::error::$1"
+            echo "Not published: $1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          if [ "$CANCELLED" != false ]; then
+            refuse "a build job was cancelled: $TAG stays a draft"
+          fi
+          now="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          # The most recently published release; gh lists by creation, not publication.
+          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | last | .tagName // ""')"
+          if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
+            before="$(gh release view "$last" --json assets --jq '.assets | length')"
+            if [ "$now" -lt "$before" ]; then
+              refuse "$TAG has $now assets where $last had $before: it stays a draft"
+            fi
+          fi
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"

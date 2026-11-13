@@ -1,6 +1,7 @@
 """Exercise the reusable SonarCloud workflow's project-key trust boundary."""
 
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,7 +22,7 @@ class SonarCloudTests(unittest.TestCase):
         self.steps = workflow['jobs']['sonarcloud']['steps']
         self.validation = next(step for step in self.steps if step.get('id') == 'project')
         self.scan = next(step for step in self.steps
-                         if step.get('uses', '').startswith('SonarSource/sonarqube-scan-action@'))
+                         if step.get('uses', '').startswith('step-security/sonarqube-scan-action@'))
 
     def run_step(self, step, **env):
         with tempfile.TemporaryDirectory() as temp:
@@ -40,7 +41,7 @@ class SonarCloudTests(unittest.TestCase):
             with self.subTest(key=key):
                 result, output = self.run_step(self.validation, PROJECT_KEY=key)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(output, f'key={key}\n')
+                self.assertEqual(output, f'key={key}\ncpd=**/i18n/**\n')
 
     def test_invalid_keys_cannot_publish_scanner_arguments(self):
         for key in (
@@ -70,19 +71,142 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(self.validation['if'], "steps.token.outputs.available == 'true'")
         self.assertEqual(self.scan['if'], self.validation['if'])
         self.assertEqual(self.scan['env']['SONAR_HOST_URL'], 'https://sonarcloud.io')
-        self.assertEqual(self.scan['env']['SONAR_TOKEN'], '${{ secrets.SONAR_TOKEN }}')
+        # The scan consumes whatever the validation step accepted: the SonarCloud PAT when the
+        # repo has one, otherwise the plain project token.
+        self.assertEqual(
+            self.scan['env']['SONAR_TOKEN'],
+            '${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}',
+        )
         self.assertEqual(
             self.scan['with']['args'].splitlines()[0],
             '"-Dsonar.projectKey=${{ steps.project.outputs.key }}" -Dsonar.organization=storytold '
-            '-Dsonar.rust.lcov.reportPaths=lcov.info "-Dsonar.cpd.exclusions=**/i18n/**"',
+            '-Dsonar.rust.lcov.reportPaths=lcov.info '
+            '"-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"',
         )
+
+    def run_validation_with_properties(self, properties):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / 'sonar-project.properties').write_text(properties)
+            output = Path(temp) / 'output'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', self.validation['run']],
+                cwd=temp,
+                env={**os.environ, 'PROJECT_KEY': 'storytold_x', 'LC_ALL': 'C', 'GITHUB_OUTPUT': str(output)},
+                capture_output=True,
+                text=True,
+            )
+            return result, output.read_text() if output.exists() else ''
+
+    def test_repository_duplication_exclusions_are_appended(self):
+        result, output = self.run_validation_with_properties(
+            'sonar.projectKey=storytold_x\nsonar.cpd.exclusions=**/tables.rs,crates/core/src/region.rs\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/tables.rs,crates/core/src/region.rs\n')
+
+    def test_duplication_exclusions_are_read_as_the_scanner_reads_them(self):
+        for line in ('sonar.cpd.exclusions = **/table?.rs', 'sonar.cpd.exclusions:**/table?.rs',
+                     '  sonar.cpd.exclusions=**/table?.rs  ', 'sonar.cpd.exclusions=**/table?.rs\r'):
+            with self.subTest(line=line):
+                result, output = self.run_validation_with_properties(f'sonar.organization=x\r\n{line}\n')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(output, 'key=storytold_x\ncpd=**/i18n/**,**/table?.rs\n')
+
+    def test_duplication_exclusions_cannot_publish_scanner_arguments(self):
+        for value in ('a" -Dsonar.host.url="https://attacker.invalid', 'a b', '$(touch injected)', "a'b"):
+            with self.subTest(value=value):
+                result, output = self.run_validation_with_properties(f'sonar.cpd.exclusions={value}\n')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('::error::', result.stdout)
+                self.assertEqual(output, '')
 
     def test_coverage_is_generated_before_the_scan_imports_it(self):
         coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        fetch = next(step for step in self.steps if step.get('name') == 'Fetch locked Rust dependencies')
+        self.assertLess(self.steps.index(fetch), self.steps.index(coverage))
+        self.assertEqual(fetch['run'], 'cargo fetch --locked')
+        self.assertEqual(
+            fetch['if'],
+            "steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$CARGO_CALLS"\n')
+            cargo.chmod(0o755)
+            calls = root / 'calls'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', fetch['run']],
+                cwd=root,
+                env={**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'CARGO_CALLS': str(calls)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.read_text(), 'fetch --locked\n')
         self.assertLess(self.steps.index(coverage), self.steps.index(self.scan))
         self.assertIn('cargo llvm-cov', coverage['run'])
         self.assertIn('--output-path lcov.info', coverage['run'])
+        self.assertIn('--no-report --no-fail-fast', coverage['run'])
+        self.assertNotIn('--ignore-run-fail', coverage['run'])
+        self.assertIn('echo "test_status=$test_status" >> "$GITHUB_OUTPUT"', coverage['run'])
         self.assertEqual(coverage['continue-on-error'], 'true')
+
+    def test_instrumented_test_failure_is_saved_while_lcov_is_still_written(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
+                'if [[ "$*" == *"--no-report"* ]]; then exit 101; fi\n'
+                'printf "TN:\\n" > lcov.info\n'
+            )
+            cargo.chmod(0o755)
+            calls = root / 'calls'
+            output = root / 'output'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', coverage['run']],
+                cwd=root,
+                env={**os.environ, **coverage.get('env', {}), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                     'CARGO_CALLS': str(calls), 'GITHUB_OUTPUT': str(output),
+                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false', 'COVERAGE_IGNORE': ''},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), 'test_status=101\n')
+            self.assertTrue((root / 'lcov.info').is_file())
+            invocations = calls.read_text().splitlines()
+            self.assertEqual(len(invocations), 2)
+            self.assertIn('--no-report --no-fail-fast', invocations[0])
+            self.assertEqual(invocations[1], 'llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex ')
+
+    def test_coverage_generation_failure_is_blocking_after_scan(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        failure = next(step for step in self.steps
+                       if step.get('name') == 'Fail on Rust coverage generation failure')
+        self.assertEqual(failure['if'], 'steps.coverage.outcome == \'failure\'')
+        self.assertGreater(self.steps.index(failure), self.steps.index(self.scan))
+        self.assertIn('cargo llvm-cov failed to build the test archive or write lcov.info', failure['run'])
+        self.assertTrue(coverage['continue-on-error'], 'the scan still runs to publish diagnostics')
+
+    def test_instrumented_test_failure_is_blocking_after_scan(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        failure = next(step for step in self.steps
+                       if step.get('name') == 'Fail on Rust instrumented test failures')
+        self.assertEqual(
+            failure['if'],
+            "steps.coverage.outputs.test_status != '' && steps.coverage.outputs.test_status != '0'",
+        )
+        self.assertGreater(self.steps.index(failure), self.steps.index(self.scan))
+        self.assertGreater(self.steps.index(failure), self.steps.index(coverage))
+        self.assertEqual(failure['env']['RUST_TEST_STATUS'], '${{ steps.coverage.outputs.test_status }}')
+        self.assertIn('instrumented Rust tests exited with status', failure['run'])
 
     def test_coverage_actions_track_main_and_pin_external_actions(self):
         workflow = yaml.load(
@@ -100,6 +224,43 @@ class SonarCloudTests(unittest.TestCase):
                             self.assertTrue(step['uses'].endswith('@main'))
                         else:
                             self.assertRegex(step['uses'], r'^[^@]+@[0-9a-f]{40}$')
+
+    def test_caller_i18n_is_available_before_each_coverage_run(self):
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        for job, runner_name in [('build', 'Build instrumented test archive'),
+                                 ('coverage', "Run this shard's tests"),
+                                 ('sonarcloud', 'Generate Rust coverage')]:
+            steps = workflow['jobs'][job]['steps']
+            checkout = next(step for step in steps if step.get('name') == 'Check out craft-i18n')
+            runner = next(step for step in steps if step.get('name') == runner_name)
+            self.assertEqual(checkout['uses'], 'storytold/craft-common-actions/actions/checkout-craft-i18n@main')
+            self.assertLess(steps.index(checkout), steps.index(runner))
+            if job == 'sonarcloud':
+                self.assertIn('inputs.shards <= 1', checkout['if'])
+                self.assertIn("steps.token.outputs.available == 'true'", checkout['if'])
+                self.assertEqual(checkout['id'], 'i18n')
+
+        steps = workflow['jobs']['sonarcloud']['steps']
+        move = next(step for step in steps if step.get('name') == 'Move craft-i18n outside scan workspace')
+        coverage = next(step for step in steps if step.get('name') == 'Generate Rust coverage')
+        scan = next(step for step in steps if step.get('name') == 'SonarCloud Scan')
+        self.assertEqual(move['if'], "steps.i18n.outputs.rev != ''")
+        self.assertLess(steps.index(coverage), steps.index(move))
+        self.assertLess(steps.index(move), steps.index(scan))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, runner = root / 'workspace', root / 'runner'
+            (workspace / 'craft-i18n').mkdir(parents=True)
+            runner.mkdir()
+            (workspace / 'craft-i18n' / 'catalog').write_text('pinned')
+            result = subprocess.run(
+                ['bash', '-e', '-o', 'pipefail', '-c', move['run']],
+                env={**os.environ, 'GITHUB_WORKSPACE': str(workspace), 'RUNNER_TEMP': str(runner)},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((workspace / 'craft-i18n').exists())
+            self.assertEqual([p.read_text() for p in runner.glob('craft-i18n.*/checkout/catalog')], ['pinned'])
 
     def test_archive_build_has_the_same_fonts_as_runtime(self):
         workflow = yaml.load(
@@ -186,7 +347,9 @@ class SonarCloudTests(unittest.TestCase):
         self.assertTrue(any('nextest archive --workspace' in step.get('run', '') for step in build))
         tests = next(step for step in workflow['jobs']['coverage']['steps']
                      if step.get('name') == "Run this shard's tests")
-        self.assertIn('--partition count:${{ matrix.shard }}/${{ inputs.shards }}', tests['run'])
+        self.assertIn('--partition "count:$SHARD/$TOTAL_SHARDS"', tests['run'])
+        self.assertEqual(tests['env']['SHARD'], '${{ matrix.shard }}')
+        self.assertEqual(tests['env']['TOTAL_SHARDS'], '${{ inputs.shards }}')
         self.assertIn('--archive-file archive/nextest-archive.tar.zst', tests['run'])
         self.assertEqual(workflow['jobs']['coverage']['needs'], ['plan', 'build'])
 
@@ -227,6 +390,26 @@ class SonarCloudTests(unittest.TestCase):
         build = workflow['jobs']['build']['steps']
         self.assertTrue(any('rustc-release.txt' in step.get('with', {}).get('path', '')
                             for step in build))
+
+    def test_sharded_export_leaves_out_the_test_code_cargo_llvm_cov_does(self):
+        # cargo llvm-cov adds these exclusions to --ignore-filename-regex on its own; the sharded
+        # merge calls llvm-cov export directly, so the shared regex has to carry them.
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        ignore = re.compile(workflow['env']['COVERAGE_IGNORE'])
+        combine = next(step for step in workflow['jobs']['sonarcloud']['steps']
+                       if step.get('name') == 'Combine shard coverage')
+        self.assertIn('-ignore-filename-regex="$COVERAGE_IGNORE"', combine['run'])
+        ws = '/home/runner/work/app/app'
+        for path in ('tests/it.rs', 'crates/fonts-tests/tests/fonts.rs', 'crates/ui/src/i18n/tests.rs',
+                     'crates/ui/src/parser_tests.rs', 'crates/ui/src/io-tests.rs',
+                     'examples/demo.rs', 'benches/render.rs', 'vendor/zlib/lib.rs', 'xtask/src/main.rs'):
+            with self.subTest(excluded=path):
+                self.assertTrue(ignore.search(f'{ws}/{path}'))
+        for path in ('src/lib.rs', 'crates/fonts-tests/src/lib.rs', 'crates/ui/src/contests.rs',
+                     'crates/ui/src/testsuite.rs', 'apps/app-cli/src/main.rs'):
+            with self.subTest(kept=path):
+                self.assertFalse(ignore.search(f'{ws}/{path}'))
 
     def test_shard_masks_only_test_failures(self):
         workflow = yaml.load(

@@ -120,14 +120,14 @@ fi
             for key in ("CRAFT_FONTS_DIR", "CRAFT_FONTS_REQUIRED"):
                 env.pop(key, None)
             # The VM wrapper forwards only the configured SSH SendEnv names.
-            vm = next(step for step in STEPS if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
+            vm = next(step for step in STEPS if step.get("uses", "").startswith("step-security/freebsd-vm@"))
             forwarded = vm["with"]["envs"].split()
             configured = {**DATA["jobs"]["freebsd"].get("env", {}), **BUILD_STEP.get("env", {})}
             env.update({key: re.sub(r"\$\{\{ inputs\.(.*?) \}\}", replace, value)
                         for key, value in configured.items() if key in forwarded})
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
-                       TARGET_ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
+                       TARGET_ARCH=arch, ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
             if cross_env:
                 (work / "guest/craft-cross").mkdir(parents=True)
                 (work / "guest/craft-cross/env").write_text("export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n")
@@ -389,7 +389,7 @@ fi
     def test_release_workflow_rejects_unsupported_architectures_before_the_vm(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         steps = release["jobs"]["freebsd"]["steps"]
-        check = steps[0]
+        check = next(step for step in steps if step.get("name") == "Check the FreeBSD architecture")
         self.assertEqual(check["name"], "Check the FreeBSD architecture")
         self.assertEqual(check["env"]["ARCH"], "${{ matrix.arch }}")
         for arch, code in (("x86_64", 0), ("aarch64", 0), ("riscv64", 1), ("amd64", 1), ("", 1)):

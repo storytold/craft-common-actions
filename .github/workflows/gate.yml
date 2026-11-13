@@ -1,20 +1,27 @@
 name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
-# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup. App-only
-# jobs (fuzzing, corpora, web builds) stay in the app's own workflow next to the call.
+# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup.
+# App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
+# inputs: an app's workflows only call this repository's workflows.
 on:
   workflow_call:
     inputs:
       packages:
-        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action"
+        description: "Ubuntu packages the build needs, separated by spaces or newlines; installed on Linux legs through the cached install-apt-packages action. Empty installs none (Windows-only calls, wasm builds)"
         type: string
-        required: true
+        required: false
+        default: ""
       command:
         description: "The gate, run with bash from the repository root"
         type: string
         required: false
         default: "cargo xtask ci"
+      setup-command:
+        description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
         type: string
@@ -81,11 +88,21 @@ on:
         type: string
         required: false
         default: "v1"
+      cache-save-on-dispatch:
+        description: "Allow manually dispatched branch runs to save their branch-scoped dependency cache; pull requests never write"
+        type: boolean
+        required: false
+        default: false
       timeout-minutes:
         description: "Timeout of each leg"
         type: number
         required: false
         default: 60
+      gate-timeout-minutes:
+        description: "Stop the gate command after this many minutes, a few before the leg's timeout-minutes, and report it as timed out with the processes still running a minute before; 0 (default) sets no limit of its own"
+        type: number
+        required: false
+        default: 0
 
 permissions:
   contents: read
@@ -106,6 +123,41 @@ jobs:
       CARGO_NET_RETRY: 10
       RUST_BACKTRACE: 1
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            *.crates.io:443
+            *.github.com:443
+            *.githubusercontent.com:443
+            *.microsoft.com:443
+            *.rust-lang.org:443
+            *.ubuntu.com:80
+            *.ubuntu.com:443
+            api.github.com:443
+            archive.ubuntu.com:80
+            archive.ubuntu.com:443
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            crates.io:443
+            ftp.tu-chemnitz.de:443
+            github.com:443
+            index.crates.io:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
+            objects.githubusercontent.com:443
+            packages.microsoft.com:443
+            release-assets.githubusercontent.com:443
+            security.ubuntu.com:80
+            security.ubuntu.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -167,7 +219,7 @@ jobs:
             /opt/hostedtoolcache/CodeQL </dev/null >/dev/null 2>&1 &
 
       - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && inputs.packages != ''
         uses: storytold/craft-common-actions/actions/install-apt-packages@main
         with:
           packages: ${{ inputs.packages }}
@@ -193,27 +245,82 @@ jobs:
 
       - name: Install cargo tools
         if: inputs.tools != ''
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: ${{ inputs.tools }}
 
-      # Only the default branch writes, so PR caches never evict its entry; a failing gate still
-      # saves. rust-cache hashes only the members' manifests, so the root Cargo.toml goes in the key
-      # or a profile change in a virtual root keeps restoring the old cache.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Root workspace profiles are not among rust-cache's member manifests. Hash only
+      # those profiles here: a dependency/version/comment change must not discard the
+      # fallback cache for every other dependency. rust-cache still hashes the lockfile,
+      # toolchain, member manifests and build environment, and Cargo checks fingerprints.
+      - name: Cache profile key
+        id: cache-profile
+        shell: bash
+        run: |
+          python - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          import tomllib
+          from pathlib import Path
+          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
+          key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"key={key}\n")
+          PYTHON
+
+      # Default-branch writes remain the default. Maintainers can explicitly opt manual
+      # branch runs into branch-scoped writes; pull-request runs never save a cache.
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           prefix-key: ${{ inputs.cache-version }}-rust
-          key: ${{ hashFiles('Cargo.toml') }}
-          save-if: ${{ github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
+          key: ${{ steps.cache-profile.outputs.key }}
+          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: true
+
+      - name: Caller setup
+        if: inputs.setup-command != ''
+        shell: bash
+        env:
+          SETUP: ${{ inputs.setup-command }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
+          bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
 
       - name: Gate
         shell: bash
         env:
           GATE: ${{ runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
+          GATE_TIMEOUT: ${{ inputs.gate-timeout-minutes }}
         run: |
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
-          bash -euo pipefail "$RUNNER_TEMP/gate.sh"
+          # gate-timeout-minutes: GNU timeout stops a hung command before the job's own timeout
+          # would, so the log says which processes hung instead of just "cancelled".
+          if [[ ! "$GATE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || ! timeout --version >/dev/null 2>&1; then
+            [[ "$GATE_TIMEOUT" =~ ^0*$ ]] || echo "::warning title=Gate timeout not set::gate-timeout-minutes '$GATE_TIMEOUT' needs a whole number of minutes and GNU timeout"
+            exec bash -euo pipefail "$RUNNER_TEMP/gate.sh"
+          fi
+          snapshot() {
+            echo "::group::Processes running one minute before the gate timeout"
+            if [ "$RUNNER_OS" = Windows ]; then ps -W; else ps -eo pid,ppid,etime,args; fi || true
+            echo "::endgroup::"
+          }
+          (
+            sleep $(( GATE_TIMEOUT * 60 - 60 )) & sleeper=$!
+            trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
+            wait "$sleeper" && snapshot
+          ) &
+          watchdog=$!
+          status=0
+          timeout --kill-after=30s "${GATE_TIMEOUT}m" bash -euo pipefail "$RUNNER_TEMP/gate.sh" || status=$?
+          kill "$watchdog" 2>/dev/null || true
+          wait "$watchdog" 2>/dev/null || true
+          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+            echo "::error title=Gate timed out::the gate command ran for over $GATE_TIMEOUT min and was stopped. The 'Processes running one minute before the gate timeout' group shows what was still running; for cargo test, the 'has been running for over 60 seconds' lines name the hung tests."
+          fi
+          exit "$status"
 
       # A gate that changed Cargo.lock ran against a lockfile that is not the one in the repository.
       - name: Lockfile unchanged

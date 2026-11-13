@@ -7,25 +7,10 @@ runs:
     - name: Install cross-compilation dependencies
       shell: bash
       run: |
-        . /etc/os-release
         sudo dpkg --add-architecture riscv64
-        # Pin the existing (archive.ubuntu.com) sources to amd64; riscv64 comes from ports.
-        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-          sudo sed -i '/^Types: deb/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
-        fi
-        if [ -f /etc/apt/sources.list ]; then
-          sudo sed -i 's/^deb /deb [arch=amd64] /g' /etc/apt/sources.list
-          sudo sed -i 's/^deb-src /deb-src [arch=amd64] /g' /etc/apt/sources.list
-        fi
-        for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
-          echo "deb [arch=riscv64] https://ports.ubuntu.com/ubuntu-ports $suite main universe restricted multiverse"
-        done | sudo tee /etc/apt/sources.list.d/riscv64.list
-        # Multi-Arch: same packages (zlib1g, ...) must match across amd64 and riscv64. ports.ubuntu.com
-        # publishes security updates as soon as security.ubuntu.com does, but the runner's amd64 mirror
-        # (azure.archive.ubuntu.com) lags for hours, so apt finds no matching pair ("held broken
-        # packages"). Read amd64 security updates from the primary too, so both sides can match.
-        echo "deb [arch=amd64] https://security.ubuntu.com/ubuntu $VERSION_CODENAME-security main universe restricted multiverse" \
-          | sudo tee /etc/apt/sources.list.d/amd64-security.list
+        # amd64 and riscv64 from one pair of mirrors serving the same snapshot, with fallbacks
+        # outside ubuntu.com; the script explains the choice.
+        sudo "$GITHUB_ACTION_PATH/select-mirrors.sh"
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu libc6-dev-riscv64-cross libc6-dev:riscv64 qemu-user \

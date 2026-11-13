@@ -206,5 +206,11 @@ function Invoke-FixtureCli([string] $Path, [string] $Argument) {
         self.assertEqual(processes, [])
 
 
+class PackageCacheTests(unittest.TestCase):
+    def test_only_main_saves_the_package_cache(self):
+        cache = next(step for step in DATA['jobs']['package']['steps'] if 'rust-cache' in step.get('uses', ''))
+        self.assertEqual(cache['with']['save-if'], "${{ github.ref == 'refs/heads/main' }}")
+
+
 if __name__ == '__main__':
     unittest.main()
