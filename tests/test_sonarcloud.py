@@ -143,6 +143,43 @@ class SonarCloudTests(unittest.TestCase):
                         else:
                             self.assertRegex(step['uses'], r'^[^@]+@[0-9a-f]{40}$')
 
+    def test_caller_i18n_is_available_before_each_coverage_run(self):
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        for job, runner_name in [('build', 'Build instrumented test archive'),
+                                 ('coverage', "Run this shard's tests"),
+                                 ('sonarcloud', 'Generate Rust coverage')]:
+            steps = workflow['jobs'][job]['steps']
+            checkout = next(step for step in steps if step.get('name') == 'Check out craft-i18n')
+            runner = next(step for step in steps if step.get('name') == runner_name)
+            self.assertEqual(checkout['uses'], 'storytold/craft-common-actions/actions/checkout-craft-i18n@main')
+            self.assertLess(steps.index(checkout), steps.index(runner))
+            if job == 'sonarcloud':
+                self.assertIn('inputs.shards <= 1', checkout['if'])
+                self.assertIn("steps.token.outputs.available == 'true'", checkout['if'])
+                self.assertEqual(checkout['id'], 'i18n')
+
+        steps = workflow['jobs']['sonarcloud']['steps']
+        move = next(step for step in steps if step.get('name') == 'Move craft-i18n outside scan workspace')
+        coverage = next(step for step in steps if step.get('name') == 'Generate Rust coverage')
+        scan = next(step for step in steps if step.get('name') == 'SonarCloud Scan')
+        self.assertEqual(move['if'], "steps.i18n.outputs.rev != ''")
+        self.assertLess(steps.index(coverage), steps.index(move))
+        self.assertLess(steps.index(move), steps.index(scan))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, runner = root / 'workspace', root / 'runner'
+            (workspace / 'craft-i18n').mkdir(parents=True)
+            runner.mkdir()
+            (workspace / 'craft-i18n' / 'catalog').write_text('pinned')
+            result = subprocess.run(
+                ['bash', '-e', '-o', 'pipefail', '-c', move['run']],
+                env={**os.environ, 'GITHUB_WORKSPACE': str(workspace), 'RUNNER_TEMP': str(runner)},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((workspace / 'craft-i18n').exists())
+            self.assertEqual([p.read_text() for p in runner.glob('craft-i18n.*/checkout/catalog')], ['pinned'])
+
     def test_archive_build_has_the_same_fonts_as_runtime(self):
         workflow = yaml.load(
             (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
