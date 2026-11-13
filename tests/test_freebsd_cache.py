@@ -270,11 +270,12 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
 class WorkflowCacheIntegrationTests(unittest.TestCase):
     # Release inputs that do not change what the FreeBSD job compiles, so they stay out of the
     # cache key. contributors-artifact names the run itself, and a key that held it could never
-    # be restored by a later run; dry-run must share the release's entry so a dry run warms it.
+    # be restored by a later run; dry-run must share the release's entry so a dry run warms it;
+    # publish only decides whether the finished draft is published.
     RELEASE_INPUTS_OUTSIDE_THE_KEY = {
         "app-title", "web-craft-fonts", "version", "contributors-artifact", "has-web", "has-riscv64",
         "has-freebsd", "has-arch", "wix-version", "nfpm-version", "trunk-version",
-        "freebsd-architectures", "has-server", "dry-run",
+        "freebsd-architectures", "has-server", "dry-run", "publish",
     }
 
     def test_release_cache_key_names_every_input_that_changes_the_freebsd_build(self):
