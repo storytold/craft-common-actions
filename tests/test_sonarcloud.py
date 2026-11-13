@@ -121,6 +121,30 @@ class SonarCloudTests(unittest.TestCase):
 
     def test_coverage_is_generated_before_the_scan_imports_it(self):
         coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        fetch = next(step for step in self.steps if step.get('name') == 'Fetch locked Rust dependencies')
+        self.assertLess(self.steps.index(fetch), self.steps.index(coverage))
+        self.assertEqual(fetch['run'], 'cargo fetch --locked')
+        self.assertEqual(
+            fetch['if'],
+            "steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" > "$CARGO_CALLS"\n')
+            cargo.chmod(0o755)
+            calls = root / 'calls'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', fetch['run']],
+                cwd=root,
+                env={**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'CARGO_CALLS': str(calls)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.read_text(), 'fetch --locked\n')
         self.assertLess(self.steps.index(coverage), self.steps.index(self.scan))
         self.assertIn('cargo llvm-cov', coverage['run'])
         self.assertIn('--output-path lcov.info', coverage['run'])
