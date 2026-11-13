@@ -67,6 +67,9 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -160,6 +163,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
     with:
       app-name: effectcraft
@@ -226,25 +232,17 @@ Rust build code.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
-macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
+macOS and Windows packages are signed by the app's own packaging scripts.
 
-Build provenance, a CycloneDX SBOM, and a Sigstore signature of the published files are a second job. Add it only in an app that is ready to grant those permissions. `release.yml` does not call `supply-chain.yml`.
+Build provenance, a CycloneDX SBOM, and a Sigstore signature of the published files are part of the
+release itself: `release.yml` calls `supply-chain.yml` once the draft exists, so an app gets them
+without adding a job of its own. A called workflow can never request more than its caller grants, so
+the caller's `permissions:` needs `id-token: write`, `attestations: write` and
+`artifact-metadata: write` beside the `contents: write` and `packages: write` it already has. An
+app that cannot grant them passes
+`attest: false` and releases as before; a dry run publishes nothing, so it attests nothing.
 
-```yaml
-  supply-chain:
-    needs: release
-    if: github.ref == 'refs/heads/release'
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
-    uses: storytold/craft-common-actions/.github/workflows/supply-chain.yml@main
-    with:
-      version: ${{ needs.release.outputs.version }}
-```
-
-After a release that ran the extra job:
+After a release:
 
 ```sh
 gh attestation verify PhotoCraft-1.2.3-macos-universal.zip --owner storytold
@@ -723,6 +721,13 @@ where an image needs it: `ghcr.io` through the workflow token, `docker.io` when 
 are listed (using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true`
 and the Docker Hub secrets are provided.
 
+Each published repository is then attested: SLSA build provenance for the multi-arch index digest,
+attached in the registry for `ghcr.io` images and recorded against the repository for every image.
+The builds keep `--provenance=false`, because buildx provenance names the registry it was pushed to
+and would give each repository a different digest, which the merge could not tag as one manifest.
+The caller must grant `id-token: write`, `attestations: write` and `artifact-metadata: write`; set
+`attest: false` to skip the attestation job.
+
 Both craft web images publish this way. `font-preview-service` fetches its font sources into the
 build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
 larger runner, passes `build-args` and a GHA layer cache, and sets `free-disk: true` because the Rust
@@ -741,6 +746,9 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: docker-publish-${{ github.ref }}
@@ -864,7 +872,7 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
 | Git sources | 5 |
-| Docker build, per platform / manifest merge | 60 / 15 |
+| Docker build, per platform / manifest merge / attestation | 60 / 15 / 15 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job

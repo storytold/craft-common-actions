@@ -58,6 +58,31 @@ class DockerBuildWorkflowTests(unittest.TestCase):
         dh_index = steps.index(dh_step)
         self.assertLess(buildx_index, dh_index, "Set up Buildx must run before Docker Hub login")
 
+    def test_published_images_are_attested_after_the_merge(self):
+        """Provenance names the published digest, not the image buildx pushed."""
+        build_step = next(s for s in WORKFLOW["jobs"]["build"]["steps"]
+                          if s.get("name") == "Build and push by digest")
+        # Buildx provenance would give each registry a different digest.
+        self.assertIn("--provenance=false", build_step["run"])
+        merge = WORKFLOW["jobs"]["merge"]
+        self.assertEqual(merge["outputs"]["subjects"], "${{ steps.publish.outputs.subjects }}")
+        publish = next(s for s in merge["steps"] if s.get("name") == "Create manifest lists and push")
+        self.assertEqual(publish["id"], "publish")
+        self.assertIn('subjects=$subjects" >> "$GITHUB_OUTPUT', publish["run"])
+        attest = WORKFLOW["jobs"]["attest"]
+        self.assertEqual(attest["needs"], "merge")
+        self.assertIn("inputs.attest", attest["if"])
+        self.assertEqual(attest["permissions"]["id-token"], "write")
+        self.assertEqual(attest["permissions"]["attestations"], "write")
+        self.assertEqual(attest["strategy"]["matrix"]["include"],
+                         "${{ fromJSON(needs.merge.outputs.subjects) }}")
+        step = next(s for s in attest["steps"] if s.get("uses", "").startswith("actions/attest@"))
+        self.assertEqual(step["with"]["subject-name"], "${{ matrix.image }}")
+        self.assertEqual(step["with"]["subject-digest"], "${{ matrix.digest }}")
+        self.assertIn("ghcr.io/", step["with"]["push-to-registry"])
+        spec = WORKFLOW["on"]["workflow_call"]["inputs"]["attest"]
+        self.assertEqual((spec["type"], spec["default"]), ("boolean", "true"))
+
     def test_build_step_accepts_docker_io_repository(self):
         steps = WORKFLOW["jobs"]["build"]["steps"]
         build_step = next(s for s in steps if s.get("name") == "Build and push by digest")
