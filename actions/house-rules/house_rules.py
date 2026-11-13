@@ -39,19 +39,41 @@ def digest(text: str) -> str:
     return hashlib.sha256(normalize(text).encode("utf-8")).hexdigest()
 
 
+def without_fenced_examples(text: str) -> str:
+    """Mask Markdown fences without changing offsets used for byte-preserving writes."""
+    result = []
+    fence = None
+    for line in text.splitlines(keepends=True):
+        if fence is None:
+            opening = re.match(r" {0,3}(`{3,}|~{3,})([^\r\n]*)", line)
+            if opening and not (opening[1][0] == "`" and "`" in opening[2]):
+                fence = opening[1]
+            else:
+                result.append(line)
+                continue
+        else:
+            closing = re.fullmatch(r" {0,3}" + re.escape(fence[0]) +
+                                   r"{" + str(len(fence)) + r",}[ \t]*(?:\r\n|\r|\n)?", line)
+            if closing:
+                fence = None
+        result.append("".join(c if c in "\r\n" else " " for c in line))
+    return "".join(result)
+
+
 def parse_blocks(text: str):
     """Return (blocks, spans). A span is the half-open range of one block in `text`."""
+    markers = without_fenced_examples(text)
     blocks = []
     spans = []
     position = 0
     while True:
-        marker = MARKER.search(text, position)
+        marker = MARKER.search(markers, position)
         if marker is None:
             break
         match = START.match(text, marker.start())
         if match is None:
             raise ValueError("house rules: malformed or unexpected block marker")
-        closing = MARKER.search(text, match.end())
+        closing = MARKER.search(markers, match.end())
         if closing is None:
             raise ValueError(f"house rules: {match.group(1)} block is not closed")
         end_at = closing.start()
@@ -224,8 +246,10 @@ def apply_blocks(agents: str, rendered: list[str]) -> str:
         generated, _ = parse_blocks(text)
         replacements[generated[0]["name"]] = text
     if not spans:
-        separator = "\n" if agents and not agents.startswith(("\n", "\r")) else ""
-        return "".join(rendered) + separator + agents
+        bom = "\ufeff" if agents.startswith("\ufeff") else ""
+        local = agents[len(bom):]
+        separator = "\n" if local and not local.startswith(("\n", "\r")) else ""
+        return bom + "".join(rendered) + separator + local
     names = [block["name"] for block in blocks]
     if len(set(names)) != len(names):
         raise ValueError("house rules: a block name is repeated")

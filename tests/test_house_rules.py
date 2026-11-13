@@ -61,8 +61,34 @@ class HouseRulesTests(unittest.TestCase):
         house_rules.write_agents(self.app, self.source, require_rust)
 
     def check(self, require_rust: bool = True):
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         return house_rules.check_file(text, self.source, require_rust)
+
+    def test_initial_write_keeps_bom_at_start(self):
+        target = self.app / "AGENTS.md"
+        target.write_bytes("\ufeff# Local\r\nKeep me.".encode("utf-8"))
+        self.write()
+        output = target.read_bytes()
+        self.assertTrue(output.startswith("\ufeff<!--".encode("utf-8")))
+        self.assertTrue(output.endswith(b"# Local\r\nKeep me."))
+        self.assertEqual(output.count("\ufeff".encode("utf-8")), 1)
+        self.write()
+        self.assertEqual(target.read_bytes(), output)
+        self.assertEqual(self.check(), ([], []))
+
+    def test_fenced_marker_examples_remain_local_text(self):
+        for fence in ("```", "~~~~"):
+            with self.subTest(fence=fence):
+                example = fence + "text\n" + house_rules.END + "\n" + fence + "\n"
+                target = self.app / "AGENTS.md"
+                target.write_text(example, encoding="utf-8", newline="\n")
+                self.write()
+                self.assertTrue(target.read_bytes().endswith(example.encode()))
+                self.assertEqual(self.check(), ([], []))
+                # A real orphan after a closed example must still fail closed.
+                target.write_bytes(target.read_bytes() + house_rules.END.encode())
+                with self.assertRaises(ValueError):
+                    self.write()
 
     def test_normalization_uses_lf_and_one_trailing_newline(self):
         self.assertEqual(house_rules.normalize("\ufeffa\r\nb\r\n\n"), "a\nb\n")
@@ -72,7 +98,7 @@ class HouseRulesTests(unittest.TestCase):
         failures, warnings = self.check()
         self.assertEqual(failures, [])
         self.assertEqual(warnings, [])
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn(self.second, text)
         self.assertIn("Core two.", text)
         self.assertIn("Rust two.", text)
@@ -80,11 +106,11 @@ class HouseRulesTests(unittest.TestCase):
     def test_text_outside_the_blocks_is_kept(self):
         (self.app / "AGENTS.md").write_text("# App\n\nLocal rule.\n")
         self.write()
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("<!-- craft-house-rules:start core "))
         self.assertIn("# App\n\nLocal rule.\n", text)
         self.write()
-        again = (self.app / "AGENTS.md").read_text()
+        again = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         self.assertEqual(text, again)
 
     def test_local_text_between_blocks_is_kept(self):
@@ -94,7 +120,7 @@ class HouseRulesTests(unittest.TestCase):
         target = self.app / "AGENTS.md"
         target.write_text("Before.\n" + core + local + rust + "After.\n")
         self.write()
-        self.assertEqual(target.read_text(), "Before.\n" +
+        self.assertEqual(target.read_text(encoding="utf-8"), "Before.\n" +
                          house_rules.render("core", self.second, "Core two.\n") + local +
                          house_rules.render("rust", self.second, "Rust two.\n") + "After.\n")
 
@@ -125,7 +151,7 @@ class HouseRulesTests(unittest.TestCase):
         target.write_text(house_rules.render("core", self.first, "Core one.\n") +
                           "Local rule.\n" + house_rules.render("rust", self.first, "Rust one.\n"))
         self.write(require_rust=False)
-        self.assertEqual(target.read_text(),
+        self.assertEqual(target.read_text(encoding="utf-8"),
                          house_rules.render("core", self.second, "Core two.\n") + "Local rule.\n")
 
     def test_unclosed_block_is_not_overwritten(self):
@@ -134,11 +160,11 @@ class HouseRulesTests(unittest.TestCase):
         target.write_text(original)
         with self.assertRaises(ValueError):
             self.write()
-        self.assertEqual(target.read_text(), original)
+        self.assertEqual(target.read_text(encoding="utf-8"), original)
 
     def test_an_edited_block_fails_even_when_its_digest_is_rewritten(self):
         self.write()
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         text = text.replace("Core two.", "Core edited.")
         body = text.split("-->\n", 1)[1].split("<!-- craft-house-rules:end -->", 1)[0]
         text = text.replace(house_rules.digest("Core two.\n"), house_rules.digest(body), 1)
@@ -148,7 +174,7 @@ class HouseRulesTests(unittest.TestCase):
 
     def test_a_digest_that_does_not_match_the_bytes_fails(self):
         self.write()
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         text = text.replace(house_rules.digest("Core two.\n"), "0" * 64, 1)
         (self.app / "AGENTS.md").write_text(text)
         failures, _ = self.check()
@@ -157,7 +183,7 @@ class HouseRulesTests(unittest.TestCase):
     def test_an_intact_older_commit_warns(self):
         house_rules.write_agents(self.app, self.source, True)
         # Move the recorded revision back to the first commit without changing the checker's view of HEAD.
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         old_core = house_rules.render("core", self.first, "Core one.\n")
         old_rust = house_rules.render("rust", self.first, "Rust one.\n")
         (self.app / "AGENTS.md").write_text(old_core + old_rust)
@@ -190,7 +216,7 @@ class HouseRulesTests(unittest.TestCase):
 
     def test_a_missing_revision_could_not_be_checked(self):
         self.write()
-        text = (self.app / "AGENTS.md").read_text().replace(self.second, "a" * 40)
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8").replace(self.second, "a" * 40)
         (self.app / "AGENTS.md").write_text(text)
         failures, _ = self.check()
         self.assertTrue(any(item.startswith("house rules: could not check") for item in failures))
@@ -249,7 +275,7 @@ class HouseRulesTests(unittest.TestCase):
         git(self.source, "checkout", "-b", "side")
         self.commit_standards("Side core.\n", "Side rust.\n")
         self.write()
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn(self.second, text)
         self.assertIn("Core two.", text)
         self.assertNotIn("Side core.", text)
@@ -258,7 +284,7 @@ class HouseRulesTests(unittest.TestCase):
     def test_origin_main_takes_priority_over_local_main(self):
         git(self.source, "update-ref", "refs/remotes/origin/main", self.first)
         self.write()
-        text = (self.app / "AGENTS.md").read_text()
+        text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn(self.first, text)
         self.assertIn("Core one.", text)
         self.assertEqual(self.check(), ([], []))
@@ -277,7 +303,7 @@ class HouseRulesTests(unittest.TestCase):
     def test_detached_head_uses_named_main(self):
         git(self.source, "checkout", "--detach", self.first)
         self.write()
-        self.assertIn(self.second, (self.app / "AGENTS.md").read_text())
+        self.assertIn(self.second, (self.app / "AGENTS.md").read_text(encoding="utf-8"))
         self.assertEqual(self.check(), ([], []))
 
     def test_ancestry_errors_are_not_reported_as_non_ancestry(self):
@@ -312,7 +338,7 @@ class HouseRulesTests(unittest.TestCase):
 
 class HouseRulesWiringTests(unittest.TestCase):
     def test_the_action_passes_its_inputs_through_the_environment(self):
-        action = yaml.load((ROOT / "actions/house-rules/action.yml").read_text(), Loader=yaml.BaseLoader)
+        action = yaml.load((ROOT / "actions/house-rules/action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         step = action["runs"]["steps"][0]
         self.assertNotIn("${{", step["run"])
         self.assertEqual(step["env"]["WORKSPACE_DIR"], "${{ inputs.working-directory }}")
@@ -321,7 +347,7 @@ class HouseRulesWiringTests(unittest.TestCase):
         self.assertEqual(action["inputs"]["require-rust"]["default"], "true")
 
     def test_the_workflow_checks_out_craft_contrib_and_runs_the_action(self):
-        workflow = yaml.load((ROOT / ".github/workflows/house-rules.yml").read_text(), Loader=yaml.BaseLoader)
+        workflow = yaml.load((ROOT / ".github/workflows/house-rules.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         job = workflow["jobs"]["house-rules"]
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertIn("timeout-minutes", job)
