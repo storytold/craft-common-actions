@@ -15,6 +15,7 @@ runs:
       run: |
         set -euo pipefail
         if ! command -v rpm >/dev/null 2>&1; then
+          sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends rpm
         fi

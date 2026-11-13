@@ -15,6 +15,17 @@ inputs:
   github-token:
     description: "GitHub token for authenticating gh CLI"
     required: true
+  retain:
+    description: "Retain existing draft assets; uploads still replace assets with matching names"
+    required: false
+    default: "false"
+  allow-published:
+    description: "Allow uploading assets to an existing published release; uploads still replace assets with matching names"
+    required: false
+    default: "false"
+  tag-prefix:
+    description: "Release tag prefix"
+    default: "v"
   signing-key:
     description: "ASCII-armored OpenPGP secret key (LINUX_SIGNING_KEY) that signs the Linux packages and SHA256SUMS.txt; empty publishes them unsigned"
     required: false
@@ -72,33 +83,45 @@ runs:
       shell: bash
       working-directory: artifacts
       env:
+        ALLOW_PUBLISHED: ${{ inputs.allow-published }}
+        RETAIN: ${{ inputs.retain }}
+        TAG_PREFIX: ${{ inputs.tag-prefix }}
         VERSION: ${{ inputs.version }}
         APP_TITLE: ${{ inputs.app-title }}
         PRERELEASE: ${{ inputs.prerelease }}
         GH_TOKEN: ${{ inputs.github-token }}
         GH_REPO: ${{ github.repository }}
       run: |
-        tag="v$VERSION"
+        tag="${TAG_PREFIX}$VERSION"
         title="$APP_TITLE v$VERSION"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
         if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
-          if [ "$draft" != "true" ]; then
+          if [ "$draft" != "true" ] && [ "$ALLOW_PUBLISHED" != "true" ]; then
             echo "::error::Release $tag is already published. Bump the version (cargo xtask version set) before pushing to release."
             exit 1
           fi
-          echo "Updating draft $tag: replacing its assets"
-          gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
-            gh release delete-asset "$tag" "$asset" --yes
-          done
-          gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE"
+          # Separate platform workflows share a draft; only remove all assets when this run owns them all.
+          if [ "$RETAIN" != "true" ]; then
+            echo "Updating draft $tag: replacing its assets"
+            gh release view "$tag" --json assets --jq '.assets[].name' | while read -r asset; do
+              gh release delete-asset "$tag" "$asset" --yes
+            done
+          fi
+          if [ "$draft" = "true" ]; then
+            gh release edit "$tag" --draft --title "$title" --target "$GITHUB_SHA" --prerelease="$PRERELEASE"
+          fi
           gh release upload "$tag" --clobber -- *
         else
           echo "Creating draft $tag"
           gh release create "$tag" --draft --title "$title" --target "$GITHUB_SHA" --generate-notes "${pre[@]}" -- *
         fi
         {
-          echo "Draft release **$title** at \`${GITHUB_SHA::9}\`:"
+          if [ "$draft" = "true" ] || [ -z "$draft" ]; then
+            echo "Draft release **$title** at \`${GITHUB_SHA::9}\`:"
+          else
+            echo "Release **$title** at \`${GITHUB_SHA::9}\`:"
+          fi
           echo
           sed 's/^/    /' SHA256SUMS.txt
           if [ -n "${SIGNING_FPR:-}" ]; then

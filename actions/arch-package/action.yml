@@ -17,6 +17,10 @@ inputs:
     description: "SPDX license expression for the package"
     required: false
     default: "MIT OR Apache-2.0"
+  extra-depends:
+    description: "Additional Arch runtime dependencies, separated by spaces or newlines"
+    required: false
+    default: ""
   pkgrel:
     description: "Package release number"
     required: false
@@ -32,6 +36,7 @@ runs:
         TARGET_ARCH: ${{ inputs.arch }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         ARCH_LICENSE: ${{ inputs.license }}
+        ARCH_EXTRA_DEPENDS: ${{ inputs.extra-depends }}
         PKGREL: ${{ inputs.pkgrel }}
       run: |
         if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
@@ -49,6 +54,7 @@ runs:
             -e TARGET_ARCH="$TARGET_ARCH" \
             -e OUTPUT_DIR="$OUTPUT_DIR" \
             -e ARCH_LICENSE="$ARCH_LICENSE" \
+            -e ARCH_EXTRA_DEPENDS="$ARCH_EXTRA_DEPENDS" \
             -e PKGREL="$PKGREL" \
             -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             -v "$GITHUB_WORKSPACE:/workspace" \

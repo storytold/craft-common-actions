@@ -325,7 +325,8 @@ class HouseRulesWiringTests(unittest.TestCase):
         job = workflow["jobs"]["house-rules"]
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertIn("timeout-minutes", job)
-        app, source, check = job["steps"]
+        steps = [s for s in job["steps"] if s.get("name") != "Harden runner"]
+        app, source, check = steps
         self.assertTrue(app["uses"].startswith("actions/checkout@"))
         self.assertEqual(app["with"]["persist-credentials"], "false")
         self.assertEqual(source["with"]["repository"], "storytold/craft-contrib")
