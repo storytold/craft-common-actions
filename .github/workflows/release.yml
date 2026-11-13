@@ -306,11 +306,13 @@ jobs:
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
       - name: Import signing certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: packaging/macos/import-cert.sh
+        # The shared import, not the app's packaging/macos/import-cert.sh: it exports the same
+        # MACOS_SIGN_IDENTITY and MACOS_KEYCHAIN that package.sh reads, from a private directory.
+        uses: storytold/craft-common-actions/actions/import-macos-certificate@main
+        with:
+          certificate: ${{ secrets.APPLE_CERTIFICATE }}
+          certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
       - name: Build, sign, notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -440,6 +442,12 @@ jobs:
         uses: storytold/craft-common-actions/actions/install-wix@main
         with:
           wix-version: ${{ inputs.wix-version }}
+      - name: Set up the shared signing script
+        # Exports CRAFT_SIGN_SCRIPT, CRAFT_SIGN_PRODUCT and CRAFT_SIGN_URL. An app's package.ps1
+        # signs with `& $env:CRAFT_SIGN_SCRIPT <files>` instead of its own sign.ps1.
+        uses: storytold/craft-common-actions/actions/setup-windows-signing@main
+        with:
+          product-name: ${{ inputs.app-title }}
       - name: Build, sign, package
         shell: pwsh
         env:
