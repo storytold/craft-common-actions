@@ -126,6 +126,15 @@ class SonarCloudTests(unittest.TestCase):
         self.assertIn('--output-path lcov.info', coverage['run'])
         self.assertEqual(coverage['continue-on-error'], 'true')
 
+    def test_coverage_generation_failure_is_blocking_after_scan(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        failure = next(step for step in self.steps
+                       if step.get('name') == 'Fail on Rust coverage generation failure')
+        self.assertEqual(failure['if'], 'steps.coverage.outcome == \'failure\'')
+        self.assertGreater(self.steps.index(failure), self.steps.index(self.scan))
+        self.assertIn('cargo llvm-cov failed to build the test archive or write lcov.info', failure['run'])
+        self.assertTrue(coverage['continue-on-error'], 'the scan still runs to publish diagnostics')
+
     def test_coverage_actions_track_main_and_pin_external_actions(self):
         workflow = yaml.load(
             (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
