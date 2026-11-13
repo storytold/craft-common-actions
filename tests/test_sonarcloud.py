@@ -124,7 +124,65 @@ class SonarCloudTests(unittest.TestCase):
         self.assertLess(self.steps.index(coverage), self.steps.index(self.scan))
         self.assertIn('cargo llvm-cov', coverage['run'])
         self.assertIn('--output-path lcov.info', coverage['run'])
+        self.assertIn('--no-report --no-fail-fast', coverage['run'])
+        self.assertNotIn('--ignore-run-fail', coverage['run'])
+        self.assertIn('echo "test_status=$test_status" >> "$GITHUB_OUTPUT"', coverage['run'])
         self.assertEqual(coverage['continue-on-error'], 'true')
+
+    def test_instrumented_test_failure_is_saved_while_lcov_is_still_written(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "$*" >> "$CARGO_CALLS"\n'
+                'if [[ "$*" == *"--no-report"* ]]; then exit 101; fi\n'
+                'printf "TN:\\n" > lcov.info\n'
+            )
+            cargo.chmod(0o755)
+            calls = root / 'calls'
+            output = root / 'output'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', coverage['run']],
+                cwd=root,
+                env={**os.environ, **coverage.get('env', {}), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                     'CARGO_CALLS': str(calls), 'GITHUB_OUTPUT': str(output),
+                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false', 'COVERAGE_IGNORE': ''},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(output.read_text(), 'test_status=101\n')
+            self.assertTrue((root / 'lcov.info').is_file())
+            invocations = calls.read_text().splitlines()
+            self.assertEqual(len(invocations), 2)
+            self.assertIn('--no-report --no-fail-fast', invocations[0])
+            self.assertEqual(invocations[1], 'llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex ')
+
+    def test_coverage_generation_failure_is_blocking_after_scan(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        failure = next(step for step in self.steps
+                       if step.get('name') == 'Fail on Rust coverage generation failure')
+        self.assertEqual(failure['if'], 'steps.coverage.outcome == \'failure\'')
+        self.assertGreater(self.steps.index(failure), self.steps.index(self.scan))
+        self.assertIn('cargo llvm-cov failed to build the test archive or write lcov.info', failure['run'])
+        self.assertTrue(coverage['continue-on-error'], 'the scan still runs to publish diagnostics')
+
+    def test_instrumented_test_failure_is_blocking_after_scan(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        failure = next(step for step in self.steps
+                       if step.get('name') == 'Fail on Rust instrumented test failures')
+        self.assertEqual(
+            failure['if'],
+            "steps.coverage.outputs.test_status != '' && steps.coverage.outputs.test_status != '0'",
+        )
+        self.assertGreater(self.steps.index(failure), self.steps.index(self.scan))
+        self.assertGreater(self.steps.index(failure), self.steps.index(coverage))
+        self.assertEqual(failure['env']['RUST_TEST_STATUS'], '${{ steps.coverage.outputs.test_status }}')
+        self.assertIn('instrumented Rust tests exited with status', failure['run'])
 
     def test_coverage_actions_track_main_and_pin_external_actions(self):
         workflow = yaml.load(
@@ -142,6 +200,43 @@ class SonarCloudTests(unittest.TestCase):
                             self.assertTrue(step['uses'].endswith('@main'))
                         else:
                             self.assertRegex(step['uses'], r'^[^@]+@[0-9a-f]{40}$')
+
+    def test_caller_i18n_is_available_before_each_coverage_run(self):
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        for job, runner_name in [('build', 'Build instrumented test archive'),
+                                 ('coverage', "Run this shard's tests"),
+                                 ('sonarcloud', 'Generate Rust coverage')]:
+            steps = workflow['jobs'][job]['steps']
+            checkout = next(step for step in steps if step.get('name') == 'Check out craft-i18n')
+            runner = next(step for step in steps if step.get('name') == runner_name)
+            self.assertEqual(checkout['uses'], 'storytold/craft-common-actions/actions/checkout-craft-i18n@main')
+            self.assertLess(steps.index(checkout), steps.index(runner))
+            if job == 'sonarcloud':
+                self.assertIn('inputs.shards <= 1', checkout['if'])
+                self.assertIn("steps.token.outputs.available == 'true'", checkout['if'])
+                self.assertEqual(checkout['id'], 'i18n')
+
+        steps = workflow['jobs']['sonarcloud']['steps']
+        move = next(step for step in steps if step.get('name') == 'Move craft-i18n outside scan workspace')
+        coverage = next(step for step in steps if step.get('name') == 'Generate Rust coverage')
+        scan = next(step for step in steps if step.get('name') == 'SonarCloud Scan')
+        self.assertEqual(move['if'], "steps.i18n.outputs.rev != ''")
+        self.assertLess(steps.index(coverage), steps.index(move))
+        self.assertLess(steps.index(move), steps.index(scan))
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace, runner = root / 'workspace', root / 'runner'
+            (workspace / 'craft-i18n').mkdir(parents=True)
+            runner.mkdir()
+            (workspace / 'craft-i18n' / 'catalog').write_text('pinned')
+            result = subprocess.run(
+                ['bash', '-e', '-o', 'pipefail', '-c', move['run']],
+                env={**os.environ, 'GITHUB_WORKSPACE': str(workspace), 'RUNNER_TEMP': str(runner)},
+                capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((workspace / 'craft-i18n').exists())
+            self.assertEqual([p.read_text() for p in runner.glob('craft-i18n.*/checkout/catalog')], ['pinned'])
 
     def test_archive_build_has_the_same_fonts_as_runtime(self):
         workflow = yaml.load(

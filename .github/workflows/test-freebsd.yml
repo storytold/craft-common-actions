@@ -28,6 +28,9 @@ jobs:
         with:
           egress-policy: block
           allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
             api.github.com:443
             github.com:443
             archive.ubuntu.com:80

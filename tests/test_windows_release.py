@@ -22,10 +22,11 @@ class WindowsReleaseWorkflowTests(unittest.TestCase):
         windows_job = self.data["jobs"]["windows"]
         matrix_include = windows_job["strategy"]["matrix"]["include"]
         expected = [
-            {"arch": "x64", "target": "x86_64-pc-windows-msvc"},
-            {"arch": "arm64", "target": "aarch64-pc-windows-msvc"},
+            {"arch": "x64", "target": "x86_64-pc-windows-msvc", "runner": "windows-latest"},
+            {"arch": "arm64", "target": "aarch64-pc-windows-msvc", "runner": "windows-11-arm"},
         ]
         self.assertEqual(matrix_include, expected)
+        self.assertEqual(windows_job["runs-on"], "${{ matrix.runner }}")
         arches = [item["arch"] for item in matrix_include]
         targets = [item["target"] for item in matrix_include]
         self.assertNotIn("x86", arches)
