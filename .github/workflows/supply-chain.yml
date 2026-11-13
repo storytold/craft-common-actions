@@ -22,6 +22,10 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - name: Download release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -49,7 +53,7 @@ jobs:
           done < "$PWD/release-files"
 
       - name: Generate the CycloneDX SBOM
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        uses: step-security/sbom-action@28bb7d0d2869c9ab0e5571c93591747945819d39 # v0.24.2
         with:
           path: subjects
           format: cyclonedx-json
@@ -72,6 +76,8 @@ jobs:
       - name: Attach the SBOM to the draft release
         env:
           GH_TOKEN: ${{ github.token }}
+          # No checkout here, so gh has no git remote to find the repository from.
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ inputs.version }}
         run: |
           tag="v${VERSION#v}"

@@ -1,0 +1,59 @@
+name: install-riscv64-cross test
+
+on:
+  pull_request:
+    paths:
+      - actions/install-riscv64-cross/**
+      - .github/workflows/test-install-riscv64-cross.yml
+  push:
+    branches: [main]
+    paths:
+      - actions/install-riscv64-cross/**
+      - .github/workflows/test-install-riscv64-cross.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: install (${{ matrix.outage && 'ubuntu.com down' || 'ubuntu.com up' }})
+    # The image release.yml's Linux riscv64 job uses.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        outage: [false, true]
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Take ubuntu.com offline
+        if: matrix.outage
+        # As on 11 Nov 2026, when no ubuntu.com host resolved on the runners.
+        run: |
+          set -euo pipefail
+          for host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com; do
+            echo "192.0.2.1 $host"
+            echo "100::1 $host"
+          done | sudo tee -a /etc/hosts
+      - name: Install the riscv64 cross toolchain
+        uses: ./actions/install-riscv64-cross
+      - name: Check the cross toolchain and the sources it used
+        run: |
+          set -euo pipefail
+          dpkg -s gcc-riscv64-linux-gnu libc6-dev:riscv64 libxkbcommon-dev:riscv64 libasound2-dev:riscv64 > /dev/null
+          printf 'int main(void) { return 0; }\n' > "$RUNNER_TEMP/t.c"
+          riscv64-linux-gnu-gcc -o "$RUNNER_TEMP/t" "$RUNNER_TEMP/t.c"
+          cat /etc/apt/sources.list.d/amd64-primary.list /etc/apt/sources.list.d/riscv64.list
+          if [ "${{ matrix.outage }}" = true ]; then
+            # Nothing came from ubuntu.com: every Ubuntu source is a fallback mirror.
+            if grep -h ubuntu.com /etc/apt/sources.list.d/amd64-*.list /etc/apt/sources.list.d/riscv64.list; then
+              exit 1
+            fi
+          fi

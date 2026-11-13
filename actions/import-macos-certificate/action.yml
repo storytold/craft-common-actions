@@ -1,0 +1,40 @@
+name: Import macOS signing certificate
+description: >-
+  Import a Developer ID Application certificate into a private temporary keychain and export
+  MACOS_SIGN_IDENTITY and MACOS_KEYCHAIN for the packaging step. An empty certificate only warns,
+  so builds without secrets fall back to ad-hoc signing.
+
+inputs:
+  certificate:
+    description: Base64-encoded .p12 bundle (APPLE_CERTIFICATE). Empty skips the import with a warning
+    required: false
+    default: ""
+  certificate-password:
+    description: Password of the .p12 bundle (APPLE_CERTIFICATE_PASSWORD)
+    required: false
+    default: ""
+  keychain-password:
+    description: Password for the temporary keychain; a random one is generated when empty
+    required: false
+    default: ""
+
+outputs:
+  identity:
+    description: SHA-1 of the imported Developer ID Application identity; empty when nothing was imported
+    value: ${{ steps.import.outputs.identity }}
+  keychain:
+    description: Path of the temporary keychain; empty when nothing was imported
+    value: ${{ steps.import.outputs.keychain }}
+
+runs:
+  using: composite
+  steps:
+    - name: Import the certificate
+      id: import
+      shell: bash
+      env:
+        APPLE_CERTIFICATE: ${{ inputs.certificate }}
+        APPLE_CERTIFICATE_PASSWORD: ${{ inputs.certificate-password }}
+        KEYCHAIN_PASSWORD: ${{ inputs.keychain-password }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: '"$ACTION_PATH/import-cert.sh"'

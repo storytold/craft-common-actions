@@ -71,7 +71,13 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_BUILD_JOBS: 4
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
@@ -88,8 +94,14 @@ jobs:
             x86_64|aarch64) ;;
             *) echo "::error::unsupported architecture '$ARCH' (use x86_64 or aarch64)"; exit 1 ;;
           esac
+      # The VM action apt-installs QEMU on the host: give it the mirrors outside ubuntu.com, and
+      # drop the image's Microsoft source, which this job never installs from.
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
+      - name: Drop the Microsoft apt source
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
       - name: Start the FreeBSD VM
-        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
           # Always an x86_64 guest, which KVM accelerates: aarch64 is cross-compiled in it,
@@ -98,10 +110,23 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND"
+          envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND ARCH"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
+            # A large test crate's rustc (photocraft-ui-egui's lib tests) was SIGKILLed when the
+            # 12 GB guest ran out of memory late in a run: the image's root is ZFS with no ARC
+            # limit, so the ARC kept the target dir's pages. Cap it. (No swap file: swap on a
+            # ZFS-backed file can hang FreeBSD under memory pressure; the image has a 1 GB swap
+            # partition.) Print disk, swap and memory so the next OOM is easy to diagnose.
+            if [ "$(uname -s)" = FreeBSD ]; then
+              if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
+                sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
+              fi
+              df -h / /var/tmp || true
+              swapctl -l || true
+              sysctl -n hw.physmem || true
+            fi
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               # The host compiler and the aarch64 standard library come from the amd64 and
               # aarch64 lang/rust packages, which must be the same build. "latest" can build
@@ -110,7 +135,7 @@ jobs:
               printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
               pkg update -f -q
             fi
-            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
             # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
             # or standard library for it ("installer for platform not found"), so use
             # FreeBSD's lang/rust package.
@@ -181,6 +206,8 @@ jobs:
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
       - name: Build and test
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           # Only rustup writes this; the lang/rust package installs into /usr/local/bin.
@@ -224,7 +251,7 @@ jobs:
                               *shlex.split(os.environ["CARGO_BUILD_EXTRA_ARGS"])])
           PY
           if [ "${{ inputs.skip-tests }}" != "true" ]; then
-            if [ "${{ matrix.arch }}" = aarch64 ]; then
+            if [ "$ARCH" = aarch64 ]; then
               # The build above compiled every test target; an x86_64 guest cannot run them.
               echo "::notice title=FreeBSD aarch64::cross-compiled on x86_64: tests built, not run"
             elif [ "${{ inputs.custom-test-command != '' }}" = "true" ]; then
@@ -259,6 +286,8 @@ jobs:
       - name: Build and validate the FreeBSD package
         if: inputs.run-package-check && matrix.arch != 'aarch64'
         shell: freebsd {0}
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           set -eu
           [ ! -f "$HOME/.cargo/env" ] || . "$HOME/.cargo/env"
@@ -277,9 +306,9 @@ jobs:
           CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
           # Check every produced archive; an unmatched glob or unreadable tarball
           # must fail instead of turning a requested package check into a no-op.
-          for archive in dist/release/*-freebsd-${{ matrix.arch }}.tar.gz; do
+          for archive in dist/release/*-freebsd-$ARCH.tar.gz; do
             if [ ! -f "$archive" ]; then
-              echo "error: no FreeBSD ${{ matrix.arch }} package was produced" >&2
+              echo "error: no FreeBSD $ARCH package was produced" >&2
               exit 1
             fi
             tar -tzf "$archive"

@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - actions/install-apt-packages/**
+      - actions/configure-apt-mirrors/**
       - .github/workflows/test-install-apt-packages.yml
   push:
     branches: [main]
     paths:
       - actions/install-apt-packages/**
+      - actions/configure-apt-mirrors/**
       - .github/workflows/test-install-apt-packages.yml
   workflow_dispatch:
 
@@ -17,19 +19,88 @@ permissions:
 
 jobs:
   install:
-    runs-on: ubuntu-24.04
+    name: install (${{ matrix.runner }}${{ matrix.outage && ', ubuntu.com down' || '' }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, outage: false }
+          - { runner: ubuntu-latest, outage: false }
+          # The images the apps' jobs use, with no ubuntu.com host reachable.
+          - { runner: ubuntu-22.04, outage: true }
+          - { runner: ubuntu-24.04, outage: true }
+          - { runner: ubuntu-latest, outage: true }
+          - { runner: ubuntu-22.04-arm, outage: true }
+          - { runner: ubuntu-24.04-arm, outage: true }
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            api.github.com:443
+            github.com:443
+            archive.ubuntu.com:80
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
+            security.ubuntu.com:80
+            archive.ubuntu.com:443
+            azure.archive.ubuntu.com:443
+            security.ubuntu.com:443
+            ports.ubuntu.com:80
+            ports.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
+            ftp.tu-chemnitz.de:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Take ubuntu.com offline
+        if: matrix.outage
+        # As on 11 Nov 2026, when no ubuntu.com host resolved: the Ubuntu hosts the images use
+        # point at addresses that never answer, so only the mirrors outside ubuntu.com can serve.
+        run: |
+          set -euo pipefail
+          for host in azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com ports.ubuntu.com; do
+            printf '192.0.2.1 %s\n100::1 %s\n' "$host" "$host"
+          done | sudo tee -a /etc/hosts
       - name: Install packages
         uses: ./actions/install-apt-packages
         with:
+          # pkg-config is on every image and needs no download, so the outage legs add hello: a
+          # package no image has, and a list no cache was saved for (save: never), so it has to
+          # come from a mirror.
           packages: |
             pkg-config libxkbcommon-dev
             mesa-vulkan-drivers
+            ${{ matrix.outage && 'hello' || '' }}
+          save: ${{ matrix.outage && 'never' || 'default-branch' }}
       - name: Check the packages and the kept downloads
         run: |
           set -euo pipefail
           dpkg -s pkg-config libxkbcommon-dev mesa-vulkan-drivers > /dev/null
           ls "$HOME"/.cache/craft-apt-debs/*.deb > /dev/null
           test -z "$(find "$HOME/.cache/craft-apt-debs" ! -user "$(id -un)" -print -quit)"
+      - name: Check apt went around ubuntu.com
+        if: matrix.outage
+        run: |
+          set -euo pipefail
+          dpkg -s hello > /dev/null
+          cat /etc/apt/craft-apt-mirrors.txt
+          # The first mirror apt tries is outside ubuntu.com, and a fresh update of the Ubuntu
+          # sources gets every index, which apt can only have fetched from there. The image's
+          # other repositories (sources.list.d) are left out: they are not what this tests.
+          head -n 1 /etc/apt/craft-apt-mirrors.txt | grep -v 'ubuntu\.com'
+          parts=$(mktemp -d)
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            cp /etc/apt/sources.list.d/ubuntu.sources "$parts/"
+          fi
+          sudo apt-get update -o Dir::Etc::SourceParts="$parts" -o APT::Update::Error-Mode=any

@@ -1,28 +1,17 @@
 name: Shared FreeBSD workflow tests
 
+# The suite covers every workflow and action, not only FreeBSD, so a change to any of them runs it.
 on:
   pull_request:
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   push:
     branches: [main]
     paths:
-      - .github/workflows/freebsd.yml
-      - .github/workflows/release.yml
-      - .github/workflows/gate.yml
-      - actions/freebsd-cargo-cache/**
-      - actions/checkout-craft-i18n/**
-      - .github/workflows/windows-arm64.yml
-      - .github/workflows/test-freebsd.yml
-      - actions/install-apt-packages/**
+      - .github/workflows/**
+      - actions/**
       - tests/**
   workflow_dispatch:
 
@@ -34,8 +23,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            api.github.com:443
+            github.com:443
+            archive.ubuntu.com:80
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            packages.microsoft.com:443
+            security.ubuntu.com:80
+            archive.ubuntu.com:443
+            azure.archive.ubuntu.com:443
+            security.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Configure apt mirrors
+        uses: ./actions/configure-apt-mirrors
       - name: Install YAML parser
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo
+      # On 11 Nov 2026 one run found no candidate for tcsh or debsigs right after an update that
+      # fetched every index, while the runs before and after passed. These answer whether apt
+      # read those indexes, and whether this CPU runs the amd64v3 packages they list.
+      - name: Show why apt found no candidate
+        if: failure()
+        run: |
+          set +e
+          apt-cache policy tcsh debsigs
+          apt-config dump | grep -iE 'architecture|variant'
+          ls -l /var/lib/apt/lists/ | grep -E 'universe.*Packages'
+          grep -m1 'model name' /proc/cpuinfo
+          echo "avx2 cores: $(grep -c avx2 /proc/cpuinfo)"
+          /lib64/ld-linux-x86-64.so.2 --help | grep -A6 'glibc-hwcaps'
       - name: Exercise failing tests, package validation and required fonts
         run: /usr/bin/python3 -m unittest discover -s tests -v
