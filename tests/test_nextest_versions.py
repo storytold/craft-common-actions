@@ -99,7 +99,7 @@ class NextestVersionTests(unittest.TestCase):
         gate = self.documents[GATE]
         self.assertEqual(gate['on']['workflow_call']['inputs']['tools']['default'], PIN)
         installers = [step for step in gate['jobs']['gate']['steps']
-                      if step.get('uses', '').startswith('taiki-e/install-action@')]
+                      if step.get('uses', '').startswith('step-security/taiki-e-install-action@')]
         self.assertEqual(len(installers), 1)
         self.assertEqual(installers[0]['with']['tool'], '${{ inputs.tools }}')
         self.assertEqual(installers[0]['if'], "inputs.tools != ''")
@@ -109,7 +109,7 @@ class NextestVersionTests(unittest.TestCase):
         for job, expected in [('build', 'cargo-llvm-cov,' + PIN), ('coverage', PIN)]:
             with self.subTest(job=job):
                 installers = [step for step in jobs[job]['steps']
-                              if step.get('uses', '').startswith('taiki-e/install-action@')]
+                              if step.get('uses', '').startswith('step-security/taiki-e-install-action@')]
                 self.assertEqual(len(installers), 1)
                 self.assertEqual(installers[0]['with']['tool'], expected)
 
@@ -137,7 +137,7 @@ class NextestVersionTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 changed = deepcopy(self.documents)
                 changed[SONAR]['jobs']['coverage']['steps'].append({
-                    'uses': 'taiki-e/install-action@' + '0' * 40,
+                    'uses': 'step-security/taiki-e-install-action@' + '0' * 40,
                     'with': {'tool': tool},
                 })
                 with self.assertRaises(AssertionError):

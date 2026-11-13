@@ -142,11 +142,11 @@ jobs:
         run: bash --noprofile --norc -eo pipefail -c "$PRE_BUILD_COMMAND"
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: step-security/setup-buildx-action@e50058a0fcd8d1a7d626c905502d010a468bf238 # v4.4.1
 
       - name: Log in to Docker Hub (DHI base images)
         if: ${{ inputs.dhi-login }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           registry: dhi.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -154,7 +154,7 @@ jobs:
 
       - name: Log in to GHCR
         if: ${{ contains(inputs.images, 'ghcr.io') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -162,7 +162,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: ${{ contains(inputs.images, 'docker.io/') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -268,11 +268,11 @@ jobs:
           merge-multiple: true
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        uses: step-security/setup-buildx-action@e50058a0fcd8d1a7d626c905502d010a468bf238 # v4.4.1
 
       - name: Log in to GHCR
         if: ${{ contains(inputs.images, 'ghcr.io') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -280,14 +280,14 @@ jobs:
 
       - name: Log in to Docker Hub
         if: ${{ contains(inputs.images, 'docker.io/') }}
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: step-security/docker-login-action@8c7b695d8738c5699a679ff5254baf0f19f20a94 # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        uses: step-security/metadata-action@21378f5b76c96c69ac34d21cc3873d85e26381b1 # v6.2.0
         with:
           images: ${{ inputs.images }}
           tags: ${{ inputs.tags }}

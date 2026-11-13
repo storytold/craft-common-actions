@@ -120,7 +120,7 @@ fi
             for key in ("CRAFT_FONTS_DIR", "CRAFT_FONTS_REQUIRED"):
                 env.pop(key, None)
             # The VM wrapper forwards only the configured SSH SendEnv names.
-            vm = next(step for step in STEPS if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
+            vm = next(step for step in STEPS if step.get("uses", "").startswith("step-security/freebsd-vm@"))
             forwarded = vm["with"]["envs"].split()
             configured = {**DATA["jobs"]["freebsd"].get("env", {}), **BUILD_STEP.get("env", {})}
             env.update({key: re.sub(r"\$\{\{ inputs\.(.*?) \}\}", replace, value)

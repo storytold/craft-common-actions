@@ -97,7 +97,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -109,8 +113,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -118,11 +120,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -168,7 +175,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -180,8 +191,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -189,11 +198,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -211,6 +225,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -234,10 +250,10 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.150
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Provision pinned PDF test fonts
@@ -291,7 +307,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -303,8 +323,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -312,11 +330,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -334,6 +357,8 @@ jobs:
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != ''
         shell: bash
@@ -349,7 +374,7 @@ jobs:
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
             libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev
             libgl1-mesa-dev mesa-vulkan-drivers
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: cargo-nextest@0.9.150
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -371,8 +396,8 @@ jobs:
         run: |
           mkdir -p profraw
           # nextest exits 100 when tests fail. A red test must not hide the static analysis, so
-          # that alone keeps the job green. Any other exit means the shard could not run its
-          # tests at all (for example a test binary nextest cannot list): fail the job, because a
+          # record that status for the scan job to fail after uploading analysis. Any other exit
+          # means the shard could not run its tests at all (for example a test binary nextest cannot list): fail the job, because a
           # shard that runs nothing would scan an empty coverage report.
           rc=0
           cargo nextest run --archive-file archive/nextest-archive.tar.zst \
@@ -381,15 +406,73 @@ jobs:
             echo "::error::nextest could not run shard $SHARD (exit $rc)"
             exit "$rc"
           fi
-          if ! ls profraw/*.profraw >/dev/null 2>&1; then
+          mkdir -p profdata
+          printf '%s\n' "$rc" > "profdata/shard-$SHARD.status"
+          if ls profraw/*.profraw >/dev/null 2>&1; then
+            profiles=true
+          else
+            profiles=false
+          fi
+
+          if [ "$rc" -eq 100 ]; then
+            echo "::warning::Coverage shard $SHARD/$TOTAL_SHARDS has failing tests; see this job's test log."
+            if [ "$profiles" = true ]; then
+              result="**Tests failed.** Coverage profiles are available, so the SonarCloud scan will continue. A green coverage job does not mean the tests passed; see this job's log for failed tests and diagnostics."
+            else
+              result='**Tests failed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          else
+            if [ "$profiles" = true ]; then
+              result='**Tests passed.** Coverage profiles are available for the SonarCloud scan.'
+            else
+              result='**Tests passed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          fi
+          printf '### Coverage shard %s/%s\n\n%s\n' "$SHARD" "$TOTAL_SHARDS" "$result" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$profiles" != true ]; then
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
+
+      - name: Install LLVM tools for the archive's toolchain
+        run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
+      - name: Merge this shard's profiles
+        # Raw profiles of a large workspace run to tens of gigabytes per shard; the scan job cannot
+        # hold every shard's at once. One sparse indexed profile per shard is a small fraction of that.
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          toolchain="$(cat archive/rustc-release.txt)"
+          llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
+          echo "Raw profiles: $(du -sh profraw | cut -f1) in $(find profraw -name '*.profraw' | wc -l) files"
+          df -h .
+          mkdir -p profdata
+          # failure-mode=any stops on any unreadable input. A profile cut short (a test process that
+          # crashed while writing it, or a full disk) fails this shard and names the file, instead of
+          # being uploaded and failing the scan's merge later with no shard to look at.
+          status=0
+          "$llvm_bin/llvm-profdata" merge -sparse --failure-mode=any profraw/*.profraw \
+            -o "profdata/shard-$SHARD.profdata" 2>merge-errors.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            cat merge-errors.txt >&2
+            sed -n 's/^warning: \(.*\.profraw\): \(.*\)$/\1: \2/p' merge-errors.txt | while IFS= read -r bad; do
+              echo "::error::shard $SHARD wrote a truncated or corrupt coverage profile: $bad"
+            done
+            echo "::error::llvm-profdata could not merge shard $SHARD's profiles (exit $status)"
+            rm -rf profdata
+            exit "$status"
+          fi
+          rm -rf profraw merge-errors.txt
+          echo "Merged profile: $(du -sh "profdata/shard-$SHARD.profdata" | cut -f1)"
+          df -h .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: profraw-${{ matrix.shard }}
-          path: profraw/
-          if-no-files-found: ignore
+          name: profdata-${{ matrix.shard }}
+          path: profdata/
+          if-no-files-found: error
           retention-days: 1
 
   sonarcloud:
@@ -404,7 +487,11 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: block
+          # Ubuntu Pro APT hooks use esm.ubuntu.com for security-update metadata.
+          # Keep this explicit alongside the archive hosts instead of allowing all Ubuntu subdomains.
           allowed-endpoints: >
+            *.amazontrust.com:80
+            motd.ubuntu.com:443
             *.amazonaws.com:443
             *.crates.io:443
             *.s3.amazonaws.com:443
@@ -416,8 +503,6 @@ jobs:
             *.pythonhosted.org:443
             *.sonarcloud.io:443
             *.sonarsource.com:443
-            *.ubuntu.com:80
-            *.ubuntu.com:443
             api.github.com:443
             archive.ubuntu.com:80
             archive.ubuntu.com:443
@@ -425,11 +510,16 @@ jobs:
             azure.archive.ubuntu.com:443
             binaries.sonarsource.com:443
             crates.io:443
+            esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
             objects.githubusercontent.com:443
             packages.microsoft.com:443
             pypi.org:443
@@ -469,12 +559,31 @@ jobs:
             echo "::error::Invalid SonarCloud project key: must start with an alphanumeric character or underscore and contain only letters, digits, dash, underscore, period or colon (max 400 characters)."
             exit 1
           fi
-          printf 'key=%s\n' "$PROJECT_KEY" >>"$GITHUB_OUTPUT"
+          # A -D argument replaces the same property in sonar-project.properties, so the repository's
+          # own duplication exclusions are appended to the shared one here.
+          cpd='**/i18n/**'
+          own=""
+          if [[ -f sonar-project.properties ]]; then
+            # Properties syntax: optional blanks around `=` or `:`, and a CRLF file leaves a trailing \r.
+            own=$(sed -n 's/^[ \t]*sonar\.cpd\.exclusions[ \t]*[=:][ \t]*//p' sonar-project.properties | tail -n 1 | sed 's/[ \t\r]*$//')
+          fi
+          if [[ -n "$own" ]]; then
+            if [[ ! "$own" =~ ^[a-zA-Z0-9_.*?/,-]+$ ]]; then
+              echo "::error::Invalid sonar.cpd.exclusions in sonar-project.properties: only letters, digits, and _ . * ? / , - are allowed."
+              exit 1
+            fi
+            cpd="$cpd,$own"
+          fi
+          printf 'key=%s\ncpd=%s\n' "$PROJECT_KEY" "$cpd" >>"$GITHUB_OUTPUT"
       - name: Check out craft-fonts
         if: steps.token.outputs.available == 'true' && inputs.shards <= 1
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.fonts-ref }}
+      - name: Check out craft-i18n
+        if: steps.token.outputs.available == 'true' && inputs.shards <= 1
+        id: i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Require requested craft-fonts
         if: inputs.fonts-ref != '' && steps.token.outputs.available == 'true' && inputs.shards <= 1
         shell: bash
@@ -504,11 +613,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview
           rustup default stable
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           tool: cargo-llvm-cov
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -518,6 +627,9 @@ jobs:
         run: |
           python3 scripts/fetch-pdf-test-fonts.py "$RUNNER_TEMP/craft-pdf-test-fonts"
           echo "CRAFT_PDF_TEST_FONT_DIR=$RUNNER_TEMP/craft-pdf-test-fonts" >> "$GITHUB_ENV"
+      - name: Fetch locked Rust dependencies
+        if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
+        run: cargo fetch --locked
       - name: Generate Rust coverage
         id: coverage
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
@@ -538,14 +650,23 @@ jobs:
           if [ "$SQLX_OFFLINE_INPUT" = true ]; then export SQLX_OFFLINE=true; fi
           features=()
           if [ -n "$CARGO_FEATURES" ]; then features=(--features "$CARGO_FEATURES"); fi
-          cargo llvm-cov --workspace "${features[@]}" --ignore-run-fail --lcov --output-path lcov.info \
+          # Run every instrumented test and remember failures, but still create coverage so
+          # SonarCloud can publish diagnostics before this workflow reports a red result.
+          set +e
+          cargo llvm-cov --workspace "${features[@]}" --no-report --no-fail-fast \
+            --ignore-filename-regex "$COVERAGE_IGNORE"
+          test_status=$?
+          set -e
+          echo "test_status=$test_status" >> "$GITHUB_OUTPUT"
+          cargo llvm-cov report --lcov --output-path lcov.info \
             --ignore-filename-regex "$COVERAGE_IGNORE"
       - name: Download shard profiles and archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: profraw-*
-          path: profraw
+          # One merged profile per shard (shard-N.profdata), never the raw profiles.
+          pattern: profdata-*
+          path: profdata
           merge-multiple: true
       - name: Download test archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
@@ -564,10 +685,10 @@ jobs:
           toolchain="$(cat archive/rustc-release.txt)"
           llvm_bin="$(rustup run "$toolchain" rustc --print sysroot)/lib/rustlib/$(rustup run "$toolchain" rustc -vV | sed -n 's/^host: //p')/bin"
           df -h . "$RUNNER_TEMP"
-          # Do not hold every raw profile beside the expanded archive. Retain the raw inputs
+          # Each shard merged its own raw profiles; combine those. Retain the shard profiles
           # until the merge succeeds, then release them before unpacking the test binaries.
-          "$llvm_bin/llvm-profdata" merge -sparse profraw/*.profraw -o coverage.profdata
-          rm -f profraw/*.profraw
+          "$llvm_bin/llvm-profdata" merge -sparse profdata/*.profdata -o coverage.profdata
+          rm -f profdata/*.profdata
           df -h . "$RUNNER_TEMP"
           # Unpack outside the checkout: the scanner analyses everything under the workspace, and build
           # output (generated sources) there would be counted as duplicated code.
@@ -656,9 +777,18 @@ jobs:
           status=0
           npm run --silent -- "$NODE_COVERAGE_SCRIPT" || status=$?
           echo "status=$status" >>"$GITHUB_OUTPUT"
+      # The checkout is a build input, not caller source. Moving it after all coverage runs
+      # prevents an unsharded scan from counting another repository's files as this project.
+      - name: Move craft-i18n outside scan workspace
+        if: steps.i18n.outputs.rev != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(mktemp -d "$RUNNER_TEMP/craft-i18n.XXXXXX")"
+          mv -- "$GITHUB_WORKSPACE/craft-i18n" "$destination/checkout"
       - name: SonarCloud Scan
         if: steps.token.outputs.available == 'true'
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        uses: step-security/sonarqube-scan-action@c2312f8888f2bff4220bd815febb9d4a7cb32433 # v8.2.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_CLOUD_PAT || secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: https://sonarcloud.io
@@ -667,7 +797,21 @@ jobs:
             "-Dsonar.projectKey=${{ steps.project.outputs.key }}"
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
-            "-Dsonar.cpd.exclusions=**/i18n/**"
+            "-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"
+      - name: Fail on Rust coverage generation failure
+        if: steps.coverage.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::cargo llvm-cov failed to build the test archive or write lcov.info"
+          exit 1
+      - name: Fail on Rust instrumented test failures
+        if: steps.coverage.outputs.test_status != '' && steps.coverage.outputs.test_status != '0'
+        shell: bash
+        env:
+          RUST_TEST_STATUS: ${{ steps.coverage.outputs.test_status }}
+        run: |
+          echo "::error::instrumented Rust tests exited with status $RUST_TEST_STATUS"
+          exit 1
       - name: Fail on JavaScript/TypeScript test failures
         if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
         env:
@@ -675,3 +819,25 @@ jobs:
         run: |
           echo "::error::node-coverage-script exited with status $NODE_COVERAGE_STATUS"
           exit 1
+      - name: Fail on Rust shard test failures
+        if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
+        shell: bash
+        env:
+          TOTAL_SHARDS: ${{ inputs.shards }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for ((shard=1; shard<=TOTAL_SHARDS; shard++)); do
+            path="profdata/shard-$shard.status"
+            if [ ! -f "$path" ]; then
+              echo "::error::Missing test status for coverage shard $shard"
+              failed=1
+              continue
+            fi
+            status="$(cat "$path")"
+            if [ "$status" != 0 ]; then
+              echo "::error::Coverage shard $shard tests failed (exit $status); analysis was still uploaded"
+              failed=1
+            fi
+          done
+          exit "$failed"

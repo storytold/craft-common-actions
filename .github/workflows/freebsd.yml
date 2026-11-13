@@ -94,8 +94,14 @@ jobs:
             x86_64|aarch64) ;;
             *) echo "::error::unsupported architecture '$ARCH' (use x86_64 or aarch64)"; exit 1 ;;
           esac
+      # The VM action apt-installs QEMU on the host: give it the mirrors outside ubuntu.com, and
+      # drop the image's Microsoft source, which this job never installs from.
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
+      - name: Drop the Microsoft apt source
+        run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
       - name: Start the FreeBSD VM
-        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
           # Always an x86_64 guest, which KVM accelerates: aarch64 is cross-compiled in it,

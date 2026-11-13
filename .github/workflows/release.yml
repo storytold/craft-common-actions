@@ -84,6 +84,23 @@ on:
         type: boolean
         required: false
         default: false
+      publish:
+        description: >-
+          Publish the draft when the run is done, instead of leaving it for a maintainer: only on
+          the release branch, only when no build job failed or was cancelled, and only when the
+          draft has at least as many assets as the last published release (a skipped job leaves the
+          run green).
+        type: boolean
+        required: false
+        default: false
+      dry-run:
+        description: >-
+          Build and check without releasing: no signing, no `release` environment, no macOS (its
+          larger runner is paid for), no Flatpak OCI push and no draft. For a nightly run on main
+          that finds release-only breakage (riscv64, Flatpak, FreeBSD, packaging) before release day.
+        type: boolean
+        required: false
+        default: false
 
     secrets:
       APPLE_CERTIFICATE:
@@ -214,9 +231,10 @@ jobs:
   macos:
     timeout-minutes: 90
     name: macOS universal
+    if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -277,11 +295,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-macos-universal
       - name: Apply version override
@@ -335,14 +353,16 @@ jobs:
     timeout-minutes: 90
     name: Windows ${{ matrix.arch }}
     needs: [version]
-    runs-on: windows-latest
-    environment: release
+    # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
+    # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
+    runs-on: ${{ matrix.runner }}
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x64, target: x86_64-pc-windows-msvc }
-          - { arch: arm64, target: aarch64-pc-windows-msvc }
+          - { arch: x64, target: x86_64-pc-windows-msvc, runner: windows-latest }
+          - { arch: arm64, target: aarch64-pc-windows-msvc, runner: windows-11-arm }
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -405,11 +425,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-windows-${{ matrix.arch }}
       - name: Apply version override
@@ -446,7 +466,7 @@ jobs:
     needs: [version]
     # The signing key lives in the release environment, as it does for the macOS, Windows and
     # flatpak jobs; without this the Linux packages are built unsigned.
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -496,10 +516,10 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: ${{ inputs.nfpm-version }}
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-linux-${{ matrix.arch }}
       - name: Apply version override
@@ -543,7 +563,7 @@ jobs:
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     permissions:
       contents: read
       packages: write
@@ -582,6 +602,8 @@ jobs:
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/linux
+      - name: Configure apt mirrors
+        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
       - name: Install flatpak-builder
         run: |
           sudo apt-get update
@@ -617,7 +639,7 @@ jobs:
           packaging/linux/flatpak-bundle.sh "$tarball"
           printf 'tarball=%s\n' "$tarball" >> "$GITHUB_OUTPUT"
       - name: Publish Flatpak OCI layout to GHCR and Docker Hub
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && !inputs.dry-run
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -793,7 +815,7 @@ jobs:
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Start the FreeBSD VM
-        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
           release: ${{ inputs.freebsd-release == '15.1-STABLE' && '15.1' || inputs.freebsd-release }}
           # Always an x86_64 guest, which KVM accelerates: aarch64 is cross-compiled in it,
@@ -883,7 +905,11 @@ jobs:
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
       - name: Build and package
         shell: freebsd {0}
@@ -967,7 +993,11 @@ jobs:
         with:
           phase: save
           profile: release
-          configuration: ${{ toJSON(inputs) }}
+          # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
+          # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
+          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
           key: ${{ steps.cargo-cache.outputs.key }}
 
@@ -1009,11 +1039,11 @@ jobs:
           app-name: ${{ inputs.app-name }}
           version: ${{ needs.version.outputs.version }}
           date: ${{ needs.version.outputs.date }}
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-web
       - uses: storytold/craft-common-actions/actions/install-trunk@main
@@ -1049,7 +1079,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1094,11 +1124,11 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: riscv64gc-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-linux-riscv64
       - name: Apply version override
@@ -1189,10 +1219,10 @@ jobs:
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: release-server-${{ matrix.arch }}
       - name: Apply version override
@@ -1215,10 +1245,10 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!cancelled() && !contains(needs.*.result, 'failure')"
+    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
-    environment: release
+    environment: ${{ !inputs.dry-run && 'release' || '' }}
     permissions:
       contents: write
     steps:
@@ -1233,3 +1263,31 @@ jobs:
           prerelease: ${{ needs.version.outputs.prerelease }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
+      - name: Publish the release
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: v${{ needs.version.outputs.version }}
+          CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
+        run: |
+          set -euo pipefail
+          refuse() {
+            echo "::error::$1"
+            echo "Not published: $1" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+          if [ "$CANCELLED" != false ]; then
+            refuse "a build job was cancelled: $TAG stays a draft"
+          fi
+          now="$(gh release view "$TAG" --json assets --jq '.assets | length')"
+          # The most recently published release; gh lists by creation, not publication.
+          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | last | .tagName // ""')"
+          if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
+            before="$(gh release view "$last" --json assets --jq '.assets | length')"
+            if [ "$now" -lt "$before" ]; then
+              refuse "$TAG has $now assets where $last had $before: it stays a draft"
+            fi
+          fi
+          gh release edit "$TAG" --draft=false
+          echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"
