@@ -17,6 +17,11 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      setup-command:
+        description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
         type: string
@@ -273,6 +278,16 @@ jobs:
           key: ${{ steps.cache-profile.outputs.key }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: true
+
+      - name: Caller setup
+        if: inputs.setup-command != ''
+        shell: bash
+        env:
+          SETUP: ${{ inputs.setup-command }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
+          bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
 
       - name: Gate
         shell: bash
