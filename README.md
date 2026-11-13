@@ -50,7 +50,17 @@ Cargo.lock) and an authenticated `gh` whose account may update `release`.
 `scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
 parallel, with a log per app and a summary of what was published or stopped.
 
+The release gate rejects Git dependencies outside `github.com/storytold` by default.
+The single repository-scoped pilot exception is for the caller `storytold/pdfcraft`:
+`edit-session` version `0.1.0-alpha.2`, with both requested revision and resolved commit
+`033f7c3a67b825b8f222288788cc61234c0c945d` from `PerchAnton/edit-session`.
+It corresponds to the dependency proposed in [PdfCraft #4594](https://github.com/storytold/pdfcraft/pull/4594).
+Other apps and forks retain the strict default; callers cannot supply an exception list.
+New exceptions or pin changes require review in this shared workflow and the caller's CI.
+Source replacement, Cargo config patches/path overrides and unlocked metadata remain rejected.
+
 #### Caller Example:
+
 ```yaml
 name: Release
 
