@@ -45,13 +45,20 @@ class ShardStatusTests(unittest.TestCase):
                 binary = root / 'cargo'
                 binary.write_text('#!/bin/bash\nmkdir -p profraw\ntouch profraw/test.profraw\nexit "$FAKE_EXIT"\n')
                 binary.chmod(0o755)
+                summary = root / 'summary'
                 result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', shard_step['run']],
                                         cwd=tmp, env={**os.environ, 'SHARD': '1', 'TOTAL_SHARDS': '2',
-                                                     'FAKE_EXIT': str(status), 'PATH': f"{tmp}:{os.environ['PATH']}"},
+                                                     'FAKE_EXIT': str(status), 'PATH': f"{tmp}:{os.environ['PATH']}",
+                                                     'GITHUB_STEP_SUMMARY': str(summary)},
                                         capture_output=True, text=True)
                 if status in (0, 100):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual((root / 'profdata/shard-1.status').read_text(), f'{status}\n')
+                    if status == 100:
+                        self.assertIn('Tests failed', summary.read_text())
+                        self.assertIn('::warning::', result.stdout)
+                    else:
+                        self.assertIn('Tests passed', summary.read_text())
                 else:
                     self.assertNotEqual(result.returncode, 0)
 

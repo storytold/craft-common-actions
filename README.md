@@ -885,6 +885,12 @@ so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
 failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
 
+Sharded Rust coverage continues after test failures when the shard produced coverage profiles, so
+SonarCloud can still analyse the code. Each shard reports its test outcome in the job summary;
+failing tests also produce a warning annotation pointing to the test log. A green coverage job
+therefore does not mean all tests passed. If a shard produces no profiles, its summary records
+that the scan cannot include it and the shard fails. Runner errors also fail the shard.
+
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
 pinned coverage.py in an isolated virtual environment and writes `python-coverage.xml`.

@@ -402,10 +402,33 @@ jobs:
           fi
           mkdir -p profdata
           printf '%s\n' "$rc" > "profdata/shard-$SHARD.status"
-          if ! ls profraw/*.profraw >/dev/null 2>&1; then
+          if ls profraw/*.profraw >/dev/null 2>&1; then
+            profiles=true
+          else
+            profiles=false
+          fi
+
+          if [ "$rc" -eq 100 ]; then
+            echo "::warning::Coverage shard $SHARD/$TOTAL_SHARDS has failing tests; see this job's test log."
+            if [ "$profiles" = true ]; then
+              result="**Tests failed.** Coverage profiles are available, so the SonarCloud scan will continue. A green coverage job does not mean the tests passed; see this job's log for failed tests and diagnostics."
+            else
+              result='**Tests failed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          else
+            if [ "$profiles" = true ]; then
+              result='**Tests passed.** Coverage profiles are available for the SonarCloud scan.'
+            else
+              result='**Tests passed.** This shard produced no coverage profiles, so its tests cannot be included in the SonarCloud scan.'
+            fi
+          fi
+          printf '### Coverage shard %s/%s\n\n%s\n' "$SHARD" "$TOTAL_SHARDS" "$result" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$profiles" != true ]; then
             echo "::error::shard $SHARD produced no coverage profiles"
             exit 1
           fi
+
       - name: Install LLVM tools for the archive's toolchain
         run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
       - name: Merge this shard's profiles
