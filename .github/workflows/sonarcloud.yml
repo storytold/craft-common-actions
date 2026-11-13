@@ -645,7 +645,15 @@ jobs:
           if [ "$SQLX_OFFLINE_INPUT" = true ]; then export SQLX_OFFLINE=true; fi
           features=()
           if [ -n "$CARGO_FEATURES" ]; then features=(--features "$CARGO_FEATURES"); fi
-          cargo llvm-cov --workspace "${features[@]}" --ignore-run-fail --lcov --output-path lcov.info \
+          # Run every instrumented test and remember failures, but still create coverage so
+          # SonarCloud can publish diagnostics before this workflow reports a red result.
+          set +e
+          cargo llvm-cov --workspace "${features[@]}" --no-report --no-fail-fast \
+            --ignore-filename-regex "$COVERAGE_IGNORE"
+          test_status=$?
+          set -e
+          echo "test_status=$test_status" >> "$GITHUB_OUTPUT"
+          cargo llvm-cov report --lcov --output-path lcov.info \
             --ignore-filename-regex "$COVERAGE_IGNORE"
       - name: Download shard profiles and archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
@@ -785,6 +793,20 @@ jobs:
             -Dsonar.organization=storytold
             -Dsonar.rust.lcov.reportPaths=lcov.info
             "-Dsonar.cpd.exclusions=${{ steps.project.outputs.cpd }}"
+      - name: Fail on Rust coverage generation failure
+        if: steps.coverage.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::cargo llvm-cov failed to build the test archive or write lcov.info"
+          exit 1
+      - name: Fail on Rust instrumented test failures
+        if: steps.coverage.outputs.test_status != '' && steps.coverage.outputs.test_status != '0'
+        shell: bash
+        env:
+          RUST_TEST_STATUS: ${{ steps.coverage.outputs.test_status }}
+        run: |
+          echo "::error::instrumented Rust tests exited with status $RUST_TEST_STATUS"
+          exit 1
       - name: Fail on JavaScript/TypeScript test failures
         if: steps.node-coverage.outputs.status != '' && steps.node-coverage.outputs.status != '0'
         env:
