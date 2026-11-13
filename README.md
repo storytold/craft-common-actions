@@ -133,6 +133,33 @@ gpg --armor --export-secret-subkeys <signing-subkey-fingerprint>! | gh secret se
 
 Without the secret the release is published unsigned, with a warning.
 
+#### Windows launch check (opt-in)
+
+winget-pkgs validation installs each new version on a VM and starts the installed programs
+without a desktop. There, no graphics backend can create a window. An app that panics (exit 101)
+or exits with an error is labelled `Validation-Executable-Error`, and only a WinGet admin can let
+it through, so the version never reaches WinGet. One that reports the failure in a dialog and
+keeps running passes (FilmCraft 0.13.0 failed, 0.14.0 passed).
+
+With `windows-launch-check: true`, the x64 and x86 Windows jobs install the MSI they built and
+start every program in it the same way, through a scheduled task running as SYSTEM:
+
+- the main app (`<app-name>.exe`, or `windows-main-exe`) must still be running after 30 seconds
+  or exit 0. Exactly one installed program may have that name; with two, the check fails;
+- other programs (CLIs, helpers) fail only on a crash (exit 101 or an NTSTATUS code). A CLI that
+  prints its usage and exits 1 or 2 passes.
+
+A failure fails the Windows job, so the release is not published. Turn it on in an app once its
+main app shows a dialog for a graphics start failure:
+
+```yaml
+    with:
+      app-name: craft-launcher
+      app-title: ArtCraft Launcher
+      windows-launch-check: true
+      windows-main-exe: artcraft-launcher.exe # only when it isn't <app-name>.exe
+```
+
 #### Automatic contributor credits (opt-in)
 
 Apps using `contributors/contributors.json` and `contributors/people.toml` can refresh bundled
@@ -783,6 +810,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/checkout-craft-i18n`: Checks out `storytold/craft-i18n` at the caller's `craft-i18n.rev`, if any, and sets `CRAFT_I18N_DIR` and `CRAFT_I18N_REQUIRED=1`.
 - `actions/resolve-version`: Slices version from `packaging/env.sh` and validates format.
 - `actions/install-wix`: Installs WiX toolset and UI/Util extensions.
+- `actions/windows-launch-check`: Installs an MSI and starts its programs without a desktop, as winget-pkgs validation does (see "Windows launch check").
 - `actions/install-nfpm`: Installs `nfpm` with strict SHA256 checksum verification.
 - `actions/install-linux-deps`: Installs Linux system build libraries and nfpm.
 - `actions/install-apt-packages`: Installs the given Ubuntu packages and keeps the downloaded `.deb` files in the Actions cache, so later runs install without the mirror download. By default only pushes to the default branch save the cache; PRs restore it. For an app's CI:
