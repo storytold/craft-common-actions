@@ -961,6 +961,19 @@ warns and leaves the files unsigned.
 Existing callers are unaffected: the shared `release.yml` still runs each app's own
 `packaging/windows/` scripts. Apps adopt the action one at a time, then delete their copy.
 
+## SonarCloud issue helper
+
+`scripts/sonar_issues.py` downloads a project's unresolved SonarCloud issues and keeps the fields
+needed to fix them (`file`, line, offsets, rule, severity, type, message). It uses only the Python
+standard library.
+
+```sh
+python3 scripts/sonar_issues.py storytold_craft-common-actions
+python3 scripts/sonar_issues.py storytold_craft-common-actions --out sonar-issues.json
+```
+
+Set `SONAR_TOKEN` (or pass `--token`) for a private project.
+
 ## Testing workflow failure paths
 
 With Python 3 and PyYAML installed, run:
