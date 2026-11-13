@@ -20,9 +20,10 @@ runs:
         # A mirror list that reaches beyond ubuntu.com, so an outage there does not stop the job.
         sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
         sudo apt-get update
+        # scap finds pipewire and dbus headers through pkg-config, and its bindgen step needs libclang
         sudo apt-get install -y --no-install-recommends \
           libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
-          libasound2-dev pkg-config \
+          libasound2-dev libpipewire-0.3-dev libdbus-1-dev libclang-dev pkg-config \
           desktop-file-utils appstream python3-yaml zsync
 
     - uses: storytold/craft-common-actions/actions/install-nfpm@main
