@@ -11,7 +11,7 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ### 1. `release.yml`
 Full multi-platform release pipeline for Craft apps:
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
-- **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
+- **Windows** (x64, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
 - **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
@@ -19,6 +19,36 @@ Full multi-platform release pipeline for Craft apps:
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
 - **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
+
+Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
+`<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA`. The prefix is the one the app's
+`packaging/env.sh` (or `packaging/common.sh`) reads in `VERSION="${<PREFIX>_VERSION:-...}"`, so a
+new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
+`CRAFT_ANYTHING`).
+
+#### Cutting a release
+
+`scripts/cut_release.py <owner/app>` cuts a release without a version-bump pull request, so a
+change of version strings never waits on the full CI of a pull request:
+
+1. It takes the newest commit on main whose `CI` run for a push passed (`--commit` picks another;
+   `--gate-workflow` names another workflow).
+2. It commits the version bump there: `[workspace.package] version`, the internal path
+   dependencies, and Cargo.lock's entries for the workspace's own packages. A repository with
+   other files that name the version adds `packaging/set-version.sh <old> <new>`.
+3. It merges that into `release` (main's version lines win) and pushes, which starts the app's
+   `release.yml`.
+4. It opens a pull request that brings the same bump to main, with auto-merge on where the
+   repository allows it. The release doesn't wait for it.
+5. With `--publish` it waits for `release.yml` and publishes the draft once every job passed and
+   the draft has assets. Otherwise it stops after the push.
+
+The version defaults to the next minor after the last published release (`--part patch`, or
+`--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
+Cargo.lock) and an authenticated `gh` whose account may update `release`.
+
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
 
 #### Caller Example:
 ```yaml
@@ -89,7 +119,9 @@ somewhere users can check it independently. On first install, compare that finge
 The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
 builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
 stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
-of the script does with `--push`.
+of the script does with `--push`. When `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured
+(e.g. as organization secrets), the job dual-pushes the OCI layout to `docker.io/storytold/<app>`
+with the same version and stable architecture tags.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
@@ -244,6 +276,9 @@ Lints all packaging configurations and metadata:
 - `appstreamcli validate`
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
+- AppImage desktop integration and bundled CLI/MCP tests, when the caller provides
+  `packaging/linux/apprun-test.sh` or `packaging/linux/apprun-cli-test.sh`. No app-local
+  workflow job is needed; a failing script fails the shared lint job.
 
 #### Caller Example:
 ```yaml
@@ -360,7 +395,13 @@ action's version prefix.
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and
 `debug`/`release` artifacts are saved, excluding incremental state, Cargo
-credentials/config and Rust toolchains. Successful non-PR runs save caches on a best-effort basis; PRs
+credentials/config and Rust toolchains. A cross build passes its triple as `target`, and
+its `target/<triple>/<profile>` output is saved and restored too: without it, the aarch64
+release job kept only its build scripts and compiled everything else cold. `release.yml`
+keys its cache on the inputs that change the FreeBSD build (app name, architecture,
+craft-fonts ref and FreeBSD release), not on all its inputs: `contributors-artifact`
+names the run, so a key that held it could never be restored, and a `dry-run` shares
+the release's entry, so a dry run warms the cache a release restores. Successful non-PR runs save caches on a best-effort basis; PRs
 only restore. Restore, checkpoint and save failures are non-blocking; each phase has a 10-minute
 time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards
@@ -475,6 +516,8 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
+- an optional `setup-command` run from the repository root before the gate, for fetching pinned
+  test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -484,7 +527,17 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
   table; dependency, version and comment edits do not discard reusable dependency artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
-  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
+- with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
+  library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
+  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. Test, binary and
+  proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
+  sccache's cache starts afresh when `cache-version` or any `Cargo.toml` or `build.rs` changes,
+  because its key leaves out `--check-cfg`: a cached compile would replay its old
+  `unexpected_cfgs` warnings after the expected cfgs change. It also can't see files a procedural
+  macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
+  such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
+  `env` sets the cache's version instead;
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -502,6 +555,11 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
       tools: trunk@0.21.14
       command: packaging/web/package.sh
 ```
+
+`setup-command` is also passed through the environment, then run with Bash from the checkout root.
+Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
+fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
+gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
 
 #### Caller Example:
 ```yaml
@@ -655,6 +713,82 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
 ```
 
+### 10. `house-rules.yml`
+
+Fails unless `AGENTS.md` carries the shared house rules from
+[storytold/craft-contrib](https://github.com/storytold/craft-contrib) unchanged. Each block names
+the commit it was copied from and the SHA-256 of the bytes inside it. The check loads
+`standards/house-rules-core.md` (and `standards/house-rules-rust.md` when `rust` is true) at that
+commit, requires the commit to be on `main`, and compares the normalized bytes. An edited block, or
+a commit that is not on `main`, fails. An intact older commit warns only when its normalized standards file changed on `main`.
+If the file is unchanged, there is no warning. A source that cannot be read
+fails as "could not check". `rust` defaults to true; a repository that is not Rust passes `false`.
+
+The caller is only the workflow call. The reusable workflow checks the app out and checks
+craft-contrib out at `main` with full history.
+
+#### Caller Example:
+```yaml
+jobs:
+  house-rules:
+    uses: storytold/craft-common-actions/.github/workflows/house-rules.yml@main
+    with:
+      rust: true
+```
+
+### 11. `docker-build.yml`
+
+Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
+`images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
+where an image needs it: `ghcr.io` through the workflow token, `docker.io` when Docker Hub images
+are listed (using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true`
+and the Docker Hub secrets are provided.
+
+Both craft web images publish this way. `font-preview-service` fetches its font sources into the
+build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
+larger runner, passes `build-args` and a GHA layer cache, and sets `free-disk: true` because the Rust
+release build needs the space.
+
+#### Caller Example:
+```yaml
+name: Docker publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
+    with:
+      images: |
+        ghcr.io/storytold/artcraft-services
+        docker.io/storytold/artcraft-services
+      platforms: '[{"platform":"linux/amd64","runner":"github-ubuntu-64core"}]'
+      dockerfile: build/service_cpu.Dockerfile
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+      free-disk: true
+      cache-from: type=gha
+      cache-to: type=gha,mode=max
+    secrets: inherit
+```
+
+The caller owns triggers, concurrency and `packages: write`; a called workflow cannot raise its
+owner's permissions. Tags default to the branch name, the semver tag and `latest` on the default
+branch, and the `tags` input replaces those metadata-action rules. `timeout-minutes` (default 60)
+bounds each platform build; the manifest merge has its own 15-minute limit.
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -672,7 +806,8 @@ Individual actions are also available for composing custom pipelines:
     with:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
-- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
+- `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
+- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
@@ -680,7 +815,9 @@ Individual actions are also available for composing custom pipelines:
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
 
@@ -741,6 +878,7 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
 | Git sources | 5 |
+| Docker build, per platform / manifest merge | 60 / 15 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job
@@ -761,6 +899,12 @@ so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
 failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
 
+Sharded Rust coverage continues after test failures when the shard produced coverage profiles, so
+SonarCloud can still analyse the code. Each shard reports its test outcome in the job summary;
+failing tests also produce a warning annotation pointing to the test log. A green coverage job
+therefore does not mean all tests passed. If a shard produces no profiles, its summary records
+that the scan cannot include it and the shard fails. Runner errors also fail the shard.
+
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
 pinned coverage.py in an isolated virtual environment and writes `python-coverage.xml`.
@@ -775,10 +919,25 @@ This step requires the Sonar token, so token-independent CI should also run the 
 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
-that archive and uploads its profile data, and the scan job merges the profiles
-with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
-the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
-does not run them.
+that archive, merges its own raw profiles into one sparse `.profdata` with the
+rustup `llvm-profdata`, and uploads that plus a small test-exit-status file; the scan job merges the shard
+profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
+cannot read (for example one cut short by a test process that crashed while
+writing it) fails its shard and is named in an error annotation, rather than
+reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
+Sharded runs skip doctests, because nextest does not run them.
+Each shard links the build job's target directory to its extracted copy of the
+archive, so tests that run a workspace binary through
+`env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.
+Ordinary test failures still allow coverage and static analysis to upload, but then
+fail the scan job. Missing shard status also fails closed; a green analysis job
+must not conceal failed tests. The single-shard Rust path is unchanged.
+
+The scan job frees unused runner SDKs before either Rust coverage path. The archive build
+frees them in the background, so the build starts at once. Sharded
+coverage merges and removes the shard profiles before extracting the test archive, then
+releases the compressed archive and temporary binaries as they are consumed.
+Disk-space snapshots in the logs show headroom before cleanup and aggregation.
 
 The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
@@ -827,6 +986,11 @@ With Python 3 and PyYAML installed, run:
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+GnuPG signing fixtures need local Unix sockets for their temporary agents. They
+report an explicit skip when a local sandbox denies socket creation or binding;
+the same restriction remains a failure on GitHub Actions. Other GPG errors are
+not skipped, and the hosted suite exercises the real protected-key fixture.
 
 The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each

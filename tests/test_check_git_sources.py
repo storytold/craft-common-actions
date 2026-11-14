@@ -167,7 +167,8 @@ class CheckGitSourcesWiringTests(unittest.TestCase):
         job = WORKFLOW["jobs"]["git-sources"]
         self.assertEqual(WORKFLOW["permissions"], {"contents": "read"})
         self.assertIn("timeout-minutes", job)
-        checkout, check = job["steps"]
+        steps = [s for s in job["steps"] if s.get("name") != "Harden runner"]
+        checkout, check = steps
         self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
         self.assertEqual(checkout["with"]["persist-credentials"], "false")
         self.assertEqual(check["uses"], "storytold/craft-common-actions/actions/check-git-sources@main")

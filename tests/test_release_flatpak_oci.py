@@ -11,7 +11,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
-STEP = next(step for step in WORKFLOW["jobs"]["flatpak"]["steps"] if step.get("name") == "Publish Flatpak OCI layout to GHCR")
+STEP = next(step for step in WORKFLOW["jobs"]["flatpak"]["steps"] if step.get("name") == "Publish Flatpak OCI layout to GHCR and Docker Hub")
 BASH = shutil.which("bash")
 
 # An app's flatpak-oci.sh as most apps still carry it: --push also moves stable-<arch>. It records
@@ -98,8 +98,28 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.log.read_text(), "")
 
-    def test_the_step_never_runs_for_a_pull_request(self):
-        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request'")
+    def test_the_step_never_runs_for_a_pull_request_or_a_dry_run(self):
+        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request' && !inputs.dry-run")
+
+    def test_dockerhub_credentials_trigger_dual_push_for_stable_release(self):
+        result = self.publish("1.2.0", "refs/heads/release", DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = self.log.read_text()
+        self.assertIn("docker://ghcr.io/storytold/democraft:1.2.0-x86_64", log)
+        self.assertIn("docker://ghcr.io/storytold/democraft:stable-x86_64", log)
+        self.assertIn("docker://docker.io/storytold/democraft:1.2.0-x86_64", log)
+        self.assertIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
+        self.assertIn("--dest-creds user:secret", log)
+
+    def test_dockerhub_credentials_trigger_dual_push_for_prerelease(self):
+        result = self.publish("1.2.0-rc.1", "refs/heads/release", DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = self.log.read_text()
+        self.assertIn("docker://ghcr.io/storytold/democraft:1.2.0-rc.1-x86_64", log)
+        self.assertNotIn("docker://ghcr.io/storytold/democraft:stable-x86_64", log)
+        self.assertIn("docker://docker.io/storytold/democraft:1.2.0-rc.1-x86_64", log)
+        self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
+        self.assertIn("Leaving docker.io/storytold/democraft:stable-x86_64 unchanged", result.stdout)
 
 
 if __name__ == "__main__":

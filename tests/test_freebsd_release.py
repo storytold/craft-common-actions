@@ -75,7 +75,7 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                        CARGO_TARGET_DIR=str(target), GITHUB_WORKSPACE=str(guest),
                        REAL_RSYNC=shutil.which('rsync'), VERSION='1.0.0', INPUT_VERSION=input_version,
                        FAIL_BUILD=str(fail_build).lower(), WITH_CLI=str(with_cli).lower(), APP_NAME='fixture',
-                       CARGO_LOG=str(log))
+                       ARCH=arch, CARGO_LOG=str(log))
             env.pop('CARGO_BUILD_TARGET', None)
             script = BUILD.replace('${{ inputs.app-name }}', 'fixture').replace('${{ matrix.arch }}', arch)
             script = script.replace('${{ steps.cargo-cache.outcome }}', 'failure')

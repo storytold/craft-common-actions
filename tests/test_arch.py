@@ -107,6 +107,40 @@ exit 0
         mp.chmod(0o755)
         return tools
 
+    def test_extra_runtime_dependencies(self):
+        """Validate and append extra runtime dependencies to the PKGBUILD depends array."""
+        test_cases = (
+            ("webkit2gtk-4.1 gtk3 openssl", True),
+            ("webkit2gtk-4.1\ngtk3\r\nopenssl>=3", True),
+            ("webkit;touch-injected", False),
+            ("openssl>=", False),
+        )
+        for dependencies, valid in test_cases:
+            with self.subTest(dependencies=dependencies), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                tarball = self._create_fixture_tarball(root)
+                tools = self._setup_mock_tools(root)
+                capture = root / "capture"
+                capture.mkdir()
+                result = subprocess.run(
+                    [str(ARCH_SCRIPT), str(tarball), "x86_64", str(root / "out")],
+                    capture_output=True, text=True,
+                    env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}",
+                         "MOCK_CAPTURE": str(capture), "ARCH_EXTRA_DEPENDS": dependencies},
+                )
+                if not valid:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("invalid extra dependency", result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    depends = subprocess.run(
+                        ["bash", "-c", 'source "$1" && printf "%s\\n" "${depends[@]}"',
+                         "_", str(capture / "PKGBUILD")],
+                        capture_output=True, text=True, check=True,
+                    ).stdout.splitlines()
+                    for dependency in dependencies.split():
+                        self.assertIn(dependency, depends)
+
     def test_unsupported_architecture_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)

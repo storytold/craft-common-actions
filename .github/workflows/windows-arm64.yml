@@ -55,17 +55,38 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            *.crates.io:443
+            *.github.com:443
+            *.githubusercontent.com:443
+            api.github.com:443
+            crates.io:443
+            github.com:443
+            index.crates.io:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
           toolchain: stable
           targets: aarch64-pc-windows-msvc
       # The nightly run on main saves; pull requests and `release` restore it. A pull request's
       # cache (about 0.7 GB) is visible to that pull request alone, and the apps' caches sit at
       # the 10 GB limit, so each one evicted a cache main's gate restores.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
         with:
           key: windows-arm64-package
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -91,6 +112,25 @@ jobs:
     runs-on: windows-11-arm
     timeout-minutes: 30
     steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            *.crates.io:443
+            *.github.com:443
+            *.githubusercontent.com:443
+            api.github.com:443
+            crates.io:443
+            github.com:443
+            index.crates.io:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ inputs.app-name }}-windows-arm64

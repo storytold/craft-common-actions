@@ -13,3 +13,5 @@ updates:
           - "*"
     commit-message:
       prefix: "ci(deps)"
+    cooldown:
+      default-days: 7
