@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 concurrency:
-  # Keep every main scan, including pending runs; only supersede older PR scans.
-  group: sonarcloud-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: sonarcloud-${{ github.ref }}
+  # A push to main publishes the analysis: never cancel one mid-scan. A newer push still
+  # replaces a queued one, so the latest commit is scanned and analyses arrive in order.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   sonarcloud:
