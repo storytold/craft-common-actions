@@ -901,8 +901,18 @@ jobs:
           export CARGO_BUILD_TARGET=$target
           export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=$X/cc
           export CC_aarch64_unknown_freebsd=$X/cc CXX_aarch64_unknown_freebsd=$X/c++ AR_aarch64_unknown_freebsd=/usr/bin/ar
-          export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S
+          export PKG_CONFIG_PATH=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH
           EOF
+          . "$X/env"
+          if ! pkg-config --exists gdk-3.0; then
+            echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
+            ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+            sed -n '1,100p' "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+            pkg-config --debug --print-errors --modversion gdk-3.0 || true
+            exit 1
+          fi
           rustc --print target-libdir --target "$target"
       - name: Restore FreeBSD release Cargo cache
         id: cargo-cache
