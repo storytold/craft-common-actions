@@ -180,10 +180,16 @@ jobs:
           # The libraries the prepare step installs; the build tools and fonts stay host-only.
           pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib
           for p in "$X"/cache/*.pkg; do
-            [ ! -L "$p" ] || continue
+            # pkg names each fetched archive with a symlink to its hashed cache file.
+            # tar follows the link; skipping links here leaves the sysroot without any ports.
+            [ -e "$p" ] || continue
             case "$p" in */rust-*) continue ;; esac
             tar -xf "$p" -C "$S" --exclude '+*'
           done
+          if [ ! -f "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" ]; then
+            echo "error: aarch64 sysroot is missing gtk3's gdk-3.0.pc" >&2
+            exit 1
+          fi
           for tool in cc c++; do
             printf '#!/bin/sh\nexec %s --target=%s%s --sysroot=%s -fuse-ld=lld -I%s/usr/local/include -L%s/usr/local/lib -Wl,-rpath-link,%s/usr/local/lib "$@"\n' \
               "$tool" "$target" "${release%%-*}" "$S" "$S" "$S" "$S" > "$X/$tool"
