@@ -276,19 +276,13 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           SQLX_OFFLINE_INPUT: ${{ inputs.sqlx-offline }}
           CARGO_FEATURES: ${{ inputs.cargo-features }}
-          RUST_TEST_THREADS_INPUT: ${{ inputs.rust-test-threads }}
         run: |
           # Opt-in build settings; validated because they reach the cargo command line.
           if [[ ! "$CARGO_FEATURES" =~ ^[A-Za-z0-9_/,-]*$ ]]; then
             echo "::error::cargo-features may only hold feature names, '/', '-', '_' and ',', got '$CARGO_FEATURES'"
             exit 1
           fi
-          if [[ -n "$RUST_TEST_THREADS_INPUT" && ! "$RUST_TEST_THREADS_INPUT" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::rust-test-threads must be a positive integer, got '$RUST_TEST_THREADS_INPUT'"
-            exit 1
-          fi
           if [ "$SQLX_OFFLINE_INPUT" = true ]; then export SQLX_OFFLINE=true; fi
-          if [ -n "$RUST_TEST_THREADS_INPUT" ]; then export RUST_TEST_THREADS="$RUST_TEST_THREADS_INPUT"; fi
           features=()
           if [ -n "$CARGO_FEATURES" ]; then features=(--features "$CARGO_FEATURES"); fi
           # show-env sets the instrumentation flags the same way the unsharded run gets them.
@@ -683,13 +677,19 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: "0"
           SQLX_OFFLINE_INPUT: ${{ inputs.sqlx-offline }}
           CARGO_FEATURES: ${{ inputs.cargo-features }}
+          RUST_TEST_THREADS_INPUT: ${{ inputs.rust-test-threads }}
         run: |
           # Opt-in build settings; validated because they reach the cargo command line.
           if [[ ! "$CARGO_FEATURES" =~ ^[A-Za-z0-9_/,-]*$ ]]; then
             echo "::error::cargo-features may only hold feature names, '/', '-', '_' and ',', got '$CARGO_FEATURES'"
             exit 1
           fi
+          if [[ -n "$RUST_TEST_THREADS_INPUT" && ! "$RUST_TEST_THREADS_INPUT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::rust-test-threads must be a positive integer, got '$RUST_TEST_THREADS_INPUT'"
+            exit 1
+          fi
           if [ "$SQLX_OFFLINE_INPUT" = true ]; then export SQLX_OFFLINE=true; fi
+          if [ -n "$RUST_TEST_THREADS_INPUT" ]; then export RUST_TEST_THREADS="$RUST_TEST_THREADS_INPUT"; fi
           features=()
           if [ -n "$CARGO_FEATURES" ]; then features=(--features "$CARGO_FEATURES"); fi
           # Run every instrumented test and remember failures, but still create coverage so
