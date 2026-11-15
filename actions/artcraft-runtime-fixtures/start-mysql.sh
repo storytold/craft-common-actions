@@ -13,7 +13,12 @@ export ARTCRAFT_MYSQL_ROOT="$root"
 echo "ARTCRAFT_MYSQL_ROOT=$root" >> "$GITHUB_ENV"
 cleanup_on_failure() {
   status=$?
-  if [ "$status" -ne 0 ]; then bash "$(dirname "$0")/cleanup.sh"; fi
+  if [ "$status" -ne 0 ]; then
+    cat "$root/initialize.log" "$root/mysql.log" >&2 2>/dev/null || true
+    ls -ld "$root" "$root/data" >&2 2>/dev/null || true
+    id >&2
+    bash "$(dirname "$0")/cleanup.sh"
+  fi
   exit "$status"
 }
 trap cleanup_on_failure EXIT
@@ -21,7 +26,9 @@ mysqld --no-defaults --initialize-insecure --datadir="$root/data" --log-error="$
 nohup mysqld --no-defaults --datadir="$root/data" --socket="$socket" \
   --skip-networking --mysqlx=0 --pid-file="$root/mysql.pid" \
   --log-error="$root/mysql.log" </dev/null >"$root/stdout.log" 2>&1 &
-echo "$!" > "$root/mysql.pid"
+pid=$!
+echo "$pid" > "$root/mysql.pid"
+if [ -r "/proc/$pid/stat" ]; then awk '{print $22}' "/proc/$pid/stat" > "$root/process-start"; fi
 for attempt in $(seq 1 60); do
   if mysqladmin --no-defaults --protocol=SOCKET --socket="$socket" --user=root ping --silent; then
     # Prove this is our private instance, not an unrelated server.
