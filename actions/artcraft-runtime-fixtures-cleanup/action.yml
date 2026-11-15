@@ -1,0 +1,7 @@
+name: Clean up ArtCraft runtime fixtures
+description: Stop and remove only the private fixture instance
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: bash "${{ github.action_path }}/../artcraft-runtime-fixtures/cleanup.sh"

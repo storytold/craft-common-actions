@@ -9,10 +9,19 @@ if [ -e "$socket" ] || [ -L "$socket" ]; then
 fi
 root="$(mktemp -d "$RUNNER_TEMP/artcraft-mysql.XXXXXX")"
 chmod 700 "$root"
+export ARTCRAFT_MYSQL_ROOT="$root"
+echo "ARTCRAFT_MYSQL_ROOT=$root" >> "$GITHUB_ENV"
+cleanup_on_failure() {
+  status=$?
+  if [ "$status" -ne 0 ]; then bash "$(dirname "$0")/cleanup.sh"; fi
+  exit "$status"
+}
+trap cleanup_on_failure EXIT
 mysqld --no-defaults --initialize-insecure --datadir="$root/data" --log-error="$root/initialize.log"
 nohup mysqld --no-defaults --datadir="$root/data" --socket="$socket" \
   --skip-networking --mysqlx=0 --pid-file="$root/mysql.pid" \
   --log-error="$root/mysql.log" </dev/null >"$root/stdout.log" 2>&1 &
+echo "$!" > "$root/mysql.pid"
 for attempt in $(seq 1 60); do
   if mysqladmin --no-defaults --protocol=SOCKET --socket="$socket" --user=root ping --silent; then
     # Prove this is our private instance, not an unrelated server.
