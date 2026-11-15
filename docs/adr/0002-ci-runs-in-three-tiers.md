@@ -24,7 +24,7 @@ Every check belongs to exactly one tier.
 
 | Tier | Runs on | Contents |
 |---|---|---|
-| PR | `pull_request` that isn't a draft | fmt, clippy, the affected tests on one Linux leg (a nextest filter of the changed packages and their dependents), cheap policy checks, and platform legs only when platform paths changed |
+| PR | `pull_request`, drafts included | fmt, clippy, the affected tests on one Linux leg (a nextest filter of the changed packages and their dependents), cheap policy checks, and platform legs only when platform paths changed |
 | Main | Every push to main, and the merge queue once enabled | The full suite, every platform leg, SonarCloud, the GPU group on lavapipe |
 | Nightly | Schedule | Tests marked `#[ignore = "nightly: <reason>"]` (fuzz-style, timing guards, every-size and exhaustive sweeps), fuzzing, FreeBSD, perf |
 

@@ -35,10 +35,8 @@ heaviest, with the most app-local CI. A change that works in both is safe to swe
 |---|---|---|---|---|
 | P1.1 | W3 | Sweep | Each app's `xtask` `cargo()` helper removes the environment variables `cargo run` sets for xtask (`CARGO_PKG_*`, `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`, `CARGO_CRATE_NAME`, `CARGO_BIN_NAME`, `CARGO_PRIMARY_PACKAGE`). | photocraft's gate shows no rebuild after `CI summary`. |
 | P1.2 | W4 | Shared, then per repository | Cap the FreeBSD cargo cache (one entry per architecture on main, pruned before save). Point app jobs that build the gate's workspace at `job: gate`. Use P0.1's data per repository. | Every repository at or under 8 GB for two weeks. |
-| P1.3 | T3 | Sweep | Add `ready_for_review` to every app's `pull_request` types. | The contract check (P4.2) or a sweep dry run shows every app done. |
-| P1.4 | T3 | Shared | `gate.yml` (and the other shared PR workflows) skip their jobs on draft PRs. Ships only after P1.3 is everywhere. | A draft PR in a pilot app starts no gate. Marking it ready runs it. |
 | P1.5 | T1 | Shared | A `tier` output computed once per run (`pr`, `main` or `nightly`, from the event and the `full-ci` label) in a small shared workflow every app calls first. Later tasks key on it. | Unit tests cover each event and label. |
-| P1.6 | T7 | craft-contrib, agent configuration | Add to the AGENTS.md house rules: open PRs as drafts, push in batches. Add a scheduled stale-PR closer (14 days of inactivity) to the shared workflows. | Open PRs per repository trend down in P0.1. |
+| P1.6 | T7 | craft-contrib, agent configuration | Add to the AGENTS.md house rules: push in batches rather than one commit at a time. Add a scheduled stale-PR closer (14 days of inactivity) to the shared workflows. | Open PRs per repository trend down in P0.1. |
 
 ## Phase 2: run less on PRs (weeks 2–4)
 
@@ -65,7 +63,7 @@ heaviest, with the most app-local CI. A change that works in both is safe to swe
 | Task | Requirement | Kind | Change | Done when |
 |---|---|---|---|---|
 | P4.1 | G1 | Shared, then per app | Move photocraft's 15 local jobs (Windows legs, corpus, web build, fuzz and perf jobs) into shared workflows or inputs, starting with the patterns more than one app needs. Delete jobs that no longer earn their minutes. Other apps' 0–2 local jobs follow. | Each app's workflows only call shared workflows, apart from the allowlist. |
-| P4.2 | G2 | Shared | `ci-contract.yml`, run like `house-rules.yml`. It fails an app with a local job not on the allowlist, no `ready_for_review`, no PR `concurrency` cancel, or a macOS PR leg without a path filter. Swept into every app. | Every app passes. |
+| P4.2 | G2 | Shared | `ci-contract.yml`, run like `house-rules.yml`. It fails an app with a local job not on the allowlist, no PR `concurrency` cancel, or a macOS PR leg without a path filter. Swept into every app. | Every app passes. |
 
 ## Phase 5: the org's own runners (when available)
 
@@ -79,7 +77,6 @@ heaviest, with the most app-local CI. A change that works in both is safe to swe
 
 - **Phase 0 comes first.** Without P0.1 nobody can tell whether a change helped, and without P0.3 a
   sweep across about 40 repositories is manual work.
-- **P1.4 waits for P1.3** to be in every app.
 - **P2.2 waits for P2.1.** P2.5 is better after P2.2, because the merge queue is what makes a lighter
   PR tier safe.
 - **P3.1 and P3.3 are independent** and can run alongside phase 2.
@@ -90,7 +87,6 @@ heaviest, with the most app-local CI. A change that works in both is safe to swe
 Every shared change is an input or a condition:
 
 - **Inputs** (`test-affected`, `gpu-group`, `sccache`, `platform-paths`): set back to the default.
-- **Draft skip:** remove the condition.
 - **Test tiers:** remove the `#[ignore]` marks, or label a PR `full-ci`.
 - **Merge queue:** a repository setting.
 

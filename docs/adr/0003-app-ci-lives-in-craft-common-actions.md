@@ -29,7 +29,6 @@ The craft apps call shared workflows from this repository (`gate.yml`, `sonarclo
 3. **A shared `ci-contract.yml` check,** run like `house-rules.yml`, enforces the rule and the
    suite's CI conventions in every app:
    - the allowlist;
-   - `ready_for_review` on PR triggers;
    - PR concurrency cancellation;
    - path filters on PR macOS legs.
 4. **Changes that must touch every app go through the sweep tool** (`scripts/sweep.py`). It opens one

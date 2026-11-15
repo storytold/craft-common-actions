@@ -104,16 +104,16 @@ Each requirement has an ID that the plan's tasks and the verification section re
   manifest, toolchain, Cargo or nextest configuration, xtask, workflows, or files outside a package
   run everything. Selecting packages with `-p` is not used, because it changes feature unification
   and misses the cache.
-- **REQ-T3 Drafts.** Draft PRs start no gate. `ready_for_review` starts it. Every app must list
-  `ready_for_review` before the skip ships, so a skipped required check can never pass a merge.
+- **REQ-T3 Drafts are not skipped.** Draft PRs get the PR tier like any other PR. That's a
+  deliberate decision (15 Nov): authors and agents rely on CI feedback while a PR is still a draft.
 - **REQ-T4 SonarCloud** runs in the main tier only, or consumes coverage the main-tier gate already
   produced, so tests never run twice for coverage.
 - **REQ-T5 macOS and Windows** legs run in the main tier, plus on PRs whose paths match the
   platform-specific code (the `changed-paths.yml` pattern photocraft already uses for Windows).
 - **REQ-T6 Merge queue.** Repositories with more than 100 merges a week turn on GitHub merge queue,
   with the main tier as the queue's check.
-- **REQ-T7 Agent PR hygiene.** Agent tooling opens PRs as drafts, batches pushes, and PRs with no
-  activity for 14 days are closed automatically. The suite's AGENTS.md house rules (craft-contrib)
+- **REQ-T7 Agent PR hygiene.** Agent tooling batches pushes, and PRs with no activity for 14 days
+  are closed automatically. The suite's AGENTS.md house rules (craft-contrib)
   carry the rule, so every agent sees it.
 
 ### Remove duplicate work
@@ -150,7 +150,7 @@ Each requirement has an ID that the plan's tasks and the verification section re
   shared workflows or are deleted.
 - **REQ-G2 CI contract check.** A shared workflow, run like `house-rules.yml`, fails an app whose
   workflows break the contract: a local job that isn't on the allowlist, a missing
-  `ready_for_review`, a missing `concurrency` cancel on PRs, or a macOS leg on PRs without a path
+  a missing `concurrency` cancel on PRs, or a macOS leg on PRs without a path
   filter.
 - **REQ-G3 Suite sweep tool.** A script in craft-common-actions applies a mechanical change to every
   app repository and opens one PR per app. Without app owners, the central team rolls changes out
@@ -174,20 +174,19 @@ The rows overlap, so the total is lower than their sum.
 | Stop waste (REQ-W1–W4) | 20–40k |
 | Avoided regression: photocraft Windows rust-cache (#15234) | ~100k+ since 13 Nov (not in the baseline) |
 | Affected tests (REQ-T2) | 60–120k |
-| Drafts and agent PR hygiene (REQ-T3, T7) | 20–60k now; more once agents open drafts |
+| Agent PR hygiene: batched pushes, stale PRs closed (REQ-T7) | Not estimated; tracked by runs per merge in REQ-M1 |
 | SonarCloud on main only, or coverage reuse (REQ-T4) | ~190k |
 | macOS and Windows off ordinary PRs (REQ-T5) | ~200k |
 | Merge queue (REQ-T6) | Multiplies T2; not estimated |
 | GPU group once, no rebuild (REQ-D1, W3) | 12–18k |
 | sccache, nightly tier for slow tests (REQ-B1, B3) | 50–150k (to be measured in a pilot) |
-| **Total** | **~600–750k a week, about 45–55%** |
+| **Total** | **~580–700k a week, about 40–50%** |
 
 ## Risks
 
 | Risk | Requirements | Mitigation |
 |---|---|---|
 | A break the PR tier missed reaches main | T1, T2, B3 | Main runs the full suite on every merge. The merge queue (T6) catches breaks before merge. `full-ci` gives a manual escape hatch. The fallback rules in T2 err towards running everything. |
-| A draft merges with a skipped gate | T3 | `ready_for_review` must land in every app first. The contract check (G2) verifies it. |
 | A test marked nightly hides a real regression for up to a day | B3 | The nightly tier fails loudly into the weekly report. Marking needs a reason string, and the house-rules check reviews new marks. |
 | Moving app jobs into common-actions makes the shared workflows complex | G1 | Each moved behaviour is an input with a default that changes nothing. Behaviour that only one app needs stays an app input, not a branch inside the workflow. |
 | Fork PRs run untrusted code on the org's runners | R2 | Fork PRs never use those runners. |
