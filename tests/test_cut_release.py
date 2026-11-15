@@ -145,6 +145,30 @@ class Bump(unittest.TestCase):
         self.assertIn('name = "demo"\nversion = "0.21.0"', lock)
         self.assertIn('name = "demo-geom"\nversion = "0.18.1"', lock)
 
+    def test_a_path_dependency_at_an_earlier_patch_of_the_old_minor_is_bumped_too(self):
+        # pdfcraft at 0.21.1 named its crates at 0.21.0: that matched 0.21.1, and not 0.22.0.
+        d = self.repo(toml=CARGO_TOML.replace('demo-io = { path = "crates/io", version = "0.18.1" }',
+                                              'demo-io = { path = "crates/io", version = "0.18.0" }\n'
+                                              'demo-old = { path = "crates/old", version = "0.17.0" }'))
+        _, lines, _ = cut_release.bump_cargo(d, "0.19.0")
+        toml = (d / "Cargo.toml").read_text()
+        self.assertEqual(lines, 3)
+        self.assertIn('demo-io = { path = "crates/io", version = "0.19.0" }', toml)
+        self.assertIn('demo-old = { path = "crates/old", version = "0.17.0" }', toml)
+
+    def test_lock_dependency_lists_that_name_the_version_follow_the_bump(self):
+        # vectorcraft also has its own crate from an older git revision in the graph, so Cargo
+        # writes `"demo-geom 0.18.1"` in dependency lists.
+        lock = CARGO_LOCK.replace(' "demo-geom",\n', ' "demo-geom 0.18.1",\n') + (
+            '\n[[package]]\nname = "demo-geom"\nversion = "0.12.0"\nsource = "git+https://example.invalid/demo?rev=abc#abc"\n'
+            '\n[[package]]\nname = "other"\nversion = "0.3.0"\ndependencies = [\n "demo-geom 0.12.0",\n]\n')
+        d = self.repo(lock=lock)
+        cut_release.bump_cargo(d, "0.21.0")
+        lock = (d / "Cargo.lock").read_text()
+        self.assertIn(' "demo-geom 0.21.0",\n', lock)
+        self.assertIn(' "demo-geom 0.12.0",\n', lock)
+        self.assertNotIn("0.18.1\",", lock)
+
     def test_no_hook_no_call(self):
         d = self.repo()
         calls = []
