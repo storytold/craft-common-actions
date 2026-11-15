@@ -666,11 +666,10 @@ A dependency lockfile is the maintained alternative to pinning each call by hand
 says it pins the actions a repository's workflows use, but does not pin calls to reusable workflows
 (`jobs.<job_id>.uses`). This repository has no lockfile, and the craft-libs lockfile covers
 craft-libs' own workflows, not the actions `gate.yml` calls. Adding one here is a change of its own:
-`gh actions-lock` does see these three refs as ordinary action dependencies — run read-only against
-this repository, it reports them as unpinned alongside the third-party ones — so a lockfile here
-would cover them, but that is a separate decision from this pin. The rest of this repository's
-workflows and composite actions still call each other's actions at `@main`, and pinning those is
-separate work too.
+while these three were still `@main`, `gh actions-lock` run read-only against this repository listed
+them as ordinary action dependencies alongside the third-party steps, so a lockfile here would cover
+them — but that is a separate decision from this pin. The rest of this repository's workflows and
+composite actions still call each other's actions at `@main`, and pinning those is separate work too.
 
 ### 7. `ast-grep.yml`
 

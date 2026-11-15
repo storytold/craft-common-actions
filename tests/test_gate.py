@@ -26,11 +26,10 @@ def step(name):
 
 
 def floating_uses(steps):
-    """The steps in `steps` that a mutable branch or tag names: every remote action must be pinned
-    to a full commit SHA. A local ./ action or a docker:// image is pinned by content."""
-    return [s['uses'] for s in steps
-            if 'uses' in s and not s['uses'].startswith(('./', 'docker://'))
-            and not FULL_SHA.search(s['uses'])]
+    """The steps in `steps` whose `uses` is not pinned to a full commit SHA. Every form counts:
+    a local ./ action is workspace state and a docker:// image is a mutable tag, so neither is a
+    commit pin and neither is exempt."""
+    return [s['uses'] for s in steps if 'uses' in s and not FULL_SHA.search(s['uses'])]
 
 
 def absent_gate_actions(steps):
@@ -42,13 +41,20 @@ def absent_gate_actions(steps):
 
 
 class GateWorkflowTests(unittest.TestCase):
-    def test_every_remote_action_is_pinned_to_a_full_commit(self):
-        self.assertEqual(floating_uses(STEPS), [], 'these steps name a branch or tag')
+    def test_every_action_is_pinned_to_a_full_commit(self):
+        self.assertEqual(floating_uses(STEPS), [], 'these steps are not pinned to a commit')
         # Named per step as well, so a failure says which call floats.
         for s in STEPS:
-            with self.subTest(uses=s.get('uses')):
-                if 'uses' in s and not s['uses'].startswith(('./', 'docker://')):
+            if 'uses' in s:
+                with self.subTest(uses=s['uses']):
                     self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+
+    def test_the_pin_guard_exempts_no_other_form_of_uses(self):
+        # A local ./ action is workspace state and a docker:// image a mutable tag: neither is a
+        # commit pin, so the guard must not grow a bypass for them.
+        for uses in ('./actions/local', 'docker://alpine:3.20'):
+            with self.subTest(uses=uses):
+                self.assertEqual(floating_uses(deepcopy(STEPS) + [{'uses': uses}]), [uses])
 
     def test_the_three_gate_actions_are_each_used_once(self):
         self.assertEqual(len(GATE_ACTIONS), 3)
