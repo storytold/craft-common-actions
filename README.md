@@ -539,6 +539,10 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
   `env` sets the cache's version instead;
 
+The shared actions this setup calls are pinned to one reviewed commit, so a push to `actions/`
+cannot change what the apps run before anyone reviews it (see
+[Bumping the gate's action pins](#bumping-the-gates-action-pins)).
+
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
 check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
@@ -628,6 +632,44 @@ jobs:
         cargo clippy --workspace --all-targets --locked -- -D warnings
         cargo test --workspace --locked
 ```
+
+#### Bumping the gate's action pins
+
+The three actions this repository owns that the gate runs — `actions/checkout-craft-i18n`,
+`actions/install-apt-packages` and `actions/rust-cache` — are called at a full commit SHA, like the
+third-party ones. The pin is a line inside `gate.yml`, so calling this workflow at `@main` (as app
+workflows do) does not move them: a change to one of those actions reaches the apps when this pin
+moves, not on the next run. Everything else in the workflow still arrives through `@main`.
+
+To bump the pin:
+
+1. Choose a commit that is already on `main` and whose actions you have reviewed: not a commit that
+   exists only on a branch, and not the commit the bumping pull request would itself create, since
+   the workflow can only be checked against a commit that already exists.
+2. Review what changed since the previous pin: `git log --oneline <old>..<new> -- actions/` and
+   `git diff <old> <new> -- actions/`, scripts included (`install-apt-packages` runs
+   `configure-apt-mirrors.sh`, so a change there counts).
+3. Move the three refs in one commit, with any test that names them.
+4. Run the focused tests (`tests/test_gate.py`, `tests/test_rust_cache.py`,
+   `tests/test_craft_i18n.py`, `tests/test_install_apt_packages.py`) and open a pull request: a pin
+   bump changes what every app's gate runs, so it merges after review like any other workflow
+   change.
+
+A pin fixes the action code, which is what these three are: each already pins its own third-party
+actions to a commit, and `install-apt-packages` runs `configure-apt-mirrors` from the same commit.
+It does not fix what they download or check out at run time — the Ubuntu packages from the mirrors,
+`storytold/craft-i18n` at the caller's own `craft-i18n.rev`. A caller pinning the workflow is a
+separate matter again: that decides which `gate.yml` runs, not which actions it calls.
+
+A dependency lockfile is the maintained alternative to pinning each call by hand, and GitHub's
+[lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles)
+says it pins the actions a repository's workflows use, but does not pin calls to reusable workflows
+(`jobs.<job_id>.uses`). This repository has no lockfile, and the craft-libs lockfile covers
+craft-libs' own workflows, not the actions `gate.yml` calls. Adding one here is a change of its own:
+while these three were still `@main`, `gh actions-lock` run read-only against this repository listed
+them as ordinary action dependencies alongside the third-party steps, so a lockfile here would cover
+them — but that is a separate decision from this pin. The rest of this repository's workflows and
+composite actions still call each other's actions at `@main`, and pinning those is separate work too.
 
 ### 7. `ast-grep.yml`
 
