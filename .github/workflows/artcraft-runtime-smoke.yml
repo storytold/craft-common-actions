@@ -1,0 +1,41 @@
+name: ArtCraft runtime fixture smoke
+on:
+  pull_request:
+    paths:
+      - 'actions/artcraft-runtime-fixtures/**'
+      - 'actions/artcraft-runtime-fixtures-cleanup/**'
+      - '.github/workflows/artcraft-runtime-smoke.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./actions/artcraft-runtime-fixtures
+      - name: Verify socket-only database and media tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          ffmpeg -version
+          ffprobe -version
+          test "$(mysql --no-defaults --protocol=SOCKET --socket=/tmp/mysql.sock -uroot -Nse 'SELECT @@skip_networking')" = 1
+          test "$(mysql --no-defaults --protocol=SOCKET --socket=/tmp/mysql.sock -uroot -Nse 'SELECT @@datadir')" = "$ARTCRAFT_MYSQL_ROOT/data/"
+          mysql --no-defaults --protocol=SOCKET --socket=/tmp/mysql.sock -uroot -e 'CREATE DATABASE artcraft_test_ci; DROP DATABASE artcraft_test_ci;'
+          test ! -e /usr/sbin/policy-rc.d
+      - name: Clean up even on failed verification
+        if: always()
+        uses: ./actions/artcraft-runtime-fixtures-cleanup
+      - name: Verify teardown
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e /tmp/mysql.sock
+          test ! -e /usr/sbin/policy-rc.d
+          if [ -n "${ARTCRAFT_MYSQL_ROOT:-}" ]; then test ! -e "$ARTCRAFT_MYSQL_ROOT"; fi
+          if pgrep -x mysqld; then exit 1; fi
