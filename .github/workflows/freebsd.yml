@@ -202,8 +202,8 @@ jobs:
           export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=$X/cc
           export CC_aarch64_unknown_freebsd=$X/cc CXX_aarch64_unknown_freebsd=$X/c++ AR_aarch64_unknown_freebsd=/usr/bin/ar
           export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S
-          export PKG_CONFIG_PATH=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/libdata/pkgconfig
-          export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_PATH=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/libdata/pkgconfig
           EOF
           . "$X/env"
           if ! pkg-config --exists gdk-3.0; then
