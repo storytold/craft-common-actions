@@ -174,7 +174,8 @@ class SonarCloudTests(unittest.TestCase):
                 cwd=root,
                 env={**os.environ, **coverage.get('env', {}), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
                      'CARGO_CALLS': str(calls), 'GITHUB_OUTPUT': str(output),
-                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false', 'COVERAGE_IGNORE': ''},
+                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false',
+                     'RUST_TEST_THREADS_INPUT': '', 'COVERAGE_IGNORE': ''},
                 capture_output=True,
                 text=True,
             )
@@ -185,6 +186,58 @@ class SonarCloudTests(unittest.TestCase):
             self.assertEqual(len(invocations), 2)
             self.assertIn('--no-report --no-fail-fast', invocations[0])
             self.assertEqual(invocations[1], 'llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex ')
+
+    def test_rust_test_threads_input_is_validated_and_exported(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text(
+                '#!/usr/bin/env bash\n'
+                'printf "%s\\n" "${RUST_TEST_THREADS-unset}" >> "$THREADS_CALLS"\n'
+                'if [[ "$*" == *"--no-report"* ]]; then exit 0; fi\n'
+                'printf "TN:\\n" > lcov.info\n'
+            )
+            cargo.chmod(0o755)
+            calls = root / 'threads'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', coverage['run']],
+                cwd=root,
+                env={**os.environ, **coverage.get('env', {}), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                     'THREADS_CALLS': str(calls), 'GITHUB_OUTPUT': str(root / 'output'),
+                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false',
+                     'RUST_TEST_THREADS_INPUT': '1', 'COVERAGE_IGNORE': ''},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ['1', '1'])
+
+    def test_invalid_rust_test_threads_cannot_start_coverage(self):
+        coverage = next(step for step in self.steps if step.get('id') == 'coverage')
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            cargo = bin_dir / 'cargo'
+            cargo.write_text('#!/usr/bin/env bash\nprintf called >> "$CARGO_CALLS"\n')
+            cargo.chmod(0o755)
+            calls = root / 'calls'
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', coverage['run']],
+                cwd=root,
+                env={**os.environ, **coverage.get('env', {}), 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+                     'CARGO_CALLS': str(calls), 'GITHUB_OUTPUT': str(root / 'output'),
+                     'CARGO_FEATURES': '', 'SQLX_OFFLINE_INPUT': 'false',
+                     'RUST_TEST_THREADS_INPUT': '0', 'COVERAGE_IGNORE': ''},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('rust-test-threads must be a positive integer', result.stdout)
+            self.assertFalse(calls.exists())
 
     def test_coverage_generation_failure_is_blocking_after_scan(self):
         coverage = next(step for step in self.steps if step.get('id') == 'coverage')
