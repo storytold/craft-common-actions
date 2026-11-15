@@ -254,35 +254,15 @@ jobs:
         with:
           tool: ${{ inputs.tools }}
 
-      # Root workspace profiles are not among rust-cache's member manifests. Hash only
-      # those profiles here: a dependency/version/comment change must not discard the
-      # fallback cache for every other dependency. rust-cache still hashes the lockfile,
-      # toolchain, member manifests and build environment, and Cargo checks fingerprints.
-      - name: Cache profile key
-        id: cache-profile
-        shell: bash
-        run: |
-          python - <<'PYTHON'
-          import hashlib
-          import json
-          import os
-          import tomllib
-          from pathlib import Path
-          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-          profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
-          key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"key={key}\n")
-          PYTHON
-
       # Default-branch writes remain the default. Maintainers can explicitly opt manual
-      # branch runs into branch-scoped writes; pull-request runs never save a cache.
-      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      # branch runs into branch-scoped writes; pull-request runs never save a cache. The key
+      # (the canonical root [profile] table included) lives in the shared action, so an app job
+      # that builds the same workspace restores this entry instead of copying the formula.
+      - uses: storytold/craft-common-actions/actions/rust-cache@main
         with:
-          prefix-key: ${{ inputs.cache-version }}-rust
-          key: ${{ steps.cache-profile.outputs.key }}
+          cache-version: ${{ inputs.cache-version }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
-          cache-on-failure: true
+          cache-on-failure: "true"
 
       # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
       - name: Install sccache

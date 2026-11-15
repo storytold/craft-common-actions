@@ -1,0 +1,122 @@
+name: "Rust cache"
+description: >-
+  The suite's rust-cache dependency cache, with one key shared by every job that builds the same
+  workspace. The restore prefix hashes the canonical root [profile] table (a dependency, version or
+  comment edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
+  toolchain and build environment. Restores by default and saves only where the caller allows it.
+
+inputs:
+  cache-version:
+    description: "gate.yml's cache-version: bump it to start the dependency cache afresh"
+    required: false
+    default: "v1"
+  job:
+    description: >-
+      The job whose cache entry to use; the calling job by default. Name the job that saves the
+      entry (the gate workflow's is `gate`) to restore it from your own job without writing to it.
+    required: false
+    default: ""
+  save-if:
+    description: "Whether to save the cache (a GitHub expression, or true/false). Empty or false restores only"
+    required: false
+    default: "false"
+  cache-on-failure:
+    description: "Save the cache even when the job fails: it holds compiled dependencies, not results"
+    required: false
+    default: "true"
+  align-environment:
+    description: >-
+      Drop CARGO_HOME from the cache key so it matches a leg that never had one. A toolchain action
+      exports CARGO_HOME=$HOME/.cargo, which rust-cache hashes; the value changes nothing about the
+      build, and the action's cached registry paths are that same directory, so it is only noise in
+      the key. Refuses to run when CARGO_HOME points somewhere else.
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    # Root workspace profiles are not among rust-cache's member manifests. Hash only those profiles
+    # here: a dependency/version/comment change must not discard the fallback cache for every other
+    # dependency. rust-cache still hashes the lockfile, toolchain, member manifests and build
+    # environment, and Cargo checks fingerprints.
+    - name: Cache profile key
+      id: cache-profile
+      shell: bash
+      run: |
+        python - <<'PYTHON'
+        import hashlib
+        import json
+        import os
+        import tomllib
+        from pathlib import Path
+        manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+        profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"key={key}\n")
+        PYTHON
+
+    # Equivalent to the old `key: <profile hash>` plus rust-cache's automatic GITHUB_JOB suffix.
+    # A shared-key contains that entire fragment; rust-cache appends no further job id to it.
+    # Refuse an empty half instead of silently missing every restore.
+    - name: Cache entry
+      id: entry
+      shell: bash
+      env:
+        PROFILE: ${{ steps.cache-profile.outputs.key }}
+        JOB: ${{ inputs.job || github.job }}
+      run: |
+        set -euo pipefail
+        if [ -z "$PROFILE" ] || [ -z "$JOB" ]; then
+          echo "::error::the cache key needs a profile hash and a job name, got '${PROFILE}' and '${JOB}'"
+          exit 1
+        fi
+        echo "key=$PROFILE-$JOB" >>"$GITHUB_OUTPUT"
+
+    # rust-cache reads an *empty* save-if as `true`, so an empty input must become an explicit
+    # `false`: this action restores unless the caller asks it to save.
+    - name: Cache save policy
+      id: save
+      shell: bash
+      env:
+        SAVE: ${{ inputs.save-if }}
+      run: |
+        echo "save=${SAVE:-false}" >>"$GITHUB_OUTPUT"
+
+    # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable it can see
+    # (src/config.ts). A toolchain action's CARGO_HOME export therefore splits a key that should be
+    # shared; the two steps below differ only in that variable.
+    - name: Align the cache environment
+      if: inputs.align-environment == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        default="$HOME/.cargo"
+        if [ -n "${CARGO_HOME:-}" ] && [ "${CARGO_HOME%/}" != "$default" ]; then
+          echo "::error::align-environment matches a leg with no CARGO_HOME, but this job sets $CARGO_HOME; drop the input, or stop overriding CARGO_HOME, so the cache never restores another registry directory"
+          exit 1
+        fi
+
+    - name: Rust cache
+      if: inputs.align-environment != 'true'
+      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.key }}
+        save-if: ${{ steps.save.outputs.save }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # An empty CARGO_HOME is falsy to rust-cache, so it leaves the variable out of the environment
+    # hash and falls back to $HOME/.cargo for the paths it caches (src/config.ts: `value &&` in the
+    # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
+    - name: Rust cache (aligned environment)
+      if: inputs.align-environment == 'true'
+      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      env:
+        CARGO_HOME: ""
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.key }}
+        save-if: ${{ steps.save.outputs.save }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}

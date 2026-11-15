@@ -162,33 +162,8 @@ class CallerSetupTests(unittest.TestCase):
         self.assertEqual(self.run_step('exit 17')[0], 17)
 
 
-class ProfileCacheTests(unittest.TestCase):
-    def key(self, manifest):
-        with tempfile.TemporaryDirectory() as directory:
-            Path(directory, 'Cargo.toml').write_text(manifest)
-            output = Path(directory, 'output')
-            subprocess.run(['bash', '-euo', 'pipefail', '-c', step('Cache profile key')['run']],
-                           cwd=directory, check=True, capture_output=True,
-                           env={**os.environ, 'GITHUB_OUTPUT': str(output)})
-            return output.read_text()
-
-    def test_dependency_revision_does_not_discard_fallback(self):
-        profile = '[profile.dev]\nopt-level = 1\n'
-        self.assertEqual(self.key('[workspace.dependencies]\na = "1"\n' + profile),
-                         self.key('[workspace.dependencies]\na = "2"\n' + profile))
-
-    def test_profile_changes_invalidate(self):
-        self.assertNotEqual(self.key('[profile.dev]\nopt-level = 1'),
-                            self.key('[profile.dev]\nopt-level = 2'))
-        self.assertNotEqual(self.key('[profile.dev.package.foo]\nopt-level = 1'),
-                            self.key('[profile.dev.package.foo]\nopt-level = 2'))
-
-    def test_order_and_comments_do_not_invalidate(self):
-        self.assertEqual(self.key('[profile.dev]\ndebug = false\nopt-level = 1'),
-                         self.key('# comment\n[profile.dev]\nopt-level = 1\ndebug = false'))
-
-    def test_no_profiles_is_supported(self):
-        self.assertRegex(self.key('[workspace]\nmembers = []'), r'^key=[a-f0-9]{64}\n$')
+# The profile half of the cache key, and the rest of the key's layout, are tested where they now
+# live: tests/test_rust_cache.py.
 
 
 if __name__ == '__main__':
