@@ -60,12 +60,14 @@ class DefinitionTests(unittest.TestCase):
                 self.assertIn(f'step-security/rust-cache@{pinned}', line)
 
     def test_restore_only_unless_the_caller_saves(self):
-        # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.
+        # rust-cache trims this input and reads what is left as "true" when empty, so the action
+        # must pass one canonical word rather than whatever the caller sent.
         self.assertEqual(INPUTS['save-if']['default'], 'false')
         for s in CACHES:
             self.assertEqual(s['with']['save-if'], '${{ steps.save.outputs.save }}')
         policy = step('Cache save policy')
         self.assertEqual(policy['env'], {'SAVE': '${{ inputs.save-if }}'})
+        self.assertEqual(policy['shell'], 'bash')
         self.assertNotIn('${{', policy['run'])
 
     def test_the_key_names_one_job_and_the_gate_cache_version(self):
@@ -154,25 +156,74 @@ class TargetDirectoryTests(unittest.TestCase):
 
 
 class SavePolicyTests(unittest.TestCase):
+    """The action hands rust-cache one canonical word: rust-cache trims its input and reads what is
+    left as `true` when empty, so anything it does not recognize must arrive as `false`."""
     STEP = step('Cache save policy')
+
+    def run_step(self, directory, save):
+        output = Path(directory, 'output')
+        if output.exists():
+            output.unlink()
+        extra = {'GITHUB_OUTPUT': str(output)}
+        env = environment(directory, extra)
+        if save is not None:
+            env['SAVE'] = save
+        else:
+            env.pop('SAVE', None)
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+            cwd=directory, capture_output=True, text=True, env=env)
+        return result.returncode, output.read_text() if output.exists() else '', result.stdout + result.stderr
 
     def resolve(self, save):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory, 'output')
-            result = subprocess.run(
-                ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
-                cwd=directory, capture_output=True, text=True,
-                env=environment(directory, {'SAVE': save, 'GITHUB_OUTPUT': str(output)}))
-            return result.returncode, output.read_text() if output.exists() else ''
+            return self.run_step(directory, save)
 
-    def test_an_empty_input_never_saves(self):
-        self.assertEqual(self.resolve(''), (0, 'save=false\n'))
+    def test_a_blank_or_whitespace_only_input_never_saves(self):
+        # rust-cache turns a trimmed-to-empty input into `true`: a caller passing a blank variable
+        # to mean "no decision" would otherwise save, so every blank shape must say false.
+        for save in ('', ' ', '\t', '\n', '\r\n', ' \t\r\n '):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
 
-    def test_a_decision_passes_through_unchanged(self):
-        self.assertEqual(self.resolve('false'), (0, 'save=false\n'))
-        self.assertEqual(self.resolve('true'), (0, 'save=true\n'))
-        expression = "github.event_name != 'pull_request' && github.ref_name == 'x'"
-        self.assertEqual(self.resolve(expression), (0, f'save={expression}\n'))
+    def test_an_unset_input_never_saves(self):
+        self.assertEqual(self.resolve(None), (0, 'save=false\n', ''))
+
+    def test_true_and_false_remain_decisions(self):
+        for save in ('true', 'TRUE', 'True', ' true ', '\ttrue\r\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=true\n', ''))
+        # A newline is whitespace to rust-cache's trim as well, so `false` there means false.
+        for save in ('false', 'FALSE', 'False', ' false ', '\tfalse\r\n', 'false\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
+
+    def test_anything_else_fails_closed(self):
+        # Actions evaluates `${{ ... }}` before this action sees an input, so the text of an
+        # expression is not a decision and must not become one. Nor is any other spelling.
+        for save in ("github.event_name != 'pull_request'", 'yes', '1', 'on', 'off', 'TRUE!',
+                     '\u0085true\u0085', '\u00a0true\u00a0', '\u3000true'):
+            with self.subTest(save=save):
+                status, written, output = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertIn('::warning::', output)
+
+    def test_a_newline_cannot_add_a_second_output_record(self):
+        # rust-cache saves when its trimmed, lowercased input is exactly `true`, so a second
+        # GITHUB_OUTPUT record could override the decision. The output is one canonical line.
+        for save in ('false\nsave=true', 'true\nsave=false', '\nsave=true', ' save=true\n'):
+            with self.subTest(save=save):
+                status, written, _ = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertEqual(written.count('\n'), 1)
+                self.assertNotIn('save=true', written)
+
+    def test_the_input_is_never_run_as_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save = '$(touch OWNED); `touch OWNED2`'
+            self.assertEqual(self.run_step(directory, save)[:2], (0, 'save=false\n'))
+            self.assertFalse(Path(directory, 'OWNED').exists())
+            self.assertFalse(Path(directory, 'OWNED2').exists())
 
 
 class ProfileKeyTests(unittest.TestCase):
