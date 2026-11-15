@@ -372,7 +372,7 @@ fi
         # different line in the heredoc and is unset in the generating shell.
         pkg_config_libdir = (
             "export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:"
-            "$S/usr/local/lib/pkgconfig:$S/usr/libdata/pkgconfig"
+            "$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/libdata/pkgconfig"
         )
         self.assertIn(pkg_config_libdir, script)
         self.assertNotIn("export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH", script)
