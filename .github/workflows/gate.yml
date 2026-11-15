@@ -258,11 +258,14 @@ jobs:
       # branch runs into branch-scoped writes; pull-request runs never save a cache. The key
       # (the canonical root [profile] table included) lives in the shared action, so an app job
       # that builds the same workspace restores this entry instead of copying the formula.
+      # No save on failure: a main run that fails at fmt or clippy has not built the test
+      # profile, and rust-cache never replaces an exact-key entry, so that half-filled entry
+      # would be restored by every run until Cargo.lock changes.
       - uses: storytold/craft-common-actions/actions/rust-cache@main
         with:
           cache-version: ${{ inputs.cache-version }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
-          cache-on-failure: "true"
+          cache-on-failure: "false"
 
       # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
       - name: Install sccache

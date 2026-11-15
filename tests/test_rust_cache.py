@@ -67,8 +67,8 @@ class DefinitionTests(unittest.TestCase):
                                         'JOB': '${{ inputs.job || github.job }}'})
         self.assertNotIn('${{', entry['run'])
 
-    def test_cache_on_failure_keeps_its_default(self):
-        self.assertEqual(INPUTS['cache-on-failure']['default'], 'true')
+    def test_a_failed_job_saves_nothing_by_default(self):
+        self.assertEqual(INPUTS['cache-on-failure']['default'], 'false')
         for s in CACHES:
             self.assertEqual(s['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
 
@@ -106,6 +106,38 @@ class CacheEntryTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(written, '')
                 self.assertIn('::error::', out)
+
+
+class TargetDirectoryTests(unittest.TestCase):
+    STEP = step('Cache target directory')
+
+    def resolve(self, target):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory, 'a', 'app', 'app')
+            checkout.mkdir(parents=True)
+            output = Path(directory, 'output')
+            extra = {'GITHUB_OUTPUT': str(output)}
+            if target is not None:
+                extra['CARGO_TARGET_DIR'] = target.replace('$ROOT', directory)
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+                cwd=checkout, capture_output=True, text=True, env=environment(directory, extra))
+            return result.returncode, output.read_text() if output.exists() else ''
+
+    def test_unset_is_rust_caches_default(self):
+        self.assertEqual(self.resolve(None), (0, 'workspaces=. -> target\n'))
+        self.assertEqual(self.resolve(''), (0, 'workspaces=. -> target\n'))
+
+    def test_a_target_outside_the_checkout_is_reached_relatively(self):
+        # The photocraft Windows layout: checkout D:\a\app\app, target D:\t.
+        self.assertEqual(self.resolve('$ROOT/t'), (0, 'workspaces=. -> ../../../t\n'))
+
+    def test_a_relative_target_stays_relative(self):
+        self.assertEqual(self.resolve('build/out'), (0, 'workspaces=. -> build/out\n'))
+
+    def test_every_cache_step_uses_it(self):
+        for s in CACHES:
+            self.assertEqual(s['with']['workspaces'], '${{ steps.target.outputs.workspaces }}')
 
 
 class SavePolicyTests(unittest.TestCase):
@@ -311,7 +343,7 @@ class GateTests(unittest.TestCase):
                  if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@main']
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]['with']['cache-version'], '${{ inputs.cache-version }}')
-        self.assertEqual(calls[0]['with']['cache-on-failure'], 'true')
+        self.assertEqual(calls[0]['with']['cache-on-failure'], 'false')
 
     def test_no_second_copy_of_the_key_remains(self):
         for s in GATE_STEPS:

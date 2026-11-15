@@ -21,9 +21,13 @@ inputs:
     required: false
     default: "false"
   cache-on-failure:
-    description: "Save the cache even when the job fails: it holds compiled dependencies, not results"
+    description: >-
+      Save the cache even when the job fails. Off by default: a job that fails before its test
+      build (fmt, clippy) saves an entry without the test profile's dependencies, and rust-cache
+      never replaces an exact-key entry, so every run restores the half-filled entry until
+      Cargo.lock changes
     required: false
-    default: "true"
+    default: "false"
   align-environment:
     description: >-
       Drop CARGO_HOME from the cache key so it matches a leg that never had one. A toolchain action
@@ -84,6 +88,26 @@ runs:
       run: |
         echo "save=${SAVE:-false}" >>"$GITHUB_OUTPUT"
 
+    # rust-cache looks for the target directory at `<workspace>/<target>` (a path join), so a
+    # CARGO_TARGET_DIR outside the checkout, such as a short `D:\t` on Windows, has to reach it
+    # as a relative path. Without that it restores nothing and the save finds no path to cache
+    # (storytold/photocraft#15232). Unset, this is rust-cache's own default, `. -> target`.
+    - name: Cache target directory
+      id: target
+      shell: bash
+      run: |
+        python - <<'PYTHON'
+        import os
+        target = os.environ.get("CARGO_TARGET_DIR") or "target"
+        try:
+            relative = os.path.relpath(os.path.abspath(target), os.getcwd())
+        except ValueError:
+            print(f"::error::CARGO_TARGET_DIR {target} is on another drive than the checkout, which rust-cache can only reach by a relative path")
+            raise SystemExit(1)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"workspaces=. -> {relative.replace(os.sep, '/')}\n")
+        PYTHON
+
     # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable it can see
     # (src/config.ts). A toolchain action's CARGO_HOME export therefore splits a key that should be
     # shared; the two steps below differ only in that variable.
@@ -132,6 +156,7 @@ runs:
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
         save-if: ${{ steps.save.outputs.save }}
         cache-on-failure: ${{ inputs.cache-on-failure }}
 
@@ -146,5 +171,6 @@ runs:
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
         save-if: ${{ steps.save.outputs.save }}
         cache-on-failure: ${{ inputs.cache-on-failure }}
