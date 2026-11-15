@@ -817,6 +817,15 @@ Individual actions are also available for composing custom pipelines:
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
+- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
+
+  ```yaml
+  - uses: storytold/craft-common-actions/actions/rust-cache@main
+    with:
+      cache-version: v1 # Match the gate call; bump both together.
+      job: gate
+      align-environment: true
+  ```
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
@@ -1010,3 +1019,16 @@ Only the default branch saves by default. A caller may set
 `workflow_dispatch` runs to save a cache scoped by GitHub to that branch, never a
 pull-request run. Use this selectively to avoid storage churn; sibling branches cannot
 restore each other's caches. Do not pass the input until this workflow change has landed.
+
+`gate.yml` gets its key formula from `actions/rust-cache`, and an app job that builds the same
+workspace restores the gate leg's entry with the same action rather than copying the formula. Name
+the producing job (`job: gate`); the action forms the entire profile-and-job fragment, and rust-cache
+adds no further job id to that shared key. Pass the same `cache-version` literal as the gate call
+(`v1` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
+the job installs Rust with an action that
+exports `CARGO_HOME`. rust-cache hashes every `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*` and
+`RUST*` variable it can see, and the exported `CARGO_HOME` is not part of the build, so an unaligned
+job computes a different key and restores nothing. The job must otherwise build with the same
+`CARGO_*`/`RUST*` values as the gate leg. Changing a toolchain or setup-action pin is a cache-contract
+change: compare both legs' actual hashed environments and keys again. Do not call the action from an app until this lands on
+`@main`; an app's pull request can only follow this one.
