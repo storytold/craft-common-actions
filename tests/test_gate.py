@@ -1,5 +1,6 @@
 """The shared gate workflow: pinned actions, a cache with explicit manual-branch opt-in, and caller
 input that reaches the shell only through the environment."""
+from copy import deepcopy
 from pathlib import Path
 import os
 import re
@@ -12,20 +13,63 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=yaml.BaseLoader)
 STEPS = WORKFLOW['jobs']['gate']['steps']
-OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
+# The actions this repository owns that the gate runs. They used to float on @main under a guard
+# exemption; they are pinned like every other action, so a push cannot change the gate before it
+# is reviewed.
+OWN_PREFIX = 'storytold/craft-common-actions/'
+GATE_ACTIONS = ('actions/checkout-craft-i18n', 'actions/install-apt-packages', 'actions/rust-cache')
+FULL_SHA = re.compile(r'@[0-9a-f]{40}$')
 
 
 def step(name):
     return next(s for s in STEPS if s.get('name') == name)
 
 
+def floating_uses(steps):
+    """The steps in `steps` that a mutable branch or tag names: every remote action must be pinned
+    to a full commit SHA. A local ./ action or a docker:// image is pinned by content."""
+    return [s['uses'] for s in steps
+            if 'uses' in s and not s['uses'].startswith(('./', 'docker://'))
+            and not FULL_SHA.search(s['uses'])]
+
+
+def absent_gate_actions(steps):
+    """The gate actions that `steps` does not use exactly once, so a deleted step cannot leave the
+    pin guard with nothing to check."""
+    uses = [s.get('uses', '') for s in steps]
+    return [action for action in GATE_ACTIONS
+            if sum(use.startswith(f'{OWN_PREFIX}{action}@') for use in uses) != 1]
+
+
 class GateWorkflowTests(unittest.TestCase):
-    def test_third_party_actions_are_pinned_to_a_commit(self):
+    def test_every_remote_action_is_pinned_to_a_full_commit(self):
+        self.assertEqual(floating_uses(STEPS), [], 'these steps name a branch or tag')
+        # Named per step as well, so a failure says which call floats.
         for s in STEPS:
-            if 'uses' in s:
-                with self.subTest(uses=s['uses']):
-                    if not OWN_ACTION.match(s['uses']):
-                        self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+            with self.subTest(uses=s.get('uses')):
+                if 'uses' in s and not s['uses'].startswith(('./', 'docker://')):
+                    self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+
+    def test_the_three_gate_actions_are_each_used_once(self):
+        self.assertEqual(len(GATE_ACTIONS), 3)
+        self.assertEqual(absent_gate_actions(STEPS), [])
+
+    def test_the_pin_guard_catches_a_floating_ref_on_each_gate_action(self):
+        # The @main exemption these three used to have: each one must fail the guard again.
+        for action in GATE_ACTIONS:
+            with self.subTest(action=action):
+                steps = deepcopy(STEPS)
+                call = next(s for s in steps if s.get('uses', '').startswith(f'{OWN_PREFIX}{action}@'))
+                call['uses'] = f'{OWN_PREFIX}{action}@main'
+                self.assertEqual(floating_uses(steps), [call['uses']])
+
+    def test_the_presence_guard_catches_each_dropped_gate_action(self):
+        for action in GATE_ACTIONS:
+            with self.subTest(action=action):
+                steps = [s for s in deepcopy(STEPS)
+                         if not s.get('uses', '').startswith(f'{OWN_PREFIX}{action}@')]
+                self.assertEqual(floating_uses(steps), [], 'the pin guard alone cannot see a drop')
+                self.assertEqual(absent_gate_actions(steps), [action])
 
     def test_manual_branch_saves_require_explicit_opt_in(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))

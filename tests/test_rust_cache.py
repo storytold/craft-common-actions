@@ -25,6 +25,11 @@ def step(name):
     return next(s for s in STEPS if s.get('name') == name)
 
 
+def gate_cache_call(s):
+    """Whether step `s` is the gate's call to this action, whatever commit it is pinned to."""
+    return s.get('uses', '').startswith('storytold/craft-common-actions/actions/rust-cache@')
+
+
 def environment(directory, extra):
     """The caller's environment, plus a `python` for the key step when this machine has none."""
     path = os.environ['PATH']
@@ -295,8 +300,7 @@ class GateTests(unittest.TestCase):
         self.assertNotIn('GITHUB_ENV', install['run'])
 
     def test_setup_shell_steps_do_not_add_cargo_home_to_the_key(self):
-        cache = next(i for i, s in enumerate(GATE_STEPS)
-                     if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@main')
+        cache = next(i for i, s in enumerate(GATE_STEPS) if gate_cache_call(s))
         for setup in GATE_STEPS[:cache]:
             # Conservative source guard, not shell data-flow analysis. An opaque setup action
             # still needs a hosted key comparison; callers' generic env input remains supported.
@@ -307,8 +311,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(default, INPUTS['cache-version']['default'])
 
     def test_the_gate_restores_through_the_action(self):
-        calls = [s for s in GATE_STEPS
-                 if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@main']
+        calls = [s for s in GATE_STEPS if gate_cache_call(s)]
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]['with']['cache-version'], '${{ inputs.cache-version }}')
         self.assertEqual(calls[0]['with']['cache-on-failure'], 'true')

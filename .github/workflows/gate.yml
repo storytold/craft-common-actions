@@ -188,7 +188,7 @@ jobs:
 
       # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
       - name: Check out craft-i18n
-        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@c8f4b6ec2a894285213c341611b6b023b0b3e469 # c8f4b6e (main, 2026-11-14)
 
       # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
       - name: Caller environment
@@ -225,7 +225,7 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && inputs.packages != ''
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: storytold/craft-common-actions/actions/install-apt-packages@c8f4b6ec2a894285213c341611b6b023b0b3e469 # c8f4b6e (main, 2026-11-14)
         with:
           packages: ${{ inputs.packages }}
 
@@ -258,7 +258,7 @@ jobs:
       # branch runs into branch-scoped writes; pull-request runs never save a cache. The key
       # (the canonical root [profile] table included) lives in the shared action, so an app job
       # that builds the same workspace restores this entry instead of copying the formula.
-      - uses: storytold/craft-common-actions/actions/rust-cache@main
+      - uses: storytold/craft-common-actions/actions/rust-cache@c8f4b6ec2a894285213c341611b6b023b0b3e469 # c8f4b6e (main, 2026-11-14)
         with:
           cache-version: ${{ inputs.cache-version }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
