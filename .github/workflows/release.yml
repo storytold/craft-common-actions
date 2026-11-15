@@ -908,6 +908,11 @@ jobs:
           export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig
           EOF
           . "$X/env"
+          if [ "${CARGO_BUILD_TARGET:-}" != "$target" ]; then
+            echo "error: $X/env did not set CARGO_BUILD_TARGET=$target" >&2
+            cat "$X/env" >&2 || true
+            exit 1
+          fi
           if ! pkg-config --exists gdk-3.0; then
             echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
             ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
@@ -946,7 +951,14 @@ jobs:
           # Before the cross environment: xtask has to run on the guest.
           if [ -n "$INPUT_VERSION" ]; then cargo xtask version set "$VERSION" || cargo run -q -p xtask -- version set "$VERSION"; fi
           # Written by "Set up the aarch64 cross toolchain": cargo then builds for aarch64.
+          # Fail closed: an incomplete env file (FreeBSD sh may not abort on an unset
+          # variable in the unquoted heredoc) would leave CARGO_BUILD_TARGET unset, and
+          # package.sh would name an x86_64 archive after uname -m.
           [ ! -f /var/tmp/craft-cross/env ] || . /var/tmp/craft-cross/env
+          if [ "$ARCH" = aarch64 ] && [ "${CARGO_BUILD_TARGET:-}" != aarch64-unknown-freebsd ]; then
+            echo "error: FreeBSD aarch64 job has CARGO_BUILD_TARGET='${CARGO_BUILD_TARGET:-}'; expected aarch64-unknown-freebsd from /var/tmp/craft-cross/env" >&2
+            exit 1
+          fi
           # Cargo puts a cross build's binaries under target/<triple>/release.
           rel="${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}release"
           export CRAFT_FONTS_DIR="$PWD/craft-fonts" CRAFT_FONTS_REQUIRED=1
