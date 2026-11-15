@@ -387,7 +387,9 @@ same toolchain, configuration and profile, so a release that only bumps a versio
 or a PR that touches a manifest, still restores compiled dependencies instead of
 rebuilding them cold; Cargo's own fingerprints decide which of those artifacts
 are still valid. Toolchain, configuration and profile changes start a new cache
-without a fallback. The test and release workflows use separate profile
+without a fallback. A run saves only when no entry for the same exact match was saved that
+day (UTC), so a busy main keeps one entry per dependency fingerprint and day instead of one
+per commit; later runs restore that entry and Cargo rebuilds only what changed since. The test and release workflows use separate profile
 namespaces. The workflow-file pattern fingerprints the caller's configuration;
 changes to the shared workflow that need a new namespace must bump the cache
 action's version prefix.
