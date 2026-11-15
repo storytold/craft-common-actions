@@ -211,6 +211,15 @@ class SavePolicyTests(unittest.TestCase):
                 self.assertEqual((status, written), (0, 'save=false\n'))
                 self.assertIn('::warning::', output)
 
+    def test_the_unrecognized_value_is_never_echoed(self):
+        # A configuration value can be a misdirected secret; the warning names the policy, not the
+        # value, so nothing a caller passes as save-if reaches the log.
+        sentinel = 'SYNTHETIC-SENTINEL-c0ffee-not-a-real-secret'
+        status, written, output = self.resolve(sentinel)
+        self.assertEqual((status, written), (0, 'save=false\n'))
+        self.assertIn('::warning::', output)
+        self.assertNotIn(sentinel, output)
+
     def test_a_newline_cannot_add_a_second_output_record(self):
         # rust-cache saves when its trimmed, lowercased input is exactly `true`, so a second
         # GITHUB_OUTPUT record could override the decision. The output is one canonical line.

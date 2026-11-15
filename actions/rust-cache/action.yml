@@ -110,8 +110,10 @@ runs:
             ;;
           *)
             # Fail closed: a blank, whitespace-only or other unrecognized value never saves. One
-            # line always, so a newline in the input cannot add a second GITHUB_OUTPUT record.
-            printf '::warning::save-if is not true or false after trimming (got %q), so this run restores only\n' "$SAVE"
+            # line always, so a newline in the input cannot add a second GITHUB_OUTPUT record. The
+            # value itself is never echoed: it is a caller's configuration and a misdirected one
+            # could hold a secret, which the log has no use for.
+            printf '::warning::save-if is not true or false after trimming, so this run restores only\n'
             echo "save=false" >>"$GITHUB_OUTPUT"
             ;;
         esac
