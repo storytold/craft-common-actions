@@ -92,8 +92,36 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        default="$HOME/.cargo"
-        if [ -n "${CARGO_HOME:-}" ] && [ "${CARGO_HOME%/}" != "$default" ]; then
+        # Compare the directories, not their spelling. On a Windows runner git-bash reports
+        # $HOME/.cargo as /c/Users/x/.cargo while the same directory arrives as C:\Users\x\.cargo
+        # from a native tool or a workflow input: one directory, two spellings, and a drive letter
+        # whose case is not significant there either. Refuse only when the paths really differ.
+        normalise() {
+          local path="${1//\\//}"
+          path="${path%/}"
+          case "$path" in
+            [A-Za-z]:*) printf '/%s%s' "$(printf '%s' "${path%%:*}" | tr '[:upper:]' '[:lower:]')" "${path#?:}" ;;
+            *) printf '%s' "$path" ;;
+          esac
+        }
+        same_directory() {
+          local left right
+          if [ -d "$1" ] && [ -d "$2" ]; then
+            left="$(cd "$1" && pwd -P)"
+            right="$(cd "$2" && pwd -P)"
+          else
+            left="$(normalise "$1")"
+            right="$(normalise "$2")"
+            case "$1$2" in
+              *[A-Za-z]:*)
+                left="$(printf '%s' "$left" | tr '[:upper:]' '[:lower:]')"
+                right="$(printf '%s' "$right" | tr '[:upper:]' '[:lower:]')"
+                ;;
+            esac
+          fi
+          [ "$left" = "$right" ]
+        }
+        if [ -n "${CARGO_HOME:-}" ] && ! same_directory "$CARGO_HOME" "$HOME/.cargo"; then
           echo "::error::align-environment matches a leg with no CARGO_HOME, but this job sets $CARGO_HOME; drop the input, or stop overriding CARGO_HOME, so the cache never restores another registry directory"
           exit 1
         fi

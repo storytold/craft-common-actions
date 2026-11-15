@@ -222,9 +222,9 @@ class KeyLayoutTests(unittest.TestCase):
 class AlignEnvironmentTests(unittest.TestCase):
     STEP = step('Align the cache environment')
 
-    def run_step(self, cargo_home):
+    def run_step(self, cargo_home, home='/home/runner'):
         with tempfile.TemporaryDirectory() as directory:
-            extra = {'HOME': '/home/runner'}
+            extra = {'HOME': home}
             if cargo_home is not None:
                 extra['CARGO_HOME'] = cargo_home
             env = environment(directory, extra)
@@ -246,6 +246,35 @@ class AlignEnvironmentTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn('::error::', out)
         self.assertIn('/usr/local/cargo', out)
+
+    def test_accepts_the_windows_spelling_of_the_same_cargo_home(self):
+        # A Windows runner's native CARGO_HOME and git-bash's $HOME/.cargo are one directory; the
+        # drive letter's case is not significant there either. Both used to exit 1.
+        for spelling in ('C:\\Users\\runneradmin\\.cargo', 'c:\\Users\\runneradmin\\.cargo',
+                         'C:/Users/runneradmin/.cargo', 'C:\\Users\\runneradmin\\.cargo\\'):
+            with self.subTest(cargo_home=spelling):
+                self.assertEqual(self.run_step(spelling, home='/c/Users/runneradmin'), (0, ''))
+
+    def test_still_refuses_a_different_windows_cargo_home(self):
+        for spelling in ('D:\\cargo', 'C:\\Users\\someone-else\\.cargo'):
+            with self.subTest(cargo_home=spelling):
+                status, out = self.run_step(spelling, home='/c/Users/runneradmin')
+                self.assertEqual(status, 1)
+                self.assertIn('::error::', out)
+
+    def test_accepts_two_spellings_of_one_existing_directory(self):
+        # When both paths exist the comparison is physical, so a symlinked cargo home that resolves
+        # to the same directory is accepted rather than refused on spelling.
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory, '.cargo')
+            real.mkdir()
+            Path(directory, 'link').symlink_to(real)
+            extra = {'HOME': directory, 'CARGO_HOME': str(Path(directory, 'link'))}
+            env = environment(directory, extra)
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+                cwd=directory, capture_output=True, text=True, env=env)
+            self.assertEqual((result.returncode, result.stdout + result.stderr), (0, ''))
 
     def test_runs_only_when_asked(self):
         self.assertEqual(self.STEP['if'], "inputs.align-environment == 'true'")
