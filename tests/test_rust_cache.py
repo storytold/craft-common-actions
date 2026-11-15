@@ -200,7 +200,10 @@ class SavePolicyTests(unittest.TestCase):
 
     def test_anything_else_fails_closed(self):
         # Actions evaluates `${{ ... }}` before this action sees an input, so the text of an
-        # expression is not a decision and must not become one. Nor is any other spelling.
+        # expression is not a decision and must not become one. Nor is any other spelling. The two
+        # Unicode wrappers differ in kind and are both refused: rust-cache's trim leaves U+0085
+        # (NEL) in place, so it refuses that value too, while U+00A0 (NBSP) and U+3000 are
+        # whitespace to its trim, so refusing them is this wrapper's deliberately narrower choice.
         for save in ("github.event_name != 'pull_request'", 'yes', '1', 'on', 'off', 'TRUE!',
                      '\u0085true\u0085', '\u00a0true\u00a0', '\u3000true'):
             with self.subTest(save=save):
