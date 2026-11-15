@@ -374,6 +374,8 @@ fi
         )
         self.assertIn(pkg_config_libdir, script)
         self.assertNotIn("export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH", script)
+        self.assertIn("pkg-config --debug --print-errors --exists gdk-3.0 || true", script)
+        self.assertNotIn("--modversion gdk-3.0", script)
         result = subprocess.run(["/bin/sh", "-n", "-c", script], text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result)
 

@@ -208,7 +208,8 @@ jobs:
             echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
             ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
             sed -n '1,100p' "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
-            pkg-config --debug --print-errors --modversion gdk-3.0 || true
+            # --modversion alone does not traverse dependencies like --exists does.
+          pkg-config --debug --print-errors --exists gdk-3.0 || true
             exit 1
           fi
           rustc --print target-libdir --target "$target"
