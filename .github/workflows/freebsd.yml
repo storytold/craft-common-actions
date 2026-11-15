@@ -178,7 +178,9 @@ jobs:
           fi
           tar -xf "$X/base.txz" -C "$S" ./lib ./usr/lib ./usr/include ./usr/libdata
           # The libraries the prepare step installs; the build tools and fonts stay host-only.
-          pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib
+          # xorgproto provides xproto, renderproto, kbproto and xextproto .pc files that
+          # GTK's public dependency chain needs, but that are not runtime dependencies.
+          pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib xorgproto
           for p in "$X"/cache/*.pkg; do
             # pkg names each fetched archive with a symlink to its hashed cache file.
             # tar follows the link; skipping links here leaves the sysroot without any ports.
@@ -208,6 +210,7 @@ jobs:
             echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
             ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
             sed -n '1,100p' "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+            pkg-config --print-errors --exists gdk-3.0 || true
             pkg-config --debug --print-errors --modversion gdk-3.0 || true
             exit 1
           fi
