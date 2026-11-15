@@ -35,6 +35,11 @@ on:
         type: boolean
         required: false
         default: false
+      artcraft-runtime-fixtures:
+        description: "Provision FFmpeg and an isolated socket-only MySQL for ArtCraft tests"
+        type: boolean
+        required: false
+        default: false
       cargo-features:
         description: >-
           Extra cargo features for the coverage build, e.g. some-crate/skip_database_tests
@@ -420,6 +425,9 @@ jobs:
           mkdir -p "$(dirname "$target_dir")" "$NEXTEST_EXTRACT_DIR"
           ln -s "$NEXTEST_EXTRACT_DIR/target" "$target_dir"
           echo "$target_dir -> $NEXTEST_EXTRACT_DIR/target"
+      - name: Provision ArtCraft runtime fixtures
+        if: inputs.artcraft-runtime-fixtures
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures@main
       - name: Run this shard's tests
         env:
           # Each instrumented binary writes its profile here; the scan job merges them.
@@ -666,6 +674,9 @@ jobs:
       - name: Fetch locked Rust dependencies
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         run: cargo fetch --locked
+      - name: Provision ArtCraft runtime fixtures
+        if: inputs.artcraft-runtime-fixtures && inputs.shards <= 1 && steps.token.outputs.available == 'true'
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures@main
       - name: Generate Rust coverage
         id: coverage
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1

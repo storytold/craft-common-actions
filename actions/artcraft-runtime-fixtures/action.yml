@@ -1,0 +1,11 @@
+name: ArtCraft runtime fixtures
+description: FFmpeg and a disposable local-only MySQL server for hosted tests
+runs:
+  using: composite
+  steps:
+    - uses: storytold/craft-common-actions/actions/install-apt-packages@main
+      with:
+        packages: ffmpeg mysql-server
+    - name: Start isolated MySQL fixture
+      shell: bash
+      run: bash "${{ github.action_path }}/start-mysql.sh"
