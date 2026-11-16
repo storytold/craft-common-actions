@@ -254,31 +254,34 @@ jobs:
           from pathlib import Path
           import zipfile
 
-          root = Path("target/apple")
-          if not root.is_dir() or root.is_symlink():
-              raise SystemExit("package must create target/apple as a real directory")
-          if any(root.rglob("*.ipa")):
-              raise SystemExit("unsigned validation must not export an installable IPA")
+          artifact_root = Path("target/apple")
           platform = os.environ["PLATFORM"]
+          configuration = artifact_root / os.environ["CONFIGURATION"]
+          root = configuration / platform
+          if not root.is_dir() or any(path.is_symlink() for path in (artifact_root, configuration, root)):
+              raise SystemExit(f"package must create {root} as a real directory")
+          if any(artifact_root.rglob("*.ipa")):
+              raise SystemExit("unsigned validation must not export an installable IPA")
           if platform in ("macos", "ios-simulator"):
               plist = "Contents/Info.plist" if platform == "macos" else "Info.plist"
               bundles = [app for app in root.rglob("*.app")
                          if (app / plist).is_file()]
               archives = list(root.rglob("*.zip" if platform == "macos" else "*.app.zip"))
               if not archives or (platform == "macos" and not bundles):
-                  raise SystemExit(f"{platform} package requires an unsigned app ZIP (and macOS .app) in target/apple")
+                  raise SystemExit(f"{platform} package requires an unsigned app ZIP (and macOS .app) in {root}")
               contains_app = False
               for archive in archives:
                   with zipfile.ZipFile(archive) as package:
-                      contains_app |= any(f".app/{plist}" in name for name in package.namelist())
+                      contains_app |= any(name.endswith(f".app/{plist}") for name in package.namelist())
               if not contains_app:
                   raise SystemExit(f"a {platform} ZIP must contain an app bundle")
           else:
               archives = [archive for archive in root.rglob("*.xcarchive")
                           if (archive / "Info.plist").is_file()
-                          and any((archive / "Products/Applications").glob("*.app/Info.plist"))]
+                          and any(plist.is_file() for plist in
+                                  (archive / "Products/Applications").glob("*.app/Info.plist"))]
               if not archives:
-                  raise SystemExit("ios-device package requires an unsigned .xcarchive in target/apple")
+                  raise SystemExit(f"ios-device package requires an unsigned .xcarchive in {root}")
           PY
       - name: Clean up only job-owned simulators
         if: always() && steps.simulators.outputs.owned == 'true'
@@ -331,9 +334,11 @@ jobs:
           set -euo pipefail
           if [[ -d target/apple ]]; then
             tar -czf apple-unsigned-evidence.tar.gz -C target apple
-          else
-            echo "::error::Driver produced no target/apple artifacts or test evidence"
+          elif [[ "$PHASE" == package || "$PHASE" == all ]]; then
+            echo "::error::Package phase produced no target/apple artifacts"
             exit 1
+          else
+            echo "No optional target/apple evidence; build/test outputs stay in app-owned locations"
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && hashFiles('apple-unsigned-evidence.tar.gz') != ''

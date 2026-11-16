@@ -1006,8 +1006,10 @@ version and a reviewed, app-owned Bash driver:
 bash scripts/build-apple.sh <build|test|package> <all|macos|ios-simulator|ios-device> <Debug|Release>
 ```
 
-The configurable `driver` path runs from the app repository root; outputs belong
-in `target/apple`. Shared CI isolates platform jobs, calls scoped phases without
+The configurable `driver` path runs from the app repository root. Package outputs
+belong in `target/apple/<Debug|Release>/<platform>`; build/test retain existing
+Cargo/DerivedData locations and do not require `target/apple`. Shared CI isolates
+platform jobs, calls scoped phases without
 `eval`, preserves failure status and uploads tarred evidence with bundle modes/
 symlinks intact. `test ios-simulator` must run **both iPhone and iPad sequentially**.
 `test` is Debug-only; CI creates distinct job-owned iPhone/iPad devices from an

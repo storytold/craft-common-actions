@@ -242,8 +242,11 @@ class AppleUnsignedTests(unittest.TestCase):
         result = self.run_step(PRESERVE, PHASE="package")
         self.assertNotEqual(result.returncode, 0)
         result = self.run_step(PRESERVE, PHASE="test")
-        self.assertNotEqual(result.returncode, 0)
-        bundle = self.root / "target/apple/macos/Synthetic.app/Contents/MacOS"
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_step(PRESERVE, PHASE="build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "apple-unsigned-evidence.tar.gz").exists())
+        bundle = self.root / "target/apple/Debug/macos/Synthetic.app/Contents/MacOS"
         bundle.mkdir(parents=True)
         executable = bundle / "Synthetic"
         executable.write_text("synthetic transport fixture, not a Mach-O binary\n")
@@ -253,13 +256,13 @@ class AppleUnsignedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         with tarfile.open(self.root / "apple-unsigned-evidence.tar.gz") as archive:
             members = {member.name: member for member in archive.getmembers()}
-        self.assertTrue(members["apple/macos/Synthetic.app/Contents/MacOS/link"].issym())
-        self.assertEqual(members["apple/macos/Synthetic.app/Contents/MacOS/Synthetic"].mode & 0o777, 0o755)
+        self.assertTrue(members["apple/Debug/macos/Synthetic.app/Contents/MacOS/link"].issym())
+        self.assertEqual(members["apple/Debug/macos/Synthetic.app/Contents/MacOS/Synthetic"].mode & 0o777, 0o755)
 
     def test_package_shape_rejects_missing_products_bad_zip_and_ipa(self):
         result = self.run_step(PRODUCTS, PLATFORM="macos")
         self.assertNotEqual(result.returncode, 0)
-        root = self.root / "target/apple"
+        root = self.root / "target/apple/Debug/macos"
         bundle = root / "Synthetic.app/Contents"
         bundle.mkdir(parents=True)
         (bundle / "Info.plist").write_text("synthetic transport fixture\n")
@@ -276,17 +279,19 @@ class AppleUnsignedTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         result = self.run_step(PRODUCTS, PLATFORM="ios-device")
         self.assertNotEqual(result.returncode, 0)
-        device_archive = root / "Synthetic.xcarchive"
+        device_archive = self.root / "target/apple/Debug/ios-device/Synthetic.xcarchive"
         app = device_archive / "Products/Applications/Synthetic.app"
         app.mkdir(parents=True)
         (app / "Info.plist").write_text("fixture")
         (device_archive / "Info.plist").write_text("fixture")
         result = self.run_step(PRODUCTS, PLATFORM="ios-device")
         self.assertEqual(result.returncode, 0, result.stderr)
-        simulator_app = root / "Simulator.app"
+        simulator_root = self.root / "target/apple/Debug/ios-simulator"
+        simulator_app = simulator_root / "Simulator.app"
+        simulator_root.mkdir()
         simulator_app.mkdir()
         (simulator_app / "Info.plist").write_text("fixture")
-        with zipfile.ZipFile(root / "Simulator.app.zip", "w") as package:
+        with zipfile.ZipFile(simulator_root / "Simulator.app.zip", "w") as package:
             package.writestr("Simulator.app/Info.plist", "fixture")
         result = self.run_step(PRODUCTS, PLATFORM="ios-simulator")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -294,6 +299,27 @@ class AppleUnsignedTests(unittest.TestCase):
         result = self.run_step(PRODUCTS, PLATFORM="ios-device")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must not export", result.stderr)
+
+    def test_package_products_from_other_configurations_or_platforms_do_not_satisfy_matchers(self):
+        root = self.root / "target/apple/Debug/macos"
+        bundle = root / "Synthetic.app/Contents"
+        bundle.mkdir(parents=True)
+        (bundle / "Info.plist").write_text("fixture")
+        with zipfile.ZipFile(root / "Synthetic.zip", "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+        result = self.run_step(PRODUCTS, PLATFORM="macos", CONFIGURATION="Release")
+        self.assertNotEqual(result.returncode, 0)
+        result = self.run_step(PRODUCTS, PLATFORM="ios-simulator")
+        self.assertNotEqual(result.returncode, 0)
+        simulator_root = self.root / "target/apple/Debug/ios-simulator"
+        simulator_root.mkdir()
+        result = self.run_step(PRODUCTS, PLATFORM="ios-simulator")
+        self.assertNotEqual(result.returncode, 0)
+        release_root = self.root / "target/apple/Release"
+        release_root.mkdir()
+        (release_root / "macos").symlink_to(root, target_is_directory=True)
+        result = self.run_step(PRODUCTS, PLATFORM="macos", CONFIGURATION="Release")
+        self.assertNotEqual(result.returncode, 0)
 
     def simulator_fixture(self, missing_ipad=False, available=True):
         types = [{"productFamily": "iPhone", "name": "iPhone Synthetic",

@@ -64,9 +64,11 @@ bash scripts/build-apple.sh <build|test|package> <all|macos|ios-simulator|ios-de
 `scripts/build-apple.sh` is the default; `driver` may select another reviewed,
 repository-relative `.sh` file. No absolute/traversal paths or command text.
 The workflow resolves symlinks and rejects a driver outside the checkout.
-Working directory is always the **app repository root**. Stage outputs and sanitized
-test evidence below **`target/apple`**, not shared `dist/release`. Keep derived data,
-Cargo build trees, credentials and unrelated caches outside that artifact root.
+Working directory is always the **app repository root**. Only `package` promises
+outputs below **`target/apple/<Debug|Release>/<platform>`**, not shared
+`dist/release`. Build/test keep existing Cargo/DerivedData locations and need not
+create `target/apple`; sanitized test evidence there is optional. Keep derived
+data, Cargo build trees, credentials and unrelated caches outside the package root.
 
 | Driver command | Required app-owned behavior |
 | --- | --- |
@@ -85,8 +87,10 @@ Drivers must reject invalid arguments, fail nonzero on any failed phase/family,
 and must not silently skip missing SDKs/tests/generators/required Rust targets.
 `package` must build its own prerequisites: a package-only workflow starts in a
 fresh checkout. Likewise, `test` must build prerequisites when needed.
-Every invocation must create `target/apple` artifacts or test evidence; absence
-is a failure, not a silently empty successful upload.
+Package invocations must create matching products under their exact configuration/
+platform directory; absence is a failure, not a silently empty successful upload.
+Build/test do not need package artifacts or `target/apple` and are judged by the
+driver's exit status, not packaging matchers.
 The shared workflow's `phase: all` expands to applicable build → test → package
 calls; it does not pass `all` as a phase to the driver. Its `platform: all` expands
 to isolated macOS, Simulator and device **jobs**, omitting unsupported combinations.
@@ -123,6 +127,18 @@ in the app's unsigned build documentation, not reported as signing success.
 
 Package jobs require macOS app/ZIP, simulator app-ZIP, or device archive structure
 and reject `.ipa` output.
+Matchers are recursive **only inside** `target/apple/<configuration>/<platform>`:
+
+| Platform | Required package matcher |
+| --- | --- |
+| `macos` | A `*.app` directory with `Contents/Info.plist`, plus a `*.zip` containing an entry ending `.app/Contents/Info.plist`; other CLI ZIPs are allowed |
+| `ios-simulator` | A `*.app.zip` containing an entry ending `.app/Info.plist`; an unpacked simulator app is optional |
+| `ios-device` | A `*.xcarchive` with its own `Info.plist` and `Products/Applications/*.app/Info.plist` |
+
+Wrong configurations/platforms, empty output directories and symlinked package
+root/configuration/platform directories do not satisfy these matchers.
+Any `.ipa` found below `target/apple` rejects packaging. Missing expected products
+fail even when optional CI/simulator evidence exists elsewhere in `target/apple`.
 Those are **structural checks, not signature, Mach-O, installability or App Review
 validation**. The app must verify its real products. The iOS `.xcarchive` is an
 unsigned engineering artifact, **not an installable IPA**, TestFlight build or
@@ -180,6 +196,18 @@ change, not fake simulator success.
 
 ### Thin caller (after review and merge)
 
+Exact reusable filename: **`.github/workflows/apple-unsigned.yml`**.
+
+| Input | Requirement / default |
+| --- | --- |
+| `xcode-version` | Required exact numeric installed Xcode version |
+| `rust-toolchain` | Required exact `major.minor.patch` Rust release |
+| `simulator-runtime` | Required for `phase: test`/`all` when the selected platforms include Simulator; exact installed `com.apple.CoreSimulator.SimRuntime.iOS-<major>-<minor>[-<patch>]`; otherwise optional/empty |
+| `phase` | `build` (default), `test`, `package`, `all` |
+| `platform` | `all` (default), `macos`, `ios-simulator`, `ios-device` |
+| `configuration` | `Debug` (default), `Release`; `test`/`all` require Debug |
+| `driver` | `scripts/build-apple.sh` (default); reviewed repository-relative `.sh` path |
+
 This example deliberately has only `workflow_dispatch`. Resolve the workflow to
 an accepted immutable commit before enabling it; the placeholder is not callable.
 Do not point an upstream app to this draft fork as if it were accepted.
@@ -220,6 +248,7 @@ repository's existing Python `unittest` + PyYAML tooling. Two synthetic consumer
 and driver paths. Cases cover selection/scoping, root working directory, ordered
 phases, Debug/Release, rejected command strings/traversal, failure propagation,
 missing Xcode/SDK, escaping driver symlinks, required package shapes/no IPA,
+wrong configuration/platform products and optional build/test evidence,
 generic simulator creation/environment handoff, missing runtime/family, partial
 creation cleanup, unrelated-device preservation, cleanup error propagation, and
 tar mode/symlink preservation. Tool-boundary fixtures are explicitly synthetic:
