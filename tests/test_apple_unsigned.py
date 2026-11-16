@@ -35,10 +35,13 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 args = sys.argv[1:]
 with Path("simctl-calls.jsonl").open("a") as log:
     log.write(json.dumps(args) + "\n")
+if args[1] in os.environ.get("TIMEOUT_COMMANDS", "").split(",") and args[2] == os.environ.get("TIMEOUT_UDID"):
+    time.sleep(3)
 state_path = Path("simctl-fixture.json")
 state = json.loads(state_path.read_text())
 assert args[0] == "simctl"
@@ -206,9 +209,10 @@ class AppleUnsignedTests(unittest.TestCase):
         self.assertEqual(DATA["jobs"]["validate"]["env"]["RUSTUP_TOOLCHAIN"],
                          "${{ inputs.rust-toolchain }}")
 
-    def preflight(self, sdk_missing=False, architecture="arm64", **overrides):
+    def preflight(self, sdk_missing=False, architecture="arm64",
+                  installed_version="26.2", reported_version="26.2", **overrides):
         applications = self.root / "Applications"
-        developer = applications / "Xcode_26.2.app/Contents/Developer"
+        developer = applications / f"Xcode_{installed_version}.app/Contents/Developer"
         developer.mkdir(parents=True, exist_ok=True)
         bin_dir = self.root / "bin"
         bin_dir.mkdir(exist_ok=True)
@@ -216,7 +220,7 @@ class AppleUnsignedTests(unittest.TestCase):
         if not python.exists():
             python.symlink_to(sys.executable)
         for name, body in {
-            "xcodebuild": "exit 0",
+            "xcodebuild": f"printf 'Xcode {reported_version}\\nBuild version synthetic\\n'",
             "git": "exit 0",
             "uname": f"echo {architecture}",
             "xcrun": 'printf "%s\\n" "$*" >> tool-calls\n' + (
@@ -251,6 +255,28 @@ class AppleUnsignedTests(unittest.TestCase):
         result = self.preflight()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("inside the app repository", result.stderr)
+
+    def test_preflight_checks_reported_xcode_version_including_aliases_and_zero_patch(self):
+        self.install_fixture("first-app", "scripts/build-apple.sh")
+        applications = self.root / "Applications"
+        applications.mkdir()
+        for requested, installed, reported, expected in (
+            ("26.1", "26.1.1", "26.1.1", False),
+            ("26.1.1", "26.1.1", "26.1.1", True),
+            ("26.2", "26.2.0", "26.2.0", True),
+            ("26.2.0", "26.2.0", "26.2", True),
+        ):
+            with self.subTest(requested=requested, reported=reported):
+                if requested != installed:
+                    (applications / f"Xcode_{requested}.app").symlink_to(
+                        f"Xcode_{installed}.app", target_is_directory=True)
+                result = self.preflight(installed_version=installed, reported_version=reported,
+                                        XCODE_VERSION=requested)
+                if expected:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Requested Xcode 26.1, but selected Xcode reports 26.1.1", result.stderr)
 
     def test_evidence_keeps_bundle_modes_symlinks_and_requires_package_output(self):
         result = self.run_step(PRESERVE, PHASE="package")
@@ -466,6 +492,24 @@ class AppleUnsignedTests(unittest.TestCase):
         calls = [json.loads(line) for line in (self.root / "simctl-calls.jsonl").read_text().splitlines()]
         self.assertEqual([call[-1] for call in calls if call[1] == "delete"],
                          [item["udid"] for item in owned])
+
+    def test_cleanup_timeouts_do_not_skip_remaining_commands_or_devices(self):
+        self.simulator_fixture()
+        result = self.run_step(SIMULATORS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        owned = json.loads((self.root / ".craft-apple-simulators.json").read_text())
+        script = CLEANUP.replace("capture_output=True, text=True, timeout=60)",
+                                 "capture_output=True, text=True, timeout=1)")
+        self.assertNotEqual(script, CLEANUP)
+        result = self.run_step(script, TIMEOUT_COMMANDS="shutdown,delete", TIMEOUT_UDID=owned[0]["udid"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stderr.count("timed out after 1 seconds"), 2, result.stderr)
+        calls = [json.loads(line) for line in (self.root / "simctl-calls.jsonl").read_text().splitlines()]
+        self.assertEqual([(call[1], call[-1]) for call in calls if call[1] in ("shutdown", "delete")],
+                         [("shutdown", owned[0]["udid"]), ("delete", owned[0]["udid"]),
+                          ("delete", owned[1]["udid"])])
+        remaining = json.loads((self.root / "simctl-fixture.json").read_text())["devices"]
+        self.assertNotIn(owned[1]["udid"], [device["udid"] for device in remaining])
 
     def test_workflow_does_not_cross_privileged_release_boundary(self):
         self.assertEqual(set(DATA["on"]), {"workflow_call"})

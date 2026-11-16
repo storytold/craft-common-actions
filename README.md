@@ -6,10 +6,11 @@ Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCra
 
 This repository unifies and eliminates duplicate CI/CD and release workflow definitions across the ArtCraft ecosystem into DRY, reusable GitHub Actions.
 
-Apple mobile CI/signing/TestFlight is a [documentation-only proposal](docs/ios-distribution-proposal.md),
+Apple signing/distribution/TestFlight remains a [documentation-only proposal](docs/ios-distribution-proposal.md),
 tracked in [storytold/craft-common-actions#259](https://github.com/storytold/craft-common-actions/issues/259).
-It is not an implemented workflow or an adopted mobile architecture; existing release
-behavior and runner usage are unchanged.
+An [opt-in unsigned Apple validation POC](#native-apple-unsigned-validation-opt-in-poc)
+is implemented. No mobile architecture is adopted; existing release behavior and
+default runner usage are unchanged.
 
 ## Workflows Included
 

@@ -151,7 +151,22 @@ jobs:
           if root not in driver.parents or not driver.is_file():
               raise SystemExit("driver must resolve to a file inside the app repository")
           PY
-          xcodebuild -version
+          version=$(xcodebuild -version)
+          printf '%s\n' "$version"
+          XCODE_REPORTED_VERSION="$version" python3 - <<'PY'
+          import os
+          import re
+
+          reported = re.search(r"^Xcode (\d+\.\d+(?:\.\d+)?)$", os.environ["XCODE_REPORTED_VERSION"], re.M)
+          if reported is None:
+              raise SystemExit("Selected Xcode did not report a recognizable numeric version")
+          requested = os.environ["XCODE_VERSION"]
+          def normalized(version):
+              parts = tuple(map(int, version.split(".")))
+              return parts + (0,) * (3 - len(parts))
+          if normalized(requested) != normalized(reported[1]):
+              raise SystemExit(f"Requested Xcode {requested}, but selected Xcode reports {reported[1]}")
+          PY
           xcodebuild -showsdks
           case "$PLATFORM" in
             macos) sdk=macosx ;;
@@ -334,8 +349,12 @@ jobs:
                   continue
               commands = ["delete"] if device["state"] == "Shutdown" else ["shutdown", "delete"]
               for command in commands:
-                  result = subprocess.run(["xcrun", "simctl", command, identifier],
-                                          capture_output=True, text=True, timeout=60)
+                  try:
+                      result = subprocess.run(["xcrun", "simctl", command, identifier],
+                                              capture_output=True, text=True, timeout=60)
+                  except subprocess.TimeoutExpired as error:
+                      failures.append(f"simctl {command} {identifier} timed out after {error.timeout} seconds")
+                      continue
                   if result.returncode:
                       failures.append(f"simctl {command} {identifier}: {result.stderr.strip()}")
           if failures:
