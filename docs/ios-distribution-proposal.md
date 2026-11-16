@@ -31,6 +31,12 @@ Related work: [RFC-0039](https://github.com/storytold/craft-contrib/pull/60),
 and [desktop signing reuse proposal](https://github.com/storytold/craft-common-actions/pull/149).
 None makes the SwiftUI POC an accepted suite standard.
 
+The [fork-only PdfCraft guide](https://github.com/blackoutsecure/pdfcraft/blob/docs/ios-poc-publishing/apps/ios/PUBLISHING.md)
+and [blackoutsecure/pdfcraft#1](https://github.com/blackoutsecure/pdfcraft/pull/1)
+record the example's unsupported controls and release blockers. That documentation
+PR targets the fork POC branch, not upstream `main`; its latest local workspace/text
+enhancements are not included in the published POC baseline or this proposal.
+
 ## Suggested workflows, not existing filenames or callable APIs
 
 | Future shared workflow | App caller and trigger | Boundary |
@@ -158,8 +164,11 @@ are useful, private keys and secret-bearing logs are not.
    Handle duplicates and retryable transport errors without repeatedly uploading.
 3. **Private internal testing:** use a named internal TestFlight group, limited to
    authorized App Store Connect users. Group assignment/invitations are explicit
-   human approvals, not a side effect of upload. Apple currently allows up to 100
-   internal testers; builds expire after 90 days.
+   human approvals. Disable automatic distribution for the pilot group and audit
+   existing automatic group assignments before upload; otherwise Apple may
+   distribute a build as an upload side effect. Apple currently allows up to 100
+   internal testers; builds expire after 90 days. Do not select a TestFlight
+   Internal Only build if that build must later reach external testers/customers.
 4. **External beta:** invite-only external groups can include people outside the
    team. The first external build requires Beta App Review; later builds may also
    require review. Provide beta information and export compliance first. Public
@@ -202,6 +211,7 @@ merely to review this design.
 - [App Store Connect API keys and roles](https://developer.apple.com/help/app-store-connect/get-started/app-store-connect-api/)
 - [Upload builds and current Xcode requirements](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/)
 - [TestFlight](https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/)
+- [Internal testers, automatic distribution and internal-only builds](https://developer.apple.com/help/app-store-connect/test-a-beta-version/add-internal-testers/)
 - [Submitting for App Review](https://developer.apple.com/help/app-store-connect/manage-submissions-to-app-review/overview-of-submitting-for-review/)
 - [GitHub Apple certificate/profile handling](https://docs.github.com/en/actions/how-tos/deploy/deploy-to-third-party-platforms/sign-xcode-applications)
 - [Reusable workflows and environment secrets](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)
