@@ -84,6 +84,21 @@ on:
         type: boolean
         required: false
         default: false
+      has-macos:
+        description: "Whether to build the macOS release"
+        type: boolean
+        required: false
+        default: true
+      has-linux:
+        description: "Whether to build the Linux release"
+        type: boolean
+        required: false
+        default: true
+      has-flatpak:
+        description: "Whether to build the Flatpak bundle"
+        type: boolean
+        required: false
+        default: true
       publish:
         description: >-
           Publish the draft when the run is done, instead of leaving it for a maintainer: only on
@@ -231,7 +246,7 @@ jobs:
   macos:
     timeout-minutes: 90
     name: macOS universal
-    if: ${{ !inputs.dry-run }}
+    if: ${{ inputs.has-macos && !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
     environment: ${{ !inputs.dry-run && 'release' || '' }}
@@ -461,6 +476,7 @@ jobs:
           if-no-files-found: error
 
   linux:
+    if: ${{ inputs.has-linux }}
     timeout-minutes: 90
     name: Linux ${{ matrix.arch }}
     needs: [version]
@@ -558,6 +574,7 @@ jobs:
           if-no-files-found: error
 
   flatpak:
+    if: ${{ inputs.has-flatpak }}
     timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
     needs: [version, linux]
@@ -1276,7 +1293,7 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
+    if: ${{ always() && !inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure') }}
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
     environment: ${{ !inputs.dry-run && 'release' || '' }}
