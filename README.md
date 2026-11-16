@@ -387,7 +387,9 @@ same toolchain, configuration and profile, so a release that only bumps a versio
 or a PR that touches a manifest, still restores compiled dependencies instead of
 rebuilding them cold; Cargo's own fingerprints decide which of those artifacts
 are still valid. Toolchain, configuration and profile changes start a new cache
-without a fallback. The test and release workflows use separate profile
+without a fallback. A run saves only when no entry for the same exact match was saved that
+day (UTC), so a busy main keeps one entry per dependency fingerprint and day instead of one
+per commit; later runs restore that entry and Cargo rebuilds only what changed since. The test and release workflows use separate profile
 namespaces. The workflow-file pattern fingerprints the caller's configuration;
 changes to the shared workflow that need a new namespace must bump the cache
 action's version prefix.
@@ -817,7 +819,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
-- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
+- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
 
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main

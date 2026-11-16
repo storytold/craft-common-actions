@@ -126,6 +126,24 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
             with self.subTest(env=env):
                 self.assertNotEqual(first["fallback-prefix"], self.identity(**env)["fallback-prefix"])
 
+    def test_the_key_carries_the_day_before_the_revision(self):
+        key = self.identity()["key"]
+        prefix = self.identity()["prefix"]
+        day, revision = key[len(prefix):].split("-", 1)
+        self.assertRegex(day, r"^\d{8}$")
+        self.assertEqual(revision, "commit1")
+
+    def test_the_save_looks_up_todays_entry_for_the_same_fingerprint(self):
+        step = next(s for s in ACTION["runs"]["steps"] if s.get("id") == "day")
+        for key, expected in (("freebsd-cargo-v3-c-f-20261115-commit1", "freebsd-cargo-v3-c-f-20261115-"),
+                              # A key from before the day was added: any entry for its fingerprint.
+                              ("freebsd-cargo-v3-c-f-commit1", "freebsd-cargo-v3-c-f-")):
+            with self.subTest(key=key):
+                (self.root / "outputs").write_text("")
+                result = self.run_script(step["run"], KEY=key)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "outputs").read_text(), f"prefix={expected}\n")
+
     def test_cold_restore_is_valid_and_warm_restore_loads_only_selected_profile(self):
         self.transfer("restore")
         self.write(self.cache, "registry/src/dependency/lib.rs", "source")
@@ -303,8 +321,16 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                                 "${{ steps.identity.outputs.fallback-prefix }}"])
         save = next(step for step in ACTION["runs"]["steps"]
                     if step.get("uses", "").startswith("actions/cache/save@"))
-        # Saving always writes the exact-revision entry the caller passed back in.
+        # Saving always writes the exact-revision entry the caller passed back in, unless
+        # today already has an entry for the same fingerprint.
         self.assertEqual(save["with"]["key"], "${{ inputs.key }}")
+        lookup = next(step for step in ACTION["runs"]["steps"] if step.get("id") == "today")
+        self.assertEqual(lookup["with"]["lookup-only"], "true")
+        self.assertEqual(lookup["with"]["restore-keys"], "${{ steps.day.outputs.prefix }}")
+        self.assertIn("steps.today.outputs.cache-matched-key == ''", save["if"])
+        transfer = next(step for step in ACTION["runs"]["steps"]
+                        if step.get("name") == "Transfer Cargo data across the VM boundary")
+        self.assertEqual(transfer["if"], "inputs.phase != 'save' || steps.today.outputs.cache-matched-key == ''")
 
     def test_host_cache_stays_outside_the_vm_shells_synced_work_tree(self):
         # vmactions syncs ~/work, not just GITHUB_WORKSPACE; RUNNER_TEMP lives
