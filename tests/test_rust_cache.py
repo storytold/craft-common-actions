@@ -116,12 +116,13 @@ class TargetDirectoryTests(unittest.TestCase):
             checkout = Path(directory, 'a', 'app', 'app')
             checkout.mkdir(parents=True)
             output = Path(directory, 'output')
-            extra = {'GITHUB_OUTPUT': str(output)}
+            env = environment(directory, {'GITHUB_OUTPUT': str(output)})
+            env.pop('CARGO_TARGET_DIR', None)  # the machine running the tests may set one
             if target is not None:
-                extra['CARGO_TARGET_DIR'] = target.replace('$ROOT', directory)
+                env['CARGO_TARGET_DIR'] = target.replace('$ROOT', directory)
             result = subprocess.run(
                 ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
-                cwd=checkout, capture_output=True, text=True, env=environment(directory, extra))
+                cwd=checkout, capture_output=True, text=True, env=env)
             return result.returncode, output.read_text() if output.exists() else ''
 
     def test_unset_is_rust_caches_default(self):
