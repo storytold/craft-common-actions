@@ -1,0 +1,33 @@
+name: Check hayro-syntax features
+description: >-
+  Fail when craft-pdf resolves hayro-syntax with its unsafe Cargo feature enabled.
+
+inputs:
+  working-directory:
+    description: "The Cargo workspace root, relative to the checkout"
+    required: false
+    default: "."
+  package:
+    description: "The package whose dependency graph is checked"
+    required: false
+    default: "craft-pdf"
+  crate:
+    description: "The crate whose resolved features are checked"
+    required: false
+    default: "hayro-syntax"
+
+runs:
+  using: composite
+  steps:
+    - name: hayro-syntax has no unsafe feature
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/check_hayro_syntax.py
+        WORKSPACE_DIR: ${{ inputs.working-directory }}
+        PACKAGE: ${{ inputs.package }}
+        CRATE: ${{ inputs.crate }}
+      run: >-
+        python3 "$CHECK_PATH"
+        --directory "$WORKSPACE_DIR"
+        --package "$PACKAGE"
+        --crate "$CRATE"
