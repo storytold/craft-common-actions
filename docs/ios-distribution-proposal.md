@@ -7,8 +7,8 @@ Tracking: [storytold/craft-common-actions#259](https://github.com/storytold/craf
 
 The accompanying `apple-unsigned.yml` is callable only by explicit opt-in; it adds
 no automatic native runs to existing callers, credentials, production signing or publishing.
-It does not select a suite mobile architecture. PdfCraft's motivating example is an
-**unofficial, fork-only iPhone/iPad proof of concept (POC)**, not an official release.
+It does not select a suite mobile architecture. PdfCraft's motivating example is
+the **experimental iPhone/iPad POC under upstream review**, not an official release.
 
 ## Existing integration and ownership
 
@@ -26,13 +26,15 @@ Preserve these contracts and all default runner costs.
 | Apple Developer / App Store Connect | Legal owner, signing identities/profiles, app records, testers, beta review, App Review and release |
 
 Related work: [RFC-0039](https://github.com/storytold/craft-contrib/pull/60),
+[Apple standards companion RFC-0041/0042](https://github.com/storytold/craft-contrib/pull/63),
+[experimental native boundary ownership](https://github.com/storytold/craft-libs/pull/1909),
 [host proposal](https://github.com/storytold/craft-libs/pull/632),
 [shared-crate inventory](https://github.com/storytold/craft-libs/issues/115),
 [PdfCraft mobile request](https://github.com/storytold/pdfcraft/issues/2085),
 [separate PdfCraft approach](https://github.com/storytold/pdfcraft/pull/1119),
 [Android release proposal](https://github.com/storytold/craft-common-actions/issues/183),
 and [desktop signing reuse proposal](https://github.com/storytold/craft-common-actions/pull/149).
-None makes the SwiftUI POC an accepted suite standard.
+Readiness for review does not make these RFCs or the SwiftUI POC accepted standards.
 
 Related shared history was searched across open **and closed** issues/PRs before
 implementation, including merged certificate import
@@ -46,11 +48,15 @@ as patterns. The new workflow is separate because release dry-run deliberately
 skips the paid macOS release job; turning that job on would change caller costs
 and signing behavior. This POC does not resolve #7 or modify production signing.
 
-The [fork-only PdfCraft guide](https://github.com/blackoutsecure/pdfcraft/blob/docs/ios-poc-publishing/apps/ios/PUBLISHING.md)
-and [blackoutsecure/pdfcraft#1](https://github.com/blackoutsecure/pdfcraft/pull/1)
-record the example's unsupported controls and release blockers. That documentation
-PR targets the fork POC branch, not upstream `main`; its latest local workspace/text
-enhancements are not included in the published POC baseline or this proposal.
+The [upstream PDFCraft app POC, #7549](https://github.com/storytold/pdfcraft/pull/7549)
+contains the app-owned `docs/apple-platform-review.md` and `apps/ios/PUBLISHING.md`,
+including native validation evidence, unsupported controls and release blockers.
+It targets upstream `main`; it is not an official release or evidence of hosted
+workflow execution. Local real Debug package products have passed the shared
+structural validator for macOS, Simulator and device scopes. App-native test and
+optimized-build results remain app-owned evidence, not proof of signing or Store
+acceptance. Source destinations here are upstream PRs, not hypothetical upstream
+branches; GitHub's fork head is only the contribution transport.
 
 ## Implemented unsigned driver contract
 
@@ -91,6 +97,11 @@ Package invocations must create matching products under their exact configuratio
 platform directory; absence is a failure, not a silently empty successful upload.
 Build/test do not need package artifacts or `target/apple` and are judged by the
 driver's exit status, not packaging matchers.
+Cleanup-generated simulator metadata is not evidence that native tests passed.
+This intentionally permits a successful reviewed driver that keeps all test
+results in existing Cargo/DerivedData locations. The app must make its canonical
+test command fail when tests fail or required families are missing; shared CI
+does not infer native test execution from the presence of files.
 The shared workflow's `phase: all` expands to applicable build → test → package
 calls; it does not pass `all` as a phase to the driver. Its `platform: all` expands
 to isolated macOS, Simulator and device **jobs**, omitting unsupported combinations.
@@ -137,6 +148,10 @@ Matchers are recursive **only inside** `target/apple/<configuration>/<platform>`
 
 Wrong configurations/platforms, empty output directories and symlinked package
 root/configuration/platform directories do not satisfy these matchers.
+Product containers (`.app`, `.xcarchive`, ZIPs) must be real products, not
+symlinks. Bundle-internal framework symlinks are supported only when they resolve
+inside the selected platform's artifact directory; dangling/escaping links fail
+instead of producing an incomplete evidence archive.
 Any `.ipa` found below `target/apple` rejects packaging. Missing expected products
 fail even when optional CI/simulator evidence exists elsewhere in `target/apple`.
 Those are **structural checks, not signature, Mach-O, installability or App Review
@@ -163,6 +178,9 @@ repository billing and job timeout before enabling a caller.
 without changing global Xcode selection or installing another Xcode. Missing
 Xcode/SDK fails clearly. Rust setup uses the existing pinned toolchain action and
 installs the four Apple targets listed above; the app retains its lockfile/pins.
+`RUSTUP_TOOLCHAIN` explicitly selects the requested version, preventing an
+app-local rustup override file from silently selecting another compiler; shared
+CI also verifies the active `rustc` version before invoking the driver.
 The workflow records Xcode/SDK/Rust/Cargo, source SHA and host architecture.
 
 The reviewed `macos-15` image lists Xcode **26.2** with iOS/Simulator SDK **26.2**
@@ -249,6 +267,7 @@ and driver paths. Cases cover selection/scoping, root working directory, ordered
 phases, Debug/Release, rejected command strings/traversal, failure propagation,
 missing Xcode/SDK, escaping driver symlinks, required package shapes/no IPA,
 wrong configuration/platform products and optional build/test evidence,
+compiler-pin mismatch and escaping/dangling/symlinked product rejection,
 generic simulator creation/environment handoff, missing runtime/family, partial
 creation cleanup, unrelated-device preservation, cleanup error propagation, and
 tar mode/symlink preservation. Tool-boundary fixtures are explicitly synthetic:

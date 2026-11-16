@@ -80,6 +80,7 @@ class AppleUnsignedTests(unittest.TestCase):
             "DRIVER": "scripts/build-apple.sh",
             "XCODE_VERSION": "26.2",
             "RUST_TOOLCHAIN": "1.99.0",
+            "RUSTUP_TOOLCHAIN": "1.99.0",
             "GITHUB_OUTPUT": str(self.root / "output"),
             "GITHUB_ENV": str(self.root / "environment"),
             "GITHUB_RUN_ID": "1234",
@@ -149,7 +150,10 @@ class AppleUnsignedTests(unittest.TestCase):
         bin_dir.mkdir(exist_ok=True)
         for name in ("cargo", "rustc"):
             executable = bin_dir / name
-            executable.write_text("#!/bin/sh\nprintf '%s\\n' 'synthetic tool version'\n")
+            executable.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "rustc ${FIXTURE_RUST_VERSION:-$RUSTUP_TOOLCHAIN} (synthetic)"\n'
+                if name == "rustc" else "#!/bin/sh\nprintf '%s\\n' 'synthetic cargo version'\n"
+            )
             executable.chmod(0o755)
         self.env["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
 
@@ -191,6 +195,16 @@ class AppleUnsignedTests(unittest.TestCase):
         result = self.run_step(RUN, PHASE="package", PLATFORM="macos", CONFIGURATION="Release")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(log.read_text().splitlines(), [f"package|macos|Release|{self.root}"])
+
+    def test_driver_rejects_an_unexpected_active_rust_compiler(self):
+        self.install_fixture("first-app", "scripts/build-apple.sh")
+        (self.root / "rust-toolchain.toml").write_text('[toolchain]\nchannel = "1.98.0"\n')
+        result = self.run_step(RUN, PHASE="build", PLATFORM="macos", FIXTURE_RUST_VERSION="1.98.0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match", result.stdout)
+        self.assertFalse((self.root / "target/apple/first-app.log").exists())
+        self.assertEqual(DATA["jobs"]["validate"]["env"]["RUSTUP_TOOLCHAIN"],
+                         "${{ inputs.rust-toolchain }}")
 
     def preflight(self, sdk_missing=False, architecture="arm64", **overrides):
         applications = self.root / "Applications"
@@ -338,6 +352,59 @@ class AppleUnsignedTests(unittest.TestCase):
         executable.write_text(f"#!{sys.executable}\n" + SIMCTL_FIXTURE)
         executable.chmod(0o755)
         self.env["PATH"] = str(bin_dir) + os.pathsep + os.environ["PATH"]
+
+    def test_successful_no_output_test_driver_can_cleanup_and_preserve_optional_metadata(self):
+        self.simulator_fixture()
+        result = self.run_step(SIMULATORS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        driver = self.root / "scripts/build-apple.sh"
+        driver.parent.mkdir()
+        driver.write_text("#!/bin/bash\nexit 0\n")
+        for name in ("cargo", "rustc"):
+            executable = self.root / "bin" / name
+            executable.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "rustc $RUSTUP_TOOLCHAIN (synthetic)"\n'
+                if name == "rustc" else "#!/bin/sh\nexit 0\n"
+            )
+            executable.chmod(0o755)
+        result = self.run_step(RUN, PHASE="test", PLATFORM="ios-simulator")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "target/apple").exists())
+        result = self.run_step(CLEANUP)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_step(PRESERVE, PHASE="test", PLATFORM="ios-simulator")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_step(PRODUCTS, PLATFORM="ios-simulator")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_package_rejects_escaping_and_symlinked_products_but_keeps_framework_links(self):
+        root = self.root / "target/apple/Debug/macos"
+        bundle = root / "Synthetic.app/Contents"
+        bundle.mkdir(parents=True)
+        (bundle / "Info.plist").write_text("fixture")
+        with zipfile.ZipFile(root / "Synthetic.zip", "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+        framework = bundle / "Frameworks/Synthetic.framework"
+        (framework / "Versions/A").mkdir(parents=True)
+        (framework / "Versions/Current").symlink_to("A", target_is_directory=True)
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        link = bundle / "external"
+        link.symlink_to(ROOT / "README.md")
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("escapes", result.stderr)
+        link.unlink()
+        link.symlink_to("missing")
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid symlink", result.stderr)
+        link.unlink()
+        product = root / "Linked.app"
+        product.symlink_to("Synthetic.app", target_is_directory=True)
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("product must not be a symlink", result.stderr)
 
     def test_generic_simulators_export_distinct_ids_and_cleanup_only_owned_devices(self):
         self.simulator_fixture()

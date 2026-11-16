@@ -117,6 +117,7 @@ jobs:
       DRIVER: ${{ inputs.driver }}
       XCODE_VERSION: ${{ inputs.xcode-version }}
       SIMULATOR_RUNTIME: ${{ inputs.simulator-runtime }}
+      RUSTUP_TOOLCHAIN: ${{ inputs.rust-toolchain }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -233,7 +234,12 @@ jobs:
           CODE_SIGNING_REQUIRED: "NO"
         run: |
           set -euo pipefail
-          rustc --version
+          compiler=$(rustc --version)
+          echo "$compiler"
+          if [[ "$compiler" != "rustc ${RUSTUP_TOOLCHAIN} "* ]]; then
+            echo "::error::Active Rust compiler does not match the requested rust-toolchain"
+            exit 1
+          fi
           cargo --version
           run_phase() {
             bash -- "$DRIVER" "$1" "$PLATFORM" "$CONFIGURATION"
@@ -262,6 +268,16 @@ jobs:
               raise SystemExit(f"package must create {root} as a real directory")
           if any(artifact_root.rglob("*.ipa")):
               raise SystemExit("unsigned validation must not export an installable IPA")
+          for path in root.rglob("*"):
+              if path.is_symlink():
+                  try:
+                      target = path.resolve(strict=True)
+                  except (OSError, RuntimeError) as error:
+                      raise SystemExit(f"package contains an invalid symlink: {path}: {error}")
+                  if root.resolve() not in target.parents:
+                      raise SystemExit(f"package symlink escapes its platform output directory: {path}")
+                  if path.suffix in (".app", ".xcarchive", ".zip"):
+                      raise SystemExit(f"package product must not be a symlink: {path}")
           if platform in ("macos", "ios-simulator"):
               plist = "Contents/Info.plist" if platform == "macos" else "Info.plist"
               bundles = [app for app in root.rglob("*.app")
