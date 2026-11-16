@@ -49,6 +49,24 @@ class GateWorkflowTests(unittest.TestCase):
                 with self.subTest(step=s.get('name')):
                     self.assertNotIn('${{', s['run'])
 
+    def test_artifact_upload_is_opt_in_after_the_gate(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        for name in ('artifact-name', 'artifact-path'):
+            with self.subTest(input=name):
+                self.assertEqual(inputs[name]['type'], 'string')
+                self.assertEqual(inputs[name]['required'], 'false')
+                self.assertEqual(inputs[name]['default'], '')
+        upload = step('Upload artifact')
+        self.assertEqual(STEPS.index(upload), STEPS.index(step('Gate')) + 1)
+        self.assertEqual(upload['if'], "inputs.artifact-name != ''")
+        self.assertEqual(upload['uses'],
+                         'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9')
+        self.assertEqual(upload['with'], {
+            'name': '${{ inputs.artifact-name }}-${{ matrix.os }}',
+            'path': '${{ inputs.artifact-path }}',
+            'if-no-files-found': 'error',
+        })
+
 
 class GateTimeoutTests(unittest.TestCase):
     STEP = step('Gate')

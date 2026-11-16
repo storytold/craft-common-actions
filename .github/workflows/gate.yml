@@ -17,6 +17,16 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      artifact-name:
+        description: "When set, each successful gate leg uploads artifact-path as <artifact-name>-<matrix.os>; empty uploads nothing"
+        type: string
+        required: false
+        default: ""
+      artifact-path:
+        description: "Files or patterns to upload when artifact-name is set; fails if no files match"
+        type: string
+        required: false
+        default: ""
       setup-command:
         description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
         type: string
@@ -336,6 +346,14 @@ jobs:
             echo "::error title=Gate timed out::the gate command ran for over $GATE_TIMEOUT min and was stopped. The 'Processes running one minute before the gate timeout' group shows what was still running; for cargo test, the 'has been running for over 60 seconds' lines name the hung tests."
           fi
           exit "$status"
+
+      - name: Upload artifact
+        if: inputs.artifact-name != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-${{ matrix.os }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error
 
       # A gate that changed Cargo.lock ran against a lockfile that is not the one in the repository.
       - name: Lockfile unchanged
