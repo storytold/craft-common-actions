@@ -522,7 +522,8 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
 - with `cache-paths` and `cache-key`, those paths restored before `setup-command` and saved after
   it where the dependency cache saves, as one entry for every OS. Put the pins of what the setup
-  fetches in `cache-key` (`psd-corpus-<commit>`), and let the setup skip a fetch whose files are
+  fetches in `cache-key` (`psd-corpus-<commit>`), or keep them in a file and name it in
+  `cache-key-files` (its hash joins the key), and let the setup skip a fetch whose files are
   already there;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);

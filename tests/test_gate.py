@@ -169,7 +169,7 @@ class CallerCacheTests(unittest.TestCase):
         self.assertEqual(STEPS.index(save), STEPS.index(setup) + 1)
         for s in (restore, save):
             with self.subTest(step=s['name']):
-                self.assertEqual(s['with']['key'], 'gate-caller-${{ inputs.cache-key }}')
+                self.assertEqual(s['with']['key'], '${{ steps.caller-key.outputs.key }}')
                 self.assertEqual(s['with']['path'], '${{ inputs.cache-paths }}')
                 self.assertIn("inputs.cache-paths != '' && matrix.part == 'test'", s['if'])
 
@@ -180,8 +180,23 @@ class CallerCacheTests(unittest.TestCase):
         self.assertTrue(condition.endswith(f'&& {policy}'), condition)
         self.assertIn("steps.caller-cache.outputs.cache-hit != 'true'", condition)
 
-    def test_paths_without_a_key_fail(self):
-        self.assertEqual(step('Caller cache key')['if'], "inputs.cache-paths != '' && inputs.cache-key == ''")
+    def run_key(self, key, files='', files_hash=''):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'output')
+            output.touch()
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', step('Caller cache key')['run']],
+                cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'KEY': key, 'FILES': files, 'FILES_HASH': files_hash, 'GITHUB_OUTPUT': str(output)})
+            return result.returncode, output.read_text()
+
+    def test_the_key_holds_the_pins_and_the_files_hash(self):
+        self.assertEqual(self.run_key('psd-corpus-7433'), (0, 'key=gate-caller-psd-corpus-7433\n'))
+        self.assertEqual(self.run_key('psd', 'scripts/x.sh', 'abc'), (0, 'key=gate-caller-psd-abc\n'))
+
+    def test_a_missing_key_or_unmatched_files_fail(self):
+        self.assertEqual(self.run_key('')[0], 1)
+        self.assertEqual(self.run_key('psd', 'scripts/missing.sh', '')[0], 1)
 
 
 class LintPartTests(unittest.TestCase):
