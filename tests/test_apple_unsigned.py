@@ -477,6 +477,35 @@ class AppleUnsignedTests(unittest.TestCase):
 
         with zipfile.ZipFile(archive, "w") as package:
             package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/cycle-a", "cycle-b"
+            )
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/cycle-b", "cycle-a"
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink cycle", result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            package.writestr("Synthetic.app/Contents/Resources/D/file", "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/L0", "D"
+            )
+            for index in range(1, 16):
+                previous = f"L{index - 1}"
+                self.add_zip_symlink(
+                    package,
+                    f"Synthetic.app/Contents/Resources/L{index}",
+                    f"{previous}/../{previous}",
+                )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("resolution exceeded its work limit", result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
             package.writestr("Synthetic.app/Contents/Resources/Info.plist", "fixture")
             self.add_zip_symlink(
                 package,

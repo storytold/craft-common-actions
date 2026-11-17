@@ -279,6 +279,7 @@ jobs:
           from pathlib import Path, PurePosixPath
 
           max_symlink_target_bytes = 4096
+          max_symlink_resolution_steps = 100_000
 
           def validate_archive(package, archive):
               entries = {}
@@ -321,10 +322,18 @@ jobs:
                   mode = info.external_attr >> 16
                   return stat.S_ISDIR(mode) or (stat.S_IFMT(mode) == 0 and info.is_dir())
 
+              resolution_steps = 0
+
               def resolve(parts, active):
+                  nonlocal resolution_steps
                   resolved = []
                   pending = deque(parts)
                   while pending:
+                      resolution_steps += 1
+                      if resolution_steps > max_symlink_resolution_steps:
+                          raise SystemExit(
+                              f"package ZIP symlink resolution exceeded its work limit: {archive}"
+                          )
                       part = pending.popleft()
                       if isinstance(part, tuple):
                           _, link, requires_directory = part
