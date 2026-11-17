@@ -520,6 +520,11 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - an optional `setup-command` run from the repository root before the gate, for fetching pinned
   test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
+- with `cache-paths` and `cache-key`, those paths restored before `setup-command` and saved after
+  it where the dependency cache saves, as one entry for every OS. Put the pins of what the setup
+  fetches in `cache-key` (`psd-corpus-<commit>`), or keep them in a file and name it in
+  `cache-key-files` (its hash joins the key), and let the setup skip a fetch whose files are
+  already there;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -540,6 +545,43 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
   `env` sets the cache's version instead;
+
+With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
+leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks
+that need no test build), and keeps a rust-cache entry of its own, since a check build's
+dependencies are not the test build's. Clippy then runs beside the test build instead of before
+it. Empty (the default) runs no lint legs, and the test legs keep their names:
+
+```yaml
+    with:
+      lint-command: |
+        cargo fmt --check
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+      command: cargo nextest run --workspace --locked --profile ci
+```
+
+With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
+platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
+(`actions/select-platforms`) compares the merge commit with its first parent and runs every leg
+when a changed file is
+
+- in a workspace crate whose `.rs` files or `Cargo.toml` hold a `cfg` naming `windows`, `unix`,
+  `target_os`, `target_vendor` or a `windows`/`unix` `target_family` (or a crate in
+  `select-crates`), or in any crate that depends on one (`cargo metadata --no-deps`);
+- part of the build setup (`.github/`, `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain`,
+  `.cargo/`, `.config/`) or matches `select-paths`;
+- outside every workspace crate and not documentation (`*.md`, `docs/`, `LICENSE*`).
+
+A pull request labelled `select-label` (`full-ci` by default) runs every leg. The label is read
+when the run starts: after adding it, push or re-run from a new event (a manual run of the
+branch) to get the other legs. Legs that are not selected don't appear in the checks; a platform
+problem they would have caught shows up in the next push to main, which runs every leg.
+
+```yaml
+    with:
+      os: '["ubuntu-latest","windows-latest","macos-latest"]'
+      select-os: '["windows-latest","macos-latest"]'
+```
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -828,6 +870,7 @@ Individual actions are also available for composing custom pipelines:
       job: gate
       align-environment: true
   ```
+- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting

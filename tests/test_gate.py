@@ -162,6 +162,65 @@ class CallerSetupTests(unittest.TestCase):
         self.assertEqual(self.run_step('exit 17')[0], 17)
 
 
+class CallerCacheTests(unittest.TestCase):
+    def test_restored_before_the_setup_and_saved_after_it(self):
+        restore, setup, save = step('Restore caller cache'), step('Caller setup'), step('Save caller cache')
+        self.assertLess(STEPS.index(restore), STEPS.index(setup))
+        self.assertEqual(STEPS.index(save), STEPS.index(setup) + 1)
+        for s in (restore, save):
+            with self.subTest(step=s['name']):
+                self.assertEqual(s['with']['key'], '${{ steps.caller-key.outputs.key }}')
+                self.assertEqual(s['with']['path'], '${{ inputs.cache-paths }}')
+                self.assertIn("inputs.cache-paths != '' && matrix.part == 'test'", s['if'])
+
+    def test_saved_only_where_the_dependency_cache_saves(self):
+        rust = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if']
+        policy = re.sub(r'\s+', ' ', rust.removeprefix('${{').removesuffix('}}')).strip()
+        condition = re.sub(r'\s+', ' ', step('Save caller cache')['if'])
+        self.assertTrue(condition.endswith(f'&& {policy}'), condition)
+        self.assertIn("steps.caller-cache.outputs.cache-hit != 'true'", condition)
+
+    def run_key(self, key, files='', files_hash=''):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, 'output')
+            output.touch()
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', step('Caller cache key')['run']],
+                cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'KEY': key, 'FILES': files, 'FILES_HASH': files_hash, 'GITHUB_OUTPUT': str(output)})
+            return result.returncode, output.read_text()
+
+    def test_the_key_holds_the_pins_and_the_files_hash(self):
+        self.assertEqual(self.run_key('psd-corpus-7433'), (0, 'key=gate-caller-psd-corpus-7433\n'))
+        self.assertEqual(self.run_key('psd', 'scripts/x.sh', 'abc'), (0, 'key=gate-caller-psd-abc\n'))
+
+    def test_a_missing_key_or_unmatched_files_fail(self):
+        self.assertEqual(self.run_key('')[0], 1)
+        self.assertEqual(self.run_key('psd', 'scripts/missing.sh', '')[0], 1)
+
+
+class LintPartTests(unittest.TestCase):
+    JOB = WORKFLOW['jobs']['gate']
+
+    def test_lint_legs_exist_only_when_a_lint_command_is_given(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['lint-command']['default'], '')
+        part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
+        self.assertEqual(part, """${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}""")
+
+    def test_the_test_part_keeps_the_gate_check_name(self):
+        self.assertEqual(self.JOB['name'], "${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})")
+
+    def test_lint_runs_its_own_command_and_skips_the_test_setup(self):
+        gate = step('Gate')['env']['GATE']
+        self.assertTrue(gate.startswith("${{ matrix.part == 'lint' && inputs.lint-command || "), gate)
+        self.assertIn("matrix.part == 'test'", step('Caller setup')['if'])
+
+    def test_lint_keeps_a_cache_entry_of_its_own(self):
+        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
+        self.assertEqual(cache['with']['job'], "${{ matrix.part == 'lint' && 'lint' || '' }}")
+
+
 # The profile half of the cache key, and the rest of the key's layout, are tested where they now
 # live: tests/test_rust_cache.py.
 

@@ -1,0 +1,55 @@
+name: Select platform legs
+description: >-
+  The gate legs a run needs: on a pull request, the legs in select-os run only when the change can
+  alter platform behaviour (a crate with platform-specific cfg code or one that depends on it, the
+  build setup, the paths given, or a non-documentation file outside every crate). Every other
+  event, and a pull request with the label, runs every leg. Run it in a checkout of the pull
+  request's merge commit with its first parent (fetch-depth 2).
+
+inputs:
+  os:
+    description: "JSON array of every leg"
+    required: true
+  select-os:
+    description: "JSON array of the legs that run on a pull request only when it is platform-affected"
+    required: true
+  paths:
+    description: "Extra globs, one per line, whose change runs every leg (`*` also matches `/`)"
+    required: false
+    default: ""
+  crates:
+    description: "Extra workspace crates, one per line, treated as having platform code"
+    required: false
+    default: ""
+  label:
+    description: "A pull request label that runs every leg; empty: none"
+    required: false
+    default: "full-ci"
+
+outputs:
+  os:
+    description: "JSON array of the legs to run"
+    value: ${{ steps.select.outputs.os }}
+  platform:
+    description: "'true' when the run needs every leg"
+    value: ${{ steps.select.outputs.platform }}
+  reason:
+    description: "Why: the first change that needs every leg, or the event or label"
+    value: ${{ steps.select.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - name: Select legs
+      id: select
+      shell: bash
+      env:
+        SCRIPT: ${{ github.action_path }}/select_platforms.py
+        EVENT: ${{ github.event_name }}
+        LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        OS: ${{ inputs.os }}
+        SELECT_OS: ${{ inputs.select-os }}
+        PATHS: ${{ inputs.paths }}
+        CRATES: ${{ inputs.crates }}
+        LABEL: ${{ inputs.label }}
+      run: python3 "$SCRIPT" --os "$OS" --select-os "$SELECT_OS" --paths "$PATHS" --crates "$CRATES" --label "$LABEL"

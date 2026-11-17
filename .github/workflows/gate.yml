@@ -1,7 +1,8 @@
 name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
-# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup.
+# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup, and with
+# `lint-command` a second job per runner that runs the lint checks beside it.
 # App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
 # inputs: an app's workflows only call this repository's workflows.
 on:
@@ -22,8 +23,28 @@ on:
         type: string
         required: false
         default: ""
+      cache-paths:
+        description: "Paths (one per line) that setup-command fills, restored before it and saved after it where the dependency cache saves; empty caches none. One entry serves every OS"
+        type: string
+        required: false
+        default: ""
+      cache-key:
+        description: "The key for cache-paths; put the pins of what setup-command fetches in it, so a new pin starts a new entry"
+        type: string
+        required: false
+        default: ""
+      cache-key-files:
+        description: "A glob of files (the fetch script that holds the pins, say) whose hash is added to cache-key; empty adds none"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
+        type: string
+        required: false
+        default: ""
+      lint-command:
+        description: "Lint checks (fmt, clippy) run with bash on a `lint (<os>)` leg beside each `gate (<os>)` leg, so they stay off the test leg's critical path; the lint leg skips setup-command and the caller cache. Empty runs no lint legs"
         type: string
         required: false
         default: ""
@@ -32,6 +53,26 @@ on:
         type: string
         required: false
         default: '["ubuntu-24.04"]'
+      select-os:
+        description: 'JSON array of the `os` entries that run on a pull request only when it can change platform behaviour (actions/select-platforms: platform cfg code or its dependents, the build setup, select-paths); pushes and other events run every leg. Empty or [] runs every leg on every event'
+        type: string
+        required: false
+        default: "[]"
+      select-paths:
+        description: "Extra globs, one per line, whose change runs the select-os legs (`*` also matches `/`)"
+        type: string
+        required: false
+        default: ""
+      select-crates:
+        description: "Extra workspace crates, one per line, treated as having platform code"
+        type: string
+        required: false
+        default: ""
+      select-label:
+        description: "A pull request label that runs every leg, read when the run starts; empty: none"
+        type: string
+        required: false
+        default: "full-ci"
       craft-fonts-ref:
         # The suite's craft-fonts pin, as in release.yml and freebsd.yml.
         description: "The commit of storytold/craft-fonts the tests build with. Defaults to the suite's pin; empty builds without craft-fonts"
@@ -113,15 +154,49 @@ permissions:
   contents: read
 
 jobs:
+  # Runs only with select-os; otherwise it is skipped and the gate runs every leg in `os`.
+  select:
+    name: select legs
+    if: inputs.select-os != '' && inputs.select-os != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.select.outputs.os }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # The merge commit and its first parent. Other events run every leg without a checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: select
+        uses: storytold/craft-common-actions/actions/select-platforms@main
+        with:
+          os: ${{ inputs.os }}
+          select-os: ${{ inputs.select-os }}
+          paths: ${{ inputs.select-paths }}
+          crates: ${{ inputs.select-crates }}
+          label: ${{ inputs.select-label }}
+
   gate:
-    name: gate (${{ matrix.os }})
+    needs: select
+    # A skipped select (no select-os) still runs the gate; a failed one does not.
+    if: ${{ !cancelled() && needs.select.result != 'failure' }}
+    # The test part keeps the `gate (<os>)` check name callers already know.
+    name: ${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       # A failing leg must not cancel the others and hide their failures.
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os) }}
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
+        # One job definition for both parts, so the shared setup is written once.
+        part: ${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -261,9 +336,12 @@ jobs:
       # No save on failure: a main run that fails at fmt or clippy has not built the test
       # profile, and rust-cache never replaces an exact-key entry, so that half-filled entry
       # would be restored by every run until Cargo.lock changes.
+      # The lint part builds in check mode, so it keeps an entry of its own (`<profile>-lint`)
+      # instead of racing the test part for the `gate` entry.
       - uses: storytold/craft-common-actions/actions/rust-cache@main
         with:
           cache-version: ${{ inputs.cache-version }}
+          job: ${{ matrix.part == 'lint' && 'lint' || '' }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-on-failure: "false"
 
@@ -294,8 +372,39 @@ jobs:
             echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
           fi
 
+      # Data the caller's setup fetches (test corpora, fixtures), keyed on the caller's pins. The
+      # key is fixed by those pins, so one entry stays valid until a pin moves.
+      - name: Caller cache key
+        id: caller-key
+        if: inputs.cache-paths != '' && matrix.part == 'test'
+        shell: bash
+        env:
+          KEY: ${{ inputs.cache-key }}
+          FILES: ${{ inputs.cache-key-files }}
+          FILES_HASH: ${{ inputs.cache-key-files != '' && hashFiles(inputs.cache-key-files) || '' }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEY" ]; then
+            echo "::error::cache-paths needs a cache-key naming the pins of what it holds"
+            exit 1
+          fi
+          if [ -n "$FILES" ] && [ -z "$FILES_HASH" ]; then
+            echo "::error::cache-key-files matches no file: $FILES"
+            exit 1
+          fi
+          echo "key=gate-caller-$KEY${FILES_HASH:+-$FILES_HASH}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore caller cache
+        id: caller-cache
+        if: inputs.cache-paths != '' && matrix.part == 'test'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.cache-paths }}
+          key: ${{ steps.caller-key.outputs.key }}
+          enableCrossOsArchive: true
+
       - name: Caller setup
-        if: inputs.setup-command != ''
+        if: inputs.setup-command != '' && matrix.part == 'test'
         shell: bash
         env:
           SETUP: ${{ inputs.setup-command }}
@@ -304,10 +413,22 @@ jobs:
           printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
           bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
 
+      # Saved where the dependency cache is saved, as soon as the setup has filled it. Every leg
+      # tries; the first to finish writes the entry and the others find it reserved.
+      - name: Save caller cache
+        if: >-
+          inputs.cache-paths != '' && matrix.part == 'test' && steps.caller-cache.outputs.cache-hit != 'true'
+          && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.cache-paths }}
+          key: ${{ steps.caller-key.outputs.key }}
+          enableCrossOsArchive: true
+
       - name: Gate
         shell: bash
         env:
-          GATE: ${{ runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
+          GATE: ${{ matrix.part == 'lint' && inputs.lint-command || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
           GATE_TIMEOUT: ${{ inputs.gate-timeout-minutes }}
         run: |
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
