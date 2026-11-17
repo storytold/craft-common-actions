@@ -467,8 +467,38 @@ class AppleUnsignedTests(unittest.TestCase):
                 "Synthetic.app/Contents/Frameworks/Synthetic.framework/Versions/Current",
                 "A",
             )
+            self.add_zip_symlink(
+                package,
+                "Synthetic.app/Contents/Frameworks/Synthetic.framework/Versions/repeated",
+                "Current/../Current/Resources/file",
+            )
         result = self.run_step(PRODUCTS, PLATFORM="macos")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            package.writestr("Synthetic.app/Contents/Resources/Info.plist", "fixture")
+            self.add_zip_symlink(
+                package,
+                "Synthetic.app/Contents/Resources/broken",
+                "missing/../Info.plist",
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dangling symlink", result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            package.writestr("Synthetic.app/Contents/Resources/Info.plist", "fixture")
+            package.writestr("Synthetic.app/Contents/Resources/file", "fixture")
+            self.add_zip_symlink(
+                package,
+                "Synthetic.app/Contents/Resources/broken",
+                "file/../Info.plist",
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-directory path component", result.stderr)
 
         with zipfile.ZipFile(archive, "w") as package:
             package.writestr("Synthetic.app/Contents/Info.plist", "fixture")

@@ -283,6 +283,7 @@ jobs:
           def validate_archive(package, archive):
               entries = {}
               symlinks = {}
+              implicit_directories = set()
               for info in package.infolist():
                   name = info.filename
                   path = PurePosixPath(name)
@@ -293,6 +294,8 @@ jobs:
                   if normalized in entries:
                       raise SystemExit(f"package ZIP contains a duplicate path: {archive}: {normalized}")
                   entries[normalized] = info
+                  for index in range(1, len(path.parts)):
+                      implicit_directories.add("/".join(path.parts[:index]))
                   mode = info.external_attr >> 16
                   kind = stat.S_IFMT(mode)
                   if kind not in (0, stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK):
@@ -311,26 +314,65 @@ jobs:
                           raise SystemExit(f"package ZIP contains an unsafe symlink: {archive}: {normalized}")
                       symlinks[normalized] = target
 
+              def is_directory(path):
+                  info = entries.get(path)
+                  if info is None:
+                      return path in implicit_directories
+                  mode = info.external_attr >> 16
+                  return stat.S_ISDIR(mode) or (stat.S_IFMT(mode) == 0 and info.is_dir())
+
               def resolve(parts, active):
                   resolved = []
                   pending = deque(parts)
                   while pending:
                       part = pending.popleft()
+                      if isinstance(part, tuple):
+                          _, link, requires_directory = part
+                          destination = "/".join(resolved)
+                          if requires_directory and destination and not is_directory(destination):
+                              raise SystemExit(
+                                  f"package ZIP symlink has a non-directory target: {archive}: {destination}"
+                              )
+                          active.remove(link)
+                          continue
                       if part in ("", "."):
+                          if part == "." and resolved and not is_directory("/".join(resolved)):
+                              raise SystemExit(
+                                  f"package ZIP symlink traverses a non-directory path component: "
+                                  f"{archive}: {'/'.join(resolved)}"
+                              )
                           continue
                       if part == "..":
                           if not resolved:
                               raise SystemExit(f"package ZIP symlink escapes the archive: {archive}")
+                          current = "/".join(resolved)
+                          if not is_directory(current):
+                              message = (
+                                  "dangling symlink"
+                                  if current not in entries and current not in implicit_directories
+                                  else "non-directory path component"
+                              )
+                              raise SystemExit(
+                                  f"package ZIP symlink has a {message}: {archive}: {current}"
+                              )
                           resolved.pop()
                           continue
+                      if resolved and not is_directory("/".join(resolved)):
+                          raise SystemExit(
+                              f"package ZIP symlink traverses a non-directory path component: "
+                              f"{archive}: {'/'.join(resolved)}"
+                          )
                       resolved.append(part)
                       current = "/".join(resolved)
                       if current in symlinks:
                           if current in active:
                               raise SystemExit(f"package ZIP contains a symlink cycle: {archive}: {current}")
-                          pending.extendleft(reversed(symlinks[current].split("/")))
+                          target = symlinks[current]
+                          pending.extendleft(reversed(
+                              target.split("/") + [(None, current, target.endswith("/"))]
+                          ))
                           resolved.pop()
-                          active = active | {current}
+                          active.add(current)
                   destination = "/".join(resolved)
                   if (destination and destination not in entries
                           and not any(name.startswith(destination + "/") for name in entries)):
