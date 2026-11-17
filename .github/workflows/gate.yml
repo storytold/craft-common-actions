@@ -23,6 +23,16 @@ on:
         type: string
         required: false
         default: ""
+      cache-paths:
+        description: "Paths (one per line) that setup-command fills, restored before it and saved after it where the dependency cache saves; empty caches none. One entry serves every OS"
+        type: string
+        required: false
+        default: ""
+      cache-key:
+        description: "The key for cache-paths; put the pins of what setup-command fetches in it, so a new pin starts a new entry"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
         type: string
@@ -306,6 +316,24 @@ jobs:
             echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
           fi
 
+      # Data the caller's setup fetches (test corpora, fixtures), keyed on the caller's pins. The
+      # key is fixed by those pins, so one entry stays valid until a pin moves.
+      - name: Caller cache key
+        if: inputs.cache-paths != '' && inputs.cache-key == ''
+        shell: bash
+        run: |
+          echo "::error::cache-paths needs a cache-key naming the pins of what it holds"
+          exit 1
+
+      - name: Restore caller cache
+        id: caller-cache
+        if: inputs.cache-paths != '' && matrix.part == 'test'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.cache-paths }}
+          key: gate-caller-${{ inputs.cache-key }}
+          enableCrossOsArchive: true
+
       - name: Caller setup
         if: inputs.setup-command != '' && matrix.part == 'test'
         shell: bash
@@ -315,6 +343,18 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
           bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
+
+      # Saved where the dependency cache is saved, as soon as the setup has filled it. Every leg
+      # tries; the first to finish writes the entry and the others find it reserved.
+      - name: Save caller cache
+        if: >-
+          inputs.cache-paths != '' && matrix.part == 'test' && steps.caller-cache.outputs.cache-hit != 'true'
+          && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ inputs.cache-paths }}
+          key: gate-caller-${{ inputs.cache-key }}
+          enableCrossOsArchive: true
 
       - name: Gate
         shell: bash

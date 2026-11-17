@@ -520,6 +520,10 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - an optional `setup-command` run from the repository root before the gate, for fetching pinned
   test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
+- with `cache-paths` and `cache-key`, those paths restored before `setup-command` and saved after
+  it where the dependency cache saves, as one entry for every OS. Put the pins of what the setup
+  fetches in `cache-key` (`psd-corpus-<commit>`), and let the setup skip a fetch whose files are
+  already there;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's

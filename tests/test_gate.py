@@ -162,6 +162,28 @@ class CallerSetupTests(unittest.TestCase):
         self.assertEqual(self.run_step('exit 17')[0], 17)
 
 
+class CallerCacheTests(unittest.TestCase):
+    def test_restored_before_the_setup_and_saved_after_it(self):
+        restore, setup, save = step('Restore caller cache'), step('Caller setup'), step('Save caller cache')
+        self.assertLess(STEPS.index(restore), STEPS.index(setup))
+        self.assertEqual(STEPS.index(save), STEPS.index(setup) + 1)
+        for s in (restore, save):
+            with self.subTest(step=s['name']):
+                self.assertEqual(s['with']['key'], 'gate-caller-${{ inputs.cache-key }}')
+                self.assertEqual(s['with']['path'], '${{ inputs.cache-paths }}')
+                self.assertIn("inputs.cache-paths != '' && matrix.part == 'test'", s['if'])
+
+    def test_saved_only_where_the_dependency_cache_saves(self):
+        rust = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if']
+        policy = re.sub(r'\s+', ' ', rust.removeprefix('${{').removesuffix('}}')).strip()
+        condition = re.sub(r'\s+', ' ', step('Save caller cache')['if'])
+        self.assertTrue(condition.endswith(f'&& {policy}'), condition)
+        self.assertIn("steps.caller-cache.outputs.cache-hit != 'true'", condition)
+
+    def test_paths_without_a_key_fail(self):
+        self.assertEqual(step('Caller cache key')['if'], "inputs.cache-paths != '' && inputs.cache-key == ''")
+
+
 class LintPartTests(unittest.TestCase):
     JOB = WORKFLOW['jobs']['gate']
 
