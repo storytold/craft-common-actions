@@ -150,8 +150,10 @@ Wrong configurations/platforms, empty output directories and symlinked package
 root/configuration/platform directories do not satisfy these matchers.
 Product containers (`.app`, `.xcarchive`, ZIPs) must be real products, not
 symlinks. Bundle-internal framework symlinks are supported only when they resolve
-inside the selected platform's artifact directory; dangling/escaping links fail
-instead of producing an incomplete evidence archive.
+inside the selected platform's artifact directory; ZIP member paths and symlink
+targets are also checked, and dangling/escaping links fail instead of producing
+an incomplete or unsafe evidence archive. The app plist used to satisfy the ZIP
+matcher must be a regular file, not a symlink.
 Any `.ipa` found below `target/apple` rejects packaging. Missing expected products
 fail even when optional CI/simulator evidence exists elsewhere in `target/apple`.
 Those are **structural checks, not signature, Mach-O, installability or App Review
@@ -206,11 +208,15 @@ download, alternate-OS fallback, preexisting device-name assumption or hardcoded
 UUID. The shared `always()` cleanup deletes only devices recorded by this job,
 including partial creation failures, preserves unrelated devices and reports
 cleanup failures. Ownership uses `.craft-apple-simulators.json` at repository root;
-drivers must not remove/alter it. Sanitized identities become
-`target/apple/ci/simulators.json` evidence. The driver owns suite boot/wait behavior;
-shared setup does not boot both devices concurrently. A caller needing an
-unavailable Xcode/runtime must wait for a separately reviewed runner/toolchain
-change, not fake simulator success.
+drivers must not remove/alter it; a missing or non-regular manifest is a cleanup
+failure, not evidence that no simulators were created. Sanitized identities become
+`target/apple/ci/simulators.json` evidence. Evidence-write errors are reported
+after cleanup attempts when a valid manifest is available, so an unavailable
+evidence path cannot skip owned-device deletion; symlinked evidence paths are
+rejected. The driver owns suite boot/wait behavior; shared setup does not boot
+both devices concurrently. A
+caller needing an unavailable Xcode/runtime must wait for a separately reviewed
+runner/toolchain change, not fake simulator success.
 
 ### Thin caller (after review and merge)
 

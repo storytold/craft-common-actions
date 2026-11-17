@@ -224,7 +224,7 @@ jobs:
               selected.append((family, variable, candidates[0]["identifier"]))
           owned = []
           manifest = Path(".craft-apple-simulators.json")
-          if manifest.exists():
+          if manifest.exists() or manifest.is_symlink():
               raise SystemExit("Refusing to overwrite an existing simulator ownership manifest")
           manifest.write_text("[]\n")
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
@@ -272,8 +272,73 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
-          from pathlib import Path
+          import re
+          import stat
           import zipfile
+          from collections import deque
+          from pathlib import Path, PurePosixPath
+
+          max_symlink_target_bytes = 4096
+
+          def validate_archive(package, archive):
+              entries = {}
+              symlinks = {}
+              for info in package.infolist():
+                  name = info.filename
+                  path = PurePosixPath(name)
+                  if (not name or "\\" in name or "\x00" in name or path.is_absolute()
+                          or re.match(r"^[A-Za-z]:", name) or ".." in path.parts):
+                      raise SystemExit(f"package ZIP contains an unsafe path: {archive}: {name!r}")
+                  normalized = path.as_posix().rstrip("/")
+                  if normalized in entries:
+                      raise SystemExit(f"package ZIP contains a duplicate path: {archive}: {normalized}")
+                  entries[normalized] = info
+                  mode = info.external_attr >> 16
+                  kind = stat.S_IFMT(mode)
+                  if kind not in (0, stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK):
+                      raise SystemExit(f"package ZIP contains a special file: {archive}: {normalized}")
+                  if stat.S_ISLNK(mode):
+                      try:
+                          with package.open(info) as source:
+                              target_bytes = source.read(max_symlink_target_bytes + 1)
+                          if len(target_bytes) > max_symlink_target_bytes:
+                              raise SystemExit(f"package ZIP symlink target is too long: {archive}: {normalized}")
+                          target = target_bytes.decode("utf-8")
+                      except (UnicodeDecodeError, RuntimeError) as error:
+                          raise SystemExit(f"package ZIP contains an invalid symlink: {archive}: {normalized}: {error}")
+                      if (not target or "\\" in target or "\x00" in target
+                              or target.startswith("/") or re.match(r"^[A-Za-z]:", target)):
+                          raise SystemExit(f"package ZIP contains an unsafe symlink: {archive}: {normalized}")
+                      symlinks[normalized] = target
+
+              def resolve(parts, active):
+                  resolved = []
+                  pending = deque(parts)
+                  while pending:
+                      part = pending.popleft()
+                      if part in ("", "."):
+                          continue
+                      if part == "..":
+                          if not resolved:
+                              raise SystemExit(f"package ZIP symlink escapes the archive: {archive}")
+                          resolved.pop()
+                          continue
+                      resolved.append(part)
+                      current = "/".join(resolved)
+                      if current in symlinks:
+                          if current in active:
+                              raise SystemExit(f"package ZIP contains a symlink cycle: {archive}: {current}")
+                          pending.extendleft(reversed(symlinks[current].split("/")))
+                          resolved.pop()
+                          active = active | {current}
+                  destination = "/".join(resolved)
+                  if (destination and destination not in entries
+                          and not any(name.startswith(destination + "/") for name in entries)):
+                      raise SystemExit(f"package ZIP contains a dangling symlink: {archive}: {destination}")
+                  return destination
+
+              for name, target in symlinks.items():
+                  resolve(PurePosixPath(name).parent.parts + tuple(target.split("/")), {name})
 
           artifact_root = Path("target/apple")
           platform = os.environ["PLATFORM"]
@@ -303,7 +368,13 @@ jobs:
               contains_app = False
               for archive in archives:
                   with zipfile.ZipFile(archive) as package:
-                      contains_app |= any(name.endswith(f".app/{plist}") for name in package.namelist())
+                      validate_archive(package, archive)
+                      contains_app |= any(
+                          info.filename.endswith(f".app/{plist}")
+                          and not info.is_dir()
+                          and not stat.S_ISLNK(info.external_attr >> 16)
+                          for info in package.infolist()
+                      )
               if not contains_app:
                   raise SystemExit(f"a {platform} ZIP must contain an app bundle")
           else:
@@ -325,18 +396,28 @@ jobs:
           import uuid
 
           manifest = Path(".craft-apple-simulators.json")
-          if not manifest.exists():
-              print("No simulators were created by this job")
-              raise SystemExit(0)
+          if manifest.is_symlink() or not manifest.is_file():
+              raise SystemExit("Refusing to read a missing or non-regular simulator ownership manifest")
           owned = json.loads(manifest.read_text())
+          failures = []
           evidence = Path("target/apple/ci")
-          evidence.mkdir(parents=True, exist_ok=True)
-          (evidence / "simulators.json").write_text(manifest.read_text())
+          try:
+              for directory in (Path("target"), Path("target/apple"), evidence):
+                  if directory.is_symlink():
+                      raise OSError(f"refusing symlinked evidence directory: {directory}")
+                  directory.mkdir(exist_ok=True)
+                  if not directory.is_dir():
+                      raise OSError(f"evidence path is not a directory: {directory}")
+              evidence_file = evidence / "simulators.json"
+              if evidence_file.is_symlink():
+                  raise OSError(f"refusing symlinked evidence file: {evidence_file}")
+              evidence_file.write_text(manifest.read_text())
+          except OSError as error:
+              failures.append(f"Could not write simulator cleanup evidence: {error}")
           result = subprocess.run(["xcrun", "simctl", "list", "devices", "--json"],
                                   capture_output=True, text=True, check=True, timeout=60)
           devices = {item["udid"]: item for group in json.loads(result.stdout)["devices"].values()
                      for item in group}
-          failures = []
           for item in owned:
               identifier = item["udid"]
               uuid.UUID(identifier)

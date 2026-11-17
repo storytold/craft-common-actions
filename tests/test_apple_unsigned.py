@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -99,6 +100,13 @@ class AppleUnsignedTests(unittest.TestCase):
             cwd=self.root, env={**self.env, **overrides},
             text=True, capture_output=True, timeout=20,
         )
+
+    @staticmethod
+    def add_zip_symlink(package, name, target):
+        entry = zipfile.ZipInfo(name)
+        entry.create_system = 3
+        entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+        package.writestr(entry, target)
 
     def plan(self, **overrides):
         output = self.root / "output"
@@ -432,6 +440,65 @@ class AppleUnsignedTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("product must not be a symlink", result.stderr)
 
+    def test_package_validates_zip_symlinks_and_requires_a_regular_app_plist(self):
+        root = self.root / "target/apple/Debug/macos"
+        root.mkdir(parents=True)
+        bundle = root / "Synthetic.app/Contents"
+        bundle.mkdir(parents=True)
+        (bundle / "Info.plist").write_text("fixture")
+        archive = root / "Synthetic.zip"
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/escape", "../../../../outside"
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ZIP symlink escapes", result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            package.writestr(
+                "Synthetic.app/Contents/Frameworks/Synthetic.framework/Versions/A/Resources/file",
+                "fixture",
+            )
+            self.add_zip_symlink(
+                package,
+                "Synthetic.app/Contents/Frameworks/Synthetic.framework/Versions/Current",
+                "A",
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/dangling", "missing"
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("dangling symlink", result.stderr)
+
+        long_target = "x" * 4097
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("Synthetic.app/Contents/Info.plist", "fixture")
+            package.writestr(long_target, "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Resources/long", long_target
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink target is too long", result.stderr)
+
+        with zipfile.ZipFile(archive, "w") as package:
+            package.writestr("outside.plist", "fixture")
+            self.add_zip_symlink(
+                package, "Synthetic.app/Contents/Info.plist", "../../outside.plist"
+            )
+        result = self.run_step(PRODUCTS, PLATFORM="macos")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must contain an app bundle", result.stderr)
+
     def test_generic_simulators_export_distinct_ids_and_cleanup_only_owned_devices(self):
         self.simulator_fixture()
         result = self.run_step(SIMULATORS)
@@ -457,6 +524,22 @@ class AppleUnsignedTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Refusing to overwrite", result.stderr)
         self.assertFalse((self.root / "output").exists())
+        manifest.unlink()
+        missing_target = self.root / "missing-manifest-target.json"
+        manifest.symlink_to(missing_target)
+        result = self.run_step(SIMULATORS)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Refusing to overwrite", result.stderr)
+        self.assertFalse(missing_target.exists())
+
+    def test_missing_simulator_manifest_is_a_cleanup_failure(self):
+        self.simulator_fixture()
+        result = self.run_step(SIMULATORS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.root / ".craft-apple-simulators.json").unlink()
+        result = self.run_step(CLEANUP)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ownership manifest", result.stderr)
 
     def test_missing_runtime_or_family_fails_before_creating_any_simulator(self):
         self.simulator_fixture(missing_ipad=True)
@@ -510,6 +593,47 @@ class AppleUnsignedTests(unittest.TestCase):
                           ("delete", owned[1]["udid"])])
         remaining = json.loads((self.root / "simctl-fixture.json").read_text())["devices"]
         self.assertNotIn(owned[1]["udid"], [device["udid"] for device in remaining])
+
+    def test_cleanup_still_deletes_owned_devices_when_evidence_write_fails(self):
+        self.simulator_fixture()
+        result = self.run_step(SIMULATORS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        owned = json.loads((self.root / ".craft-apple-simulators.json").read_text())
+
+        evidence = self.root / "target/apple/ci"
+        evidence.parent.mkdir(parents=True)
+        evidence.write_text("not a directory")
+        result = self.run_step(CLEANUP)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("evidence", result.stderr.lower())
+
+        calls = [json.loads(line) for line in (self.root / "simctl-calls.jsonl").read_text().splitlines()]
+        deleted = [call[-1] for call in calls if call[1] == "delete"]
+        self.assertCountEqual(deleted, [item["udid"] for item in owned])
+        remaining = json.loads((self.root / "simctl-fixture.json").read_text())["devices"]
+        self.assertFalse(any(item["udid"] in [device["udid"] for device in remaining]
+                             for item in owned))
+        self.assertTrue((self.root / ".craft-apple-simulators.json").exists())
+
+    def test_cleanup_rejects_symlinked_evidence_path_and_still_deletes_devices(self):
+        self.simulator_fixture()
+        result = self.run_step(SIMULATORS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        owned = json.loads((self.root / ".craft-apple-simulators.json").read_text())
+
+        evidence = self.root / "target/apple/ci"
+        evidence.parent.mkdir(parents=True)
+        outside = self.root / "outside"
+        outside.mkdir()
+        evidence.symlink_to(outside, target_is_directory=True)
+        result = self.run_step(CLEANUP)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlinked evidence directory", result.stderr)
+        self.assertFalse((outside / "simulators.json").exists())
+
+        calls = [json.loads(line) for line in (self.root / "simctl-calls.jsonl").read_text().splitlines()]
+        deleted = [call[-1] for call in calls if call[1] == "delete"]
+        self.assertCountEqual(deleted, [item["udid"] for item in owned])
 
     def test_workflow_does_not_cross_privileged_release_boundary(self):
         self.assertEqual(set(DATA["on"]), {"workflow_call"})
