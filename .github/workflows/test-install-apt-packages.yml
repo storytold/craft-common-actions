@@ -36,7 +36,7 @@ jobs:
           - { runner: ubuntu-24.04-arm, outage: true }
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@v2.22.4
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -60,7 +60,7 @@ jobs:
             mirrors.dotsrc.org:443
             mirrors.edge.kernel.org:443
             ftp.tu-chemnitz.de:443
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
       - name: Take ubuntu.com offline
@@ -73,7 +73,7 @@ jobs:
             printf '192.0.2.1 %s\n100::1 %s\n' "$host" "$host"
           done | sudo tee -a /etc/hosts
       - name: Install packages
-        uses: ./actions/install-apt-packages
+        uses: $/actions/install-apt-packages
         with:
           # pkg-config is on every image and needs no download, so the outage legs add hello: a
           # package no image has, and a list no cache was saved for (save: never), so it has to
