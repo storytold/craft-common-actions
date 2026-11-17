@@ -50,6 +50,17 @@ def check(repos: list[str], extra: list[str]) -> None:
             raise SystemExit(f"{opt!r} is not an option a train passes to cut_release.py")
 
 
+def logs_dir(name: str) -> Path:
+    """The log folder: a plain relative path inside the current directory, nothing outside it."""
+    base = Path.cwd().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", name) or Path(name).is_absolute():
+        raise SystemExit(f"{name!r}: --logs is a relative folder name inside the current directory")
+    path = (base / name).resolve()
+    if path != base and base not in path.parents:
+        raise SystemExit(f"{name!r}: --logs must stay inside {base}")
+    return path
+
+
 def run_app(repo: str, extra: list[str], logs: Path) -> tuple[str, int, str]:
     log = logs / f"{repo.split('/')[-1]}.log"
     with log.open("w", encoding="utf-8") as out:
@@ -80,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         p.error("name the apps, or pass --all")
     extra += ["--publish"] * a.publish + ["--dry-run"] * a.dry_run
     check(repos, extra)
-    logs = Path(a.logs)
+    logs = logs_dir(a.logs)
     logs.mkdir(parents=True, exist_ok=True)
 
     start = time.time()

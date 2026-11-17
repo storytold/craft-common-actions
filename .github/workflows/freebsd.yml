@@ -135,7 +135,7 @@ jobs:
               printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
               pkg update -f -q
             fi
-            pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib dejavu
+            pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib dejavu
             # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
             # or standard library for it ("installer for platform not found"), so use
             # FreeBSD's lang/rust package.
@@ -176,14 +176,22 @@ jobs:
             echo "error: arm64 base.txz does not match its MANIFEST" >&2
             exit 1
           fi
-          tar -xf "$X/base.txz" -C "$S" ./lib ./usr/lib ./usr/include ./usr/libdata
+          tar -xf "$X/base.txz" -C "$S" ./lib ./usr/lib ./usr/include ./usr/libdata ./usr/share
           # The libraries the prepare step installs; the build tools and fonts stay host-only.
-          pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 fontconfig freetype2 alsa-lib
+          # xorgproto provides xproto, renderproto, kbproto and xextproto .pc files that
+          # GTK's public dependency chain needs, but that are not runtime dependencies.
+          pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib xorgproto
           for p in "$X"/cache/*.pkg; do
-            [ ! -L "$p" ] || continue
+            # pkg names each fetched archive with a symlink to its hashed cache file.
+            # tar follows the link; skipping links here leaves the sysroot without any ports.
+            [ -e "$p" ] || continue
             case "$p" in */rust-*) continue ;; esac
             tar -xf "$p" -C "$S" --exclude '+*'
           done
+          if [ ! -f "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" ]; then
+            echo "error: aarch64 sysroot is missing gtk3's gdk-3.0.pc" >&2
+            exit 1
+          fi
           for tool in cc c++; do
             printf '#!/bin/sh\nexec %s --target=%s%s --sysroot=%s -fuse-ld=lld -I%s/usr/local/include -L%s/usr/local/lib -Wl,-rpath-link,%s/usr/local/lib "$@"\n' \
               "$tool" "$target" "${release%%-*}" "$S" "$S" "$S" "$S" > "$X/$tool"
@@ -193,8 +201,24 @@ jobs:
           export CARGO_BUILD_TARGET=$target
           export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=$X/cc
           export CC_aarch64_unknown_freebsd=$X/cc CXX_aarch64_unknown_freebsd=$X/c++ AR_aarch64_unknown_freebsd=/usr/bin/ar
-          export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S
+          export PKG_CONFIG_PATH=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig
+          export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig
           EOF
+          . "$X/env"
+          if [ "${CARGO_BUILD_TARGET:-}" != "$target" ]; then
+            echo "error: $X/env did not set CARGO_BUILD_TARGET=$target" >&2
+            cat "$X/env" >&2 || true
+            exit 1
+          fi
+          if ! pkg-config --exists gdk-3.0; then
+            echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
+            ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+            sed -n '1,100p' "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+            pkg-config --print-errors --exists gdk-3.0 || true
+            pkg-config --debug --print-errors --modversion gdk-3.0 || true
+            exit 1
+          fi
           rustc --print target-libdir --target "$target"
       - name: Restore FreeBSD Cargo cache
         id: cargo-cache
@@ -230,7 +254,14 @@ jobs:
           fi
           if [ -f craft-i18n.rev ]; then export CRAFT_I18N_DIR="$PWD/craft-i18n" CRAFT_I18N_REQUIRED=1; fi
           # Written by "Set up the aarch64 cross toolchain": cargo then builds for aarch64.
+          # Fail closed: an incomplete env file (FreeBSD sh may not abort on an unset
+          # variable in the unquoted heredoc) would leave CARGO_BUILD_TARGET unset, and
+          # package.sh would name an x86_64 archive after uname -m.
           [ ! -f /var/tmp/craft-cross/env ] || . /var/tmp/craft-cross/env
+          if [ "$ARCH" = aarch64 ] && [ "${CARGO_BUILD_TARGET:-}" != aarch64-unknown-freebsd ]; then
+            echo "error: FreeBSD aarch64 job has CARGO_BUILD_TARGET='${CARGO_BUILD_TARGET:-}'; expected aarch64-unknown-freebsd from /var/tmp/craft-cross/env" >&2
+            exit 1
+          fi
           # Tests run as an ordinary user: root is never refused a file, so a test that expects
           # "permission denied" fails as root, and a permission bug root would hide goes unseen.
           as_tester() {

@@ -135,33 +135,35 @@ class CallerEnvironmentTests(unittest.TestCase):
                 self.assertEqual(self.run_step(ALL=f'GOOD=1\n{line}')[0], 1)
 
 
-class ProfileCacheTests(unittest.TestCase):
-    def key(self, manifest):
+class CallerSetupTests(unittest.TestCase):
+    STEP = step('Caller setup')
+
+    def run_step(self, setup):
         with tempfile.TemporaryDirectory() as directory:
-            Path(directory, 'Cargo.toml').write_text(manifest)
-            output = Path(directory, 'output')
-            subprocess.run(['bash', '-euo', 'pipefail', '-c', step('Cache profile key')['run']],
-                           cwd=directory, check=True, capture_output=True,
-                           env={**os.environ, 'GITHUB_OUTPUT': str(output)})
-            return output.read_text()
+            github_env = Path(directory, 'github_env')
+            github_env.touch()
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', self.STEP['run']],
+                cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'SETUP': setup, 'RUNNER_TEMP': directory,
+                     'GITHUB_ENV': str(github_env)})
+            return result.returncode, github_env.read_text().splitlines(), Path(directory, 'setup-ran').exists()
 
-    def test_dependency_revision_does_not_discard_fallback(self):
-        profile = '[profile.dev]\nopt-level = 1\n'
-        self.assertEqual(self.key('[workspace.dependencies]\na = "1"\n' + profile),
-                         self.key('[workspace.dependencies]\na = "2"\n' + profile))
+    def test_setup_input_is_passed_through_env_before_the_gate(self):
+        self.assertEqual(set(self.STEP['env']), {'SETUP'})
+        self.assertLess(STEPS.index(self.STEP), STEPS.index(step('Gate')))
+        self.assertNotIn('${{', self.STEP['run'])
 
-    def test_profile_changes_invalidate(self):
-        self.assertNotEqual(self.key('[profile.dev]\nopt-level = 1'),
-                            self.key('[profile.dev]\nopt-level = 2'))
-        self.assertNotEqual(self.key('[profile.dev.package.foo]\nopt-level = 1'),
-                            self.key('[profile.dev.package.foo]\nopt-level = 2'))
+    def test_setup_can_provision_data_and_export_its_path(self):
+        setup = 'touch setup-ran\necho "CRAFT_PSD_CORPUS=/corpus" >> "$GITHUB_ENV"'
+        self.assertEqual(self.run_step(setup), (0, ['CRAFT_PSD_CORPUS=/corpus'], True))
 
-    def test_order_and_comments_do_not_invalidate(self):
-        self.assertEqual(self.key('[profile.dev]\ndebug = false\nopt-level = 1'),
-                         self.key('# comment\n[profile.dev]\nopt-level = 1\ndebug = false'))
+    def test_setup_failure_stops_the_gate_job(self):
+        self.assertEqual(self.run_step('exit 17')[0], 17)
 
-    def test_no_profiles_is_supported(self):
-        self.assertRegex(self.key('[workspace]\nmembers = []'), r'^key=[a-f0-9]{64}\n$')
+
+# The profile half of the cache key, and the rest of the key's layout, are tested where they now
+# live: tests/test_rust_cache.py.
 
 
 if __name__ == '__main__':

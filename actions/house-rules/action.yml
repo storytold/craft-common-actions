@@ -1,7 +1,7 @@
 name: Check house rules
 description: >-
   Fail unless the AGENTS.md house-rules blocks match craft-contrib at the commit they name,
-  and that commit is on main. An intact older commit warns.
+  and that commit is on main. An intact older commit warns only when the normalized standards file changed on main.
 
 inputs:
   working-directory:

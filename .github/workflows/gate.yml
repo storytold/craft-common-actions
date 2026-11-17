@@ -17,6 +17,11 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      setup-command:
+        description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
         type: string
@@ -78,6 +83,11 @@ on:
         type: boolean
         required: false
         default: true
+      sccache:
+        description: "Also cache the workspace crates' compiled libraries (which rust-cache leaves out) with sccache in the GitHub Actions cache. It writes where the dependency cache is saved (pushes to the default branch, opted-in manual runs); other runs read those entries. SCCACHE_GHA_RW_MODE in `env` overrides that. Test executables are never cached. Its cache starts afresh when cache-version, a Cargo.toml or a build.rs changes; bump cache-version when files a procedural macro reads change (see the README)"
+        type: boolean
+        required: false
+        default: false
       cache-version:
         description: "Bump to start the dependency cache afresh"
         type: string
@@ -119,7 +129,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@v2.22.4
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
           allowed-endpoints: >
@@ -153,13 +163,13 @@ jobs:
             security.ubuntu.com:443
             static.crates.io:443
             static.rust-lang.org:443
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: storytold/craft-fonts
           ref: ${{ inputs.craft-fonts-ref }}
@@ -240,39 +250,59 @@ jobs:
 
       - name: Install cargo tools
         if: inputs.tools != ''
-        uses: step-security/taiki-e-install-action@v2.87.32
+        uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
         with:
           tool: ${{ inputs.tools }}
 
-      # Root workspace profiles are not among rust-cache's member manifests. Hash only
-      # those profiles here: a dependency/version/comment change must not discard the
-      # fallback cache for every other dependency. rust-cache still hashes the lockfile,
-      # toolchain, member manifests and build environment, and Cargo checks fingerprints.
-      - name: Cache profile key
-        id: cache-profile
-        shell: bash
-        run: |
-          python - <<'PYTHON'
-          import hashlib
-          import json
-          import os
-          import tomllib
-          from pathlib import Path
-          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-          profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
-          key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"key={key}\n")
-          PYTHON
-
       # Default-branch writes remain the default. Maintainers can explicitly opt manual
-      # branch runs into branch-scoped writes; pull-request runs never save a cache.
-      - uses: step-security/rust-cache@v2.9.2
+      # branch runs into branch-scoped writes; pull-request runs never save a cache. The key
+      # (the canonical root [profile] table included) lives in the shared action, so an app job
+      # that builds the same workspace restores this entry instead of copying the formula.
+      # No save on failure: a main run that fails at fmt or clippy has not built the test
+      # profile, and rust-cache never replaces an exact-key entry, so that half-filled entry
+      # would be restored by every run until Cargo.lock changes.
+      - uses: storytold/craft-common-actions/actions/rust-cache@main
         with:
-          prefix-key: ${{ inputs.cache-version }}-rust
-          key: ${{ steps.cache-profile.outputs.key }}
+          cache-version: ${{ inputs.cache-version }}
           save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
-          cache-on-failure: true
+          cache-on-failure: "false"
+
+      # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
+      - name: Install sccache
+        if: inputs.sccache
+        uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.18.0
+
+      - name: Use sccache
+        if: inputs.sccache
+        shell: bash
+        env:
+          WRITES: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          # sccache leaves `--check-cfg` out of its key, so after a change to the expected cfgs a
+          # cached compile would replay its old `unexpected_cfgs` warnings. A change to the files
+          # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
+          # fresh sccache cache instead.
+          VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+            echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
+
+      - name: Caller setup
+        if: inputs.setup-command != ''
+        shell: bash
+        env:
+          SETUP: ${{ inputs.setup-command }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
+          bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
 
       - name: Gate
         shell: bash

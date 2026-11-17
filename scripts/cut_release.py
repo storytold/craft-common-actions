@@ -104,6 +104,14 @@ def workspace_version(root: Path) -> str:
     raise ValueError("Cargo.toml has no [workspace.package] version")
 
 
+def _stale_path_version(line: str, old: str) -> str | None:
+    """The version a path dependency line names, when it is `old` or another patch of its minor."""
+    m = re.search(r'version\s*=\s*"([^"]+)"', line)
+    if not m or not SEMVER.match(m[1]):
+        return None
+    return m[1] if m[1].split(".")[:2] == old.split(".")[:2] else None
+
+
 def bump_cargo(root: Path, new: str, members: set[str] | None = None) -> tuple[str, int, int]:
     """Set the workspace version to `new`. Returns (old version, Cargo.toml lines, lock packages).
 
@@ -126,12 +134,15 @@ def bump_cargo(root: Path, new: str, members: set[str] | None = None) -> tuple[s
             # Only the value: a trailing comment stays.
             lines[i] = re.sub(rf'^(version\s*=\s*"){re.escape(old)}"', lambda m: f'{m[1]}{new}"', line)
             changed += 1
-        elif "path = " in line and f'version = "{old}"' in line:
-            lines[i] = line.replace(f'version = "{old}"', f'version = "{new}"')
+        elif "path = " in line and (stale := _stale_path_version(line, old)):
+            # An internal dependency can sit at an earlier patch of the old minor (0.21.0 beside a
+            # 0.21.1 workspace): it matched 0.21.1, and would not match the new version.
+            lines[i] = line.replace(f'version = "{stale}"', f'version = "{new}"')
             changed += 1
     _write(root / "Cargo.toml", "\n".join(lines), crlf)
 
     lock_path, packages = root / "Cargo.lock", 0
+    bumped: set[str] = set()
     if lock_path.exists():
         lock, lcrlf = _read(lock_path)
         blocks = lock.split("\n[[package]]\n")
@@ -147,9 +158,15 @@ def bump_cargo(root: Path, new: str, members: set[str] | None = None) -> tuple[s
                 if f == f'version = "{old}"':
                     fields[j] = f'version = "{new}"'
                     packages += 1
+                    bumped.add(name)
                     break
             blocks[b] = "\n".join(fields)
-        _write(lock_path, "\n[[package]]\n".join(blocks), lcrlf)
+        lock = "\n[[package]]\n".join(blocks)
+        # Where another package of the same name is in the graph (the app's own crate from an older
+        # git revision), dependency lists name the version too: `"vectorcraft-geom 0.24.1"`.
+        for name in bumped:
+            lock = lock.replace(f'\n "{name} {old}",\n', f'\n "{name} {new}",\n')
+        _write(lock_path, lock, lcrlf)
     return old, changed, packages
 
 

@@ -19,12 +19,16 @@ COPY = next(step['run'] for step in STEPS if step.get('name') == 'Copy release a
 
 @unittest.skipUnless(shutil.which('rsync'), 'rsync required')
 class FreeBSDReleaseTests(unittest.TestCase):
-    def run_release(self, fail_build=False, with_cli=False, arch='x86_64', package_arch=None, input_version=''):
+    def run_release(self, fail_build=False, with_cli=False, arch='x86_64', package_arch=None, input_version='',
+                    with_cross_env=None):
         """Return (exit code, complete archive copied to the host, stale partial file left, cargo log, output).
 
-        arch='aarch64' writes the cross environment the toolchain step leaves behind.
+        arch='aarch64' writes the cross environment the toolchain step leaves behind,
+        unless with_cross_env is False.
         package_arch makes a packaging/freebsd/package.sh that names its archive after it.
         """
+        if with_cross_env is None:
+            with_cross_env = arch == 'aarch64'
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             guest, host, tools = (root / name for name in ('guest', 'host', 'tools'))
@@ -33,7 +37,7 @@ class FreeBSDReleaseTests(unittest.TestCase):
             target = guest / 'craft-target'
             (target / 'release').mkdir(parents=True)
             (target / 'release/partial').write_text('failed restore')
-            if arch == 'aarch64':
+            if with_cross_env:
                 (guest / 'craft-cross').mkdir()
                 (guest / 'craft-cross/env').write_text('export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n')
             if package_arch:
@@ -116,6 +120,13 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         # xtask runs on the guest; only the app is built for aarch64.
         self.assertEqual(log[0], 'xtask|', log)
         self.assertEqual(log[-1], 'build|aarch64-unknown-freebsd', log)
+
+    def test_aarch64_fails_closed_without_the_cross_env(self):
+        code, copied, _, log, output = self.run_release(arch='aarch64', with_cross_env=False)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('expected aarch64-unknown-freebsd', output)
+        self.assertFalse(copied)
+        self.assertEqual(log, [])
 
     def test_package_script_archive_must_match_the_matrix_arch(self):
         for arch, package_arch, code in (('x86_64', 'x86_64', 0), ('aarch64', 'aarch64', 0),
