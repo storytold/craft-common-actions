@@ -45,7 +45,19 @@ class DefinitionTests(unittest.TestCase):
 
     def test_both_cache_steps_run_the_same_pinned_action(self):
         self.assertEqual([s['uses'] for s in CACHES],
-                         ['step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e'] * 2)
+                         ['step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851'] * 2)
+
+    def test_every_rust_cache_pin_is_the_actions_and_never_the_windows_broken_one(self):
+        # v2.9.2 (8871c8ba) matches no cache path on Windows, so no Windows job ever saved (#249).
+        pinned = CACHES[0]['uses'].split('@')[1]
+        files = sorted((ROOT / '.github/workflows').glob('*.yml')) + sorted((ROOT / 'actions').glob('*/action.yml'))
+        uses = [(path.relative_to(ROOT), line.strip()) for path in files
+                for line in path.read_text().splitlines() if 'step-security/rust-cache@' in line]
+        self.assertTrue(uses)
+        for path, line in uses:
+            with self.subTest(path=str(path), line=line):
+                self.assertNotIn('8871c8ba063416da7c32246932ea6ae08700453e', line)
+                self.assertIn(f'step-security/rust-cache@{pinned}', line)
 
     def test_restore_only_unless_the_caller_saves(self):
         # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.

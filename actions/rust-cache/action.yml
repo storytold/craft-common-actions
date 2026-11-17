@@ -150,9 +150,13 @@ runs:
           exit 1
         fi
 
+    # v2.9.1, not v2.9.2: v2.9.2's ES-module bundle runs minimatch 3, whose `require('path')`
+    # throws there, so it falls back to `/` as the separator and on Windows matches none of the
+    # cache paths. Every Windows save failed with "Path Validation Error" (#249). Every
+    # step-security/rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
       if: inputs.align-environment != 'true'
-      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      uses: step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851 # v2.9.1
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
@@ -165,7 +169,7 @@ runs:
     # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
     - name: Rust cache (aligned environment)
       if: inputs.align-environment == 'true'
-      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      uses: step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851 # v2.9.1
       env:
         CARGO_HOME: ""
       with:
