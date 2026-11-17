@@ -559,6 +559,29 @@ it. Empty (the default) runs no lint legs, and the test legs keep their names:
       command: cargo nextest run --workspace --locked --profile ci
 ```
 
+With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
+platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
+(`actions/select-platforms`) compares the merge commit with its first parent and runs every leg
+when a changed file is
+
+- in a workspace crate whose `.rs` files or `Cargo.toml` hold a `cfg` naming `windows`, `unix`,
+  `target_os`, `target_vendor` or a `windows`/`unix` `target_family` (or a crate in
+  `select-crates`), or in any crate that depends on one (`cargo metadata --no-deps`);
+- part of the build setup (`.github/`, `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain`,
+  `.cargo/`, `.config/`) or matches `select-paths`;
+- outside every workspace crate and not documentation (`*.md`, `docs/`, `LICENSE*`).
+
+A pull request labelled `select-label` (`full-ci` by default) runs every leg. The label is read
+when the run starts: after adding it, push or re-run from a new event (a manual run of the
+branch) to get the other legs. Legs that are not selected don't appear in the checks; a platform
+problem they would have caught shows up in the next push to main, which runs every leg.
+
+```yaml
+    with:
+      os: '["ubuntu-latest","windows-latest","macos-latest"]'
+      select-os: '["windows-latest","macos-latest"]'
+```
+
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
 check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
@@ -846,6 +869,7 @@ Individual actions are also available for composing custom pipelines:
       job: gate
       align-environment: true
   ```
+- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting

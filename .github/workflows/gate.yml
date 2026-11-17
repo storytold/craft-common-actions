@@ -48,6 +48,26 @@ on:
         type: string
         required: false
         default: '["ubuntu-24.04"]'
+      select-os:
+        description: 'JSON array of the `os` entries that run on a pull request only when it can change platform behaviour (actions/select-platforms: platform cfg code or its dependents, the build setup, select-paths); pushes and other events run every leg. Empty or [] runs every leg on every event'
+        type: string
+        required: false
+        default: "[]"
+      select-paths:
+        description: "Extra globs, one per line, whose change runs the select-os legs (`*` also matches `/`)"
+        type: string
+        required: false
+        default: ""
+      select-crates:
+        description: "Extra workspace crates, one per line, treated as having platform code"
+        type: string
+        required: false
+        default: ""
+      select-label:
+        description: "A pull request label that runs every leg, read when the run starts; empty: none"
+        type: string
+        required: false
+        default: "full-ci"
       craft-fonts-ref:
         # The suite's craft-fonts pin, as in release.yml and freebsd.yml.
         description: "The commit of storytold/craft-fonts the tests build with. Defaults to the suite's pin; empty builds without craft-fonts"
@@ -129,7 +149,38 @@ permissions:
   contents: read
 
 jobs:
+  # Runs only with select-os; otherwise it is skipped and the gate runs every leg in `os`.
+  select:
+    name: select legs
+    if: inputs.select-os != '' && inputs.select-os != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.select.outputs.os }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # The merge commit and its first parent. Other events run every leg without a checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: select
+        uses: storytold/craft-common-actions/actions/select-platforms@main
+        with:
+          os: ${{ inputs.os }}
+          select-os: ${{ inputs.select-os }}
+          paths: ${{ inputs.select-paths }}
+          crates: ${{ inputs.select-crates }}
+          label: ${{ inputs.select-label }}
+
   gate:
+    needs: select
+    # A skipped select (no select-os) still runs the gate; a failed one does not.
+    if: ${{ !cancelled() && needs.select.result != 'failure' }}
     # The test part keeps the `gate (<os>)` check name callers already know.
     name: ${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -138,7 +189,7 @@ jobs:
       # A failing leg must not cancel the others and hide their failures.
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os) }}
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
         # One job definition for both parts, so the shared setup is written once.
         part: ${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}
     env:
