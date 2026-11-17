@@ -162,6 +162,28 @@ class CallerSetupTests(unittest.TestCase):
         self.assertEqual(self.run_step('exit 17')[0], 17)
 
 
+class LintPartTests(unittest.TestCase):
+    JOB = WORKFLOW['jobs']['gate']
+
+    def test_lint_legs_exist_only_when_a_lint_command_is_given(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['lint-command']['default'], '')
+        part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
+        self.assertEqual(part, """${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}""")
+
+    def test_the_test_part_keeps_the_gate_check_name(self):
+        self.assertEqual(self.JOB['name'], "${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})")
+
+    def test_lint_runs_its_own_command_and_skips_the_test_setup(self):
+        gate = step('Gate')['env']['GATE']
+        self.assertTrue(gate.startswith("${{ matrix.part == 'lint' && inputs.lint-command || "), gate)
+        self.assertIn("matrix.part == 'test'", step('Caller setup')['if'])
+
+    def test_lint_keeps_a_cache_entry_of_its_own(self):
+        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
+        self.assertEqual(cache['with']['job'], "${{ matrix.part == 'lint' && 'lint' || '' }}")
+
+
 # The profile half of the cache key, and the rest of the key's layout, are tested where they now
 # live: tests/test_rust_cache.py.
 

@@ -541,6 +541,20 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
   `env` sets the cache's version instead;
 
+With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
+leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks
+that need no test build), and keeps a rust-cache entry of its own, since a check build's
+dependencies are not the test build's. Clippy then runs beside the test build instead of before
+it. Empty (the default) runs no lint legs, and the test legs keep their names:
+
+```yaml
+    with:
+      lint-command: |
+        cargo fmt --check
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+      command: cargo nextest run --workspace --locked --profile ci
+```
+
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
 check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own
