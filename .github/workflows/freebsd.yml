@@ -401,6 +401,7 @@ jobs:
           sysctl kstat.zfs.misc.arcstats.size
           dmesg | grep -Ei 'out of swap|out of memory|killed|swap_pager' | tail -n 30 || true
           FREEBSD_RESOURCES
+          # Use the established SSH alias directly: the freebsd wrapper would resync the worktree.
           echo "::group::Final guest resources"
-          timeout --kill-after=5s 30s freebsd "$diagnostics" || echo "::warning::Guest resource diagnostics unavailable or timed out"
+          timeout --kill-after=5s 30s ssh -o BatchMode=yes -o ConnectTimeout=5 freebsd sh < "$diagnostics" || echo "::warning::Guest resource diagnostics unavailable or timed out"
           echo "::endgroup::"

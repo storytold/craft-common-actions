@@ -25,7 +25,7 @@ class FreeBSDResourceDiagnosticsTests(unittest.TestCase):
 
     def test_guest_query_has_bounded_runtime_and_literal_read_only_commands(self):
         run = self.step["run"]
-        self.assertIn('timeout --kill-after=5s 30s freebsd "$diagnostics"', run)
+        self.assertIn('timeout --kill-after=5s 30s ssh -o BatchMode=yes -o ConnectTimeout=5 freebsd sh < "$diagnostics"', run)
         guest = run.split("<<'FREEBSD_RESOURCES'\n", 1)[1].split("\nFREEBSD_RESOURCES", 1)[0]
         self.assertEqual(guest.splitlines(), [
             "df -k / /var/tmp",
@@ -37,6 +37,9 @@ class FreeBSDResourceDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("${{", run)
         self.assertNotIn("rm ", run)
         self.assertNotIn("sysctl -w", run)
+        self.assertNotIn('freebsd ""', run)
+        self.assertNotIn("StrictHostKeyChecking", run)
+        self.assertNotIn("UserKnownHostsFile", run)
 
     def test_host_reports_bytes_inodes_memory_and_only_filtered_kernel_messages(self):
         run = self.step["run"]
