@@ -199,6 +199,19 @@ class ProfileKeyTests(unittest.TestCase):
         self.assertNotEqual(self.key('[profile.dev.package.foo]\nopt-level = 1'),
                             self.key('[profile.dev.package.foo]\nopt-level = 2'))
 
+    def test_wasm_only_profiles_do_not_invalidate(self):
+        native = '[profile.dev]\nopt-level = 1\n'
+        for name in ('web', 'web-release', 'wasm-release'):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.key(native + f'[profile.{name}]\nlto = "thin"\n[profile.{name}.package.foo]\nopt-level = 1\n'),
+                    self.key(native + f'[profile.{name}]\nlto = "fat"\n'))
+                self.assertEqual(self.key(native + f'[profile.{name}]\nlto = "fat"\n'), self.key(native))
+
+    def test_native_profiles_with_similar_names_invalidate(self):
+        self.assertNotEqual(self.key('[profile.webkit]\nopt-level = 1'), self.key('[profile.webkit]\nopt-level = 2'))
+        self.assertNotEqual(self.key('[profile.dist]\nlto = "thin"'), self.key('[profile.dist]\nlto = "fat"'))
+
     def test_order_and_comments_do_not_invalidate(self):
         self.assertEqual(self.key('[profile.dev]\ndebug = false\nopt-level = 1'),
                          self.key('# comment\n[profile.dev]\nopt-level = 1\ndebug = false'))

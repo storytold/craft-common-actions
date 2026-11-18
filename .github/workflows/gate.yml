@@ -18,6 +18,11 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      warm-command:
+        description: "Optional build that fills the dependency cache, for example `cargo test --workspace --no-run --locked`; empty (default) runs none. Where the dependency cache saves, a `cache warm (<os>)` leg beside the gate runs it and saves the `gate` entry as soon as it succeeds, so a failing test no longer keeps the entry from being saved. Give it the build the gate does (same features, profile and targets) and nothing else; the gate legs then only restore"
+        type: string
+        required: false
+        default: ""
       setup-command:
         description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
         type: string
@@ -187,7 +192,7 @@ jobs:
     # A skipped select (no select-os) still runs the gate; a failed one does not.
     if: ${{ !cancelled() && needs.select.result != 'failure' }}
     # The test part keeps the `gate (<os>)` check name callers already know.
-    name: ${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})
+    name: ${{ matrix.part == 'lint' && 'lint' || matrix.part == 'warm' && 'cache warm' || 'gate' }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
@@ -196,7 +201,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
         # One job definition for both parts, so the shared setup is written once.
-        part: ${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}
+        part: ${{ fromJSON(format('["test"{0}{1}]', inputs.lint-command != '' && ',"lint"' || '', inputs.warm-command != '' && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && ',"warm"' || '')) }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -342,7 +347,7 @@ jobs:
         with:
           cache-version: ${{ inputs.cache-version }}
           job: ${{ matrix.part == 'lint' && 'lint' || '' }}
-          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && (matrix.part != 'test' || inputs.warm-command == '') }}
           cache-on-failure: "false"
 
       # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
@@ -376,7 +381,7 @@ jobs:
       # key is fixed by those pins, so one entry stays valid until a pin moves.
       - name: Caller cache key
         id: caller-key
-        if: inputs.cache-paths != '' && matrix.part == 'test'
+        if: inputs.cache-paths != '' && matrix.part != 'lint'
         shell: bash
         env:
           KEY: ${{ inputs.cache-key }}
@@ -396,7 +401,7 @@ jobs:
 
       - name: Restore caller cache
         id: caller-cache
-        if: inputs.cache-paths != '' && matrix.part == 'test'
+        if: inputs.cache-paths != '' && matrix.part != 'lint'
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ inputs.cache-paths }}
@@ -404,7 +409,7 @@ jobs:
           enableCrossOsArchive: true
 
       - name: Caller setup
-        if: inputs.setup-command != '' && matrix.part == 'test'
+        if: inputs.setup-command != '' && matrix.part != 'lint'
         shell: bash
         env:
           SETUP: ${{ inputs.setup-command }}
@@ -417,7 +422,7 @@ jobs:
       # tries; the first to finish writes the entry and the others find it reserved.
       - name: Save caller cache
         if: >-
-          inputs.cache-paths != '' && matrix.part == 'test' && steps.caller-cache.outputs.cache-hit != 'true'
+          inputs.cache-paths != '' && matrix.part != 'lint' && steps.caller-cache.outputs.cache-hit != 'true'
           && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
@@ -428,7 +433,7 @@ jobs:
       - name: Gate
         shell: bash
         env:
-          GATE: ${{ matrix.part == 'lint' && inputs.lint-command || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
+          GATE: ${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
           GATE_TIMEOUT: ${{ inputs.gate-timeout-minutes }}
         run: |
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"

@@ -1,8 +1,8 @@
 name: "Rust cache"
 description: >-
   The suite's rust-cache dependency cache, with one key shared by every job that builds the same
-  workspace. The restore prefix hashes the canonical root [profile] table (a dependency, version or
-  comment edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
+  workspace. The restore prefix hashes the canonical root [profile] table without the wasm-only
+  profiles, named web or wasm (a dependency, version, comment or web-profile edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
   toolchain and build environment. Restores by default and saves only where the caller allows it.
 
 inputs:
@@ -40,8 +40,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Root workspace profiles are not among rust-cache's member manifests. Hash only those profiles
-    # here: a dependency/version/comment change must not discard the fallback cache for every other
+    # Root workspace profiles are not among rust-cache's member manifests. Hash only the native
+    # ones here: a dependency/version/comment change must not discard the fallback cache for every other
     # dependency. rust-cache still hashes the lockfile, toolchain, member manifests and build
     # environment, and Cargo checks fingerprints.
     - name: Cache profile key
@@ -52,10 +52,16 @@ runs:
         import hashlib
         import json
         import os
+        import re
         import tomllib
         from pathlib import Path
+        # A profile named web or wasm (web, web-release, wasm-release) builds only for a wasm
+        # target, so editing it cannot change a native build's dependency artifacts.
+        wasm_only = re.compile(r"(web|wasm)([-_].*)?")
         manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-        profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
+        native = {name: table for name, table in manifest.get("profile", {}).items()
+                  if not wasm_only.fullmatch(name)}
+        profiles = json.dumps(native, sort_keys=True, separators=(",", ":"))
         key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             output.write(f"key={key}\n")

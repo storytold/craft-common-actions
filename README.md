@@ -532,7 +532,9 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - a rust-cache dependency cache saved by the default branch by default. Pull requests only
   restore caches; callers may opt manual branch runs into branch-scoped writes with
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
-  table; dependency, version and comment edits do not discard reusable dependency artifacts.
+  table without the wasm-only profiles (names `web` or `wasm`, with or without a `-suffix`);
+  dependency, version, comment and web-profile edits do not discard reusable dependency
+  artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
   Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
 - with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
@@ -545,6 +547,15 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
   `env` sets the cache's version instead;
+
+With `warm-command`, a default-branch run (or an opted-in manual run) adds a `cache warm (<os>)`
+leg per runner beside the gate leg. It runs only that command, for example
+`cargo test --workspace --no-run --locked`, and saves the `gate` dependency entry as soon as it
+succeeds. The gate legs then only restore. Without it, the gate saves at the end of a green run,
+so a main whose tests fail never saves and every pull request builds cold. Pull requests never
+get the leg. Give the command the build the gate does (same features, profile and targets), since
+the entry holds what that build compiled; the leg has the same setup, environment and
+`setup-command` as the gate.
 
 With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
 leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks

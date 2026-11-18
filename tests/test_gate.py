@@ -171,13 +171,16 @@ class CallerCacheTests(unittest.TestCase):
             with self.subTest(step=s['name']):
                 self.assertEqual(s['with']['key'], '${{ steps.caller-key.outputs.key }}')
                 self.assertEqual(s['with']['path'], '${{ inputs.cache-paths }}')
-                self.assertIn("inputs.cache-paths != '' && matrix.part == 'test'", s['if'])
+                self.assertIn("inputs.cache-paths != '' && matrix.part != 'lint'", s['if'])
 
     def test_saved_only_where_the_dependency_cache_saves(self):
         rust = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if']
         policy = re.sub(r'\s+', ' ', rust.removeprefix('${{').removesuffix('}}')).strip()
         condition = re.sub(r'\s+', ' ', step('Save caller cache')['if'])
-        self.assertTrue(condition.endswith(f'&& {policy}'), condition)
+        # The test part leaves the save to the cache-warm leg when there is one.
+        writes = policy.removesuffix("&& (matrix.part != 'test' || inputs.warm-command == '')").strip()
+        self.assertNotEqual(writes, policy)
+        self.assertTrue(condition.endswith(f'&& {writes}'), condition)
         self.assertIn("steps.caller-cache.outputs.cache-hit != 'true'", condition)
 
     def run_key(self, key, files='', files_hash=''):
@@ -199,6 +202,26 @@ class CallerCacheTests(unittest.TestCase):
         self.assertEqual(self.run_key('psd', 'scripts/missing.sh', '')[0], 1)
 
 
+class WarmPartTests(unittest.TestCase):
+    JOB = WORKFLOW['jobs']['gate']
+
+    def test_the_warm_leg_exists_only_where_the_cache_saves(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        self.assertEqual(inputs['warm-command']['default'], '')
+        part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
+        save = re.sub(r'\s+', ' ', next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if'])
+        writes = save.removeprefix('${{').split("&& (matrix.part")[0].strip()
+        self.assertIn(f"inputs.warm-command != '' && {writes} && ',\"warm\"'", part)
+
+    def test_the_warm_leg_runs_its_command_and_saves_the_gate_entry(self):
+        self.assertTrue(step('Gate')['env']['GATE'].startswith(
+            "${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command || "))
+        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']
+        self.assertEqual(cache['job'], "${{ matrix.part == 'lint' && 'lint' || '' }}")
+        self.assertIn("matrix.part != 'test' || inputs.warm-command == ''", cache['save-if'])
+        self.assertEqual(cache['cache-on-failure'], 'false')
+
+
 class LintPartTests(unittest.TestCase):
     JOB = WORKFLOW['jobs']['gate']
 
@@ -206,15 +229,16 @@ class LintPartTests(unittest.TestCase):
         inputs = WORKFLOW['on']['workflow_call']['inputs']
         self.assertEqual(inputs['lint-command']['default'], '')
         part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
-        self.assertEqual(part, """${{ fromJSON(inputs.lint-command != '' && '["test","lint"]' || '["test"]') }}""")
+        self.assertIn("inputs.lint-command != '' && ',\"lint\"'", part)
+        self.assertTrue(part.startswith("${{ fromJSON(format('[\"test\"{0}{1}]', "), part)
 
     def test_the_test_part_keeps_the_gate_check_name(self):
-        self.assertEqual(self.JOB['name'], "${{ matrix.part == 'lint' && 'lint' || 'gate' }} (${{ matrix.os }})")
+        self.assertEqual(self.JOB['name'], "${{ matrix.part == 'lint' && 'lint' || matrix.part == 'warm' && 'cache warm' || 'gate' }} (${{ matrix.os }})")
 
     def test_lint_runs_its_own_command_and_skips_the_test_setup(self):
         gate = step('Gate')['env']['GATE']
         self.assertTrue(gate.startswith("${{ matrix.part == 'lint' && inputs.lint-command || "), gate)
-        self.assertIn("matrix.part == 'test'", step('Caller setup')['if'])
+        self.assertIn("matrix.part != 'lint'", step('Caller setup')['if'])
 
     def test_lint_keeps_a_cache_entry_of_its_own(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
