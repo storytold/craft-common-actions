@@ -24,6 +24,11 @@ on:
         type: string
         required: false
         default: "15.1-STABLE"
+      build-jobs:
+        description: "Concurrent Cargo builds (1-4); lower for memory-heavy crates, without changing test selection"
+        type: number
+        required: false
+        default: 4
       cargo-test-extra-args:
         description: "Extra arguments to append to cargo test (shell-style quoting, no shell expansion)"
         type: string
@@ -69,7 +74,7 @@ jobs:
       CARGO_HOME: /var/tmp/craft-cargo
       CARGO_TARGET_DIR: /var/tmp/craft-target
       CARGO_INCREMENTAL: 0
-      CARGO_BUILD_JOBS: 4
+      CARGO_BUILD_JOBS: ${{ inputs.build-jobs }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -93,6 +98,14 @@ jobs:
           case "$ARCH" in
             x86_64|aarch64) ;;
             *) echo "::error::unsupported architecture '$ARCH' (use x86_64 or aarch64)"; exit 1 ;;
+          esac
+      # Validate environment data before starting the VM. Never interpolate it into shell source.
+      - name: Validate build concurrency
+        shell: bash
+        run: |
+          case "$CARGO_BUILD_JOBS" in
+            1|2|3|4) ;;
+            *) echo "::error::build-jobs must be an integer from 1 to 4"; exit 1 ;;
           esac
       # The VM action apt-installs QEMU on the host: give it the mirrors outside ubuntu.com, and
       # drop the image's Microsoft source, which this job never installs from.
@@ -357,7 +370,7 @@ jobs:
             echo "error: requested FreeBSD packaging script is missing" >&2
             exit 1
           fi
-          CARGO_BUILD_JOBS=4 bash packaging/freebsd/package.sh
+          bash packaging/freebsd/package.sh
           # Check every produced archive; an unmatched glob or unreadable tarball
           # must fail instead of turning a requested package check into a no-op.
           for archive in dist/release/*-freebsd-$ARCH.tar.gz; do
