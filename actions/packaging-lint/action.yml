@@ -90,6 +90,8 @@ runs:
             if ($errors) { $errors | ForEach-Object { Write-Output "::error file=$($f.Name)::$_" }; exit 1 }
             Write-Output "ok $($f.Name)"
           }
+        } else {
+          Write-Output "::notice::packaging/windows is absent; skipping PowerShell checks"
         }
         if (Test-Path ./packaging/windows/check-icons.ps1) {
           ./packaging/windows/check-icons.ps1
