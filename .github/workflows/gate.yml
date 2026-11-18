@@ -402,7 +402,7 @@ jobs:
       - name: Restore caller cache
         id: caller-cache
         if: inputs.cache-paths != '' && matrix.part != 'lint'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.cache-paths }}
           key: ${{ steps.caller-key.outputs.key }}
@@ -424,7 +424,7 @@ jobs:
         if: >-
           inputs.cache-paths != '' && matrix.part != 'lint' && steps.caller-cache.outputs.cache-hit != 'true'
           && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.cache-paths }}
           key: ${{ steps.caller-key.outputs.key }}
