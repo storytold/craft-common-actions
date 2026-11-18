@@ -165,7 +165,8 @@ runs:
     #   became `cfg` and was deleted: each saved entry lost most dependencies (Swatinem#371).
     # - Windows saves find their paths. A bundled minimatch 3 whose `require('path')` throws in the
     #   ES-module build fell back to `/` as the separator, and every Windows save failed with
-    #   "Path Validation Error" (#249; Swatinem#355 uses the top-level @actions/glob instead).
+    #   "Path Validation Error" (#249: step-security's v2.9.2 fork has #371 but not Swatinem#355,
+    #   which uses the top-level @actions/glob instead).
     # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
       if: inputs.align-environment != 'true'

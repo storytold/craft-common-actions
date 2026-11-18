@@ -30,7 +30,7 @@ def all_steps():
 
 class Expression:
     """The part of GitHub's expression language the gate uses: literals, contexts, `!`, comparisons,
-    `&&`/`||` (which return an operand), and format, fromJSON, cancelled. Strings compare without
+    `&&`/`||` (which return an operand), and format, fromJSON, cancelled, always. Strings compare without
     case and mixed types compare as numbers, as on GitHub."""
 
     TOKEN = re.compile(r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>-?\d+(?:\.\d+)?)|(?P<op>&&|\|\||==|!=|>=|<=|[!<>(),\[\]])"
@@ -134,6 +134,8 @@ class Expression:
             return json.loads(args[0])
         if name == 'cancelled':
             return self.context.get('cancelled', False)
+        if name == 'always':
+            return True
         if name == 'hashFiles':
             return 'files-hash'
         raise ValueError(name)
@@ -507,7 +509,7 @@ class ShardTests(unittest.TestCase):
             ('gate', 'gate (windows-latest)'), ('gate', 'lint (windows-latest)')])
         for _, _, _, steps in legs:
             names = [n for n, _, _ in steps]
-            for added in ('Shard environment', 'Record the passed leg', 'Upload the passed leg'):
+            for added in ('Shard environment', "Record the leg's result", "Upload the leg's result"):
                 self.assertNotIn(added, names)
 
     def test_each_runner_runs_its_shards_once_lint_once_and_reports_one_gate_result(self):
@@ -531,7 +533,7 @@ class ShardTests(unittest.TestCase):
                 self.assertEqual((cache['job'], cache['save-if']), ('', k == 1))
                 self.assertEqual(ran(steps, 'Gate')[1]['GATE'], SHARDED['shard_command'])
                 self.assertEqual(ran(steps, 'Shard environment')[1], {'SHARD': k, 'SHARDS': 3})
-                self.assertEqual(ran(steps, 'Upload the passed leg')[0]['name'], f'gate-passed-ubuntu-24.04-{k}')
+                self.assertEqual(ran(steps, "Upload the leg's result")[0]['name'], f'gate-shard-ubuntu-24.04-{k}')
         self.assertFalse(any(ran(leg(graph(event='pull_request', ref='x', **SHARDED), f'test {k}/3 (ubuntu-24.04)'),
                                  CACHE)[0]['save-if'] for k in (1, 2, 3)))
 
@@ -586,20 +588,25 @@ class ResultTests(unittest.TestCase):
 
     def run_step(self, markers, os='ubuntu-24.04', shards='3'):
         with tempfile.TemporaryDirectory() as directory:
-            for marker in markers:
+            for marker, leg_status in markers.items():
                 Path(directory, marker).mkdir()
-                Path(directory, marker, 'passed').touch()
-            status, out, _, _ = run_script(self.STEP['run'], {'PASSED': directory, 'OS': os, 'SHARDS': shards})
+                Path(directory, marker, 'status').write_text(leg_status + '\n')
+            status, out, _, _ = run_script(self.STEP['run'], {'RESULT': directory, 'OS': os, 'SHARDS': shards})
             return status, re.findall(r'::error::(.*)', out)
 
     def test_passes_when_every_shard_passed(self):
-        self.assertEqual(self.run_step([f'gate-passed-ubuntu-24.04-{k}' for k in (1, 2, 3)]), (0, []))
+        self.assertEqual(self.run_step({f'gate-shard-ubuntu-24.04-{k}': 'success' for k in (1, 2, 3)}), (0, []))
 
     def test_names_each_shard_that_did_not_pass(self):
-        # Markers of another runner whose label starts with this one's do not count.
-        markers = ['gate-passed-ubuntu-24.04-1', 'gate-passed-ubuntu-24.04-arm-2', 'gate-passed-ubuntu-24.04-arm-3']
+        # A failed leg's status and markers of another runner whose label starts with this one's do not count.
+        markers = {'gate-shard-ubuntu-24.04-1': 'success', 'gate-shard-ubuntu-24.04-2': 'failure',
+                   'gate-shard-ubuntu-24.04-arm-3': 'success'}
         self.assertEqual(self.run_step(markers), (1, ['test 2/3 (ubuntu-24.04) did not pass',
                                                       'test 3/3 (ubuntu-24.04) did not pass']))
+
+    def test_every_shard_leg_records_its_status_even_when_it_fails(self):
+        for name in ("Record the leg's result", "Upload the leg's result"):
+            self.assertTrue(step(name)['if'].startswith('always()'), name)
 
     def test_the_result_job_keeps_the_gate_check_name_and_runs_after_failures(self):
         self.assertEqual(JOBS['result']['name'], 'gate (${{ matrix.os }})')
