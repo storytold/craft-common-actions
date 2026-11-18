@@ -233,7 +233,7 @@ jobs:
       # Cargo.lock hash and survives a version bump, unlike the Cargo cache. A
       # cold-start run skips the restore, because measuring the uncached path is
       # the whole point of that run.
-      # The sysroot also holds packages from the pkg repository's latest branch,
+      # The sysroot also holds packages from the pkg repository's quarterly branch,
       # which is rebuilt without changing the FreeBSD release. meta.conf is
       # static (version, packing format, file names), so its content never
       # moves. packagesite.pkg is the catalogue itself and is rewritten on every
@@ -259,7 +259,7 @@ jobs:
       - name: Restore FreeBSD sysroot
         id: sysroot-cache
         if: inputs.cold-start != true
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v4.2.3
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ~/freebsd-sysroot
           key: v2-sysroot-${{ matrix.arch }}-${{ steps.freebsd-release.outputs.release }}-${{ steps.detect-libs.outputs.needs_extra_libs }}-${{ steps.detect-libs.outputs.needs_extra_libs == 'true' && steps.pkg-epoch.outputs.epoch || 'no-extra-libs' }}
