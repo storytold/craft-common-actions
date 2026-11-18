@@ -584,8 +584,9 @@ above.
 - `lint (<os>)` and `cache warm (<os>)` still run once per runner.
 - A `gate (<os>)` job passes only when every shard of that runner passed, so required checks keep
   their names. It waits for every leg of the gate job; the shards themselves start at once.
-- The pass markers are artifacts named after the runner label (`gate-passed-<os>-<k>`), so a
-  workflow run can hold one sharded gate call per runner label.
+- Each shard leg records its status in an artifact named after the runner label
+  (`gate-shard-<os>-<k>`), so a workflow run can hold one sharded gate call per runner label. A
+  re-run replaces the status of every leg it runs.
 
 ```yaml
     with:

@@ -537,22 +537,24 @@ jobs:
         shell: bash
         run: git diff --exit-code -- Cargo.lock
 
-      # The `result` job counts these, one per passed shard leg: a matrix job's result covers every
-      # runner, so it cannot say which runner's shards passed. Markers last for the run, so after a
-      # re-run of the failed legs the shards that passed before still count.
-      - name: Record the passed leg
-        if: matrix.part == 'shard'
+      # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
+      # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest
+      # status and lasts for the run: after a re-run of the failed legs the shards that passed before
+      # still count, and a shard that fails in a later attempt replaces its earlier pass.
+      - name: Record the leg's result
+        if: always() && matrix.part == 'shard'
         shell: bash
         env:
-          PASSED: ${{ runner.temp }}/gate-passed
-        run: mkdir -p "$PASSED" && touch "$PASSED/passed"
+          RESULT: ${{ runner.temp }}/gate-shard
+          STATUS: ${{ job.status }}
+        run: mkdir -p "$RESULT" && echo "$STATUS" > "$RESULT/status"
 
-      - name: Upload the passed leg
-        if: matrix.part == 'shard'
+      - name: Upload the leg's result
+        if: always() && matrix.part == 'shard'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: gate-passed-${{ matrix.os }}-${{ matrix.shard }}
-          path: ${{ runner.temp }}/gate-passed/passed
+          name: gate-shard-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gate-shard/status
           if-no-files-found: error
           overwrite: true
           retention-days: 1
@@ -575,23 +577,23 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
-      # Each marker lands in a directory named after it; a runner with no passed leg downloads none.
-      - name: Download the passed legs
+      # Each marker lands in a directory named after it; a runner with no recorded leg downloads none.
+      - name: Download the legs' results
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: gate-passed-${{ matrix.os }}-*
-          path: ${{ runner.temp }}/gate-passed
+          pattern: gate-shard-${{ matrix.os }}-*
+          path: ${{ runner.temp }}/gate-shard
       - name: Every leg passed
         shell: bash
         env:
-          PASSED: ${{ runner.temp }}/gate-passed
+          RESULT: ${{ runner.temp }}/gate-shard
           OS: ${{ matrix.os }}
           SHARDS: ${{ inputs.test-shards }}
         run: |
           set -uo pipefail
           status=0
           for shard in $(seq 1 "$SHARDS"); do
-            if [ ! -f "$PASSED/gate-passed-$OS-$shard/passed" ]; then
+            if [ "$(cat "$RESULT/gate-shard-$OS-$shard/status" 2>/dev/null)" != success ]; then
               echo "::error::test $shard/$SHARDS ($OS) did not pass"
               status=1
             fi
