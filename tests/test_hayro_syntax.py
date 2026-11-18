@@ -19,13 +19,22 @@ WORKFLOW = yaml.load((ROOT / ".github/workflows/hayro-syntax.yml").read_text(), 
 
 
 def metadata(features=("std",), package="craft-pdf", crate="hayro-syntax", extra_packages=()):
+    package_id = f"{package} 1.0.0 (path+file:///app)"
+    crate_id = f"{crate} 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)"
     packages = [
-        {"name": package, "id": f"{package} 1.0.0 (path+file:///app)"},
-        {"name": crate, "id": f"{crate} 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)"},
+        {"name": package, "id": package_id},
+        {"name": crate, "id": crate_id},
         *extra_packages,
     ]
-    nodes = [{"id": item["id"], "features": list(features) if item["name"] == crate else []}
-             for item in packages]
+    nodes = []
+    for item in packages:
+        node = {
+            "id": item["id"],
+            "features": list(features) if item["name"] == crate else [],
+        }
+        if item["name"] == package:
+            node["deps"] = [{"pkg": crate_id}]
+        nodes.append(node)
     return {"packages": packages, "resolve": {"nodes": nodes}}
 
 
@@ -74,16 +83,38 @@ class HayroSyntaxTests(unittest.TestCase):
         self.write_metadata(metadata(package="other-package"))
         self.assert_fails(self.run_check(), "craft-pdf is not in the resolved graph")
 
-    def test_every_resolved_version_is_checked(self):
+    def test_each_reachable_version_is_checked(self):
         second = {
             "name": "hayro-syntax",
             "id": "hayro-syntax 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
         }
         value = metadata(extra_packages=(second,))
-        value["resolve"]["nodes"] = [node for node in value["resolve"]["nodes"] if node["id"] != second["id"]]
+        package_id = next(
+            package["id"] for package in value["packages"] if package["name"] == "craft-pdf"
+        )
+        for node in value["resolve"]["nodes"]:
+            if node["id"] == package_id:
+                node["deps"].append({"pkg": second["id"]})
+        value["resolve"]["nodes"] = [
+            node for node in value["resolve"]["nodes"] if node["id"] != second["id"]
+        ]
         value["resolve"]["nodes"].append({"id": second["id"], "features": ["unsafe"]})
         self.write_metadata(value)
         self.assert_fails(self.run_check(), "hayro-syntax is resolved with the unsafe feature enabled")
+
+    def test_an_unreachable_version_is_ignored(self):
+        second = {
+            "name": "hayro-syntax",
+            "id": "hayro-syntax 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+        }
+        value = metadata(extra_packages=(second,))
+        value["resolve"]["nodes"] = [
+            node for node in value["resolve"]["nodes"] if node["id"] != second["id"]
+        ]
+        value["resolve"]["nodes"].append({"id": second["id"], "features": ["unsafe"]})
+        self.write_metadata(value)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_a_missing_resolved_node_fails_closed(self):
         value = metadata()

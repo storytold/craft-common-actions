@@ -68,6 +68,30 @@ def resolve_node(metadata, package_id):
                  if isinstance(node, dict) and node.get("id") == package_id), None)
 
 
+def reachable_package_ids(metadata, roots):
+    """Return package IDs reachable from any root through the resolved graph."""
+    reachable = set()
+    pending = list(roots)
+    while pending:
+        package_id = pending.pop()
+        if package_id in reachable:
+            continue
+        reachable.add(package_id)
+        node = resolve_node(metadata, package_id)
+        if node is None:
+            continue
+        deps = node.get("deps")
+        if not isinstance(deps, list):
+            continue
+        for dep in deps:
+            if not isinstance(dep, dict):
+                continue
+            dep_id = dep.get("pkg")
+            if isinstance(dep_id, str) and dep_id not in reachable:
+                pending.append(dep_id)
+    return reachable
+
+
 def check(metadata, package, crate):
     problems = []
     package_nodes = package_ids(metadata, package)
@@ -79,7 +103,11 @@ def check(metadata, package, crate):
     for package_id in package_nodes:
         if resolve_node(metadata, package_id) is None:
             problems.append(f"{package} has no resolved node")
-    for crate_id in crate_nodes:
+    reachable = reachable_package_ids(metadata, package_nodes)
+    reachable_crates = [crate_id for crate_id in crate_nodes if crate_id in reachable]
+    if crate_nodes and not reachable_crates:
+        problems.append(f"{crate} is not reachable from {package} in the resolved graph")
+    for crate_id in reachable_crates:
         node = resolve_node(metadata, crate_id)
         if node is None:
             problems.append(f"{crate} has no resolved node")
