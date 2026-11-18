@@ -2,7 +2,8 @@ name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
 # `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup, and with
-# `lint-command` a second job per runner that runs the lint checks beside it.
+# `lint-command` a second job per runner that runs the lint checks beside it. With `test-shards`,
+# each runner runs its tests as that many shard jobs instead of one.
 # App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
 # inputs: an app's workflows only call this repository's workflows.
 on:
@@ -50,6 +51,21 @@ on:
         default: ""
       lint-command:
         description: "Lint checks (fmt, clippy) run with bash on a `lint (<os>)` leg beside each `gate (<os>)` leg, so they stay off the test leg's critical path; the lint leg skips setup-command and the caller cache. Empty runs no lint legs"
+        type: string
+        required: false
+        default: ""
+      test-shards:
+        description: "0 (default): one `gate (<os>)` leg per runner runs `command`. N > 0: per runner, N `test <k>/<N> (<os>)` legs each run `shard-command`, and `gate (<os>)` passes only when all of them did"
+        type: number
+        required: false
+        default: 0
+      shard-command:
+        description: "With test-shards: each shard leg's command, which builds and runs its share of the tests. `GATE_SHARD` (1..N), `GATE_SHARDS` (N) and `NEXTEST_PARTITION` (`hash:<k>/<N>`) say which share, for example `cargo nextest run --workspace --locked --partition \"$NEXTEST_PARTITION\"`"
+        type: string
+        required: false
+        default: ""
+      windows-shard-command:
+        description: "shard-command on Windows legs; empty runs `shard-command`"
         type: string
         required: false
         default: ""
@@ -160,14 +176,17 @@ permissions:
   contents: read
 
 jobs:
-  # Runs only with select-os; otherwise it is skipped and the gate runs every leg in `os`.
+  # Runs only with select-os or test-shards; otherwise it is skipped and the gate runs every leg
+  # in `os`.
   select:
     name: select legs
-    if: inputs.select-os != '' && inputs.select-os != '[]'
+    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       os: ${{ steps.select.outputs.os }}
+      shards: ${{ steps.shards.outputs.shards }}
+      exclude: ${{ steps.shards.outputs.exclude }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -175,11 +194,12 @@ jobs:
           egress-policy: audit
       # The merge commit and its first parent. Other events run every leg without a checkout.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && inputs.select-os != '' && inputs.select-os != '[]'
         with:
           persist-credentials: false
           fetch-depth: 2
       - id: select
+        if: inputs.select-os != '' && inputs.select-os != '[]'
         uses: storytold/craft-common-actions/actions/select-platforms@main
         with:
           os: ${{ inputs.os }}
@@ -187,13 +207,39 @@ jobs:
           paths: ${{ inputs.select-paths }}
           crates: ${{ inputs.select-crates }}
           label: ${{ inputs.select-label }}
+      # The gate job's `shard` dimension, and the lint and warm legs it must not repeat: those
+      # keep one leg per runner, as shard 1.
+      - name: Shards
+        id: shards
+        if: inputs.test-shards != 0
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.test-shards }}
+          SHARD: ${{ inputs.shard-command }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$SHARDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::test-shards must be 0 or a positive whole number, got '$SHARDS'"
+            exit 1
+          fi
+          if [ -z "$SHARD" ]; then
+            echo "::error::test-shards needs shard-command"
+            exit 1
+          fi
+          exclude=
+          for shard in $(seq 2 "$SHARDS"); do
+            exclude+="${exclude:+,}{\"part\":\"lint\",\"shard\":$shard},{\"part\":\"warm\",\"shard\":$shard}"
+          done
+          echo "shards=[$(seq -s, 1 "$SHARDS")]" >> "$GITHUB_OUTPUT"
+          echo "exclude=[$exclude]" >> "$GITHUB_OUTPUT"
 
   gate:
     needs: select
-    # A skipped select (no select-os) still runs the gate; a failed one does not.
+    # A skipped select (no select-os, no test-shards) still runs the gate; a failed one does not.
     if: ${{ !cancelled() && needs.select.result != 'failure' }}
-    # The test part keeps the `gate (<os>)` check name callers already know.
-    name: ${{ matrix.part == 'lint' && 'lint' || matrix.part == 'warm' && 'cache warm' || 'gate' }} (${{ matrix.os }})
+    # The test part keeps the `gate (<os>)` check name callers already know. With test-shards the
+    # shard legs take its place, and the `result` job reports `gate (<os>)`.
+    name: ${{ matrix.part == 'lint' && 'lint' || matrix.part == 'warm' && 'cache warm' || matrix.part == 'shard' && format('test {0}/{1}', matrix.shard, inputs.test-shards) || 'gate' }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
@@ -201,8 +247,11 @@ jobs:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
-        # One job definition for both parts, so the shared setup is written once.
-        part: ${{ fromJSON(format('["test"{0}{1}]', inputs.lint-command != '' && ',"lint"' || '', inputs.warm-command != '' && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && ',"warm"' || '')) }}
+        # One job definition for every part, so the shared setup is written once.
+        part: ${{ fromJSON(format('["{0}"{1}{2}]', inputs.test-shards != 0 && 'shard' || 'test', inputs.lint-command != '' && ',"lint"' || '', inputs.warm-command != '' && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && ',"warm"' || '')) }}
+        # With test-shards, 1..N for the shard part; lint and warm run once, as shard 1. Otherwise 0.
+        shard: ${{ fromJSON(needs.select.outputs.shards || '[0]') }}
+        exclude: ${{ fromJSON(needs.select.outputs.exclude || '[]') }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -215,6 +264,7 @@ jobs:
           egress-policy: audit
           allowed-endpoints: >
             *.amazontrust.com:80
+            *.blob.core.windows.net:443
             esm.ubuntu.com:443
             motd.ubuntu.com:443
             *.crates.io:443
@@ -343,12 +393,13 @@ jobs:
       # profile, and rust-cache never replaces an exact-key entry, so that half-filled entry
       # would be restored by every run until Cargo.lock changes.
       # The lint part builds in check mode, so it keeps an entry of its own (`<profile>-lint`)
-      # instead of racing the test part for the `gate` entry.
+      # instead of racing the test part for the `gate` entry. Shard legs restore the test part's
+      # entry, and shard 1 alone saves it, so the shards do not race each other for it.
       - uses: storytold/craft-common-actions/actions/rust-cache@main
         with:
           cache-version: ${{ inputs.cache-version }}
           job: ${{ matrix.part == 'lint' && 'lint' || '' }}
-          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && (matrix.part != 'test' || inputs.warm-command == '') }}
+          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && (matrix.part == 'lint' || matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1) }}
           cache-on-failure: "false"
 
       # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
@@ -431,10 +482,27 @@ jobs:
           key: ${{ steps.caller-key.outputs.key }}
           enableCrossOsArchive: true
 
+      # Which share of the tests a shard leg runs.
+      - name: Shard environment
+        if: matrix.part == 'shard'
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ inputs.test-shards }}
+        run: |
+          {
+            echo "GATE_SHARD=$SHARD"
+            echo "GATE_SHARDS=$SHARDS"
+            echo "NEXTEST_PARTITION=hash:$SHARD/$SHARDS"
+          } >> "$GITHUB_ENV"
+
       - name: Gate
         shell: bash
         env:
-          GATE: ${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
+          GATE: >-
+            ${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command
+            || matrix.part == 'shard' && (runner.os == 'Windows' && inputs.windows-shard-command != '' && inputs.windows-shard-command || inputs.shard-command)
+            || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
           GATE_TIMEOUT: ${{ inputs.gate-timeout-minutes }}
         run: |
           printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
@@ -468,3 +536,64 @@ jobs:
       - name: Lockfile unchanged
         shell: bash
         run: git diff --exit-code -- Cargo.lock
+
+      # The `result` job counts these, one per passed shard leg: a matrix job's result covers every
+      # runner, so it cannot say which runner's shards passed. Markers last for the run, so after a
+      # re-run of the failed legs the shards that passed before still count.
+      - name: Record the passed leg
+        if: matrix.part == 'shard'
+        shell: bash
+        env:
+          PASSED: ${{ runner.temp }}/gate-passed
+        run: mkdir -p "$PASSED" && touch "$PASSED/passed"
+
+      - name: Upload the passed leg
+        if: matrix.part == 'shard'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-passed-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gate-passed/passed
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # With test-shards, the gate's result per runner under the `gate (<os>)` name the unsharded leg
+  # has, so required checks stay as they are: it passes only when every one of that runner's shards
+  # passed. It waits for every gate leg, since a matrix job's `needs` cannot pick one runner's legs.
+  result:
+    needs: [select, gate]
+    if: ${{ !cancelled() && inputs.test-shards != 0 }}
+    name: gate (${{ matrix.os }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # Each marker lands in a directory named after it; a runner with no passed leg downloads none.
+      - name: Download the passed legs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-passed-${{ matrix.os }}-*
+          path: ${{ runner.temp }}/gate-passed
+      - name: Every leg passed
+        shell: bash
+        env:
+          PASSED: ${{ runner.temp }}/gate-passed
+          OS: ${{ matrix.os }}
+          SHARDS: ${{ inputs.test-shards }}
+        run: |
+          set -uo pipefail
+          status=0
+          for shard in $(seq 1 "$SHARDS"); do
+            if [ ! -f "$PASSED/gate-passed-$OS-$shard/passed" ]; then
+              echo "::error::test $shard/$SHARDS ($OS) did not pass"
+              status=1
+            fi
+          done
+          exit "$status"
