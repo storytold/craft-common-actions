@@ -37,7 +37,7 @@ class FreeBSDResourceDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("${{", run)
         self.assertNotIn("rm ", run)
         self.assertNotIn("sysctl -w", run)
-        self.assertNotIn('freebsd ""', run)
+        self.assertNotIn('freebsd "$diagnostics"', run)
         self.assertNotIn("StrictHostKeyChecking", run)
         self.assertNotIn("UserKnownHostsFile", run)
 
