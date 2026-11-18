@@ -877,7 +877,7 @@ Individual actions are also available for composing custom pipelines:
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main
     with:
-      cache-version: v1 # Match the gate call; bump both together.
+      cache-version: v2 # Match the gate call; bump both together.
       job: gate
       align-environment: true
   ```
@@ -1080,7 +1080,7 @@ restore each other's caches. Do not pass the input until this workflow change ha
 workspace restores the gate leg's entry with the same action rather than copying the formula. Name
 the producing job (`job: gate`); the action forms the entire profile-and-job fragment, and rust-cache
 adds no further job id to that shared key. Pass the same `cache-version` literal as the gate call
-(`v1` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
+(`v2` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
 the job installs Rust with an action that
 exports `CARGO_HOME`. rust-cache hashes every `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*` and
 `RUST*` variable it can see, and the exported `CARGO_HOME` is not part of the build, so an unaligned

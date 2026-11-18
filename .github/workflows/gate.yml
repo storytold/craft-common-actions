@@ -138,7 +138,8 @@ on:
         description: "Bump to start the dependency cache afresh"
         type: string
         required: false
-        default: "v1"
+        # Same default as actions/rust-cache, which explains the v2 bump.
+        default: "v2"
       cache-save-on-dispatch:
         description: "Allow manually dispatched branch runs to save their branch-scoped dependency cache; pull requests never write"
         type: boolean

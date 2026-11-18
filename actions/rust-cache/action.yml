@@ -9,7 +9,10 @@ inputs:
   cache-version:
     description: "gate.yml's cache-version: bump it to start the dependency cache afresh"
     required: false
-    default: "v1"
+    # v2: the entries saved under v1 lost most dependencies to the old cleanup (see the Rust cache
+    # step), and rust-cache never replaces an exact-key entry, so they would be restored as they
+    # are until the lockfile changes. The new prefix makes the next default-branch run save a full one.
+    default: "v2"
   job:
     description: >-
       The job whose cache entry to use; the calling job by default. Name the job that saves the
@@ -156,13 +159,17 @@ runs:
           exit 1
         fi
 
-    # v2.9.1, not v2.9.2: v2.9.2's ES-module bundle runs minimatch 3, whose `require('path')`
-    # throws there, so it falls back to `/` as the separator and on Windows matches none of the
-    # cache paths. Every Windows save failed with "Path Validation Error" (#249). Every
-    # step-security/rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
+    # v2.9.3 is the first release with both fixes the suite needs:
+    # - Cargo's new build-dir layout (`build/<package>/<hash>/`, Rust 1.100) keeps its directories.
+    #   Older cleanups cut every name at its last `-` as if it ended in `-<hash>`, so `build/cfg-if`
+    #   became `cfg` and was deleted: each saved entry lost most dependencies (Swatinem#371).
+    # - Windows saves find their paths. A bundled minimatch 3 whose `require('path')` throws in the
+    #   ES-module build fell back to `/` as the separator, and every Windows save failed with
+    #   "Path Validation Error" (#249; Swatinem#355 uses the top-level @actions/glob instead).
+    # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
       if: inputs.align-environment != 'true'
-      uses: step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851 # v2.9.1
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
@@ -175,7 +182,7 @@ runs:
     # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
     - name: Rust cache (aligned environment)
       if: inputs.align-environment == 'true'
-      uses: step-security/rust-cache@851174d9a2fdc03e0896e02844dcc61d81dd7851 # v2.9.1
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       env:
         CARGO_HOME: ""
       with:
