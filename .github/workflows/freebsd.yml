@@ -100,6 +100,22 @@ jobs:
         uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
       - name: Drop the Microsoft apt source
         run: sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft-prod.sources
+      # The VM disk and the expanded Cargo cache share the hosted Linux filesystem.
+      # Reclaim only unused image toolchains, as Gate does, before either can grow.
+      # Wait for cleanup: background deletion can race VM/cache allocation (#266).
+      - name: Reclaim unused hosted toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Host capacity before cleanup"
+          df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          echo "::endgroup::"
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          echo "::group::Host capacity after cleanup"
+          df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          echo "::endgroup::"
       - name: Start the FreeBSD VM
         uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
@@ -228,6 +244,13 @@ jobs:
         with:
           configuration: ${{ toJSON(inputs) }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
+      # Host ENOSPC can kill the runner before it uploads the guest build log.
+      # Measure bytes and inodes after the VM and restored cache occupy the host.
+      - name: Report host capacity before build
+        shell: bash
+        run: |
+          df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
       - name: Build and test
         shell: freebsd {0}
         env:
