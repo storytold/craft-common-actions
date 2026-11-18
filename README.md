@@ -571,6 +571,28 @@ it. Empty (the default) runs no lint legs, and the test legs keep their names:
       command: cargo nextest run --workspace --locked --profile ci
 ```
 
+With `test-shards: N` (N > 0), each runner runs its tests as N legs, `test <k>/<N> (<os>)`, in
+place of its `gate (<os>)` leg. The default, 0, runs one `gate (<os>)` leg per runner as described
+above.
+
+- Each shard leg has the gate leg's full setup, restores the gate's Rust cache entry, and runs
+  `shard-command` (`windows-shard-command` on Windows), which builds and runs its share of the
+  tests. The gate sets `GATE_SHARD` (1 to N), `GATE_SHARDS` (N) and `NEXTEST_PARTITION`
+  (`hash:<GATE_SHARD>/<GATE_SHARDS>`) for it.
+- Shard 1 saves the cache by the gate leg's rules; with `warm-command` the `cache warm (<os>)` leg
+  saves instead. The other shards only restore.
+- `lint (<os>)` and `cache warm (<os>)` still run once per runner.
+- A `gate (<os>)` job passes only when every shard of that runner passed, so required checks keep
+  their names. It waits for every leg of the gate job; the shards themselves start at once.
+- The pass markers are artifacts named after the runner label (`gate-passed-<os>-<k>`), so a
+  workflow run can hold one sharded gate call per runner label.
+
+```yaml
+    with:
+      test-shards: 4
+      shard-command: cargo nextest run --workspace --locked --profile ci --partition "$NEXTEST_PARTITION"
+```
+
 With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
 platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
 (`actions/select-platforms`) compares the merge commit with its first parent and runs every leg
@@ -877,7 +899,7 @@ Individual actions are also available for composing custom pipelines:
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main
     with:
-      cache-version: v1 # Match the gate call; bump both together.
+      cache-version: v2 # Match the gate call; bump both together.
       job: gate
       align-environment: true
   ```
@@ -1080,7 +1102,7 @@ restore each other's caches. Do not pass the input until this workflow change ha
 workspace restores the gate leg's entry with the same action rather than copying the formula. Name
 the producing job (`job: gate`); the action forms the entire profile-and-job fragment, and rust-cache
 adds no further job id to that shared key. Pass the same `cache-version` literal as the gate call
-(`v1` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
+(`v2` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
 the job installs Rust with an action that
 exports `CARGO_HOME`. rust-cache hashes every `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*` and
 `RUST*` variable it can see, and the exported `CARGO_HOME` is not part of the build, so an unaligned

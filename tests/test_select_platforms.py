@@ -164,9 +164,9 @@ class GateSelectJobTests(unittest.TestCase):
         self.assertEqual(gate['strategy']['matrix']['os'], '${{ fromJSON(needs.select.outputs.os || inputs.os) }}')
         self.assertEqual(gate['if'], "${{ !cancelled() && needs.select.result != 'failure' }}")
 
-    def test_select_runs_only_with_select_os(self):
+    def test_select_runs_only_with_select_os_or_shards(self):
         select = GATE['jobs']['select']
-        self.assertEqual(select['if'], "inputs.select-os != '' && inputs.select-os != '[]'")
+        self.assertEqual(select['if'], "(inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0")
         self.assertEqual(GATE['on']['workflow_call']['inputs']['select-os']['default'], '[]')
         checkout = next(s for s in select['steps'] if 'actions/checkout' in s.get('uses', ''))
         self.assertEqual(checkout['with']['fetch-depth'], '2')
