@@ -22,7 +22,7 @@ SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
 # The reviewed revision of the first-party actions gate.yml calls: the commit that added
 # gate-setup, gate-run and restore-mtimes. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'd82b20d6b7fdd7bdbf674aef95db3b72a5efb283'
+OWN_ACTION_REV = 'd65d611f0ef67eaa94039351be5afce61102dbb0'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
 CACHE = 'storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
