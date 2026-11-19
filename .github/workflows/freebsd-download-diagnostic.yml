@@ -1,0 +1,93 @@
+name: FreeBSD verified download diagnostic
+
+# Phase-only measurement. Never substitutes for the application's ARM build gate.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Materialize the reviewed download block
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+          source = Path('.github/workflows/freebsd.yml').read_text()
+          start = source.index('          fetch_release_file() {')
+          end = source.index('          tar -xf "$X/base.txz"', start)
+          block = textwrap.dedent(source[start:end])
+          output = Path('.diagnostic/fetch-base.sh')
+          output.parent.mkdir()
+          output.write_text('set -eu\n'
+              'X="$GITHUB_WORKSPACE/.diagnostic/out"\nmkdir -p "$X"\n'
+              'release=$(freebsd-version -u | sed \'s/-p[0-9]*$//\')\n'
+              'base=https://download.freebsd.org/releases/arm64/aarch64/$release\n'
+              'date -u +%s > "$X/start-epoch"\n' + block +
+              'date -u +%s > "$X/end-epoch"\n'
+              'printf "%s\\n" "$release" > "$X/release"\n'
+              'sha256 -q "$X/base.txz" > "$X/base.sha256"\n')
+          PY
+      - name: Start the same FreeBSD release without application dependencies
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
+        with:
+          release: '15.1'
+          usesh: true
+          cpu: 4
+          mem: 4096
+          copyback: false
+          prepare: pkg install -y curl
+      - name: Measure official downloads and verify checksum
+        timeout-minutes: 20
+        shell: freebsd {0}
+        run: sh .diagnostic/fetch-base.sh
+      - name: Collect only verified download evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir diagnostic-out
+          for name in MANIFEST base.txz base.sha256 release start-epoch end-epoch; do
+            scp "freebsd:$GITHUB_WORKSPACE/.diagnostic/out/$name" "diagnostic-out/$name"
+          done
+          # Recheck transferred bytes locally; an artifact is not permission to trust its contents.
+          (cd diagnostic-out; printf '%s  base.txz\n' "$(cat base.sha256)" | sha256sum --check --strict)
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('diagnostic-out')
+          evidence = {
+              'schema': 1, 'phase': 'official-release-download-only',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'workflow_commit': os.environ['GITHUB_SHA'],
+              'target': 'aarch64-unknown-freebsd',
+              'release': (root / 'release').read_text().strip(),
+              'base_sha256': (root / 'base.sha256').read_text().strip(),
+              'manifest_sha256': hashlib.sha256((root / 'MANIFEST').read_bytes()).hexdigest(),
+              'download_seconds': int((root / 'end-epoch').read_text()) - int((root / 'start-epoch').read_text()),
+              'not_validated': ['target packages', 'Rust/compiler ABI', 'cross compilation', 'application tests'],
+          }
+          (root / 'provenance.json').write_text(json.dumps(evidence, indent=2) + '\n')
+          print(json.dumps(evidence, indent=2))
+          PY
+      - name: Save phase-only evidence, not a reusable sysroot
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.0
+        with:
+          name: freebsd-download-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnostic-out/
+          if-no-files-found: error
+          retention-days: 1
