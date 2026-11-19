@@ -20,8 +20,10 @@ runs:
         # A mirror list that reaches beyond ubuntu.com, so an outage there does not stop the job.
         sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
         sudo apt-get update
+        # AppImage packaging bundles the X11 keyboard bridge loaded at runtime.
         sudo apt-get install -y --no-install-recommends \
-          libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+          libxkbcommon-dev libxkbcommon-x11-0 libxcb-xkb1 \
+          libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
           libasound2-dev pkg-config \
           desktop-file-utils appstream python3-yaml zsync
 
