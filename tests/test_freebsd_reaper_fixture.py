@@ -67,9 +67,14 @@ if mode=='timeout': time.sleep(2)
                 self.assertFalse(late.exists(),'detached descendant escaped reaper cleanup')
 
     def test_supervisor_signal(self):
-        process=subprocess.Popen([str(self.exe),'5000','/bin/sleep','2'])
+        ready=self.root/'signal-child-ready'
+        code='import pathlib,sys,time;pathlib.Path(sys.argv[1]).write_text("ready");time.sleep(2)'
+        process=subprocess.Popen([str(self.exe),'5000',sys.executable,'-c',code,str(ready)])
         try:
-            time.sleep(0.1)
+            deadline=time.monotonic()+2
+            while not ready.exists() and process.poll() is None and time.monotonic()<deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(),'supervisor child never became ready')
             process.send_signal(signal.SIGTERM)
             self.assertEqual(process.wait(timeout=3),128+signal.SIGTERM)
         finally:
