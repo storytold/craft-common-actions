@@ -121,6 +121,8 @@ assert_eq!(ACTIVE.fetch_sub(1,Ordering::SeqCst),1); }
                     self.assertEqual(process.returncode,0,data)
                     return data
             version=run(['rustc','-vV'])
+            print(version, end='')
+            print(run(['cargo','-Vv']), end='')
             host=next(line.split(': ',1)[1] for line in version.splitlines() if line.startswith('host: '))
             self.assertTrue(host.endswith(('unknown-freebsd','unknown-linux-gnu')),host)
             output=run(['cargo','test','--workspace','--lib','--tests','--offline','--no-run','--message-format=json'])
@@ -150,9 +152,13 @@ assert_eq!(ACTIVE.fetch_sub(1,Ordering::SeqCst),1); }
             for call in calls:
                 expected=['--test-threads=1'] if manifest[call['executable']]['serial'] else []
                 self.assertEqual(call['args'],expected)
-            # Doctests remain Cargo/rustdoc-managed, never inferred from runner calls.
+            # Cargo forwards the native runner to rustdoc too. Disable only our
+            # fixture runner for the separate doctest phase, never widen allowlist.
+            env.pop('CARGO_TARGET_'+host.upper().replace('-','_')+'_RUNNER')
+            log_before_doc=runner_log.read_text()
             output=run(['cargo','test','--workspace','--doc','--offline','--','--test-threads=1'])
             self.assertIn('1 passed; 0 failed',output)
+            self.assertEqual(runner_log.read_text(),log_before_doc)
             print('Native fixture: exact 4 executable identities, 4 lib/integration tests + harnessless target, 1 doctest passed')
 
 
