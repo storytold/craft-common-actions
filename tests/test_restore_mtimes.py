@@ -58,6 +58,28 @@ class RestoreMtimesTests(unittest.TestCase):
             self.run_step(app, 'restore')
             self.assertGreater(os.stat(fonts / 'font.ttf').st_mtime, OLD)
 
+    def test_a_long_list_of_changed_files_is_cut_without_failing_the_step(self):
+        # More output than a pipe holds: printing the first lines must not end the step
+        # with SIGPIPE under pipefail (a PR far from the cache commit, e.g. one into another branch).
+        with tempfile.TemporaryDirectory() as tmp:
+            origin, app = Path(tmp, 'origin.git'), Path(tmp, 'app')
+            git(tmp, 'init', '-q', '--bare', str(origin))
+            git(tmp, 'init', '-q', str(app))
+            git(app, 'remote', 'add', 'origin', str(origin))
+            commit(app, 'kept.rs', 'a')
+            self.run_step(app, 'record')
+            git(app, 'push', '-q', 'origin', 'HEAD:main')
+            for i in range(3000):
+                Path(app, f'changed_file_with_a_long_name_{i:05}.rs').write_text('x')
+            git(app, 'add', '.')
+            git(app, 'commit', '-qm', 'many')
+
+            out = self.run_step(app, 'restore')
+            lines = out.splitlines()
+            start = next(i for i, line in enumerate(lines) if 'changed files touched' in line)
+            listed = [line for line in lines[start + 1:] if not line.startswith('external checkouts')]
+            self.assertEqual(len(listed), 50)
+
     def test_without_a_marker_nothing_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             git(tmp, 'init', '-q', tmp)
