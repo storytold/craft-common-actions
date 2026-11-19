@@ -39,6 +39,7 @@ runs:
         CACHE_CONFIGURATION: ${{ inputs.configuration }}
         CACHE_SOURCE_HASH: ${{ inputs.source-hash }}
         CACHE_PROFILE: ${{ inputs.profile }}
+        CACHE_TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
         # Read the actual guest, including native-library versions. Host Rust and
@@ -60,7 +61,13 @@ runs:
         # that touches a manifest with nothing to restore, so the fallback
         # prefix below deliberately omits it and lets Cargo invalidate the
         # stale parts. See issues #33 and #39.
-        compatible=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$CACHE_PROFILE" | sha256sum | cut -d ' ' -f 1)
+        # Keep native cache keys stable; never reuse host-only or another target's objects.
+        case "$CACHE_TARGET" in *[!a-z0-9_-]*) echo 'invalid cache target' >&2; exit 1 ;; esac
+        profile_identity=$CACHE_PROFILE
+        if [ -n "$CACHE_TARGET" ]; then
+          profile_identity="$CACHE_PROFILE|target=$CACHE_TARGET"
+        fi
+        compatible=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$profile_identity" | sha256sum | cut -d ' ' -f 1)
         fingerprint=$(printf '%s\n' "$compatible" "$CACHE_SOURCE_HASH" | sha256sum | cut -d ' ' -f 1)
         fallback_prefix="freebsd-cargo-v3-$compatible-"
         prefix="$fallback_prefix$fingerprint-"

@@ -275,6 +275,7 @@ jobs:
         timeout-minutes: 10
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           configuration: ${{ toJSON(inputs) }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
       # Host ENOSPC can kill the runner before it uploads the guest build log.
@@ -368,6 +369,7 @@ jobs:
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           phase: package
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           configuration: ${{ toJSON(inputs) }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
       - name: Build and validate the FreeBSD package
@@ -407,6 +409,7 @@ jobs:
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
         with:
           phase: save
+          target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           configuration: ${{ toJSON(inputs) }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/freebsd.yml') }}
           key: ${{ steps.cargo-cache.outputs.key }}
