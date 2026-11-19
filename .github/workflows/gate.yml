@@ -220,7 +220,7 @@ jobs:
           fetch-depth: 2
       - id: select
         if: inputs.select-os != '' && inputs.select-os != '[]'
-        uses: storytold/craft-common-actions/actions/select-platforms@139cccb97f9dc462b56f39ee2830718aaa782fed
+        uses: storytold/craft-common-actions/actions/select-platforms@2c06746765d368723dc28ac3a44b04f841bec4da
         with:
           os: ${{ inputs.os }}
           select-os: ${{ inputs.select-os }}
@@ -339,7 +339,7 @@ jobs:
 
       # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
       - name: Check out craft-i18n
-        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@139cccb97f9dc462b56f39ee2830718aaa782fed
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@2c06746765d368723dc28ac3a44b04f841bec4da
 
       # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
       - name: Caller environment
@@ -381,7 +381,7 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && inputs.packages != ''
-        uses: storytold/craft-common-actions/actions/install-apt-packages@139cccb97f9dc462b56f39ee2830718aaa782fed
+        uses: storytold/craft-common-actions/actions/install-apt-packages@2c06746765d368723dc28ac3a44b04f841bec4da
         with:
           packages: ${{ inputs.packages }}
 
@@ -420,7 +420,7 @@ jobs:
       # The lint part builds in check mode, so it keeps an entry of its own (`<profile>-lint`)
       # instead of racing the test part for the `gate` entry. Shard legs restore the test part's
       # entry, and shard 1 alone saves it, so the shards do not race each other for it.
-      - uses: storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed
+      - uses: storytold/craft-common-actions/actions/rust-cache@2c06746765d368723dc28ac3a44b04f841bec4da
         with:
           cache-version: ${{ inputs.cache-version }}
           job: ${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}
@@ -479,7 +479,7 @@ jobs:
       - name: Restore caller cache
         id: caller-cache
         if: inputs.cache-paths != '' && matrix.part != 'lint'
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.cache-paths }}
           key: ${{ steps.caller-key.outputs.key }}
@@ -501,7 +501,7 @@ jobs:
         if: >-
           inputs.cache-paths != '' && matrix.part != 'lint' && steps.caller-cache.outputs.cache-hit != 'true'
           && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))
-        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ inputs.cache-paths }}
           key: ${{ steps.caller-key.outputs.key }}
