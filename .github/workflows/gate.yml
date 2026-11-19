@@ -77,7 +77,7 @@ on:
         required: false
         default: ""
       archive-command:
-        description: "With test-shards: build the tests once per runner, in a `build (<os>)` job that runs this command to write a nextest archive to $NEXTEST_ARCHIVE_FILE. The shard legs download the archive instead of building, and only they wait for the build job. Where the dependency cache saves, the build job saves the `gate` entry. A failed build skips the shards of every runner in the call, so give each runner a call of its own. Empty (default): each shard builds its own tests; test-shards: 0 with an archive-command is an error"
+        description: "With test-shards: build the tests once per runner, in a `build (<os>)` job that runs this command to write a nextest archive to $NEXTEST_ARCHIVE_FILE (with shard-archives, one per shard). The shard legs download the archive instead of building, and only they wait for the build job. Where the dependency cache saves, the build job saves the `gate` entry. A failed build skips the shards of every runner in the call, so give each runner a call of its own. Empty (default): each shard builds its own tests; test-shards: 0 with an archive-command is an error"
         type: string
         required: false
         default: ""
@@ -86,6 +86,11 @@ on:
         type: string
         required: false
         default: "nextest-archive.tar.zst"
+      shard-archives:
+        description: "With archive-command: the build job writes one archive per shard instead of one for all, and each shard downloads only its own, so it fetches only the test binaries it runs. archive-command then writes shard k's archive to $NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME for every k from 1 to $GATE_SHARDS ($NEXTEST_ARCHIVE_FILE is not set), and records in the archives which tests each shard runs; the shard legs get $NEXTEST_ARCHIVE_FILE as before. At most 8 shards: the build job uploads each archive in a step of its own. false (default): one archive for every shard"
+        type: boolean
+        required: false
+        default: false
       after-archive-command:
         description: "With archive-command: a command the build job runs after it has uploaded the archive, for checks that need the build directory (doctests, say). The shards wait for the whole build job, so its time adds to the gate's. `gate (<os>)` passes only when it passed too. Empty runs none"
         type: string
@@ -232,7 +237,7 @@ jobs:
   # in `os`.
   select:
     name: select legs
-    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != ''
+    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -263,13 +268,19 @@ jobs:
       # per runner, as shard 1.
       - name: Shards
         id: shards
-        if: inputs.test-shards != 0 || inputs.archive-command != ''
+        if: inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
         shell: bash
         env:
           SHARDS: ${{ inputs.test-shards }}
           SHARD: ${{ inputs.shard-command }}
+          ARCHIVE: ${{ inputs.archive-command }}
+          SHARD_ARCHIVES: ${{ inputs.shard-archives }}
         run: |
           set -euo pipefail
+          if [ "$SHARD_ARCHIVES" = true ] && [ -z "$ARCHIVE" ]; then
+            echo "::error::shard-archives needs archive-command: it writes the archives"
+            exit 1
+          fi
           if [ "$SHARDS" = 0 ]; then
             echo "::error::archive-command needs test-shards: the shard legs are what run its archive"
             exit 1
@@ -280,6 +291,11 @@ jobs:
           fi
           if [ -z "$SHARD" ]; then
             echo "::error::test-shards needs shard-command"
+            exit 1
+          fi
+          # The build job has one upload step per shard archive.
+          if [ "$SHARD_ARCHIVES" = true ] && [ "$SHARDS" -gt 8 ]; then
+            echo "::error::shard-archives uploads at most 8 archives, got test-shards: $SHARDS"
             exit 1
           fi
           exclude=
@@ -381,10 +397,25 @@ jobs:
           setup-command: ${{ inputs.setup-command }}
 
       - name: Archive path
+        if: ${{ !inputs.shard-archives }}
         shell: bash
         env:
           FILE: ${{ runner.temp }}/${{ inputs.archive-file }}
         run: echo "NEXTEST_ARCHIVE_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Archive paths
+        if: inputs.shard-archives
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/gate-archives
+          NAME: ${{ inputs.archive-file }}
+          SHARDS: ${{ inputs.test-shards }}
+        run: |
+          {
+            echo "NEXTEST_ARCHIVE_DIR=$DIR"
+            echo "NEXTEST_ARCHIVE_NAME=$NAME"
+            echo "GATE_SHARDS=$SHARDS"
+          } >> "$GITHUB_ENV"
 
       - name: Build the test archive
         uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
@@ -405,17 +436,125 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
 
       - name: Archive size
+        if: ${{ !inputs.shard-archives }}
         shell: bash
         run: ls -l "$NEXTEST_ARCHIVE_FILE"
 
+      - name: Archive sizes
+        if: inputs.shard-archives
+        shell: bash
+        run: |
+          status=0
+          for shard in $(seq 1 "$GATE_SHARDS"); do
+            file="$NEXTEST_ARCHIVE_DIR/$shard/$NEXTEST_ARCHIVE_NAME"
+            if [ -f "$file" ]; then
+              ls -l "$file"
+            else
+              echo "::error::archive-command wrote no archive for shard $shard ($file)"
+              status=1
+            fi
+          done
+          exit "$status"
+
       # Uncompressed: a zstd archive barely shrinks, and level 0 uploads it in seconds.
       - name: Upload the test archive
+        if: ${{ !inputs.shard-archives }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-archive-${{ matrix.os }}
           path: ${{ runner.temp }}/${{ inputs.archive-file }}
           if-no-files-found: error
           # A re-run of the build job replaces the archive of the attempt before.
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      # With shard-archives, one artifact per shard, so each shard downloads only its own. An upload
+      # step takes one artifact name, hence one step for each of up to eight shards.
+      - name: Upload shard 1's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-1
+          path: ${{ runner.temp }}/gate-archives/1/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 2's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-2
+          path: ${{ runner.temp }}/gate-archives/2/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 3's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-3
+          path: ${{ runner.temp }}/gate-archives/3/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 4's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-4
+          path: ${{ runner.temp }}/gate-archives/4/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 5's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-5
+          path: ${{ runner.temp }}/gate-archives/5/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 6's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-6
+          path: ${{ runner.temp }}/gate-archives/6/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 7's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-7
+          path: ${{ runner.temp }}/gate-archives/7/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 8's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 8
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-8
+          path: ${{ runner.temp }}/gate-archives/8/${{ inputs.archive-file }}
+          if-no-files-found: error
           overwrite: true
           compression-level: 0
           retention-days: 1
@@ -565,7 +704,7 @@ jobs:
         if: matrix.part == 'shard' && inputs.archive-command != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: gate-archive-${{ matrix.os }}
+          name: gate-archive-${{ matrix.os }}${{ inputs.shard-archives && format('-{0}', matrix.shard) || '' }}
           path: ${{ runner.temp }}/gate-archive
 
       - name: Archive path

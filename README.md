@@ -622,6 +622,30 @@ With `archive-command` as well, each runner builds its tests once instead of onc
       shard-command: cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" --workspace-remap . --partition "$NEXTEST_PARTITION"
 ```
 
+With `shard-archives: true` as well, each shard downloads only the test binaries it runs:
+
+- The build job sets `$NEXTEST_ARCHIVE_DIR`, `$NEXTEST_ARCHIVE_NAME` (the `archive-file` input)
+  and `$GATE_SHARDS` instead of `$NEXTEST_ARCHIVE_FILE`. `archive-command` writes shard k's archive
+  to `$NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME` for every k from 1 to `$GATE_SHARDS`, for
+  example with `cargo nextest archive -E 'binary_id(=...) | ...'` per shard, and the build job
+  fails if one is missing.
+- Each archive is uploaded as `gate-archive-<os>-<k>`, and shard k downloads only that one. On
+  the shard, `$NEXTEST_ARCHIVE_FILE` points at it as before.
+- Which tests each shard runs is the caller's to decide and to record: a shard runs its archive
+  without a partition. PhotoCraft balances the shards by recorded test times, splits binaries too
+  heavy for one shard by test filter, and puts its plan into every archive (its
+  `xtask/src/shards.rs`).
+- At most 8 shards: the build job has one upload step per archive, since an upload step takes one
+  artifact name. The select job rejects more.
+
+```yaml
+    with:
+      test-shards: 4
+      archive-command: cargo xtask ci archive
+      shard-archives: true
+      shard-command: bash scripts/ci-test-shard.sh
+```
+
 With `cache-workspace-crates: true`, the dependency entry also keeps the workspace crates'
 compiled libraries and unit-test executables, so a change rebuilds only the crates it reaches:
 
