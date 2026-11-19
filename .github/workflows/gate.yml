@@ -198,6 +198,16 @@ on:
         type: boolean
         required: false
         default: false
+      lint-cache:
+        description: "Restore and save the lint legs' dependency-cache entry (`lint`, about 1 GB per OS). `false` runs the lint legs without a dependency cache, which frees that much of the repository's cache budget for a slower lint leg"
+        type: boolean
+        required: false
+        default: true
+      prune-cache:
+        description: "On the default branch, a `prune cache` job right after the build job deletes all but the newest rolling `-crates-` entry (cache-workspace-crates) of each job, runner and architecture, so the older entries do not wait for the repository's cache budget to evict them. It is the only job with `actions: write`: the caller's job that calls this workflow must grant it (`permissions: {contents: read, actions: write}`). Needs archive-command and cache-workspace-crates; other callers neither need nor get the permission"
+        type: boolean
+        required: false
+        default: false
       cold-build:
         description: "With cache-workspace-crates: restore no dependency cache and build everything from source; where the cache saves, the saving leg still writes a fresh entry (a nightly cold run is the safety net for the restored mtimes, and it starts the rolling entry afresh)"
         type: boolean
@@ -229,6 +239,8 @@ jobs:
     name: select legs
     if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != ''
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 5
     outputs:
       os: ${{ steps.select.outputs.os }}
@@ -293,6 +305,8 @@ jobs:
     if: ${{ !cancelled() && needs.select.result != 'failure' && inputs.test-shards != 0 && inputs.archive-command != '' }}
     name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
@@ -449,6 +463,8 @@ jobs:
     if: ${{ !cancelled() && needs.select.result != 'failure' && inputs.lint-command != '' }}
     name: lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
@@ -479,6 +495,7 @@ jobs:
           targets: ${{ inputs.targets }}
           tools: ${{ inputs.tools }}
           cache-version: ${{ inputs.cache-version }}
+          rust-cache: ${{ inputs.lint-cache }}
           cache-job: lint
           cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           sccache: ${{ inputs.sccache }}
@@ -495,6 +512,47 @@ jobs:
         shell: bash
         run: git diff --exit-code -- Cargo.lock
 
+  # With prune-cache: after the build job has saved its rolling entry, deletes the older entries of
+  # the same job, runner and architecture on the default branch. It checks out nothing and builds
+  # nothing, so the `actions: write` token it holds never reaches code the repository compiles.
+  prune:
+    needs: build
+    # A failed build can still have saved an entry; a skipped one (no archive-command) saved none.
+    if: ${{ !cancelled() && inputs.prune-cache && needs.build.result != 'skipped' && github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch }}
+    name: prune cache
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    timeout-minutes: 5
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Delete all but the newest rolling entry of each job and runner
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # `<version>-rust-<profile>-<job>-crates-<os>-<arch>-<run>-<attempt>-...`, newest first.
+          gh cache list --repo "$REPO" --ref "refs/heads/$DEFAULT_BRANCH" --limit 100 --sort created_at --order desc --json id,key \
+            --jq '.[] | "\(.id) \(.key)"' > "$RUNNER_TEMP/caches"
+          declare -A kept
+          while read -r id key; do
+            [[ "$key" =~ ^.+-rust-[0-9a-f]{64}-(.+-crates-[A-Za-z_]+-[a-z0-9]+)-[0-9]+-[0-9]+- ]] || continue
+            entry=${BASH_REMATCH[1]}
+            if [ -n "${kept[$entry]:-}" ]; then
+              echo "delete $key"
+              gh cache delete "$id" --repo "$REPO"
+            else
+              kept[$entry]=1
+              echo "keep $key"
+            fi
+          done < "$RUNNER_TEMP/caches"
+
   gate:
     needs: [select, build]
     # A skipped select (no select-os, no test-shards) or build (no archive-command) still runs the
@@ -504,6 +562,8 @@ jobs:
     # shard legs take its place, and the `result` job reports `gate (<os>)`.
     name: ${{ matrix.part == 'warm' && 'cache warm' || matrix.part == 'shard' && format('test {0}/{1}', matrix.shard, inputs.test-shards) || 'gate' }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       # A failing leg must not cancel the others and hide their failures.
@@ -645,6 +705,8 @@ jobs:
     if: ${{ !cancelled() && inputs.test-shards != 0 }}
     name: gate (${{ matrix.os }})
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     timeout-minutes: 5
     strategy:
       fail-fast: false

@@ -67,6 +67,14 @@ on:
         type: number
         required: false
         default: 4
+      build-cache:
+        description: >-
+          Restore and save the instrumented archive build's dependency cache (about 1.3 GB, saved on
+          main). false builds the archive without it, which frees that much of the repository's
+          cache budget for a slower build on main.
+        type: boolean
+        required: false
+        default: true
       rust-test-threads:
         description: >-
           Optional positive Rust test-harness thread count for the single-job cargo llvm-cov path
@@ -261,6 +269,7 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest@0.9.150
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: inputs.build-cache
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Provision pinned PDF test fonts

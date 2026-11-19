@@ -393,6 +393,14 @@ class SonarCloudTests(unittest.TestCase):
         self.assertEqual(workflow['jobs']['plan']['if'], 'inputs.shards > 1')
         self.assertEqual(workflow['jobs']['coverage']['strategy']['fail-fast'], 'false')
 
+    def test_the_archive_build_cache_can_be_turned_off(self):
+        workflow = yaml.load(
+            (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(workflow['on']['workflow_call']['inputs']['build-cache']['default'], 'true')
+        cache = next(step for step in workflow['jobs']['build']['steps']
+                     if step.get('uses', '').startswith('Swatinem/rust-cache@'))
+        self.assertEqual(cache['if'], 'inputs.build-cache')
+
     def test_shards_run_partitions_of_one_prebuilt_archive(self):
         workflow = yaml.load(
             (ROOT / '.github/workflows/sonarcloud.yml').read_text(), Loader=yaml.BaseLoader)

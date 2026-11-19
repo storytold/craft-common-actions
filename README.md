@@ -640,6 +640,14 @@ compiled libraries and unit-test executables, so a change rebuilds only the crat
   rolling entry afresh, which drops artifacts of older toolchains and lockfiles.
 - The lint legs keep their usual entry. An app job restores the rolling entry with
   `actions/rust-cache`'s `cache-workspace-crates: "true"`.
+- `lint-cache: false` runs the lint legs without a dependency cache (they restore and save
+  nothing), which frees about 1 GB per OS of the repository's cache budget for slower lint legs.
+- `prune-cache: true` adds a `prune cache` job right after the build job. On the default branch it
+  deletes all but the newest rolling entry of each job, runner and architecture, instead of leaving
+  the older ones to the budget's eviction (which evicts other entries too). It checks out and builds
+  nothing and is the only job with `actions: write`: the caller's job that calls the gate grants
+  it (`permissions: {contents: read, actions: write}`; a called workflow's permissions cannot
+  exceed its caller's). Callers that leave it off need no permission.
 
 With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
 platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
