@@ -1,0 +1,70 @@
+name: "Cache prune"
+description: >-
+  Deletes the Actions cache entries of one branch that no run will restore again. For a job that
+  holds `permissions: actions: write` (the gate's jobs hold no write permission, so this runs in the
+  caller's own job). Rolling `cache-workspace-crates` entries: all but the newest of each job, OS and
+  architecture. Other rust-cache entries (`...-<os>-<arch>-<environment hash>-<lockfile hash>`), and
+  `<name>-<sha256>` entries for the names in `content-keys`: an older entry of the same family once
+  nothing has used it since the newest was created. Everything else (apt packages, tool caches) stays.
+  With `watch`, it starts with the run and prunes each time one of `saving-jobs` finishes, so a new
+  entry's predecessor goes within about 30 seconds of the save; it ends when none of them is still
+  queued or running, after the cache list shows the last one's entry (at most three more polls),
+  or after `watch-minutes`. Rust-cache families leave out the environment and lockfile hashes, so a
+  toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different
+  toolchains or environments would count as one family. A failed pass prints a warning and the next
+  pass tries again; a failure that stops the script prints a warning and exits 1, so run the step
+  with `continue-on-error: true` where the prune must not fail the run.
+
+inputs:
+  ref:
+    description: "The branch whose entries are pruned; the default branch when empty"
+    required: false
+    default: ""
+  content-keys:
+    description: "Names of actions/cache entries keyed `<name>-<sha256>` (for example a test corpus keyed on its manifest's hash), separated by spaces or newlines"
+    required: false
+    default: ""
+  saving-jobs:
+    description: >-
+      With watch: regular expressions, one per line, matching the run's jobs that save cache
+      entries, as the jobs API names them (`<caller job> / <job>` inside a reusable workflow). Match
+      the skipped job too (a skipped reusable-workflow call is listed under the caller job's name),
+      so a run that skips one still ends. Empty: prune after every job and end when no other job is
+      queued or running
+    required: false
+    default: ""
+  watch:
+    description: "Keep running beside the run's other jobs and prune as their entries land (true/false); false prunes once"
+    required: false
+    default: "false"
+  watch-minutes:
+    description: "With watch: end after this many minutes, with one more pass; keep it under the job's timeout-minutes"
+    required: false
+    default: "110"
+  dry-run:
+    description: "List what would be deleted without deleting it (true/false)"
+    required: false
+    default: "false"
+  token:
+    description: "A token with actions: write"
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Prune
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        PRUNE: ${{ github.action_path }}/prune.py
+        PRUNE_REPO: ${{ github.repository }}
+        PRUNE_REF: ${{ inputs.ref || format('refs/heads/{0}', github.event.repository.default_branch) }}
+        PRUNE_CONTENT_KEYS: ${{ inputs.content-keys }}
+        PRUNE_SAVING_JOBS: ${{ inputs.saving-jobs }}
+        PRUNE_WATCH: ${{ inputs.watch }}
+        PRUNE_WATCH_MINUTES: ${{ inputs.watch-minutes }}
+        PRUNE_DRY_RUN: ${{ inputs.dry-run }}
+        PRUNE_RUN: ${{ github.run_id }}
+        PRUNE_ATTEMPT: ${{ github.run_attempt }}
+      run: python3 "$PRUNE"
