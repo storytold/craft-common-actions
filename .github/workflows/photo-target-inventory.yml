@@ -1,0 +1,53 @@
+name: Photo no-build target inventory
+on:
+  pull_request:
+    paths: [.github/workflows/photo-target-inventory.yml]
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: storytold/photocraft
+          ref: 057297bb0b0872244ac0910e640db8d87e46572f
+          persist-credentials: false
+      - name: Inventory only; no dependency resolution or compilation
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 057297bb0b0872244ac0910e640db8d87e46572f
+          cargo +stable --version
+          sha256sum Cargo.toml Cargo.lock
+          timeout 60s cargo +stable metadata --offline --no-deps --format-version 1 > "$RUNNER_TEMP/photo-metadata.json"
+          python3 - "$RUNNER_TEMP/photo-metadata.json" <<'PY'
+          import json, pathlib, sys, tomllib
+          metadata = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          members = set(metadata['workspace_members'])
+          total = 0
+          for package in metadata['packages']:
+              if package['id'] not in members:
+                  continue
+              manifest = tomllib.loads(pathlib.Path(package['manifest_path']).read_text())
+              for target in package['targets']:
+                  kind = target['kind']
+                  # Cargo metadata does not expose harness=false. Include original
+                  # manifest declarations instead of assuming every test is libtest.
+                  declarations = []
+                  for section in ('bin', 'test', 'example', 'bench'):
+                      declarations.extend(x for x in manifest.get(section, [])
+                                          if x.get('name') == target['name'])
+                  if set(kind) & {'lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro'} and 'lib' in manifest:
+                      declarations.append(manifest['lib'])
+                  print(json.dumps({'package': package['name'], 'target': target,
+                                    'explicit_declarations': declarations}, sort_keys=True))
+                  total += 1
+          assert total > 0, 'empty target inventory'
+          print(f'Inventory: {len(members)} workspace packages, {total} targets')
+          print('No build performed. No resolved or compiler feature equivalence claimed.')
+          PY
