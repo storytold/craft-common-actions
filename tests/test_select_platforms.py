@@ -158,15 +158,18 @@ class PlatformCfgTests(unittest.TestCase):
 
 
 class GateSelectJobTests(unittest.TestCase):
-    def test_the_gate_reads_its_legs_from_the_select_job_or_os(self):
-        gate = GATE['jobs']['gate']
-        self.assertEqual(gate['needs'], 'select')
-        self.assertEqual(gate['strategy']['matrix']['os'], '${{ fromJSON(needs.select.outputs.os || inputs.os) }}')
-        self.assertEqual(gate['if'], "${{ !cancelled() && needs.select.result != 'failure' }}")
+    def test_every_job_reads_its_legs_from_the_select_job_or_os(self):
+        for name in ('build', 'lint', 'gate'):
+            with self.subTest(job=name):
+                job = GATE['jobs'][name]
+                self.assertIn('select', job['needs'])
+                self.assertEqual(job['strategy']['matrix']['os'], '${{ fromJSON(needs.select.outputs.os || inputs.os) }}')
+                self.assertTrue(job['if'].startswith("${{ !cancelled() && needs.select.result != 'failure'"), job['if'])
 
-    def test_select_runs_only_with_select_os_or_shards(self):
+    def test_select_runs_only_with_select_os_shards_or_an_archive(self):
         select = GATE['jobs']['select']
-        self.assertEqual(select['if'], "(inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0")
+        self.assertEqual(select['if'], "(inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0"
+                                       " || inputs.archive-command != ''")
         self.assertEqual(GATE['on']['workflow_call']['inputs']['select-os']['default'], '[]')
         checkout = next(s for s in select['steps'] if 'actions/checkout' in s.get('uses', ''))
         self.assertEqual(checkout['with']['fetch-depth'], '2')

@@ -20,7 +20,10 @@ inputs:
     required: false
     default: ""
   save-if:
-    description: "Whether to save the cache (a GitHub expression, or true/false). Empty or false restores only"
+    description: >-
+      Whether to save the cache: true or false, normally the value of a GitHub expression. Only an
+      accepted true saves (after trimming ASCII whitespace, ignoring ASCII case); empty,
+      whitespace-only or unrecognized values restore only.
     required: false
     default: "false"
   cache-on-failure:
@@ -120,15 +123,42 @@ runs:
           echo "crates-run=$PROFILE-$JOB-crates-$os-$arch-$RUN" >>"$GITHUB_OUTPUT"
         fi
 
-    # rust-cache reads an *empty* save-if as `true`, so an empty input must become an explicit
-    # `false`: this action restores unless the caller asks it to save.
+    # rust-cache reads an *empty* save-if as `true` (it trims the input and falls back to true when
+    # nothing is left), so this action emits one canonical word and only an accepted `true` grants a
+    # save: an empty, whitespace-only or unrecognized input restores instead.
     - name: Cache save policy
       id: save
       shell: bash
       env:
         SAVE: ${{ inputs.save-if }}
       run: |
-        echo "save=${SAVE:-false}" >>"$GITHUB_OUTPUT"
+        set -euo pipefail
+        # The input is a caller's decision, never code: it is matched against two words, not
+        # evaluated. Whitespace and case are ASCII only, deliberately. rust-cache's own trim leaves
+        # U+0085 (NEL) in place and so refuses a value wrapped in it, which this matches; it does
+        # strip U+00A0 (NBSP) and the other Unicode spaces, which this deliberately does not, so the
+        # wrapper is never looser than the cache action -- only narrower.
+        LC_ALL=C
+        export LC_ALL
+        value="${SAVE-}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        case "$value" in
+          [Tt][Rr][Uu][Ee])
+            echo "save=true" >>"$GITHUB_OUTPUT"
+            ;;
+          ''|[Ff][Aa][Ll][Ss][Ee])
+            echo "save=false" >>"$GITHUB_OUTPUT"
+            ;;
+          *)
+            # Fail closed: a blank, whitespace-only or other unrecognized value never saves. One
+            # line always, so a newline in the input cannot add a second GITHUB_OUTPUT record. The
+            # value itself is never echoed: it is a caller's configuration and a misdirected one
+            # could hold a secret, which the log has no use for.
+            printf '::warning::save-if is not true or false after trimming, so this run restores only\n'
+            echo "save=false" >>"$GITHUB_OUTPUT"
+            ;;
+        esac
 
     # rust-cache looks for the target directory at `<workspace>/<target>` (a path join), so a
     # CARGO_TARGET_DIR outside the checkout, such as a short `D:\t` on Windows, has to reach it

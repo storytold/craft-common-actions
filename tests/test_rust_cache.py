@@ -15,7 +15,6 @@ ACTION = yaml.load((ROOT / 'actions/rust-cache/action.yml').read_text(), Loader=
 INPUTS = ACTION['inputs']
 STEPS = ACTION['runs']['steps']
 GATE = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=yaml.BaseLoader)
-GATE_STEPS = GATE['jobs']['gate']['steps']
 OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
 PINNED = re.compile(r'^[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
 CACHES = [s for s in STEPS if 'rust-cache' in s.get('uses', '')]
@@ -64,7 +63,8 @@ class DefinitionTests(unittest.TestCase):
                 self.assertIn(f'uses: {pinned} # v2.9.3', line)
 
     def test_restore_only_unless_the_caller_saves(self):
-        # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.
+        # rust-cache trims this input and reads what is left as "true" when empty, so the action
+        # must pass one canonical word rather than whatever the caller sent.
         self.assertEqual(INPUTS['save-if']['default'], 'false')
         for s in (PLAIN, ALIGNED):
             self.assertEqual(s['with']['save-if'], '${{ steps.save.outputs.save }}')
@@ -74,6 +74,7 @@ class DefinitionTests(unittest.TestCase):
         self.assertIn("steps.save.outputs.save == 'true'", RUN_ENTRY['if'])
         policy = step('Cache save policy')
         self.assertEqual(policy['env'], {'SAVE': '${{ inputs.save-if }}'})
+        self.assertEqual(policy['shell'], 'bash')
         self.assertNotIn('${{', policy['run'])
 
     def test_the_key_names_one_job_and_the_gate_cache_version(self):
@@ -195,25 +196,86 @@ class TargetDirectoryTests(unittest.TestCase):
 
 
 class SavePolicyTests(unittest.TestCase):
+    """The action hands rust-cache one canonical word: rust-cache trims its input and reads what is
+    left as `true` when empty, so anything it does not recognize must arrive as `false`."""
     STEP = step('Cache save policy')
+
+    def run_step(self, directory, save):
+        output = Path(directory, 'output')
+        if output.exists():
+            output.unlink()
+        extra = {'GITHUB_OUTPUT': str(output)}
+        env = environment(directory, extra)
+        if save is not None:
+            env['SAVE'] = save
+        else:
+            env.pop('SAVE', None)
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+            cwd=directory, capture_output=True, text=True, env=env)
+        return result.returncode, output.read_text() if output.exists() else '', result.stdout + result.stderr
 
     def resolve(self, save):
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory, 'output')
-            result = subprocess.run(
-                ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
-                cwd=directory, capture_output=True, text=True,
-                env=environment(directory, {'SAVE': save, 'GITHUB_OUTPUT': str(output)}))
-            return result.returncode, output.read_text() if output.exists() else ''
+            return self.run_step(directory, save)
 
-    def test_an_empty_input_never_saves(self):
-        self.assertEqual(self.resolve(''), (0, 'save=false\n'))
+    def test_a_blank_or_whitespace_only_input_never_saves(self):
+        # rust-cache turns a trimmed-to-empty input into `true`: a caller passing a blank variable
+        # to mean "no decision" would otherwise save, so every blank shape must say false.
+        for save in ('', ' ', '\t', '\n', '\r\n', ' \t\r\n '):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
 
-    def test_a_decision_passes_through_unchanged(self):
-        self.assertEqual(self.resolve('false'), (0, 'save=false\n'))
-        self.assertEqual(self.resolve('true'), (0, 'save=true\n'))
-        expression = "github.event_name != 'pull_request' && github.ref_name == 'x'"
-        self.assertEqual(self.resolve(expression), (0, f'save={expression}\n'))
+    def test_an_unset_input_never_saves(self):
+        self.assertEqual(self.resolve(None), (0, 'save=false\n', ''))
+
+    def test_true_and_false_remain_decisions(self):
+        for save in ('true', 'TRUE', 'True', ' true ', '\ttrue\r\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=true\n', ''))
+        # A newline is whitespace to rust-cache's trim as well, so `false` there means false.
+        for save in ('false', 'FALSE', 'False', ' false ', '\tfalse\r\n', 'false\n'):
+            with self.subTest(save=save):
+                self.assertEqual(self.resolve(save), (0, 'save=false\n', ''))
+
+    def test_anything_else_fails_closed(self):
+        # Actions evaluates `${{ ... }}` before this action sees an input, so the text of an
+        # expression is not a decision and must not become one. Nor is any other spelling. The two
+        # Unicode wrappers differ in kind and are both refused: rust-cache's trim leaves U+0085
+        # (NEL) in place, so it refuses that value too, while U+00A0 (NBSP) and U+3000 are
+        # whitespace to its trim, so refusing them is this wrapper's deliberately narrower choice.
+        for save in ("github.event_name != 'pull_request'", 'yes', '1', 'on', 'off', 'TRUE!',
+                     '\u0085true\u0085', '\u00a0true\u00a0', '\u3000true'):
+            with self.subTest(save=save):
+                status, written, output = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertIn('::warning::', output)
+
+    def test_the_unrecognized_value_is_never_echoed(self):
+        # A configuration value can be a misdirected secret; the warning names the policy, not the
+        # value, so nothing a caller passes as save-if reaches the log.
+        sentinel = 'SYNTHETIC-SENTINEL-c0ffee-not-a-real-secret'
+        status, written, output = self.resolve(sentinel)
+        self.assertEqual((status, written), (0, 'save=false\n'))
+        self.assertIn('::warning::', output)
+        self.assertNotIn(sentinel, output)
+
+    def test_a_newline_cannot_add_a_second_output_record(self):
+        # rust-cache saves when its trimmed, lowercased input is exactly `true`, so a second
+        # GITHUB_OUTPUT record could override the decision. The output is one canonical line.
+        for save in ('false\nsave=true', 'true\nsave=false', '\nsave=true', ' save=true\n'):
+            with self.subTest(save=save):
+                status, written, _ = self.resolve(save)
+                self.assertEqual((status, written), (0, 'save=false\n'))
+                self.assertEqual(written.count('\n'), 1)
+                self.assertNotIn('save=true', written)
+
+    def test_the_input_is_never_run_as_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            save = '$(touch OWNED); `touch OWNED2`'
+            self.assertEqual(self.run_step(directory, save)[:2], (0, 'save=false\n'))
+            self.assertFalse(Path(directory, 'OWNED').exists())
+            self.assertFalse(Path(directory, 'OWNED2').exists())
 
 
 class ProfileKeyTests(unittest.TestCase):
@@ -394,42 +456,28 @@ class AlignEnvironmentTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    """gate.yml's side of the key. gate-setup's call of this action: tests/test_gate_setup.py."""
+
     def test_fixed_gate_environment_is_part_of_the_restore_contract(self):
         # Callers can add build variables through env/dev-debug. Photo opts out of the debug
         # override; changing this shared fixed part still splits its restore from the gate.
+        for job in ('build', 'lint'):
+            self.assertEqual(GATE['jobs'][job]['env'], GATE['jobs']['gate']['env'], job)
         fixed = GATE['jobs']['gate']['env']
         hashed = {name: value for name, value in fixed.items()
                   if name.startswith(('CARGO', 'CC', 'CFLAGS', 'CXX', 'CMAKE', 'RUST'))}
         self.assertEqual(hashed, {'CARGO_TERM_COLOR': 'always', 'CARGO_INCREMENTAL': '0',
                                   'CARGO_NET_RETRY': '10', 'RUST_BACKTRACE': '1'})
-        install = next(s for s in GATE_STEPS if s.get('name') == 'Install Rust')
-        # Replacing rustup with an action that exports CARGO_HOME needs a cache-contract review.
-        self.assertNotIn('GITHUB_ENV', install['run'])
-
-    def test_setup_shell_steps_do_not_add_cargo_home_to_the_key(self):
-        cache = next(i for i, s in enumerate(GATE_STEPS)
-                     if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed')
-        for setup in GATE_STEPS[:cache]:
-            # Conservative source guard, not shell data-flow analysis. An opaque setup action
-            # still needs a hosted key comparison; callers' generic env input remains supported.
-            self.assertNotIn('CARGO_HOME', setup.get('run', ''), setup.get('name', setup.get('uses')))
 
     def test_gate_and_action_cache_version_defaults_agree(self):
         default = GATE['on']['workflow_call']['inputs']['cache-version']['default']
         self.assertEqual(default, INPUTS['cache-version']['default'])
 
-    def test_the_gate_restores_through_the_action(self):
-        calls = [s for s in GATE_STEPS
-                 if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed']
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['with']['cache-version'], '${{ inputs.cache-version }}')
-        self.assertEqual(calls[0]['with']['cache-on-failure'], 'false')
-
-    def test_no_second_copy_of_the_key_remains(self):
-        for s in GATE_STEPS:
-            with self.subTest(step=s.get('name')):
-                self.assertNotRegex(s.get('uses', ''), r'^[^/]+/rust-cache@')
-        self.assertNotIn('Cache profile key', [s.get('name') for s in GATE_STEPS])
+    def test_no_gate_job_keys_the_cache_itself(self):
+        for name, job in GATE['jobs'].items():
+            for s in job['steps']:
+                with self.subTest(job=name, step=s.get('name')):
+                    self.assertNotRegex(s.get('uses', ''), r'/rust-cache@')
 
 
 if __name__ == '__main__':

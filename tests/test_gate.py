@@ -1,5 +1,7 @@
 """The shared gate workflow: pinned actions, a cache with explicit manual-branch opt-in, and caller
-input that reaches the shell only through the environment, and tests sharded from one build."""
+input that reaches the shell only through the environment, and tests sharded from one build. The
+setup every job shares (actions/gate-setup) and the command runner (actions/gate-run) are tested
+here too, as the legs run them."""
 from pathlib import Path
 import json
 import os
@@ -15,17 +17,36 @@ WORKFLOW = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=y
 INPUTS = WORKFLOW['on']['workflow_call']['inputs']
 JOBS = WORKFLOW['jobs']
 STEPS = JOBS['gate']['steps']
-OWN_ACTION_REV = '139cccb97f9dc462b56f39ee2830718aaa782fed'
+SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
+SETUP_STEPS = SETUP['runs']['steps']
+RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
+# The reviewed revision of the first-party actions gate.yml calls: the commit that added
+# gate-setup, gate-run and restore-mtimes. gate-setup pins its own (tests/test_gate_setup.py).
+OWN_ACTION_REV = 'd65d611f0ef67eaa94039351be5afce61102dbb0'
+SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
+# Pushes to the default branch and opted-in manual runs: the runs that write caches.
+WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
+          " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
 
 
 def step(name):
-    return next(s for s in STEPS if s.get('name') == name)
+    """A step of the gate job, or else of the shared setup."""
+    return next(s for s in STEPS + SETUP_STEPS if s.get('name') == name)
+
+
+def setup(job='gate'):
+    """The `with` a job passes to the shared setup."""
+    return next(s for s in JOBS[job]['steps'] if s.get('uses') == SETUP_ACTION)['with']
 
 
 def all_steps():
     for job_id, job in JOBS.items():
         for s in job['steps']:
             yield job_id, s
+    for s in SETUP_STEPS:
+        yield 'gate-setup', s
+    yield 'gate-run', RUN_STEP
 
 
 class Expression:
@@ -210,9 +231,25 @@ def scalar(value):
     return int(value) if isinstance(value, str) and value.isdigit() else value
 
 
+def composite(action, given, context):
+    """The steps of a composite action that run, with their evaluated `with` and `env`. Its inputs
+    arrive as strings, as GitHub passes them."""
+    inputs = {name: spec.get('default', '') for name, spec in action['inputs'].items()}
+    inputs.update({name: Expression.string(value) for name, value in given.items()})
+    expression = Expression({**context, 'inputs': inputs})
+
+    def fields(values):
+        return {key: Expression.string(expression(value)) for key, value in (values or {}).items()}
+
+    return [(s.get('name') or s['uses'], fields(s.get('with')), fields(s.get('env')))
+            for s in action['runs']['steps']
+            if 'if' not in s or Expression.truthy(expression.evaluate(s['if'].strip().removeprefix('${{').removesuffix('}}')))]
+
+
 def graph(workflow=WORKFLOW, **call):
     """The legs a call runs, as GitHub would expand them: (job, name, matrix, steps that run with
-    their evaluated `with` and `env`). Every leg and step is assumed to pass."""
+    their evaluated `with` and `env`, the shared setup's steps in its place). Every leg and step is
+    assumed to pass."""
     jobs = workflow['jobs']
     context = caller(**call)
     expression = Expression(context)
@@ -232,11 +269,13 @@ def graph(workflow=WORKFLOW, **call):
                 if status:
                     raise AssertionError(out)
                 select['outputs'].update(line.split('=', 1) for line in outputs)
-    context['needs'] = {'select': select}
+    needs = context['needs'] = {'select': select}
     legs = []
-    for job_id in ('gate', 'result'):
+    for job_id in ('build', 'lint', 'gate', 'result'):
         job = jobs.get(job_id)
-        if job is None or not condition(job['if']):
+        runs = job is not None and condition(job['if'])
+        needs[job_id] = {'result': 'success' if runs else 'skipped'}
+        if not runs:
             continue
         matrix = {key: expression(value) if isinstance(value, str) else [scalar(v) for v in value]
                   for key, value in job['strategy']['matrix'].items()}
@@ -250,8 +289,14 @@ def graph(workflow=WORKFLOW, **call):
             context['matrix'] = combo
             context['runner'] = {'os': 'Windows' if combo['os'].startswith('windows') else 'Linux',
                                  'temp': '/runner/temp'}
-            steps = [(s.get('name') or s['uses'], fields(s.get('with')), fields(s.get('env')))
-                     for s in job['steps'] if 'if' not in s or condition(s['if'])]
+            steps = []
+            for s in job['steps']:
+                if 'if' in s and not condition(s['if']):
+                    continue
+                if s.get('uses') == SETUP_ACTION:
+                    steps.extend(composite(SETUP, fields(s.get('with')), context))
+                else:
+                    steps.append((s.get('name') or s['uses'], fields(s.get('with')), fields(s.get('env'))))
             legs.append((job_id, expression(job['name']), combo, steps))
     return legs
 
@@ -272,24 +317,30 @@ class GateWorkflowTests(unittest.TestCase):
                     self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
     def test_first_party_actions_share_reviewed_revision(self):
-        expected = {'select-platforms', 'checkout-craft-i18n', 'install-apt-packages', 'rust-cache'}
+        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes'}
         actual = set()
         prefix = 'storytold/craft-common-actions/actions/'
-        for _, item in all_steps():
-            uses = item.get('uses', '')
-            if uses.startswith(prefix):
+        for _, job in JOBS.items():
+            for item in job['steps']:
+                uses = item.get('uses', '')
+                if not uses.startswith(prefix):
+                    continue
                 name, revision = uses[len(prefix):].split('@')
-                self.assertEqual(revision, OWN_ACTION_REV)
+                self.assertEqual(revision, OWN_ACTION_REV, name)
                 actual.add(name)
         self.assertEqual(actual, expected)
 
     def test_manual_branch_saves_require_explicit_opt_in(self):
-        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
-        condition = re.sub(r'\s+', ' ', cache['with']['save-if'])
-        self.assertIn("github.event_name != 'pull_request'", condition)
-        self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
-        self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
+        # The approved condition token by token, in every job that writes: substrings were the gap,
+        # since appending `|| true` keeps every one of them intact. Formatting stays free; a token
+        # does not.
+        for job in SAVING_JOBS:
+            with self.subTest(job=job):
+                self.assertEqual(tokens(cache_condition(job)), tokens(approved_condition(job)))
+                self.assertEqual(tokens(condition_of(setup(job), 'writes')), tokens(APPROVED_CONDITION))
         self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-save-on-dispatch']['default'], 'false')
+        self.assertEqual(step('Save caller cache')['if'].split('&&')[-1].strip(), "inputs.writes == 'true'")
+        self.assertEqual(step('Use sccache')['env']['WRITES'], '${{ inputs.writes }}')
 
     def test_packages_are_optional_and_empty_installs_none(self):
         packages = WORKFLOW['on']['workflow_call']['inputs']['packages']
@@ -335,7 +386,7 @@ class GateWorkflowTests(unittest.TestCase):
 
 
 class GateTimeoutTests(unittest.TestCase):
-    STEP = step('Gate')
+    STEP = RUN_STEP
 
     def run_gate(self, command, minutes, fake_timeout=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -355,7 +406,11 @@ class GateTimeoutTests(unittest.TestCase):
 
     def test_input_defaults_to_no_limit(self):
         self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['gate-timeout-minutes']['default'], '0')
-        self.assertEqual(set(self.STEP['env']), {'GATE', 'GATE_TIMEOUT'})
+        self.assertEqual(self.STEP['env'], {'GATE': '${{ inputs.command }}', 'GATE_TIMEOUT': '${{ inputs.timeout-minutes }}'})
+        for job_id, s in all_steps():
+            if s.get('uses') == 'storytold/craft-common-actions/actions/gate-run@' + OWN_ACTION_REV:
+                with self.subTest(job=job_id, step=s['name']):
+                    self.assertEqual(s['with']['timeout-minutes'], '${{ inputs.gate-timeout-minutes }}')
 
     def test_no_limit_runs_the_command_as_before(self):
         self.assertEqual(self.run_gate('echo ran; exit 3', '0'), (3, 'ran\n'))
@@ -439,7 +494,10 @@ class CallerSetupTests(unittest.TestCase):
 
     def test_setup_input_is_passed_through_env_before_the_gate(self):
         self.assertEqual(set(self.STEP['env']), {'SETUP'})
-        self.assertLess(STEPS.index(self.STEP), STEPS.index(step('Gate')))
+        for job in ('build', 'gate'):
+            names = [s.get('name') for s in JOBS[job]['steps']]
+            self.assertLess(names.index('Setup'), names.index('Build the test archive' if job == 'build' else 'Gate'))
+            self.assertEqual(setup(job)['setup-command'], '${{ inputs.setup-command }}')
         self.assertNotIn('${{', self.STEP['run'])
 
     def test_setup_can_provision_data_and_export_its_path(self):
@@ -452,24 +510,23 @@ class CallerSetupTests(unittest.TestCase):
 
 class CallerCacheTests(unittest.TestCase):
     def test_restored_before_the_setup_and_saved_after_it(self):
-        restore, setup, save = step('Restore caller cache'), step('Caller setup'), step('Save caller cache')
-        self.assertLess(STEPS.index(restore), STEPS.index(setup))
-        self.assertEqual(STEPS.index(save), STEPS.index(setup) + 1)
+        restore, caller, save = step('Restore caller cache'), step('Caller setup'), step('Save caller cache')
+        self.assertLess(SETUP_STEPS.index(restore), SETUP_STEPS.index(caller))
+        self.assertEqual(SETUP_STEPS.index(save), SETUP_STEPS.index(caller) + 1)
         for s in (restore, save):
             with self.subTest(step=s['name']):
                 self.assertEqual(s['with']['key'], '${{ steps.caller-key.outputs.key }}')
                 self.assertEqual(s['with']['path'], '${{ inputs.cache-paths }}')
-                self.assertIn("inputs.cache-paths != '' && matrix.part != 'lint'", s['if'])
+                self.assertIn("inputs.cache-paths != '' && inputs.caller-setup == 'true'", s['if'])
 
     def test_saved_only_where_the_dependency_cache_saves(self):
-        rust = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if']
-        policy = re.sub(r'\s+', ' ', rust.removeprefix('${{').removesuffix('}}')).strip()
         condition = re.sub(r'\s+', ' ', step('Save caller cache')['if'])
-        # The test part leaves the save to the cache-warm leg when there is one.
-        writes = policy.removesuffix("&& (matrix.part == 'lint' || matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1)").strip()
-        self.assertNotEqual(writes, policy)
-        self.assertTrue(condition.endswith(f'&& {writes}'), condition)
+        self.assertTrue(condition.endswith("&& inputs.writes == 'true'"), condition)
         self.assertIn("steps.caller-cache.outputs.cache-hit != 'true'", condition)
+        saves = graph(cache_paths='corpus', cache_key='k', setup_command='true')
+        self.assertTrue(ran(leg(saves, 'gate (ubuntu-24.04)'), 'Save caller cache'))
+        self.assertIsNone(ran(leg(graph(event='pull_request', ref='x', cache_paths='corpus', cache_key='k'),
+                                  'gate (ubuntu-24.04)'), 'Save caller cache'))
 
     def run_key(self, key, files='', files_hash=''):
         with tempfile.TemporaryDirectory() as directory:
@@ -493,63 +550,73 @@ class CallerCacheTests(unittest.TestCase):
 class WarmPartTests(unittest.TestCase):
     JOB = WORKFLOW['jobs']['gate']
 
-    def test_the_warm_leg_exists_only_where_the_cache_saves(self):
-        inputs = WORKFLOW['on']['workflow_call']['inputs']
-        self.assertEqual(inputs['warm-command']['default'], '')
+    def test_the_warm_leg_exists_only_where_the_cache_saves_and_without_an_archive(self):
+        self.assertEqual(INPUTS['warm-command']['default'], '')
         part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
-        save = re.sub(r'\s+', ' ', next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']['save-if'])
-        writes = save.removeprefix('${{').split("&& (matrix.part")[0].strip()
-        self.assertIn(f"inputs.warm-command != '' && {writes} && ',\"warm\"'", part)
+        self.assertIn(f"inputs.warm-command != '' && inputs.archive-command == '' && {WRITES} && ',\"warm\"'", part)
 
     def test_the_warm_leg_runs_its_command_and_saves_the_gate_entry(self):
-        self.assertTrue(step('Gate')['env']['GATE'].startswith(
-            "${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command || "))
-        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']
-        self.assertEqual(cache['job'], "${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}")
-        self.assertIn("matrix.part == 'lint' || matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1", cache['save-if'])
-        self.assertEqual(cache['cache-on-failure'], 'false')
+        self.assertTrue(step('Gate')['with']['command'].startswith(
+            "${{ matrix.part == 'warm' && inputs.warm-command || "))
+        self.assertEqual(setup()['cache-job'], "${{ inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || 'gate' }}")
+        self.assertIn("(matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1)", setup()['cache-save'])
+        self.assertEqual(next(s for s in SETUP_STEPS if s.get('uses') == CACHE)['with']['cache-on-failure'], 'false')
 
 
 class LintPartTests(unittest.TestCase):
-    JOB = WORKFLOW['jobs']['gate']
+    JOB = WORKFLOW['jobs']['lint']
 
     def test_lint_legs_exist_only_when_a_lint_command_is_given(self):
-        inputs = WORKFLOW['on']['workflow_call']['inputs']
-        self.assertEqual(inputs['lint-command']['default'], '')
-        part = re.sub(r'\s+', ' ', self.JOB['strategy']['matrix']['part'])
-        self.assertIn("inputs.lint-command != '' && ',\"lint\"'", part)
-        self.assertTrue(part.startswith("${{ fromJSON(format('[\"{0}\"{1}{2}]', inputs.test-shards != 0 && 'shard' || 'test', "), part)
+        self.assertEqual(INPUTS['lint-command']['default'], '')
+        self.assertIn("inputs.lint-command != ''", self.JOB['if'])
+        self.assertEqual(graph(lint_command=''), graph())
+
+    def test_lint_never_waits_for_the_build(self):
+        self.assertEqual(self.JOB['needs'], 'select')
 
     def test_the_test_part_keeps_the_gate_check_name(self):
         names = [name for _, name, _, _ in graph(lint_command='cargo clippy', warm_command='cargo test --no-run',
                                                  os='["ubuntu-24.04","windows-latest"]')]
-        self.assertEqual(names, ['gate (ubuntu-24.04)', 'lint (ubuntu-24.04)', 'cache warm (ubuntu-24.04)',
-                                 'gate (windows-latest)', 'lint (windows-latest)', 'cache warm (windows-latest)'])
+        self.assertEqual(names, ['lint (ubuntu-24.04)', 'lint (windows-latest)',
+                                 'gate (ubuntu-24.04)', 'cache warm (ubuntu-24.04)',
+                                 'gate (windows-latest)', 'cache warm (windows-latest)'])
 
     def test_lint_runs_its_own_command_and_skips_the_test_setup(self):
-        gate = step('Gate')['env']['GATE']
-        self.assertTrue(gate.startswith("${{ matrix.part == 'lint' && inputs.lint-command || "), gate)
-        self.assertIn("matrix.part != 'lint'", step('Caller setup')['if'])
+        steps = leg(graph(lint_command='cargo clippy', cache_paths='corpus', cache_key='k', setup_command='true'),
+                    'lint (ubuntu-24.04)')
+        self.assertEqual(ran(steps, 'Gate')[0]['command'], 'cargo clippy')
+        for name in ('Caller setup', 'Restore caller cache', 'Restore mtimes'):
+            self.assertIsNone(ran(steps, name), name)
 
     def test_cache_name_gives_each_call_its_own_entry(self):
-        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
-        self.assertIn("inputs.cache-name != '' && format('gate-{0}', inputs.cache-name)", cache['with']['job'])
-        self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-name']['default'], '')
+        self.assertIn("inputs.cache-name != '' && format('gate-{0}', inputs.cache-name)", setup()['cache-job'])
+        self.assertEqual(INPUTS['cache-name']['default'], '')
+        cache, _ = ran(leg(graph(cache_name='msrv'), 'gate (ubuntu-24.04)'), CACHE)
+        self.assertEqual(cache['job'], 'gate-msrv')
 
     def test_dev_strip_is_off_by_default_and_sets_the_test_profile(self):
-        self.assertEqual(str(WORKFLOW['on']['workflow_call']['inputs']['dev-strip']['default']).lower(), 'false')
+        self.assertEqual(str(INPUTS['dev-strip']['default']).lower(), 'false')
         run = step('Caller environment')['run']
         self.assertIn('CARGO_PROFILE_TEST_STRIP=symbols', run)
         self.assertIn('CARGO_PROFILE_TEST_DEBUG=0', run)
 
     def test_lint_keeps_a_cache_entry_of_its_own(self):
-        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
-        self.assertEqual(cache['with']['job'], "${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}")
+        cache, _ = ran(leg(graph(lint_command='cargo clippy', cache_workspace_crates=True), 'lint (ubuntu-24.04)'), CACHE)
+        self.assertEqual((cache['job'], cache['save-if'], cache['cache-workspace-crates']), ('lint', 'true', 'false'))
+
+
+class CacheBudgetTests(unittest.TestCase):
+    def test_lint_cache_is_on_by_default_and_off_removes_the_lint_entry(self):
+        self.assertEqual(INPUTS['lint-cache']['default'], 'true')
+        on = leg(graph(lint_command='cargo clippy'), 'lint (ubuntu-24.04)')
+        off = leg(graph(lint_command='cargo clippy', lint_cache=False), 'lint (ubuntu-24.04)')
+        self.assertIsNotNone(ran(on, CACHE))
+        self.assertIsNone(ran(off, CACHE))
+        self.assertIsNotNone(ran(leg(graph(lint_command='cargo clippy', lint_cache=False), 'gate (ubuntu-24.04)'), CACHE))
 
 
 SHARDED = dict(test_shards=3, shard_command='cargo nextest run --workspace --partition "$NEXTEST_PARTITION"')
 TWO_RUNNERS = '["ubuntu-24.04","windows-latest"]'
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@' + OWN_ACTION_REV
 
 
 class ShardTests(unittest.TestCase):
@@ -559,8 +626,8 @@ class ShardTests(unittest.TestCase):
         self.assertEqual((INPUTS['test-shards']['type'], INPUTS['test-shards']['default']), ('number', '0'))
         legs = graph(os=TWO_RUNNERS, lint_command='cargo clippy')
         self.assertEqual([(job, name) for job, name, _, _ in legs], [
-            ('gate', 'gate (ubuntu-24.04)'), ('gate', 'lint (ubuntu-24.04)'),
-            ('gate', 'gate (windows-latest)'), ('gate', 'lint (windows-latest)')])
+            ('lint', 'lint (ubuntu-24.04)'), ('lint', 'lint (windows-latest)'),
+            ('gate', 'gate (ubuntu-24.04)'), ('gate', 'gate (windows-latest)')])
         for _, _, _, steps in legs:
             names = [n for n, _, _ in steps]
             for added in ('Shard environment', "Record the leg's result", "Upload the leg's result"):
@@ -569,14 +636,15 @@ class ShardTests(unittest.TestCase):
     def test_each_runner_runs_its_shards_once_lint_once_and_reports_one_gate_result(self):
         legs = graph(os=TWO_RUNNERS, lint_command='cargo clippy', warm_command='cargo test --no-run', **SHARDED)
         self.assertEqual([(job, name) for job, name, _, _ in legs], [
+            ('lint', 'lint (ubuntu-24.04)'), ('lint', 'lint (windows-latest)'),
             ('gate', 'test 1/3 (ubuntu-24.04)'), ('gate', 'test 2/3 (ubuntu-24.04)'), ('gate', 'test 3/3 (ubuntu-24.04)'),
-            ('gate', 'lint (ubuntu-24.04)'), ('gate', 'cache warm (ubuntu-24.04)'),
+            ('gate', 'cache warm (ubuntu-24.04)'),
             ('gate', 'test 1/3 (windows-latest)'), ('gate', 'test 2/3 (windows-latest)'), ('gate', 'test 3/3 (windows-latest)'),
-            ('gate', 'lint (windows-latest)'), ('gate', 'cache warm (windows-latest)'),
+            ('gate', 'cache warm (windows-latest)'),
             ('result', 'gate (ubuntu-24.04)'), ('result', 'gate (windows-latest)')])
-        # The shards are legs of the gate job, so they wait only for `select`, as the gate leg does.
-        self.assertEqual(JOBS['gate']['needs'], 'select')
-        self.assertEqual(JOBS['result']['needs'], ['select', 'gate'])
+        # Without archive-command the build job is skipped, so the shards wait only for `select`.
+        self.assertEqual(JOBS['gate']['needs'], ['select', 'build'])
+        self.assertEqual(JOBS['result']['needs'], ['select', 'build', 'gate'])
 
     def test_every_shard_restores_the_gate_entry_and_only_shard_1_saves_it(self):
         legs = graph(**SHARDED)
@@ -584,25 +652,25 @@ class ShardTests(unittest.TestCase):
             with self.subTest(shard=k):
                 steps = leg(legs, f'test {k}/3 (ubuntu-24.04)')
                 cache, _ = ran(steps, CACHE)
-                self.assertEqual((cache['job'], cache['save-if']), ('', k == 1))
-                self.assertEqual(ran(steps, 'Gate')[1]['GATE'], SHARDED['shard_command'])
+                self.assertEqual((cache['job'], cache['save-if']), ('gate', 'true' if k == 1 else 'false'))
+                self.assertEqual(ran(steps, 'Gate')[0]['command'], SHARDED['shard_command'])
                 self.assertEqual(ran(steps, 'Shard environment')[1], {'SHARD': k, 'SHARDS': 3})
                 self.assertEqual(ran(steps, "Upload the leg's result")[0]['name'], f'gate-shard-ubuntu-24.04-{k}')
-        self.assertFalse(any(ran(leg(graph(event='pull_request', ref='x', **SHARDED), f'test {k}/3 (ubuntu-24.04)'),
-                                 CACHE)[0]['save-if'] for k in (1, 2, 3)))
+        self.assertEqual({ran(leg(graph(event='pull_request', ref='x', **SHARDED), f'test {k}/3 (ubuntu-24.04)'),
+                              CACHE)[0]['save-if'] for k in (1, 2, 3)}, {'false'})
 
     def test_with_a_warm_leg_the_warm_leg_saves_and_no_shard_does(self):
         legs = graph(warm_command='cargo test --no-run', lint_command='cargo clippy', **SHARDED)
         for k in (1, 2, 3):
-            self.assertFalse(ran(leg(legs, f'test {k}/3 (ubuntu-24.04)'), CACHE)[0]['save-if'])
-        self.assertTrue(ran(leg(legs, 'cache warm (ubuntu-24.04)'), CACHE)[0]['save-if'])
+            self.assertEqual(ran(leg(legs, f'test {k}/3 (ubuntu-24.04)'), CACHE)[0]['save-if'], 'false')
+        self.assertEqual(ran(leg(legs, 'cache warm (ubuntu-24.04)'), CACHE)[0]['save-if'], 'true')
         lint, _ = ran(leg(legs, 'lint (ubuntu-24.04)'), CACHE)
-        self.assertEqual((lint['job'], lint['save-if']), ('lint', True))
+        self.assertEqual((lint['job'], lint['save-if']), ('lint', 'true'))
 
     def test_windows_shard_command_overrides_on_windows_legs_only(self):
         legs = graph(os=TWO_RUNNERS, windows_shard_command='shard.ps1', **SHARDED)
-        self.assertEqual(ran(leg(legs, 'test 1/3 (windows-latest)'), 'Gate')[1]['GATE'], 'shard.ps1')
-        self.assertEqual(ran(leg(legs, 'test 1/3 (ubuntu-24.04)'), 'Gate')[1]['GATE'], SHARDED['shard_command'])
+        self.assertEqual(ran(leg(legs, 'test 1/3 (windows-latest)'), 'Gate')[0]['command'], 'shard.ps1')
+        self.assertEqual(ran(leg(legs, 'test 1/3 (ubuntu-24.04)'), 'Gate')[0]['command'], SHARDED['shard_command'])
 
 
 class ShardInputTests(unittest.TestCase):
@@ -612,13 +680,20 @@ class ShardInputTests(unittest.TestCase):
         status, out, outputs, _ = run_script(self.STEP['run'], {'SHARDS': shards, 'SHARD': shard})
         return status, out, outputs
 
-    def test_outputs_the_shards_and_the_lint_and_warm_legs_to_leave_out(self):
+    def test_an_archive_without_shards_is_an_error(self):
+        # The select job runs for an archive-command alone, so the step can refuse it.
+        self.assertIn("inputs.archive-command != ''", JOBS['select']['if'])
+        self.assertIn("inputs.archive-command != ''", self.STEP['if'])
+        status, out, outputs = self.run_step('0')
+        self.assertEqual((status, outputs), (1, []))
+        self.assertIn('archive-command needs test-shards', out)
+
+    def test_outputs_the_shards_and_the_warm_legs_to_leave_out(self):
         status, _, outputs = self.run_step()
         self.assertEqual(status, 0)
         self.assertEqual(outputs[0], 'shards=[1,2,3]')
         self.assertEqual(json.loads(outputs[1].removeprefix('exclude=')),
-                         [{'part': 'lint', 'shard': 2}, {'part': 'warm', 'shard': 2},
-                          {'part': 'lint', 'shard': 3}, {'part': 'warm', 'shard': 3}])
+                         [{'part': 'warm', 'shard': 2}, {'part': 'warm', 'shard': 3}])
         self.assertEqual(self.run_step('1')[2], ['shards=[1]', 'exclude=[]'])
 
     def test_rejects_what_cannot_run(self):
@@ -640,12 +715,12 @@ class ShardEnvironmentTests(unittest.TestCase):
 class ResultTests(unittest.TestCase):
     STEP = next(s for s in JOBS['result']['steps'] if s.get('name') == 'Every leg passed')
 
-    def run_step(self, markers, os='ubuntu-24.04', shards='3'):
+    def run_step(self, markers, os='ubuntu-24.04', shards='3', build='false'):
         with tempfile.TemporaryDirectory() as directory:
             for marker, leg_status in markers.items():
-                Path(directory, marker).mkdir()
-                Path(directory, marker, 'status').write_text(leg_status + '\n')
-            status, out, _, _ = run_script(self.STEP['run'], {'RESULT': directory, 'OS': os, 'SHARDS': shards})
+                Path(directory, marker).write_text(leg_status + '\n')
+            status, out, _, _ = run_script(self.STEP['run'], {'RESULT': directory, 'OS': os, 'SHARDS': shards,
+                                                              'BUILD': build})
             return status, re.findall(r'::error::(.*)', out)
 
     def test_passes_when_every_shard_passed(self):
@@ -658,13 +733,366 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(self.run_step(markers), (1, ['test 2/3 (ubuntu-24.04) did not pass',
                                                       'test 3/3 (ubuntu-24.04) did not pass']))
 
+    def test_with_an_archive_the_build_job_must_have_passed_too(self):
+        shards = {f'gate-shard-ubuntu-24.04-{k}': 'success' for k in (1, 2, 3)}
+        self.assertEqual(self.run_step(shards, build='true'), (1, ['build (ubuntu-24.04) did not pass']))
+        self.assertEqual(self.run_step({**shards, 'gate-build-ubuntu-24.04': 'failure'}, build='true'),
+                         (1, ['build (ubuntu-24.04) did not pass']))
+        self.assertEqual(self.run_step({**shards, 'gate-build-ubuntu-24.04': 'success'}, build='true'), (0, []))
+
     def test_every_shard_leg_records_its_status_even_when_it_fails(self):
         for name in ("Record the leg's result", "Upload the leg's result"):
             self.assertTrue(step(name)['if'].startswith('always()'), name)
+        for s in JOBS['build']['steps']:
+            if s.get('name') in ("Record the build's result", "Upload the build's result"):
+                self.assertEqual(s['if'], 'always()')
+
+    def test_every_marker_lands_where_the_check_reads_it(self):
+        # Each marker is one file named after its leg, and the downloads merge them into one
+        # directory: with one shard, or one build, a pattern matching a single artifact would
+        # otherwise drop it into `path` without the directory named after it.
+        result = '${{ runner.temp }}/gate-result'
+        uploads = {s['with']['name']: s['with']['path'] for job in ('build', 'gate') for s in JOBS[job]['steps']
+                   if s.get('name') in ("Upload the build's result", "Upload the leg's result")}
+        self.assertEqual(uploads, {
+            'gate-build-${{ matrix.os }}': f'{result}/gate-build-${{{{ matrix.os }}}}',
+            'gate-shard-${{ matrix.os }}-${{ matrix.shard }}': f'{result}/gate-shard-${{{{ matrix.os }}}}-${{{{ matrix.shard }}}}'})
+        downloads = [s for s in JOBS['result']['steps'] if s.get('uses', '').startswith('actions/download-artifact@')]
+        self.assertEqual({s['with']['pattern'] for s in downloads},
+                         {'gate-shard-${{ matrix.os }}-*', 'gate-build-${{ matrix.os }}'})
+        for s in downloads:
+            self.assertEqual((s['with']['path'], s['with']['merge-multiple']), (result, 'true'))
+        self.assertEqual(JOBS['result']['steps'][-1]['env']['RESULT'], result)
+        self.assertIn('"$RESULT/gate-build-$OS"', self.STEP['run'])
+        self.assertIn('"$RESULT/gate-shard-$OS-$shard"', self.STEP['run'])
 
     def test_the_result_job_keeps_the_gate_check_name_and_runs_after_failures(self):
         self.assertEqual(JOBS['result']['name'], 'gate (${{ matrix.os }})')
         self.assertIn('!cancelled()', JOBS['result']['if'])
+
+
+# The gate's cache-write policy, read here rather than beside the pin guards above so the two sets of
+# tests stay independent: the approved expression, one bounded reader for its shape, and the truth
+# table that says when a run may write.
+
+# The approved cache-write condition, operator by operator: a run saves only on the default branch,
+# or on a manual dispatch whose caller opted in, and never on a pull request.
+APPROVED_CONDITION = (
+    "github.event_name != 'pull_request' && ("
+    "github.ref_name == github.event.repository.default_branch || "
+    "(inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))"
+)
+
+# event_name, ref_name, the repository's default branch, cache-save-on-dispatch -> saves the cache
+SAVE_CONDITIONS = [
+    # A pull request never saves, on the default branch or not, opted in or not.
+    ('pull_request', 'main', 'main', False, False),
+    ('pull_request', 'main', 'main', True, False),
+    ('pull_request', 'feature', 'main', False, False),
+    ('pull_request', 'feature', 'main', True, False),
+    # Pushes save on the default branch only.
+    ('push', 'main', 'main', False, True),
+    ('push', 'main', 'main', True, True),
+    ('push', 'trunk', 'trunk', False, True),
+    ('push', 'feature', 'main', False, False),
+    ('push', 'feature', 'main', True, False),
+    # A manual dispatch saves on the default branch, and on a branch only with the explicit opt-in.
+    ('workflow_dispatch', 'main', 'main', False, True),
+    ('workflow_dispatch', 'main', 'main', True, True),
+    ('workflow_dispatch', 'feature', 'main', False, False),
+    ('workflow_dispatch', 'feature', 'main', True, True),
+]
+
+TOKEN = re.compile(r"\s*(?:('[^']*')|(==|!=|<=|>=|&&|\|\||!|<|>|\(|\))|([A-Za-z_][A-Za-z0-9_.-]*)|(-?\d+))")
+
+
+def tokens(expression):
+    """The expression's tokens, so formatting is free and every other change is not."""
+    expression, found, position = expression.strip(), [], 0
+    while position < len(expression):
+        match = TOKEN.match(expression, position)
+        if match is None:
+            raise AssertionError(f'unsupported syntax in a cache condition: {expression[position:]!r}')
+        found.append(next(group for group in match.groups() if group is not None))
+        position = match.end()
+    return found
+
+
+def condition_of(values, field='cache-save'):
+    """A job's save condition (its `with` for the shared setup) as the one expression it passes."""
+    value = values[field].strip()
+    if not (value.startswith('${{') and value.endswith('}}')):
+        raise AssertionError(f'the gate save condition is not one expression: {value!r}')
+    inner = value[3:-2]
+    if '${{' in inner or '}}' in inner:
+        raise AssertionError(f'the gate save condition holds more than one expression: {value!r}')
+    return inner
+
+
+# The jobs whose setup may save the dependency cache. The gate job saves from one leg per runner
+# (the warm leg, else shard 1), so its condition is the approved one narrowed by that.
+SAVING_JOBS = ('build', 'lint', 'gate')
+WARM_ALLOWANCE = "(matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1)"
+
+
+def approved_condition(job):
+    return f'{APPROVED_CONDITION} && {WARM_ALLOWANCE}' if job == 'gate' else APPROVED_CONDITION
+
+
+def cache_condition(job):
+    return condition_of(setup(job))
+
+
+class BoundedExpression:
+    """Reads the save condition's shape only: comparisons, `!`, `&&`, `||` and parentheses over
+    identifiers and quoted strings. It is not a GitHub expression engine: anything else (a function
+    call, an unknown identifier) raises, so a rewritten condition fails loudly instead of evaluating
+    to something the table happens to accept."""
+
+    def __init__(self, expression):
+        self.tokens = tokens(expression)
+        self.position = 0
+
+    def evaluate(self, context):
+        value = self.expression(context)
+        if self.position != len(self.tokens):
+            raise AssertionError(f'unexpected {self.tokens[self.position]!r} in a cache condition')
+        return value
+
+    def peek(self):
+        return self.tokens[self.position] if self.position < len(self.tokens) else None
+
+    def take(self, expected=None):
+        found = self.peek()
+        if found is None or (expected is not None and found != expected):
+            raise AssertionError(f'expected {expected!r} in a cache condition, found {found!r}')
+        self.position += 1
+        return found
+
+    def expression(self, context):
+        value = self.conjunction(context)
+        while self.peek() == '||':
+            self.take('||')
+            value = self.conjunction(context) or value
+        return bool(value)
+
+    def conjunction(self, context):
+        value = self.unary(context)
+        while self.peek() == '&&':
+            self.take('&&')
+            value = self.unary(context) and value
+        return bool(value)
+
+    def unary(self, context):
+        if self.peek() == '!':
+            self.take('!')
+            return not self.unary(context)
+        return self.comparison(context)
+
+    def comparison(self, context):
+        left = self.operand(context)
+        if self.peek() in ('==', '!=', '<=', '>=', '<', '>'):
+            operator = self.take()
+            right = self.operand(context)
+            if operator in ('==', '!='):
+                return (left == right) == (operator == '==')
+            if not (isinstance(left, int) and isinstance(right, int)):
+                raise AssertionError(f'{operator!r} compares numbers only in a cache condition')
+            return {'<=': left <= right, '>=': left >= right, '<': left < right, '>': left > right}[operator]
+        return left
+
+    def operand(self, context):
+        found = self.peek()
+        if found == '(':
+            self.take('(')
+            value = self.expression(context)
+            self.take(')')
+            return value
+        self.take()
+        if found.startswith("'"):
+            return found[1:-1]
+        if found in ('true', 'false'):
+            return found == 'true'
+        if found.lstrip('-').isdigit():
+            return int(found)
+        if found not in context:
+            raise AssertionError(f'unknown identifier {found!r} in a cache condition')
+        return context[found]
+
+
+# The gate job's leg that saves: the warm-leg allowance holds for it.
+SAVING_LEG = {'matrix.part': 'shard', 'matrix.shard': 1, 'inputs.warm-command': ''}
+# Every kind of leg, saving or not.
+LEGS = [{'matrix.part': part, 'matrix.shard': shard, 'inputs.warm-command': warm}
+        for part in ('test', 'shard', 'warm') for shard in (0, 1, 2) for warm in ('', 'cargo test --no-run')]
+
+
+def evaluates(expression, event, ref, default_branch, optin, leg=SAVING_LEG):
+    """What the workflow engine would hand the action as the save-if input, as the action sees it."""
+    return str(BoundedExpression(expression).evaluate({
+        'github.event_name': event,
+        'github.ref_name': ref,
+        'github.event.repository.default_branch': default_branch,
+        'inputs.cache-save-on-dispatch': optin,
+        **leg,
+    })).lower()
+
+
+
+class SaveConditionTests(unittest.TestCase):
+    def test_only_the_default_branch_and_opted_in_dispatch_save(self):
+        for job in SAVING_JOBS:
+            for event, ref, default_branch, optin, saves in SAVE_CONDITIONS:
+                with self.subTest(job=job, event=event, ref=ref, default_branch=default_branch, optin=optin):
+                    self.assertEqual(evaluates(cache_condition(job), event, ref, default_branch, optin),
+                                     'true' if saves else 'false')
+
+    def test_a_pull_request_run_never_saves(self):
+        # The default-branch clause is what a rewrite can accidentally reorder, so a pull request
+        # from the default branch must restore only, with or without the dispatch opt-in.
+        for job in SAVING_JOBS:
+            for event, ref, default_branch, optin, saves in SAVE_CONDITIONS:
+                if event != 'pull_request':
+                    continue
+                for leg in LEGS:
+                    with self.subTest(job=job, ref=ref, optin=optin, leg=leg):
+                        self.assertEqual(evaluates(cache_condition(job), event, ref, default_branch, optin, leg),
+                                         'false')
+
+    def test_the_gate_job_saves_from_one_leg_per_runner(self):
+        saving = [leg for leg in LEGS if evaluates(cache_condition('gate'), 'push', 'main', 'main', False, leg) == 'true']
+        self.assertEqual(saving, [leg for leg in LEGS if leg['matrix.part'] == 'warm'
+                                  or leg['inputs.warm-command'] == '' and leg['matrix.shard'] <= 1])
+
+
+class SaveConditionShapeTests(unittest.TestCase):
+    """The reader above is the tests' instrument, so its own limits get controls."""
+
+    def test_whitespace_and_line_breaks_do_not_change_the_condition(self):
+        reformatted = APPROVED_CONDITION.replace(' && ', '\n  && ').replace('(', '( ')
+        self.assertEqual(tokens(reformatted), tokens(APPROVED_CONDITION))
+        self.assertEqual(evaluates(reformatted, 'pull_request', 'main', 'main', True), 'false')
+
+    def test_an_appended_always_true_branch_is_a_different_condition(self):
+        mutated = f'{APPROVED_CONDITION} || true'
+        self.assertNotEqual(tokens(mutated), tokens(APPROVED_CONDITION))
+        self.assertEqual(evaluates(mutated, 'pull_request', 'feature', 'main', False), 'true')
+
+    def test_unsupported_syntax_is_an_error_not_a_guess(self):
+        for expression in ('fromJSON(inputs.os)', "contains(github.ref_name, 'main')",
+                           "github.head_ref == 'main'", "github.event_name != 'pull_request' &&"):
+            with self.subTest(expression=expression):
+                with self.assertRaises(AssertionError):
+                    evaluates(expression, 'push', 'main', 'main', False)
+
+
+class GateCacheContractTests(unittest.TestCase):
+    """What the gate hands the shared action, and what the action's own script makes of it.
+
+    This is a source contract, not an Actions run: the condition is evaluated by the reader above and
+    the action's shipped policy step is executed as the caller's runner would execute it."""
+
+    ACTION = yaml.load((ROOT / 'actions/rust-cache/action.yml').read_text(), Loader=yaml.BaseLoader)
+    STEP = next(s for s in ACTION['runs']['steps'] if s.get('name') == 'Cache save policy')
+
+    def save_output(self, directory, decision):
+        output = Path(directory, 'output')
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+            cwd=directory, capture_output=True, text=True,
+            env={**os.environ, 'SAVE': decision, 'GITHUB_OUTPUT': str(output)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return output.read_text() if output.exists() else ''
+
+    def test_the_action_reads_the_condition_as_the_decision_it_is(self):
+        for job, (event, ref, default_branch, optin, saves) in (
+                (job, row) for job in SAVING_JOBS for row in SAVE_CONDITIONS):
+            decision = evaluates(cache_condition(job), event, ref, default_branch, optin)
+            with self.subTest(job=job, event=event, ref=ref, optin=optin, decision=decision):
+                # The value the workflow engine passes is already a decision; the action must not
+                # turn it into anything else, and a canonical one must never be reported as blank.
+                self.assertEqual(decision, 'true' if saves else 'false')
+                with tempfile.TemporaryDirectory() as directory:
+                    self.assertEqual(self.save_output(directory, decision), f'save={decision}\n')
+
+ARCHIVED = dict(SHARDED, archive_command='cargo xtask ci archive', lint_command='cargo clippy',
+                warm_command='cargo test --no-run')
+
+
+class ArchiveTests(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertEqual((INPUTS['archive-command']['default'], INPUTS['after-archive-command']['default']), ('', ''))
+        self.assertNotIn('build', [job for job, _, _, _ in graph(**SHARDED)])
+
+    def test_one_build_per_runner_and_no_warm_leg(self):
+        legs = graph(os=TWO_RUNNERS, **ARCHIVED)
+        self.assertEqual([(job, name) for job, name, _, _ in legs if job != 'gate'], [
+            ('build', 'build (ubuntu-24.04)'), ('build', 'build (windows-latest)'),
+            ('lint', 'lint (ubuntu-24.04)'), ('lint', 'lint (windows-latest)'),
+            ('result', 'gate (ubuntu-24.04)'), ('result', 'gate (windows-latest)')])
+        self.assertEqual([name for job, name, _, _ in legs if job == 'gate'],
+                         [f'test {k}/3 ({os})' for os in ('ubuntu-24.04', 'windows-latest') for k in (1, 2, 3)])
+
+    def test_the_build_job_builds_uploads_and_saves_the_gate_entry_on_main(self):
+        steps = leg(graph(after_archive_command='cargo test --doc', **ARCHIVED), 'build (ubuntu-24.04)')
+        names = [name for name, _, _ in steps]
+        self.assertEqual(ran(steps, 'Archive path')[1], {'FILE': '/runner/temp/nextest-archive.tar.zst'})
+        self.assertEqual(ran(steps, 'Build the test archive')[0]['command'], ARCHIVED['archive_command'])
+        # The after-archive command runs after the upload; the shards still wait for the whole job.
+        self.assertLess(names.index('Upload the test archive'), names.index('After the archive'))
+        # A re-run of the build job replaces the archive its first attempt uploaded.
+        self.assertEqual(ran(steps, 'Upload the test archive')[0]['overwrite'], 'true')
+        self.assertEqual(ran(steps, 'After the archive')[0]['command'], 'cargo test --doc')
+        self.assertEqual(ran(steps, 'Upload the test archive')[0]['name'], 'gate-archive-ubuntu-24.04')
+        self.assertEqual(ran(steps, CACHE)[0]['job'], 'gate')
+        self.assertEqual(ran(steps, CACHE)[0]['save-if'], 'true')
+        pull = leg(graph(event='pull_request', ref='x', **ARCHIVED), 'build (ubuntu-24.04)')
+        self.assertEqual(ran(pull, CACHE)[0]['save-if'], 'false')
+
+    def test_shards_download_the_archive_and_restore_no_cache(self):
+        steps = leg(graph(**ARCHIVED), 'test 2/3 (ubuntu-24.04)')
+        self.assertIsNone(ran(steps, CACHE))
+        self.assertEqual(ran(steps, 'Download the test archive')[0]['name'], 'gate-archive-ubuntu-24.04')
+        self.assertEqual(ran(steps, 'Archive path')[1], {'FILE': '/runner/temp/gate-archive/nextest-archive.tar.zst'})
+        self.assertEqual(ran(steps, 'Gate')[0]['command'], SHARDED['shard_command'])
+
+    def test_only_the_shards_wait_for_the_build(self):
+        self.assertEqual(JOBS['lint']['needs'], 'select')
+        self.assertEqual(JOBS['gate']['needs'], ['select', 'build'])
+        self.assertIn("needs.build.result != 'failure'", JOBS['gate']['if'])
+
+
+class WorkspaceCrateTests(unittest.TestCase):
+    def test_off_by_default(self):
+        self.assertEqual((INPUTS['cache-workspace-crates']['default'], INPUTS['cold-build']['default']), ('false', 'false'))
+        steps = leg(graph(**ARCHIVED), 'build (ubuntu-24.04)')
+        self.assertEqual(ran(steps, CACHE)[0]['cache-workspace-crates'], 'false')
+        self.assertIsNone(ran(steps, 'Restore mtimes'))
+        self.assertIsNone(ran(steps, 'Record the cache commit'))
+
+    def test_the_saving_leg_restores_mtimes_and_records_its_commit(self):
+        steps = leg(graph(cache_workspace_crates=True, **ARCHIVED), 'build (ubuntu-24.04)')
+        cache, _ = ran(steps, CACHE)
+        self.assertEqual((cache['cache-workspace-crates'], cache['restore'], cache['save-if']), ('true', 'true', 'true'))
+        names = [name for name, _, _ in steps]
+        self.assertLess(names.index(CACHE), names.index('Restore mtimes'))
+        self.assertEqual(ran(steps, 'Restore mtimes')[0]['mode'], 'restore')
+        self.assertLess(names.index('Build the test archive'), names.index('Record the cache commit'))
+        self.assertEqual(ran(steps, 'Record the cache commit')[0]['mode'], 'record')
+
+    def test_without_an_archive_every_building_leg_restores_mtimes(self):
+        legs = graph(cache_workspace_crates=True, **SHARDED)
+        for k in (1, 2, 3):
+            steps = leg(legs, f'test {k}/3 (ubuntu-24.04)')
+            self.assertTrue(ran(steps, 'Restore mtimes'))
+            self.assertTrue(ran(steps, 'Record the cache commit'))
+
+    def test_a_cold_build_restores_nothing_and_still_saves(self):
+        steps = leg(graph(cache_workspace_crates=True, cold_build=True, **ARCHIVED), 'build (ubuntu-24.04)')
+        cache, _ = ran(steps, CACHE)
+        self.assertEqual((cache['restore'], cache['save-if']), ('false', 'true'))
+        self.assertIsNone(ran(steps, 'Restore mtimes'))
+        self.assertTrue(ran(steps, 'Record the cache commit'))
 
 
 # The profile half of the cache key, and the rest of the key's layout, are tested where they now

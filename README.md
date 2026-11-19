@@ -557,7 +557,8 @@ succeeds. The gate legs then only restore. Without it, the gate saves at the end
 so a main whose tests fail never saves and every pull request builds cold. Pull requests never
 get the leg. Give the command the build the gate does (same features, profile and targets), since
 the entry holds what that build compiled; the leg has the same setup, environment and
-`setup-command` as the gate.
+`setup-command` as the gate. With `archive-command` the build job saves the entry and no warm leg
+runs.
 
 With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
 leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks
@@ -585,8 +586,8 @@ above.
   saves instead. The other shards only restore.
 - `lint (<os>)` and `cache warm (<os>)` still run once per runner.
 - A `gate (<os>)` job passes only when every shard of that runner passed, so required checks keep
-  their names. It waits for every leg of the gate job; the shards themselves start at once.
-- Each shard leg records its status in an artifact named after the runner label
+  their names. It waits for every shard leg; the shards themselves start at once.
+- Each shard leg records its status in an artifact and a file named after the runner label
   (`gate-shard-<os>-<k>`), so a workflow run can hold one sharded gate call per runner label. A
   re-run replaces the status of every leg it runs.
 
@@ -595,6 +596,52 @@ above.
       test-shards: 4
       shard-command: cargo nextest run --workspace --locked --profile ci --partition "$NEXTEST_PARTITION"
 ```
+
+With `archive-command` as well, each runner builds its tests once instead of once per shard:
+
+- A `build (<os>)` job runs `archive-command`, which writes a nextest archive to
+  `$NEXTEST_ARCHIVE_FILE`, and uploads it as the `gate-archive-<os>` artifact (uncompressed: the
+  archive is already zstd). Where the dependency cache saves, this job saves the `gate` entry.
+- The shard legs wait for it, download the archive, restore no cache and build nothing:
+  `shard-command` runs the tests from `$NEXTEST_ARCHIVE_FILE`
+  (`cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" ...`). The lint legs never wait for
+  the build job.
+- `after-archive-command` runs in the build job after the upload, for checks that need the build
+  directory, such as doctests. The shards wait for the whole build job, its cache save included,
+  so this command's time adds to the gate's wall time. `gate (<os>)` passes only when the build
+  job passed too.
+- `test-shards` must be set: the shards are what run the archive.
+- A failed build skips the shards of every runner in the call. Give each runner its own call to
+  keep one runner's build failure from hiding another runner's test results.
+
+```yaml
+    with:
+      test-shards: 4
+      archive-command: cargo nextest archive --workspace --locked --archive-file "$NEXTEST_ARCHIVE_FILE"
+      after-archive-command: cargo test --doc --workspace --locked
+      shard-command: cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" --workspace-remap . --partition "$NEXTEST_PARTITION"
+```
+
+With `cache-workspace-crates: true`, the dependency entry also keeps the workspace crates'
+compiled libraries and unit-test executables, so a change rebuilds only the crates it reaches:
+
+- The entry rolls: the saving leg (the build job, else the warm leg or shard 1) writes an entry of
+  its own each run (`<job>-crates-<os>-<arch>-<run id>-<attempt>`), and every leg restores the
+  newest one by its prefix. A fixed key would never be replaced, so its commit would fall ever
+  further behind.
+- After the restore, `actions/restore-mtimes` gives every tracked file an old mtime and touches
+  the files that differ from the commit the entry was built from (`.ci-cache-meta/commit`, saved
+  with the entry), so Cargo's fingerprints see exactly those as changed. The craft-fonts and
+  craft-i18n checkouts keep old mtimes while they are at the commits recorded with the entry.
+  Without a marker, or when that commit cannot be fetched, every source stays new and Cargo
+  rebuilds all workspace crates.
+- `cold-build: true` restores nothing and builds everything, and where the cache saves it writes a
+  fresh entry. Run it on a schedule as the safety net for the restored mtimes; it also starts the
+  rolling entry afresh, which drops artifacts of older toolchains and lockfiles.
+- The lint legs keep their usual entry. An app job restores the rolling entry with
+  `actions/rust-cache`'s `cache-workspace-crates: "true"`.
+- `lint-cache: false` runs the lint legs without a dependency cache (they restore and save
+  nothing), which frees about 1 GB per OS of the repository's cache budget for slower lint legs.
 
 With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
 platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
@@ -902,7 +949,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
-- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own (`<job>-crates-<os>-<arch>-<run id>-<attempt>`), since rust-cache never replaces an existing key; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
+- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing, and only an accepted `true` writes: an empty, whitespace-only or unrecognized value (for example the text of an expression rather than its value) restores only; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own (`<job>-crates-<os>-<arch>-<run id>-<attempt>`), since rust-cache never replaces an existing key; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
 
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main

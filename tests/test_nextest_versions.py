@@ -98,7 +98,13 @@ class NextestVersionTests(unittest.TestCase):
     def test_gate_default_still_reaches_the_installer_and_allows_caller_overrides(self):
         gate = self.documents[GATE]
         self.assertEqual(gate['on']['workflow_call']['inputs']['tools']['default'], PIN)
-        installers = [step for step in gate['jobs']['gate']['steps']
+        # Every gate job installs the tools through the shared setup, which passes them on.
+        for job in ('build', 'lint', 'gate'):
+            setup = next(step for step in gate['jobs'][job]['steps']
+                         if step.get('uses', '').startswith('storytold/craft-common-actions/actions/gate-setup@'))
+            self.assertEqual(setup['with']['tools'], '${{ inputs.tools }}', job)
+        action = yaml.safe_load((ROOT / 'actions/gate-setup/action.yml').read_text())
+        installers = [step for step in action['runs']['steps']
                       if step.get('uses', '').startswith('step-security/taiki-e-install-action@')]
         self.assertEqual(len(installers), 1)
         self.assertEqual(installers[0]['with']['tool'], '${{ inputs.tools }}')
