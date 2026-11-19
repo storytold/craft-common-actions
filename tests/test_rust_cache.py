@@ -19,6 +19,9 @@ GATE_STEPS = GATE['jobs']['gate']['steps']
 OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
 PINNED = re.compile(r'^[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
 CACHES = [s for s in STEPS if 'rust-cache' in s.get('uses', '')]
+# The fixed-key entry (plain and aligned), and cache-workspace-crates' rolling entry: the newest
+# entry's restore (plain and aligned) and the run's own save.
+PLAIN, ALIGNED, NEWEST, NEWEST_ALIGNED, RUN_ENTRY = CACHES
 
 
 def step(name):
@@ -43,9 +46,9 @@ class DefinitionTests(unittest.TestCase):
                     if not OWN_ACTION.match(s['uses']):
                         self.assertRegex(s['uses'], PINNED)
 
-    def test_both_cache_steps_run_the_same_pinned_action(self):
+    def test_every_cache_step_runs_the_same_pinned_action(self):
         self.assertEqual([s['uses'] for s in CACHES],
-                         ['Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0'] * 2)
+                         ['Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0'] * 5)
 
     def test_every_rust_cache_pin_is_the_actions(self):
         # StepSecurity's v2.9.1 (851174d9) prunes Cargo's new build-dir layout, its v2.9.2
@@ -63,8 +66,12 @@ class DefinitionTests(unittest.TestCase):
     def test_restore_only_unless_the_caller_saves(self):
         # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.
         self.assertEqual(INPUTS['save-if']['default'], 'false')
-        for s in CACHES:
+        for s in (PLAIN, ALIGNED):
             self.assertEqual(s['with']['save-if'], '${{ steps.save.outputs.save }}')
+        for s in (NEWEST, NEWEST_ALIGNED):
+            self.assertEqual(s['with']['save-if'], 'false')
+        self.assertEqual(RUN_ENTRY['with']['save-if'], 'true')
+        self.assertIn("steps.save.outputs.save == 'true'", RUN_ENTRY['if'])
         policy = step('Cache save policy')
         self.assertEqual(policy['env'], {'SAVE': '${{ inputs.save-if }}'})
         self.assertNotIn('${{', policy['run'])
@@ -74,42 +81,75 @@ class DefinitionTests(unittest.TestCase):
         self.assertEqual(INPUTS['cache-version']['default'], 'v2')
         for s in CACHES:
             self.assertEqual(s['with']['prefix-key'], '${{ inputs.cache-version }}-rust')
+        for s in (PLAIN, ALIGNED):
             self.assertEqual(s['with']['shared-key'], '${{ steps.entry.outputs.key }}')
         entry = step('Cache entry')
         self.assertEqual(entry['env'], {'PROFILE': '${{ steps.cache-profile.outputs.key }}',
-                                        'JOB': '${{ inputs.job || github.job }}'})
+                                        'JOB': '${{ inputs.job || github.job }}',
+                                        'CRATES': '${{ inputs.cache-workspace-crates }}',
+                                        'RUN': '${{ github.run_id }}-${{ github.run_attempt }}'})
         self.assertNotIn('${{', entry['run'])
 
     def test_a_failed_job_saves_nothing_by_default(self):
         self.assertEqual(INPUTS['cache-on-failure']['default'], 'false')
-        for s in CACHES:
+        for s in (PLAIN, ALIGNED, RUN_ENTRY):
             self.assertEqual(s['with']['cache-on-failure'], '${{ inputs.cache-on-failure }}')
 
-    def test_the_two_cache_steps_differ_only_in_cargo_home(self):
-        plain, aligned = CACHES
-        self.assertEqual(plain['if'], "inputs.align-environment != 'true'")
-        self.assertEqual(aligned['if'], "inputs.align-environment == 'true'")
-        self.assertEqual(plain['with'], aligned['with'])
-        self.assertEqual(plain.get('env'), None)
-        self.assertEqual(aligned['env'], {'CARGO_HOME': ''})
+    def test_the_aligned_cache_steps_differ_only_in_cargo_home(self):
+        for plain, aligned in ((PLAIN, ALIGNED), (NEWEST, NEWEST_ALIGNED)):
+            with self.subTest(step=plain['name']):
+                self.assertEqual(plain['if'].replace("inputs.align-environment != 'true'", ''),
+                                 aligned['if'].replace("inputs.align-environment == 'true'", ''))
+                self.assertIn("inputs.align-environment != 'true'", plain['if'])
+                self.assertEqual(plain['with'], aligned['with'])
+                self.assertEqual(plain.get('env'), None)
+                self.assertEqual(aligned['env'], {'CARGO_HOME': ''})
+
+    def test_workspace_crates_switch_from_the_fixed_entry_to_the_rolling_one(self):
+        self.assertEqual(INPUTS['cache-workspace-crates']['default'], 'false')
+        self.assertEqual(INPUTS['restore']['default'], 'true')
+        for s in (PLAIN, ALIGNED):
+            self.assertIn("inputs.cache-workspace-crates != 'true'", s['if'])
+        for s in (NEWEST, NEWEST_ALIGNED):
+            self.assertIn("inputs.cache-workspace-crates == 'true' && inputs.restore != 'false'", s['if'])
+            self.assertEqual(s['with']['shared-key'], '${{ steps.entry.outputs.crates }}')
+            # Without the environment and lockfile hashes, rust-cache's key is the restore prefix.
+            self.assertEqual(s['with']['add-rust-environment-hash-key'], 'false')
+        self.assertIn("inputs.cache-workspace-crates == 'true'", RUN_ENTRY['if'])
+        self.assertEqual(RUN_ENTRY['with']['shared-key'], '${{ steps.entry.outputs.crates-run }}')
+        self.assertEqual(RUN_ENTRY['with']['cache-workspace-crates'], 'true')
+        # The same paths, so the saved entries match the restore's cache version.
+        for s in (NEWEST, NEWEST_ALIGNED, RUN_ENTRY):
+            self.assertEqual(s['with']['cache-directories'], '.ci-cache-meta')
+            self.assertNotIn('cache-bin', s['with'])
+            self.assertNotIn('cache-targets', s['with'])
 
 
 class CacheEntryTests(unittest.TestCase):
     STEP = step('Cache entry')
 
-    def run_step(self, profile, job):
+    def run_step(self, profile, job, **extra):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'Cargo.toml').write_text('[profile.dev]\nopt-level = 1\n')
             output = Path(directory, 'output')
             result = subprocess.run(
                 ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
                 cwd=directory, capture_output=True, text=True,
-                env=environment(directory, {'PROFILE': profile, 'JOB': job, 'GITHUB_OUTPUT': str(output)}))
+                env=environment(directory, {'PROFILE': profile, 'JOB': job, 'GITHUB_OUTPUT': str(output), **extra}))
             written = output.read_text() if output.exists() else ''
             return result.returncode, written, result.stdout + result.stderr
 
     def test_names_the_profile_and_the_entry_job(self):
         self.assertEqual(self.run_step('a' * 64, 'gate'), (0, f"key={'a' * 64}-gate\n", ''))
+
+    def test_workspace_crates_name_the_rolling_entry_and_the_run_s_own(self):
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Linux', RUNNER_ARCH='X64')
+        self.assertEqual((status, written), (0, 'key=p-gate\ncrates=p-gate-crates\ncrates-run=p-gate-crates-Linux-x64-77-1\n'))
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Windows', RUNNER_ARCH='X64')
+        self.assertIn('crates-run=p-gate-crates-Windows_NT-x64-77-1\n', written)
+        status, _, out = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Plan9', RUNNER_ARCH='X64')
+        self.assertEqual(status, 1)
+        self.assertIn('::error::', out)
 
     def test_refuses_an_empty_half(self):
         # A silent miss would cost every run; an empty job id must fail the job instead.
@@ -270,6 +310,18 @@ class KeyLayoutTests(unittest.TestCase):
                             cache_key(GATE_PROFILE, 'test-without-heif', HOSTED_ENV))
         self.assertNotEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV),
                             cache_key(GATE_PROFILE, 'gate', HOSTED_ENV, prefix='v1-web-rust'))
+
+    def test_every_run_entry_starts_with_the_restore_key(self):
+        # rust-cache's restore key for the newest entry (no environment or lockfile hash) must be a
+        # prefix of each run's saved key, or the restore finds nothing; and the prefix must not
+        # reach another OS's entries or the fixed-key entry.
+        restore = f'v2-rust-{GATE_PROFILE}-gate-crates-{OS_ARCH}'
+        saved = cache_key(GATE_PROFILE, f'gate-crates-{OS_ARCH}-44460709974-1', HOSTED_ENV, prefix='v2-rust')
+        self.assertTrue(saved.startswith(restore + '-'), saved)
+        windows = cache_key(GATE_PROFILE, 'gate-crates-Windows_NT-x64-44460709974-1', HOSTED_ENV,
+                            prefix='v2-rust', os_arch='Windows_NT-x64')
+        self.assertFalse(windows.startswith(restore))
+        self.assertFalse(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV, prefix='v2-rust').startswith(restore))
 
     def test_an_exported_cargo_home_splits_the_key(self):
         self.assertNotEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV + ['CARGO_HOME=/home/runner/.cargo']),
