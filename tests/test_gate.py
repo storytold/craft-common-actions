@@ -691,8 +691,9 @@ class ShardTests(unittest.TestCase):
 class ShardInputTests(unittest.TestCase):
     STEP = next(s for s in JOBS['select']['steps'] if s.get('id') == 'shards')
 
-    def run_step(self, shards='3', shard='s'):
-        status, out, outputs, _ = run_script(self.STEP['run'], {'SHARDS': shards, 'SHARD': shard})
+    def run_step(self, shards='3', shard='s', archive='', shard_archives='false'):
+        status, out, outputs, _ = run_script(self.STEP['run'], {'SHARDS': shards, 'SHARD': shard, 'ARCHIVE': archive,
+                                                                'SHARD_ARCHIVES': shard_archives})
         return status, out, outputs
 
     def test_an_archive_without_shards_is_an_error(self):
@@ -713,7 +714,9 @@ class ShardInputTests(unittest.TestCase):
 
     def test_rejects_what_cannot_run(self):
         for case, message in ((dict(shards='2.5'), 'whole number'), (dict(shards='-1'), 'whole number'),
-                              (dict(shard=''), 'needs shard-command')):
+                              (dict(shard=''), 'needs shard-command'),
+                              (dict(shard_archives='true'), 'shard-archives needs archive-command'),
+                              (dict(shards='9', archive='a', shard_archives='true'), 'at most 8 archives')):
             with self.subTest(case=case):
                 status, out, outputs = self.run_step(**case)
                 self.assertEqual(status, 1)
@@ -1075,6 +1078,71 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(JOBS['lint']['needs'], 'select')
         self.assertEqual(JOBS['gate']['needs'], ['select', 'build'])
         self.assertIn("needs.build.result != 'failure'", JOBS['gate']['if'])
+
+
+SHARD_ARCHIVES = dict(ARCHIVED, shard_archives=True)
+
+
+class ShardArchiveTests(unittest.TestCase):
+    BUILD_STEPS = JOBS['build']['steps']
+
+    def uploads(self, steps):
+        return [w for n, w, _ in steps if n.startswith('Upload shard ')]
+
+    def test_off_by_default_every_shard_downloads_the_one_archive(self):
+        self.assertEqual((INPUTS['shard-archives']['type'], INPUTS['shard-archives']['default']), ('boolean', 'false'))
+        legs = graph(**ARCHIVED)
+        names = [name for name, _, _ in leg(legs, 'build (ubuntu-24.04)')]
+        for absent in ('Archive paths', 'Archive sizes'):
+            self.assertNotIn(absent, names)
+        self.assertEqual(self.uploads(leg(legs, 'build (ubuntu-24.04)')), [])
+        for k in (1, 2, 3):
+            steps = leg(legs, f'test {k}/3 (ubuntu-24.04)')
+            self.assertEqual(ran(steps, 'Download the test archive')[0]['name'], 'gate-archive-ubuntu-24.04')
+
+    def test_each_shard_uploads_and_downloads_only_its_own_archive(self):
+        legs = graph(os=TWO_RUNNERS, after_archive_command='cargo test --doc', **SHARD_ARCHIVES)
+        build = leg(legs, 'build (windows-latest)')
+        names = [name for name, _, _ in build]
+        for absent in ('Archive path', 'Archive size', 'Upload the test archive'):
+            self.assertNotIn(absent, names)
+        self.assertEqual(ran(build, 'Archive paths')[1],
+                         {'DIR': '/runner/temp/gate-archives', 'NAME': 'nextest-archive.tar.zst', 'SHARDS': 3})
+        uploads = self.uploads(build)
+        self.assertEqual([(u['name'], u['path']) for u in uploads],
+                         [(f'gate-archive-windows-latest-{k}', f'/runner/temp/gate-archives/{k}/nextest-archive.tar.zst')
+                          for k in (1, 2, 3)])
+        for u in uploads:
+            self.assertEqual((u['overwrite'], u['compression-level'], u['if-no-files-found']), ('true', '0', 'error'))
+        self.assertLess(names.index('Archive sizes'), names.index("Upload shard 1's test archive"))
+        self.assertLess(names.index("Upload shard 3's test archive"), names.index('After the archive'))
+        for k in (1, 2, 3):
+            steps = leg(legs, f'test {k}/3 (windows-latest)')
+            self.assertEqual(ran(steps, 'Download the test archive')[0]['name'], f'gate-archive-windows-latest-{k}')
+            self.assertEqual(ran(steps, 'Archive path')[1], {'FILE': '/runner/temp/gate-archive/nextest-archive.tar.zst'})
+
+    def test_one_upload_per_shard_up_to_the_eight_the_select_job_allows(self):
+        for n in range(1, 9):
+            with self.subTest(shards=n):
+                build = leg(graph(**dict(SHARD_ARCHIVES, test_shards=n)), 'build (ubuntu-24.04)')
+                self.assertEqual([u['name'] for u in self.uploads(build)], [f'gate-archive-ubuntu-24.04-{k}' for k in range(1, n + 1)])
+        with self.assertRaises(AssertionError):
+            graph(**dict(SHARD_ARCHIVES, test_shards=9))
+        self.assertEqual(len([s for s in self.BUILD_STEPS if s.get('name', '').startswith('Upload shard ')]), 8)
+
+    def test_the_build_fails_when_a_shard_archive_is_missing(self):
+        sizes = next(s for s in self.BUILD_STEPS if s.get('name') == 'Archive sizes')
+        with tempfile.TemporaryDirectory() as directory:
+            for k in (1, 3):
+                Path(directory, str(k)).mkdir()
+                Path(directory, str(k), 'a.tar.zst').write_text('x')
+            env = {'GATE_SHARDS': '3', 'NEXTEST_ARCHIVE_DIR': directory, 'NEXTEST_ARCHIVE_NAME': 'a.tar.zst'}
+            status, out, _, _ = run_script(sizes['run'], env)
+            self.assertEqual(status, 1)
+            self.assertEqual(re.findall(r'::error::archive-command wrote no archive for shard (\d+)', out), ['2'])
+            Path(directory, '2').mkdir()
+            Path(directory, '2', 'a.tar.zst').write_text('x')
+            self.assertEqual(run_script(sizes['run'], env)[0], 0)
 
 
 class WorkspaceCrateTests(unittest.TestCase):
