@@ -24,7 +24,7 @@ RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=
 # gate-setup, gate-run and restore-mtimes. gate-setup pins its own (tests/test_gate_setup.py).
 OWN_ACTION_REV = 'd65d611f0ef67eaa94039351be5afce61102dbb0'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@bf191401c5b42eb6ac209e953880ae948a41570a'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
