@@ -194,7 +194,7 @@ on:
         # Same default as actions/rust-cache, which explains the v2 bump.
         default: "v2"
       cache-workspace-crates:
-        description: "Keep the workspace crates' compiled libraries and unit-test executables in the dependency cache as a rolling entry: the leg that saves writes an entry of its own each run, every leg restores the newest one, and actions/restore-mtimes resets source mtimes from the diff against the commit that entry was built from, so Cargo rebuilds only what changed. The lint legs keep their usual entry"
+        description: "Keep the workspace crates' compiled libraries and unit-test executables in the dependency cache as a rolling entry: the leg that saves writes an entry of its own each run, every leg restores the newest one, and actions/restore-mtimes resets source mtimes from the diff against the commit that entry was built from, so Cargo rebuilds only what changed. A run's entry is named after the entry it restored, so of overlapping runs that restored the same entry with the same lockfile and toolchain, only the first to finish saves; when the build records its units (actions/cache-trim), the entry holds only those. The lint legs keep their usual entry"
         type: boolean
         required: false
         default: false
@@ -252,7 +252,7 @@ jobs:
           fetch-depth: 2
       - id: select
         if: inputs.select-os != '' && inputs.select-os != '[]'
-        uses: storytold/craft-common-actions/actions/select-platforms@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/select-platforms@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           os: ${{ inputs.os }}
           select-os: ${{ inputs.select-os }}
@@ -354,7 +354,7 @@ jobs:
       # Default-branch writes remain the default. Maintainers can explicitly opt manual branch runs
       # into branch-scoped writes; pull-request runs never save a cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -387,7 +387,7 @@ jobs:
         run: echo "NEXTEST_ARCHIVE_FILE=$FILE" >> "$GITHUB_ENV"
 
       - name: Build the test archive
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           command: ${{ inputs.archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -395,7 +395,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates
-        uses: storytold/craft-common-actions/actions/restore-mtimes@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/restore-mtimes@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           mode: record
 
@@ -422,10 +422,19 @@ jobs:
 
       - name: After the archive
         if: inputs.after-archive-command != ''
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           command: ${{ inputs.after-archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim). actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg
+      # that saves. A trim that stops part-way has deleted only units the build did not use, so it
+      # warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@ab35cb2622a77d004a8344095888bfcfbef10323
 
       # The `result` job reads it: the build job's result covers every runner.
       - name: Record the build's result
@@ -469,7 +478,7 @@ jobs:
       - *checkout
 
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -492,7 +501,7 @@ jobs:
           caller-setup: "false"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           command: ${{ inputs.lint-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -534,7 +543,7 @@ jobs:
       # there is one), so the shards do not race each other for it. Shards that run the build
       # job's archive build nothing and restore no cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -590,7 +599,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           command: >-
             ${{ matrix.part == 'warm' && inputs.warm-command
@@ -601,7 +610,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step, where the leg saves.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates && !(matrix.part == 'shard' && inputs.archive-command != '')
-        uses: storytold/craft-common-actions/actions/restore-mtimes@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/restore-mtimes@ab35cb2622a77d004a8344095888bfcfbef10323
         with:
           mode: record
 
@@ -619,6 +628,15 @@ jobs:
           path: ${{ inputs.artifact-path }}
           if-no-files-found: error
           retention-days: 1
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim), after the upload, which may read the target directory.
+      # actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg that saves. A trim that stops
+      # part-way has deleted only units the build did not use, so it warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@ab35cb2622a77d004a8344095888bfcfbef10323
 
       # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
       # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest

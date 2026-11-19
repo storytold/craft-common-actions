@@ -20,11 +20,11 @@ STEPS = JOBS['gate']['steps']
 SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
 SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
-# The reviewed revision of the first-party actions gate.yml calls: the commit that added
-# gate-setup, gate-run and restore-mtimes. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'd65d611f0ef67eaa94039351be5afce61102dbb0'
+# The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
+# gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
+OWN_ACTION_REV = 'ab35cb2622a77d004a8344095888bfcfbef10323'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@bf191401c5b42eb6ac209e953880ae948a41570a'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
@@ -316,8 +316,23 @@ class GateWorkflowTests(unittest.TestCase):
                 with self.subTest(job=job, uses=s['uses']):
                     self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
+    def test_a_saving_leg_trims_its_entry_after_its_last_build_command(self):
+        # The trim must follow every command that builds, and it runs only where actions/rust-cache
+        # set the unit record, which it does only in a leg that saves.
+        for job, last_build in (('build', 'After the archive'), ('gate', 'Gate')):
+            with self.subTest(job=job):
+                names = [s.get('name') for s in JOBS[job]['steps']]
+                trim = JOBS[job]['steps'][names.index('Trim the cache entry to this build')]
+                self.assertEqual(trim['if'], "env.CRAFT_CACHE_UNITS != ''")
+                # Deleting stops safely anywhere, so a failed trim must not fail the build or skip the save.
+                self.assertEqual(trim.get('continue-on-error'), 'true')
+                self.assertTrue(trim['uses'].startswith('storytold/craft-common-actions/actions/cache-trim@'))
+                self.assertGreater(names.index('Trim the cache entry to this build'), names.index(last_build))
+                later = JOBS[job]['steps'][names.index('Trim the cache entry to this build') + 1:]
+                self.assertFalse([s for s in later if 'gate-run' in s.get('uses', '')])
+
     def test_first_party_actions_share_reviewed_revision(self):
-        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes'}
+        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes', 'cache-trim'}
         actual = set()
         prefix = 'storytold/craft-common-actions/actions/'
         for _, job in JOBS.items():

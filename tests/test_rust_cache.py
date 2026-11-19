@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 import yaml
@@ -87,8 +88,7 @@ class DefinitionTests(unittest.TestCase):
         entry = step('Cache entry')
         self.assertEqual(entry['env'], {'PROFILE': '${{ steps.cache-profile.outputs.key }}',
                                         'JOB': '${{ inputs.job || github.job }}',
-                                        'CRATES': '${{ inputs.cache-workspace-crates }}',
-                                        'RUN': '${{ github.run_id }}-${{ github.run_attempt }}'})
+                                        'CRATES': '${{ inputs.cache-workspace-crates }}'})
         self.assertNotIn('${{', entry['run'])
 
     def test_a_failed_job_saves_nothing_by_default(self):
@@ -117,7 +117,12 @@ class DefinitionTests(unittest.TestCase):
             # Without the environment and lockfile hashes, rust-cache's key is the restore prefix.
             self.assertEqual(s['with']['add-rust-environment-hash-key'], 'false')
         self.assertIn("inputs.cache-workspace-crates == 'true'", RUN_ENTRY['if'])
-        self.assertEqual(RUN_ENTRY['with']['shared-key'], '${{ steps.entry.outputs.crates-run }}')
+        self.assertEqual(RUN_ENTRY['with']['shared-key'], '${{ steps.run-entry.outputs.key }}')
+        # The run's key is named after the restored entry, so the restore has to come first.
+        names = [s.get('name') for s in STEPS]
+        self.assertLess(names.index(NEWEST_ALIGNED['name']), names.index('Run entry'))
+        self.assertLess(names.index('Run entry'), names.index(RUN_ENTRY['name']))
+        self.assertEqual(step('Run entry')['if'], RUN_ENTRY['if'])
         self.assertEqual(RUN_ENTRY['with']['cache-workspace-crates'], 'true')
         # The same paths, so the saved entries match the restore's cache version.
         for s in (NEWEST, NEWEST_ALIGNED, RUN_ENTRY):
@@ -143,12 +148,12 @@ class CacheEntryTests(unittest.TestCase):
     def test_names_the_profile_and_the_entry_job(self):
         self.assertEqual(self.run_step('a' * 64, 'gate'), (0, f"key={'a' * 64}-gate\n", ''))
 
-    def test_workspace_crates_name_the_rolling_entry_and_the_run_s_own(self):
-        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Linux', RUNNER_ARCH='X64')
-        self.assertEqual((status, written), (0, 'key=p-gate\ncrates=p-gate-crates\ncrates-run=p-gate-crates-Linux-x64-77-1\n'))
-        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Windows', RUNNER_ARCH='X64')
-        self.assertIn('crates-run=p-gate-crates-Windows_NT-x64-77-1\n', written)
-        status, _, out = self.run_step('p', 'gate', CRATES='true', RUN='77-1', RUNNER_OS='Plan9', RUNNER_ARCH='X64')
+    def test_workspace_crates_name_the_rolling_entry_and_its_runner_prefix(self):
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Linux', RUNNER_ARCH='X64')
+        self.assertEqual((status, written), (0, 'key=p-gate\ncrates=p-gate-crates\ncrates-os=p-gate-crates-Linux-x64\n'))
+        status, written, _ = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Windows', RUNNER_ARCH='X64')
+        self.assertIn('crates-os=p-gate-crates-Windows_NT-x64\n', written)
+        status, _, out = self.run_step('p', 'gate', CRATES='true', RUNNER_OS='Plan9', RUNNER_ARCH='X64')
         self.assertEqual(status, 1)
         self.assertIn('::error::', out)
 
@@ -160,6 +165,70 @@ class CacheEntryTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(written, '')
                 self.assertIn('::error::', out)
+
+
+class RunEntryTests(unittest.TestCase):
+    """The run's own entry is named after the restored one, so a second child of it is refused."""
+    STEP = step('Run entry')
+
+    def run_step(self, meta, restore='true'):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, text in meta.items():
+                Path(directory, '.ci-cache-meta').mkdir(exist_ok=True)
+                Path(directory, '.ci-cache-meta', name).write_text(text)
+            output = Path(directory, 'output')
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-c', self.STEP['run']], cwd=directory, capture_output=True, text=True,
+                env={**os.environ, 'PREFIX': 'p-gate-crates-Linux-x64', 'RESTORE': restore, 'RUN_ID': '900',
+                     'RUN': '900-2', 'GITHUB_OUTPUT': str(output)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return output.read_text(), Path(directory, '.ci-cache-meta', 'entry').read_text()
+
+    def test_a_child_is_named_after_the_run_that_saved_its_parent(self):
+        self.assertEqual(self.run_step({'commit': 'abc\n', 'entry': '812\n'}), ('key=p-gate-crates-Linux-x64-812-0\n', '900\n'))
+
+    def test_nothing_restored_names_one_shared_first_entry(self):
+        self.assertEqual(self.run_step({})[0], 'key=p-gate-crates-Linux-x64-0-0\n')
+
+    def test_a_cold_build_and_an_entry_without_the_record_save_their_own(self):
+        self.assertEqual(self.run_step({}, restore='false')[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+        self.assertEqual(self.run_step({'commit': 'abc\n'})[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+        self.assertEqual(self.run_step({'commit': 'abc\n', 'entry': 'x'})[0], 'key=p-gate-crates-Linux-x64-900-2\n')
+
+    def test_a_child_key_never_equals_a_run_s_own_and_old_prunes_still_match(self):
+        # Attempts start at 1. The `<digits>-<digits>-` shape is what callers' prune jobs parse.
+        child = self.run_step({'commit': 'abc', 'entry': '812'})[0].split('=', 1)[1].strip()
+        self.assertRegex(child + '-Linux-x64-d843ffbc-3e8a8849', r'-crates-[A-Za-z_]+-[a-z0-9]+-[0-9]+-0-')
+
+
+class UnitRecordTests(unittest.TestCase):
+    STEP = step('Unit record')
+
+    def test_only_a_saving_leg_records(self):
+        self.assertEqual(self.STEP['if'], "steps.save.outputs.save == 'true'")
+        self.assertEqual(STEPS[-1], self.STEP)
+
+    def test_the_record_and_the_start_time_land_where_the_trim_reads_them(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = environment(directory, {'RUNNER_TEMP': directory, 'GITHUB_ENV': str(Path(directory, 'env'))})
+            before = int(time.time())
+            subprocess.run(['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+                           cwd=directory, env=env, check=True)
+            record = Path(directory, 'env').read_text().strip().removeprefix('CRAFT_CACHE_UNITS=')
+            self.assertEqual(Path(record).parent, Path(directory))
+            # actions/cache-trim reads `<record stem>.start`.
+            start = int(Path(record).with_suffix('.start').read_text())
+            self.assertTrue(before <= start <= time.time())
+
+    def test_the_variable_name_is_outside_the_hashed_prefixes(self):
+        # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable. Only saving
+        # legs set this one, so a hashed name would split main's key from every pull request's. (The
+        # step runs after both restores, so it cannot change this job's key; it guards the name for
+        # a later step that calls rust-cache.)
+        name = re.search(r'echo "([A-Z_]+)=', self.STEP['run']).group(1)
+        self.assertEqual(name, 'CRAFT_CACHE_UNITS')
+        self.assertEqual(cache_key(GATE_PROFILE, 'gate', HOSTED_ENV + [f'{name}=/home/runner/work/_temp/x.jsonl']),
+                         HOSTED_GATE)
 
 
 class TargetDirectoryTests(unittest.TestCase):

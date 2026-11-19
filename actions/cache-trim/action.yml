@@ -1,0 +1,18 @@
+name: "Cache trim"
+description: >-
+  Trims the Cargo target directory to the build units this job's build used, before rust-cache's
+  post step saves it. The build records them in the file actions/rust-cache names in
+  CRAFT_CACHE_UNITS (Cargo's JSON messages: `--message-format json-render-diagnostics`, or nextest's
+  `--cargo-message-format json-render-diagnostics`, with the lines that start with `{"reason":`
+  appended to the file). Every unit directory (`<profile>/build/<package>/<hash>/`) that no recorded
+  path lies in is deleted, so a saved entry holds only the current build and not older builds of
+  repinned dependencies. Without a record it changes nothing, and rust-cache trims by package name.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Trim the target directory to the recorded units
+      shell: bash
+      env:
+        TRIM: ${{ github.action_path }}/trim.py
+      run: python "$TRIM"

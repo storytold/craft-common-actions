@@ -97,7 +97,6 @@ runs:
         PROFILE: ${{ steps.cache-profile.outputs.key }}
         JOB: ${{ inputs.job || github.job }}
         CRATES: ${{ inputs.cache-workspace-crates }}
-        RUN: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         set -euo pipefail
         if [ -z "$PROFILE" ] || [ -z "$JOB" ]; then
@@ -107,7 +106,8 @@ runs:
         echo "key=$PROFILE-$JOB" >>"$GITHUB_OUTPUT"
         if [ "${CRATES:-false}" = true ]; then
           # rust-cache appends `-<os.type()>-<os.arch()>` to the shared key (src/config.ts), so a
-          # run's own entry repeats that suffix to start with the restore step's whole key.
+          # run's own entry (the Run entry step) repeats that suffix to start with the restore
+          # step's whole key.
           case "$RUNNER_OS" in
             Linux) os=Linux ;;
             Windows) os=Windows_NT ;;
@@ -120,7 +120,7 @@ runs:
             *) echo "::error::cache-workspace-crates: unknown runner architecture '$RUNNER_ARCH'"; exit 1 ;;
           esac
           echo "crates=$PROFILE-$JOB-crates" >>"$GITHUB_OUTPUT"
-          echo "crates-run=$PROFILE-$JOB-crates-$os-$arch-$RUN" >>"$GITHUB_OUTPUT"
+          echo "crates-os=$PROFILE-$JOB-crates-$os-$arch" >>"$GITHUB_OUTPUT"
         fi
 
     # rust-cache reads an *empty* save-if as `true` (it trims the input and falls back to true when
@@ -259,7 +259,7 @@ runs:
     # cache-workspace-crates: a rolling entry. rust-cache never replaces an entry whose key exists,
     # and its key changes only with the lockfile, so a fixed key would keep the first saved commit
     # until Cargo.lock changes, and the diff restore-mtimes touches would grow toward a full
-    # rebuild. Each saving run therefore writes `<job>-crates-<os>-<arch>-<run>`, and the restore
+    # rebuild. Each saving run therefore writes an entry of its own (see Run entry), and the restore
     # below leaves the environment and lockfile hashes out of its key, so rust-cache's restore key
     # is `<job>-crates-<os>-<arch>` and GitHub returns the newest entry under that prefix. Both
     # steps cache the same paths, so the saved entries match the restore's version. Toolchain and
@@ -288,16 +288,70 @@ runs:
         cache-directories: .ci-cache-meta
         save-if: "false"
 
-    # Its own key is new, so its restore finds nothing and leaves the restored files alone; its
-    # post step trims the target directory to dependencies and workspace crates and saves.
+    # The run's entry is named after the entry the restore above brought back, by the run id that
+    # entry recorded in .ci-cache-meta/entry: `<job>-crates-<os>-<arch>-<parent run>-0`. Runs that
+    # restored the same entry, with the same lockfile and toolchain, compute the same key, and GitHub
+    # refuses to save a key that exists, so a run whose restored entry already has a newer child saves
+    # nothing (rust-cache still packs the archive; the reservation then fails with one warning). Attempt 0 never names a run, so the key
+    # cannot equal a run's own. Nothing restored gives `0-0`, so concurrent first runs save once
+    # too. A cold build, or a restored entry from before the record existed, writes the run's own
+    # `<run>-<attempt>`: a cold build must always be able to start a fresh entry.
+    - name: Run entry
+      id: run-entry
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true'
+      shell: bash
+      env:
+        PREFIX: ${{ steps.entry.outputs.crates-os }}
+        RESTORE: ${{ inputs.restore }}
+        RUN_ID: ${{ github.run_id }}
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        META=.ci-cache-meta
+        parent=""
+        if [ -s "$META/entry" ]; then
+          parent=$(tr -d '[:space:]' < "$META/entry")
+        fi
+        if [ "$RESTORE" = false ]; then
+          suffix=$RUN
+        elif [[ "$parent" =~ ^[0-9]+$ ]]; then
+          suffix=$parent-0
+        elif [ -e "$META/commit" ]; then
+          suffix=$RUN
+        else
+          suffix=0-0
+        fi
+        mkdir -p "$META"
+        echo "$RUN_ID" > "$META/entry"
+        echo "key=$PREFIX-$suffix" >>"$GITHUB_OUTPUT"
+        echo "this run's entry: $PREFIX-$suffix"
+
+    # Its restore usually finds nothing and leaves the restored files alone. An overlapping run that
+    # restored the same parent may have saved this key in the seconds since the restore above: an
+    # exact match then restores that sibling's entry and the post step skips the save ("Cache
+    # up-to-date"), and a match with another lockfile hash restores it and cleans the target
+    # directory first. Either way the build stays correct. The post step trims the target directory
+    # to dependencies and workspace crates and saves.
     - name: Rust cache (this run's workspace entry)
       if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true'
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
-        shared-key: ${{ steps.entry.outputs.crates-run }}
+        shared-key: ${{ steps.run-entry.outputs.key }}
         workspaces: ${{ steps.target.outputs.workspaces }}
         cache-directories: .ci-cache-meta
         cache-workspace-crates: "true"
         save-if: "true"
         cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # A saving leg's build records the units it used in this file (Cargo's JSON messages), and
+    # actions/cache-trim trims the target directory to them before the post step saves. The name
+    # starts with none of the prefixes rust-cache hashes into its key (CARGO, CC, CFLAGS, CXX, CMAKE,
+    # RUST): a variable only saving legs set would split their key from every other leg's. The start
+    # time beside it lets the trim tell a unit this job built but did not record from a stale one.
+    - name: Unit record
+      if: steps.save.outputs.save == 'true'
+      shell: bash
+      run: |
+        date +%s >"$RUNNER_TEMP/craft-cache-units.start"
+        echo "CRAFT_CACHE_UNITS=$RUNNER_TEMP/craft-cache-units.jsonl" >>"$GITHUB_ENV"
