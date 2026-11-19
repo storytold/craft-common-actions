@@ -1,0 +1,50 @@
+name: Libtest isolation fixtures
+on:
+  pull_request:
+    paths:
+      - scripts/libtest_isolation.py
+      - tests/test_libtest_isolation.py
+      - .github/workflows/libtest-isolation-fixtures.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/libtest_isolation.py
+      - tests/test_libtest_isolation.py
+      - .github/workflows/libtest-isolation-fixtures.yml
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exercise real libtest and bounded synthetic failures
+        run: RUN_REAL_LIBTEST_FIXTURES=1 python3 -m unittest discover -s tests -p test_libtest_isolation.py -v
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare the native fixture host
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128
+        with:
+          release: '15.1'
+          usesh: 'true'
+          cpu: '4'
+          mem: '12288'
+          copyback: 'false'
+          prepare: pkg install -y python3 rust
+      - name: Exercise real libtest and bounded synthetic failures on FreeBSD
+        shell: freebsd {0}
+        run: RUN_REAL_LIBTEST_FIXTURES=1 python3 -m unittest discover -s tests -p test_libtest_isolation.py -v
