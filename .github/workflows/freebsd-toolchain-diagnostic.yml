@@ -1,0 +1,209 @@
+# Setup-only measurement; never substitutes for the application ARM gate.
+name: FreeBSD toolchain setup diagnostic
+'on':
+  workflow_dispatch: null
+permissions:
+  contents: read
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+    - name: Harden runner
+      uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+      with:
+        egress-policy: audit
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: false
+    - name: Prepare the existing aarch64 host toolchain only
+      uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128
+      with:
+        release: '15.1'
+        usesh: 'true'
+        cpu: '4'
+        mem: '12288'
+        copyback: 'false'
+        envs: ''
+        prepare: |
+          # Keep rustup/proxies outside the Cargo data cache.
+          unset CARGO_HOME CARGO_TARGET_DIR
+          # A large test crate's rustc (photocraft-ui-egui's lib tests) was SIGKILLed when the
+          # 12 GB guest ran out of memory late in a run: the image's root is ZFS with no ARC
+          # limit, so the ARC kept the target dir's pages. Cap it. (No swap file: swap on a
+          # ZFS-backed file can hang FreeBSD under memory pressure; the image has a 1 GB swap
+          # partition.) Print disk, swap and memory so the next OOM is easy to diagnose.
+          if [ "$(uname -s)" = FreeBSD ]; then
+            if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
+              sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
+            fi
+            df -h / /var/tmp || true
+            swapctl -l || true
+            sysctl -n hw.physmem || true
+          fi
+          if [ "aarch64" = aarch64 ]; then
+            # The host compiler and the aarch64 standard library come from the amd64 and
+            # aarch64 lang/rust packages, which must be the same build. "latest" can build
+            # them days apart; the quarterly branch keeps them in step.
+            mkdir -p /usr/local/etc/pkg/repos
+            printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
+            pkg update -f -q
+          fi
+          pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib dejavu
+          # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
+          # or standard library for it ("installer for platform not found"), so use
+          # FreeBSD's lang/rust package.
+          if [ "aarch64" = aarch64 ]; then
+            pkg install -y rust
+          else
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+    - name: Measure complete target toolchain setup without compiling
+      shell: freebsd {0}
+      run: |
+        date -u +%s > /var/tmp/toolchain-start-epoch
+        set -eu
+        # Stable Rust, no -Zbuild-std: the aarch64 standard library is copied from FreeBSD's
+        # aarch64 lang/rust package, and C code links with base clang and lld against an
+        # arm64 sysroot (base.txz plus the libraries the prepare step installs).
+        target=aarch64-unknown-freebsd
+        X=/var/tmp/craft-cross
+        S=$X/sysroot
+        mkdir -p "$X/db" "$X/cache" "$S"
+        release=$(freebsd-version -u | sed 's/-p[0-9]*$//')
+        P="-o ABI=FreeBSD:${release%%.*}:aarch64 -o OSVERSION=$(uname -U) -o PKG_DBDIR=$X/db -o PKG_CACHEDIR=$X/cache -o IGNORE_OSVERSION=yes"
+        pkg $P update -q
+        host=$(pkg query %v rust)
+        cross=$(pkg $P rquery %v rust)
+        if [ "$host" != "$cross" ]; then
+          echo "error: lang/rust is $host for amd64 but $cross for aarch64; the standard library must match the compiler" >&2
+          exit 1
+        fi
+        pkg $P fetch -y -q rust
+        # pkg links each name-version.pkg to its hashed file.
+        tar -xf "$X/cache/rust-$cross.pkg" -C "$X" --include "*usr/local/lib/rustlib/$target/*"
+        cp -R "$X/usr/local/lib/rustlib/$target" /usr/local/lib/rustlib/
+        base=https://download.freebsd.org/releases/arm64/aarch64/$release
+        # Bound transient network retries; never extract an unverified partial file.
+        fetch_release_file() {
+          url=$1
+          destination=$2
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if curl -fL --proto =https --proto-redir =https --connect-timeout 20 --max-time 180 \
+              -o "$destination.part" "$url"; then
+              mv "$destination.part" "$destination"
+              return 0
+            fi
+            rm -f "$destination.part"
+            if [ "$attempt" -eq 3 ]; then
+              echo "error: could not fetch $url after $attempt attempts" >&2
+              return 1
+            fi
+            sleep "$((attempt * 5))"
+            attempt=$((attempt + 1))
+          done
+        }
+        fetch_release_file "$base/MANIFEST" "$X/MANIFEST"
+        fetch_release_file "$base/base.txz" "$X/base.txz"
+        if [ "$(awk '$1 == "base.txz" { print $2 }' "$X/MANIFEST")" != "$(sha256 -q "$X/base.txz")" ]; then
+          echo "error: arm64 base.txz does not match its MANIFEST" >&2
+          exit 1
+        fi
+        tar -xf "$X/base.txz" -C "$S" ./lib ./usr/lib ./usr/include ./usr/libdata ./usr/share
+        # The libraries the prepare step installs; the build tools and fonts stay host-only.
+        # xorgproto provides xproto, renderproto, kbproto and xextproto .pc files that
+        # GTK's public dependency chain needs, but that are not runtime dependencies.
+        pkg $P fetch -y -q -d libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib xorgproto
+        for p in "$X"/cache/*.pkg; do
+          # pkg names each fetched archive with a symlink to its hashed cache file.
+          # tar follows the link; skipping links here leaves the sysroot without any ports.
+          [ -e "$p" ] || continue
+          case "$p" in */rust-*) continue ;; esac
+          tar -xf "$p" -C "$S" --exclude '+*'
+        done
+        if [ ! -f "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" ]; then
+          echo "error: aarch64 sysroot is missing gtk3's gdk-3.0.pc" >&2
+          exit 1
+        fi
+        for tool in cc c++; do
+          printf '#!/bin/sh\nexec %s --target=%s%s --sysroot=%s -fuse-ld=lld -I%s/usr/local/include -L%s/usr/local/lib -Wl,-rpath-link,%s/usr/local/lib "$@"\n' \
+            "$tool" "$target" "${release%%-*}" "$S" "$S" "$S" "$S" > "$X/$tool"
+          chmod +x "$X/$tool"
+        done
+        cat > "$X/env" <<EOF
+        export CARGO_BUILD_TARGET=$target
+        export CARGO_TARGET_AARCH64_UNKNOWN_FREEBSD_LINKER=$X/cc
+        export CC_aarch64_unknown_freebsd=$X/cc CXX_aarch64_unknown_freebsd=$X/c++ AR_aarch64_unknown_freebsd=/usr/bin/ar
+        export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_SYSROOT_DIR=$S
+        export PKG_CONFIG_PATH=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig
+        export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig
+        EOF
+        . "$X/env"
+        if [ "${CARGO_BUILD_TARGET:-}" != "$target" ]; then
+          echo "error: $X/env did not set CARGO_BUILD_TARGET=$target" >&2
+          cat "$X/env" >&2 || true
+          exit 1
+        fi
+        if ! pkg-config --exists gdk-3.0; then
+          echo "error: pkg-config cannot resolve gdk-3.0 from the aarch64 sysroot" >&2
+          ls -l "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+          sed -n '1,100p' "$S/usr/local/libdata/pkgconfig/gdk-3.0.pc" >&2
+          pkg-config --print-errors --exists gdk-3.0 || true
+          pkg-config --debug --print-errors --modversion gdk-3.0 || true
+          exit 1
+        fi
+        rustc --print target-libdir --target "$target"
+
+        date -u +%s > /var/tmp/toolchain-end-epoch
+      timeout-minutes: 20
+    - name: Record verified toolchain identity only
+      shell: freebsd {0}
+      run: |
+        set -eu
+        out="$GITHUB_WORKSPACE/toolchain-evidence"
+        mkdir -p "$out"
+        cp /var/tmp/toolchain-start-epoch /var/tmp/toolchain-end-epoch "$out/"
+        freebsd-version -ku > "$out/freebsd-version"
+        uname -m > "$out/host-architecture"
+        rustc -vV > "$out/compiler"
+        pkg query '%n-%v' | sort > "$out/host-packages"
+        sha256 -q /var/tmp/craft-cross/base.txz > "$out/base.sha256"
+        sha256 -q /var/tmp/craft-cross/MANIFEST > "$out/manifest.sha256"
+        sha256 /var/tmp/craft-cross/cache/*.pkg > "$out/target-package-digests"
+        find -s /usr/local/lib/rustlib/aarch64-unknown-freebsd -type f -exec sha256 {} + > "$out/target-stdlib-digests"
+        find -s /var/tmp/craft-cross/sysroot -type f -exec sha256 {} + > "$out/sysroot-file-digests"
+    - name: Collect enumerated phase evidence
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir toolchain-evidence
+        for name in toolchain-start-epoch toolchain-end-epoch freebsd-version host-architecture compiler host-packages base.sha256 manifest.sha256 target-package-digests target-stdlib-digests sysroot-file-digests; do
+          scp "freebsd:$GITHUB_WORKSPACE/toolchain-evidence/$name" "toolchain-evidence/$name"
+        done
+        python3 - <<'PY'
+        import hashlib, json, os
+        from pathlib import Path
+        root = Path('toolchain-evidence')
+        files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in root.iterdir() if p.is_file()}
+        evidence = {
+            'schema': 1, 'phase': 'target-toolchain-setup-only',
+            'repository': os.environ['GITHUB_REPOSITORY'],
+            'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+            'workflow_commit': os.environ['GITHUB_SHA'],
+            'target': 'aarch64-unknown-freebsd', 'requested_vm_release': '15.1',
+            'cross_setup_seconds': int((root / 'toolchain-end-epoch').read_text()) - int((root / 'toolchain-start-epoch').read_text()),
+            'evidence_sha256': files,
+            'timing_scope': 'cross_setup_seconds excludes VM boot and host package preparation; total duration is the Actions job startedAt/completedAt',
+            'not_validated': ['cross compilation', 'application tests', 'reusable artifact consumption'],
+        }
+        (root / 'provenance.json').write_text(json.dumps(evidence, indent=2) + '\n')
+        print(json.dumps(evidence, indent=2))
+        PY
+    - name: Save setup evidence, not a reusable toolchain
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: freebsd-toolchain-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+        path: toolchain-evidence/
+        if-no-files-found: error
+        retention-days: 1
