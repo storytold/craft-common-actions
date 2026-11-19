@@ -1,0 +1,35 @@
+name: FreeBSD descendant reaper fixtures
+on:
+  pull_request:
+    paths:
+      - scripts/freebsd_reaper_fixture.c
+      - tests/test_freebsd_reaper_fixture.py
+      - .github/workflows/freebsd-reaper-fixtures.yml
+permissions:
+  contents: read
+jobs:
+  freebsd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128
+        with:
+          release: '15.1'
+          usesh: 'true'
+          cpu: '4'
+          mem: '12288'
+          copyback: 'false'
+          prepare: pkg install -y python3
+      - name: Exercise trusted descendant lifecycle fixtures only
+        shell: freebsd {0}
+        run: |
+          set -eu
+          uname -a
+          cc --version
+          timeout 60s python3 -m unittest discover -s tests -p test_freebsd_reaper_fixture.py -v
