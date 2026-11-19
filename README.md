@@ -528,8 +528,10 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
-  profile) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
-- a rust-cache dependency cache saved by the default branch by default. Pull requests only
+  profile), `dev-strip: true` (no debug info and stripped symbols in the test profile, for CI test
+  builds; off by default) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
+- a rust-cache dependency cache saved by the default branch by default; give each call of the
+  workflow in one job a `cache-name` (`gate-<name>` entry) so the calls do not share one key; Pull requests only
   restore caches; callers may opt manual branch runs into branch-scoped writes with
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
   table without the wasm-only profiles (names `web` or `wasm`, with or without a `-suffix`);

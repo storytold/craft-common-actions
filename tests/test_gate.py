@@ -382,7 +382,7 @@ class CallerEnvironmentTests(unittest.TestCase):
     STEP = step('Caller environment')
 
     def run_step(self, runner_os='Linux', **inputs):
-        env = {'ALL': '', 'LINUX': '', 'WINDOWS': '', 'DEV_DEBUG': '', **inputs}
+        env = {'ALL': '', 'LINUX': '', 'WINDOWS': '', 'DEV_DEBUG': '', 'DEV_STRIP': 'false', **inputs}
         with tempfile.TemporaryDirectory() as directory:
             github_env = Path(directory, 'github_env')
             github_env.touch()
@@ -393,7 +393,7 @@ class CallerEnvironmentTests(unittest.TestCase):
             return result.returncode, github_env.read_text().splitlines()
 
     def test_the_step_reads_its_inputs_from_env(self):
-        self.assertEqual(set(self.STEP['env']), {'ALL', 'LINUX', 'WINDOWS', 'DEV_DEBUG'})
+        self.assertEqual(set(self.STEP['env']), {'ALL', 'LINUX', 'WINDOWS', 'DEV_DEBUG', 'DEV_STRIP'})
 
     def test_writes_shared_and_per_os_lines(self):
         inputs = {'ALL': 'A=1\n\nB=two words', 'LINUX': 'ONLY_LINUX=1', 'WINDOWS': 'ONLY_WINDOWS=1',
@@ -401,6 +401,10 @@ class CallerEnvironmentTests(unittest.TestCase):
         self.assertEqual(self.run_step('Linux', **inputs), (0, [
             'CARGO_PROFILE_DEV_DEBUG=line-tables-only', 'A=1', 'B=two words', 'ONLY_LINUX=1']))
         self.assertEqual(self.run_step('Windows', **inputs)[1][-1], 'ONLY_WINDOWS=1')
+
+    def test_dev_strip_sets_the_test_profile(self):
+        self.assertEqual(self.run_step(DEV_STRIP='true')[1],
+                         ['CARGO_PROFILE_TEST_DEBUG=0', 'CARGO_PROFILE_TEST_STRIP=symbols'])
 
     def test_rejects_a_line_that_is_not_key_value(self):
         for line in ('NOT AN ASSIGNMENT', '1X=1', 'X<<EOF'):
@@ -490,7 +494,7 @@ class WarmPartTests(unittest.TestCase):
         self.assertTrue(step('Gate')['env']['GATE'].startswith(
             "${{ matrix.part == 'lint' && inputs.lint-command || matrix.part == 'warm' && inputs.warm-command || "))
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))['with']
-        self.assertEqual(cache['job'], "${{ matrix.part == 'lint' && 'lint' || '' }}")
+        self.assertEqual(cache['job'], "${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}")
         self.assertIn("matrix.part == 'lint' || matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1", cache['save-if'])
         self.assertEqual(cache['cache-on-failure'], 'false')
 
@@ -516,9 +520,20 @@ class LintPartTests(unittest.TestCase):
         self.assertTrue(gate.startswith("${{ matrix.part == 'lint' && inputs.lint-command || "), gate)
         self.assertIn("matrix.part != 'lint'", step('Caller setup')['if'])
 
+    def test_cache_name_gives_each_call_its_own_entry(self):
+        cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
+        self.assertIn("inputs.cache-name != '' && format('gate-{0}', inputs.cache-name)", cache['with']['job'])
+        self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-name']['default'], '')
+
+    def test_dev_strip_is_off_by_default_and_sets_the_test_profile(self):
+        self.assertEqual(str(WORKFLOW['on']['workflow_call']['inputs']['dev-strip']['default']).lower(), 'false')
+        run = step('Caller environment')['run']
+        self.assertIn('CARGO_PROFILE_TEST_STRIP=symbols', run)
+        self.assertIn('CARGO_PROFILE_TEST_DEBUG=0', run)
+
     def test_lint_keeps_a_cache_entry_of_its_own(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
-        self.assertEqual(cache['with']['job'], "${{ matrix.part == 'lint' && 'lint' || '' }}")
+        self.assertEqual(cache['with']['job'], "${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}")
 
 
 SHARDED = dict(test_shards=3, shard_command='cargo nextest run --workspace --partition "$NEXTEST_PARTITION"')
