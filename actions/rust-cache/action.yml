@@ -39,6 +39,20 @@ inputs:
       the key. Refuses to run when CARGO_HOME points somewhere else.
     required: false
     default: "false"
+  cache-workspace-crates:
+    description: >-
+      Keep the workspace crates' compiled libraries and library unit-test executables in the entry
+      as well, in a rolling entry: a saving run writes an entry of its own, and every run restores
+      the newest one. The entry also holds .ci-cache-meta, where actions/restore-mtimes records the
+      commit it was built from; pair the two so Cargo rebuilds only what changed since then
+    required: false
+    default: "false"
+  restore:
+    description: >-
+      With cache-workspace-crates: restore the newest entry. `false` builds everything from source
+      and, where the caller saves, writes a fresh entry
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -79,6 +93,8 @@ runs:
       env:
         PROFILE: ${{ steps.cache-profile.outputs.key }}
         JOB: ${{ inputs.job || github.job }}
+        CRATES: ${{ inputs.cache-workspace-crates }}
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}
       run: |
         set -euo pipefail
         if [ -z "$PROFILE" ] || [ -z "$JOB" ]; then
@@ -86,6 +102,23 @@ runs:
           exit 1
         fi
         echo "key=$PROFILE-$JOB" >>"$GITHUB_OUTPUT"
+        if [ "${CRATES:-false}" = true ]; then
+          # rust-cache appends `-<os.type()>-<os.arch()>` to the shared key (src/config.ts), so a
+          # run's own entry repeats that suffix to start with the restore step's whole key.
+          case "$RUNNER_OS" in
+            Linux) os=Linux ;;
+            Windows) os=Windows_NT ;;
+            macOS) os=Darwin ;;
+            *) echo "::error::cache-workspace-crates: unknown runner OS '$RUNNER_OS'"; exit 1 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) arch=x64 ;;
+            ARM64) arch=arm64 ;;
+            *) echo "::error::cache-workspace-crates: unknown runner architecture '$RUNNER_ARCH'"; exit 1 ;;
+          esac
+          echo "crates=$PROFILE-$JOB-crates" >>"$GITHUB_OUTPUT"
+          echo "crates-run=$PROFILE-$JOB-crates-$os-$arch-$RUN" >>"$GITHUB_OUTPUT"
+        fi
 
     # rust-cache reads an *empty* save-if as `true`, so an empty input must become an explicit
     # `false`: this action restores unless the caller asks it to save.
@@ -169,7 +202,7 @@ runs:
     #   which uses the top-level @actions/glob instead).
     # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
-      if: inputs.align-environment != 'true'
+      if: inputs.cache-workspace-crates != 'true' && inputs.align-environment != 'true'
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
@@ -182,7 +215,7 @@ runs:
     # hash and falls back to $HOME/.cargo for the paths it caches (src/config.ts: `value &&` in the
     # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
     - name: Rust cache (aligned environment)
-      if: inputs.align-environment == 'true'
+      if: inputs.cache-workspace-crates != 'true' && inputs.align-environment == 'true'
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       env:
         CARGO_HOME: ""
@@ -191,4 +224,50 @@ runs:
         shared-key: ${{ steps.entry.outputs.key }}
         workspaces: ${{ steps.target.outputs.workspaces }}
         save-if: ${{ steps.save.outputs.save }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # cache-workspace-crates: a rolling entry. rust-cache never replaces an entry whose key exists,
+    # and its key changes only with the lockfile, so a fixed key would keep the first saved commit
+    # until Cargo.lock changes, and the diff restore-mtimes touches would grow toward a full
+    # rebuild. Each saving run therefore writes `<job>-crates-<os>-<arch>-<run>`, and the restore
+    # below leaves the environment and lockfile hashes out of its key, so rust-cache's restore key
+    # is `<job>-crates-<os>-<arch>` and GitHub returns the newest entry under that prefix. Both
+    # steps cache the same paths, so the saved entries match the restore's version. Toolchain and
+    # lockfile changes still restore the newest entry; Cargo rebuilds what they touch.
+    - name: Rust cache (newest workspace entry)
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && inputs.align-environment != 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.crates }}
+        add-rust-environment-hash-key: "false"
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        save-if: "false"
+
+    - name: Rust cache (newest workspace entry, aligned environment)
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && inputs.align-environment == 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      env:
+        CARGO_HOME: ""
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.crates }}
+        add-rust-environment-hash-key: "false"
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        save-if: "false"
+
+    # Its own key is new, so its restore finds nothing and leaves the restored files alone; its
+    # post step trims the target directory to dependencies and workspace crates and saves.
+    - name: Rust cache (this run's workspace entry)
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.crates-run }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        cache-workspace-crates: "true"
+        save-if: "true"
         cache-on-failure: ${{ inputs.cache-on-failure }}
