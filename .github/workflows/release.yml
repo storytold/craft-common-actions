@@ -872,8 +872,28 @@ jobs:
           tar -xf "$X/cache/rust-$cross.pkg" -C "$X" --include "*usr/local/lib/rustlib/$target/*"
           cp -R "$X/usr/local/lib/rustlib/$target" /usr/local/lib/rustlib/
           base=https://download.freebsd.org/releases/arm64/aarch64/$release
-          fetch -q -o "$X/MANIFEST" "$base/MANIFEST"
-          fetch -q -o "$X/base.txz" "$base/base.txz"
+          # Bound transient network retries; never extract an unverified partial file.
+          fetch_release_file() {
+            url=$1
+            destination=$2
+            attempt=1
+            while [ "$attempt" -le 3 ]; do
+              if curl -fL --proto =https --proto-redir =https --connect-timeout 20 --max-time 180 \
+                -o "$destination.part" "$url"; then
+                mv "$destination.part" "$destination"
+                return 0
+              fi
+              rm -f "$destination.part"
+              if [ "$attempt" -eq 3 ]; then
+                echo "error: could not fetch $url after $attempt attempts" >&2
+                return 1
+              fi
+              sleep "$((attempt * 5))"
+              attempt=$((attempt + 1))
+            done
+          }
+          fetch_release_file "$base/MANIFEST" "$X/MANIFEST"
+          fetch_release_file "$base/base.txz" "$X/base.txz"
           if [ "$(awk '$1 == "base.txz" { print $2 }' "$X/MANIFEST")" != "$(sha256 -q "$X/base.txz")" ]; then
             echo "error: arm64 base.txz does not match its MANIFEST" >&2
             exit 1
