@@ -15,7 +15,7 @@ WORKFLOW = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=y
 INPUTS = WORKFLOW['on']['workflow_call']['inputs']
 JOBS = WORKFLOW['jobs']
 STEPS = JOBS['gate']['steps']
-OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
+OWN_ACTION_REV = '139cccb97f9dc462b56f39ee2830718aaa782fed'
 
 
 def step(name):
@@ -265,12 +265,23 @@ def ran(steps, name):
 
 
 class GateWorkflowTests(unittest.TestCase):
-    def test_third_party_actions_are_pinned_to_a_commit(self):
+    def test_all_actions_are_pinned_to_a_commit(self):
         for job, s in all_steps():
             if 'uses' in s:
                 with self.subTest(job=job, uses=s['uses']):
-                    if not OWN_ACTION.match(s['uses']):
-                        self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+                    self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+
+    def test_first_party_actions_share_reviewed_revision(self):
+        expected = {'select-platforms', 'checkout-craft-i18n', 'install-apt-packages', 'rust-cache'}
+        actual = set()
+        prefix = 'storytold/craft-common-actions/actions/'
+        for _, item in all_steps():
+            uses = item.get('uses', '')
+            if uses.startswith(prefix):
+                name, revision = uses[len(prefix):].split('@')
+                self.assertEqual(revision, OWN_ACTION_REV)
+                actual.add(name)
+        self.assertEqual(actual, expected)
 
     def test_manual_branch_saves_require_explicit_opt_in(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
@@ -538,7 +549,7 @@ class LintPartTests(unittest.TestCase):
 
 SHARDED = dict(test_shards=3, shard_command='cargo nextest run --workspace --partition "$NEXTEST_PARTITION"')
 TWO_RUNNERS = '["ubuntu-24.04","windows-latest"]'
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@main'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@' + OWN_ACTION_REV
 
 
 class ShardTests(unittest.TestCase):

@@ -220,7 +220,7 @@ jobs:
           fetch-depth: 2
       - id: select
         if: inputs.select-os != '' && inputs.select-os != '[]'
-        uses: storytold/craft-common-actions/actions/select-platforms@main
+        uses: storytold/craft-common-actions/actions/select-platforms@139cccb97f9dc462b56f39ee2830718aaa782fed
         with:
           os: ${{ inputs.os }}
           select-os: ${{ inputs.select-os }}
@@ -339,7 +339,7 @@ jobs:
 
       # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
       - name: Check out craft-i18n
-        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@139cccb97f9dc462b56f39ee2830718aaa782fed
 
       # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
       - name: Caller environment
@@ -381,7 +381,7 @@ jobs:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux' && inputs.packages != ''
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: storytold/craft-common-actions/actions/install-apt-packages@139cccb97f9dc462b56f39ee2830718aaa782fed
         with:
           packages: ${{ inputs.packages }}
 
@@ -420,7 +420,7 @@ jobs:
       # The lint part builds in check mode, so it keeps an entry of its own (`<profile>-lint`)
       # instead of racing the test part for the `gate` entry. Shard legs restore the test part's
       # entry, and shard 1 alone saves it, so the shards do not race each other for it.
-      - uses: storytold/craft-common-actions/actions/rust-cache@main
+      - uses: storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed
         with:
           cache-version: ${{ inputs.cache-version }}
           job: ${{ matrix.part == 'lint' && 'lint' || inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || '' }}
