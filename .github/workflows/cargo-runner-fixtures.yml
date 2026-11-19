@@ -19,7 +19,10 @@ jobs:
         with:
           persist-credentials: false
       - name: Exercise Cargo runtime contract and synthetic failures
-        run: RUN_NATIVE_CARGO_FIXTURE=1 python3 -m unittest discover -s tests -p test_cargo_runner_fixture.py -v
+        run: |
+          timeout 180s rustup toolchain install 1.100.0 --profile minimal
+          export RUSTUP_TOOLCHAIN=1.100.0
+          RUN_NATIVE_CARGO_FIXTURE=1 FIXTURE_EXPECTED_RUST_VERSION=1.100.0 python3 -m unittest discover -s tests -p test_cargo_runner_fixture.py -v
   freebsd:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -38,7 +41,12 @@ jobs:
           cpu: '4'
           mem: '12288'
           copyback: 'false'
-          prepare: pkg install -y python3 rust
+          prepare: pkg install -y python3 curl
       - name: Exercise Cargo runtime contract and synthetic failures on FreeBSD
         shell: freebsd {0}
-        run: RUN_NATIVE_CARGO_FIXTURE=1 python3 -m unittest discover -s tests -p test_cargo_runner_fixture.py -v
+        run: |
+          set -eu
+          curl --proto '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 60 -fsS https://sh.rustup.rs -o /tmp/fixture-install-rustup.sh
+          timeout 180s sh /tmp/fixture-install-rustup.sh -y --profile minimal --default-toolchain 1.100.0 --no-modify-path
+          export PATH="$HOME/.cargo/bin:$PATH" RUSTUP_TOOLCHAIN=1.100.0
+          RUN_NATIVE_CARGO_FIXTURE=1 FIXTURE_EXPECTED_RUST_VERSION=1.100.0 python3 -m unittest discover -s tests -p test_cargo_runner_fixture.py -v
