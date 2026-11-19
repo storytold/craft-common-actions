@@ -617,6 +617,11 @@ problem they would have caught shows up in the next push to main, which runs eve
       select-os: '["windows-latest","macos-latest"]'
 ```
 
+Set `artifact-name` and `artifact-path` to upload outputs after the command and lockfile checks pass.
+Only the unsharded test/build leg uploads, never lint, cache-warm, or test-shard legs. Each OS uses
+`<artifact-name>-<matrix.os>`; missing files fail, retention is one day, and empty defaults do nothing.
+Callers must choose distinct names for different feature configurations or producer jobs.
+
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
 check, can be a second call with its own `command`, `os`, `tools` and `targets`, and its own

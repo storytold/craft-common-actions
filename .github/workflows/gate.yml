@@ -19,6 +19,16 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      artifact-name:
+        description: "Optional unsharded test/build output, uploaded as <artifact-name>-<matrix.os>; empty uploads nothing"
+        type: string
+        required: false
+        default: ""
+      artifact-path:
+        description: "Files or patterns to upload after the gate and lockfile checks; fails if no files match"
+        type: string
+        required: false
+        default: ""
       warm-command:
         description: "Optional build that fills the dependency cache, for example `cargo test --workspace --no-run --locked`; empty (default) runs none. Where the dependency cache saves, a `cache warm (<os>)` leg beside the gate runs it and saves the `gate` entry as soon as it succeeds, so a failing test no longer keeps the entry from being saved. Give it the build the gate does (same features, profile and targets) and nothing else; the gate legs then only restore"
         type: string
@@ -536,6 +546,16 @@ jobs:
       - name: Lockfile unchanged
         shell: bash
         run: git diff --exit-code -- Cargo.lock
+
+      # Only the unsharded test/build producer uploads: lint/warm/shard parts must not race it.
+      - name: Upload artifact
+        if: inputs.artifact-name != '' && matrix.part == 'test'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-${{ matrix.os }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: 1
 
       # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
       # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest

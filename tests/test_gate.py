@@ -294,6 +294,34 @@ class GateWorkflowTests(unittest.TestCase):
                 with self.subTest(job=job, step=s.get('name')):
                     self.assertNotIn('${{', s['run'])
 
+    def test_artifact_upload_is_opt_in_after_the_gate(self):
+        inputs = WORKFLOW['on']['workflow_call']['inputs']
+        for name in ('artifact-name', 'artifact-path'):
+            with self.subTest(input=name):
+                self.assertEqual(inputs[name]['type'], 'string')
+                self.assertEqual(inputs[name]['required'], 'false')
+                self.assertEqual(inputs[name]['default'], '')
+        upload = step('Upload artifact')
+        self.assertEqual(STEPS.index(upload), STEPS.index(step('Lockfile unchanged')) + 1)
+        self.assertEqual(upload['if'], "inputs.artifact-name != '' && matrix.part == 'test'")
+        self.assertEqual(upload['uses'],
+                         'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9')
+        self.assertEqual(upload['with'], {
+            'name': '${{ inputs.artifact-name }}-${{ matrix.os }}',
+            'path': '${{ inputs.artifact-path }}',
+            'if-no-files-found': 'error',
+            'retention-days': '1',
+        })
+
+
+    def test_artifacts_never_come_from_lint_warm_or_shards(self):
+        condition = step('Upload artifact')['if']
+        for name in ['', 'archive-default']:
+            for part in ['test', 'lint', 'warm', 'shard']:
+                with self.subTest(name=name, part=part):
+                    actual = Expression({'inputs': {'artifact-name': name}, 'matrix': {'part': part}}).evaluate(condition)
+                    self.assertEqual(bool(actual), bool(name) and part == 'test')
+
 
 class GateTimeoutTests(unittest.TestCase):
     STEP = step('Gate')
