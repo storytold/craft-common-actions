@@ -25,6 +25,22 @@ jobs:
           ref: 057297bb0b0872244ac0910e640db8d87e46572f
           path: photo
           persist-credentials: false
+      - name: Verify pinned checkout before VM transfer
+        run: |
+          test "$(git -C photo rev-parse HEAD)" = 057297bb0b0872244ac0910e640db8d87e46572f
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          names = subprocess.check_output(['git', '-C', 'photo', 'ls-files', '-z']).split(bytes([0]))
+          identity = {}
+          for raw_name in filter(None, names):
+              name = os.fsdecode(raw_name)
+              path = pathlib.Path('photo') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              identity[str(path)] = [kind, hashlib.sha256(data).hexdigest()]
+          assert identity, 'empty source inventory'
+          pathlib.Path('photo-source-identity.json').write_text(json.dumps(identity, sort_keys=True))
+          PYCODE
       - name: Prepare native FreeBSD host, without application compilation
         uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128
         with:
@@ -49,7 +65,16 @@ jobs:
           set -eu
           export PATH="$HOME/.cargo/bin:$PATH"
           cd photo
-          test "$(git rev-parse HEAD)" = 057297bb0b0872244ac0910e640db8d87e46572f
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib
+          identity = json.loads(pathlib.Path('../photo-source-identity.json').read_text())
+          for name, expected in identity.items():
+              path = pathlib.Path('..') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              assert [kind, hashlib.sha256(data).hexdigest()] == expected, name
+          print('All tracked source files match host-verified pinned checkout')
+          PYCODE
           sha256 Cargo.toml Cargo.lock
           mkdir /tmp/photo-unit-graphs
           timeout 60s cargo +nightly-2026-11-18 metadata --offline --no-deps --format-version 1 > /tmp/photo-unit-graphs/metadata.json
@@ -59,6 +84,15 @@ jobs:
             echo "ARCHITECTURE=$arch HOST=$(uname -m)"
             timeout 30s python3 ../scripts/compare_cargo_units.py "/tmp/photo-unit-graphs/$arch-baseline.json" "/tmp/photo-unit-graphs/$arch-reduced.json" /tmp/photo-unit-graphs/metadata.json
           done
-          git diff --exit-code -- Cargo.toml Cargo.lock
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib
+          identity = json.loads(pathlib.Path('../photo-source-identity.json').read_text())
+          for name, expected in identity.items():
+              path = pathlib.Path('..') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              assert [kind, hashlib.sha256(data).hexdigest()] == expected, name
+          print('Planning left all tracked source files unchanged')
+          PYCODE
           echo 'No application compilation. Default-test plan only; no doctest execution or runtime coverage assertion.'
           echo 'Nightly planner differs from production stable; equality is planned graph evidence only.'

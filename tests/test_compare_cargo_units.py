@@ -2,6 +2,10 @@ import copy
 import importlib.util
 import pathlib
 import unittest
+import subprocess
+import tempfile
+import sys
+import json
 
 spec = importlib.util.spec_from_file_location('units', pathlib.Path(__file__).parents[1] / 'scripts/compare_cargo_units.py')
 m = importlib.util.module_from_spec(spec)
@@ -57,6 +61,34 @@ class UnitGraphTests(unittest.TestCase):
         for index in [1, -1, 100, True]:
             a = graph(); a['units'][1]['dependencies'][0]['index'] = index
             with self.assertRaises(ValueError): m.inventory(a, set())
+
+
+    def test_real_git_nul_inventory_and_symlink_integrity(self):
+        workflow = (pathlib.Path(__file__).parents[1] / '.github/workflows/photo-unit-graph.yml').read_text()
+        blocks = workflow.split("<<'PYCODE'\n")[1:]
+        scripts = ['\n'.join(line[10:] for line in block.split('          PYCODE', 1)[0].splitlines()) for block in blocks]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            photo = root / 'photo'
+            photo.mkdir()
+            subprocess.run(['git', 'init', '-q', str(photo)], check=True)
+            (photo / 'first.txt').write_text('first')
+            (photo / 'second with space.txt').write_text('second')
+            (photo / 'link').symlink_to('first.txt')
+            subprocess.run(['git', '-C', str(photo), 'add', '.'], check=True)
+            subprocess.run([sys.executable, '-c', scripts[0]], cwd=root, check=True)
+            identity = json.loads((root / 'photo-source-identity.json').read_text())
+            self.assertEqual(set(identity), {'photo/first.txt', 'photo/second with space.txt', 'photo/link'})
+            self.assertEqual(identity['photo/link'][0], 'symlink')
+            subprocess.run([sys.executable, '-c', scripts[1]], cwd=photo, check=True, capture_output=True)
+            (photo / 'first.txt').write_text('changed')
+            result = subprocess.run([sys.executable, '-c', scripts[1]], cwd=photo, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            (photo / 'first.txt').write_text('first')
+            (photo / 'link').unlink()
+            (photo / 'link').symlink_to('second with space.txt')
+            result = subprocess.run([sys.executable, '-c', scripts[1]], cwd=photo, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_root_and_header_changes(self):
         a = graph(); b = graph(); b['roots'] = [0]
