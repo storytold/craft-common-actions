@@ -285,10 +285,9 @@ class GateWorkflowTests(unittest.TestCase):
 
     def test_manual_branch_saves_require_explicit_opt_in(self):
         cache = next(s for s in STEPS if 'rust-cache' in s.get('uses', ''))
-        condition = re.sub(r'\s+', ' ', cache['with']['save-if'])
-        self.assertIn("github.event_name != 'pull_request'", condition)
-        self.assertIn('github.ref_name == github.event.repository.default_branch', condition)
-        self.assertIn("inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'", condition)
+        # The approved condition token by token. Substrings were the gap: appending `|| true` to the
+        # expression keeps every one of them intact. Formatting stays free; a token does not.
+        self.assertEqual(tokens(condition_of(cache)), tokens(APPROVED_CONDITION))
         self.assertEqual(WORKFLOW['on']['workflow_call']['inputs']['cache-save-on-dispatch']['default'], 'false')
 
     def test_packages_are_optional_and_empty_installs_none(self):
@@ -665,6 +664,220 @@ class ResultTests(unittest.TestCase):
     def test_the_result_job_keeps_the_gate_check_name_and_runs_after_failures(self):
         self.assertEqual(JOBS['result']['name'], 'gate (${{ matrix.os }})')
         self.assertIn('!cancelled()', JOBS['result']['if'])
+
+
+# The gate's cache-write policy, read here rather than beside the pin guards above so the two sets of
+# tests stay independent: the approved expression, one bounded reader for its shape, and the truth
+# table that says when a run may write.
+
+# The approved cache-write condition, operator by operator: a run saves only on the default branch,
+# or on a manual dispatch whose caller opted in, and never on a pull request.
+APPROVED_CONDITION = (
+    "github.event_name != 'pull_request' && ("
+    "github.ref_name == github.event.repository.default_branch || "
+    "(inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))"
+)
+
+# event_name, ref_name, the repository's default branch, cache-save-on-dispatch -> saves the cache
+SAVE_CONDITIONS = [
+    # A pull request never saves, on the default branch or not, opted in or not.
+    ('pull_request', 'main', 'main', False, False),
+    ('pull_request', 'main', 'main', True, False),
+    ('pull_request', 'feature', 'main', False, False),
+    ('pull_request', 'feature', 'main', True, False),
+    # Pushes save on the default branch only.
+    ('push', 'main', 'main', False, True),
+    ('push', 'main', 'main', True, True),
+    ('push', 'trunk', 'trunk', False, True),
+    ('push', 'feature', 'main', False, False),
+    ('push', 'feature', 'main', True, False),
+    # A manual dispatch saves on the default branch, and on a branch only with the explicit opt-in.
+    ('workflow_dispatch', 'main', 'main', False, True),
+    ('workflow_dispatch', 'main', 'main', True, True),
+    ('workflow_dispatch', 'feature', 'main', False, False),
+    ('workflow_dispatch', 'feature', 'main', True, True),
+]
+
+TOKEN = re.compile(r"\s*(?:('[^']*')|(==|!=|&&|\|\||!|\(|\))|([A-Za-z_][A-Za-z0-9_.-]*)|(-?\d+))")
+
+
+def tokens(expression):
+    """The expression's tokens, so formatting is free and every other change is not."""
+    expression, found, position = expression.strip(), [], 0
+    while position < len(expression):
+        match = TOKEN.match(expression, position)
+        if match is None:
+            raise AssertionError(f'unsupported syntax in a cache condition: {expression[position:]!r}')
+        found.append(next(group for group in match.groups() if group is not None))
+        position = match.end()
+    return found
+
+
+def condition_of(cache_step):
+    """The gate's save-if as the one expression the action receives."""
+    value = cache_step['with']['save-if'].strip()
+    if not (value.startswith('${{') and value.endswith('}}')):
+        raise AssertionError(f'the gate save condition is not one expression: {value!r}')
+    inner = value[3:-2]
+    if '${{' in inner or '}}' in inner:
+        raise AssertionError(f'the gate save condition holds more than one expression: {value!r}')
+    return inner
+
+
+def cache_condition():
+    return condition_of(next(s for s in STEPS if 'rust-cache' in s.get('uses', '')))
+
+
+class BoundedExpression:
+    """Reads the save condition's shape only: comparisons, `!`, `&&`, `||` and parentheses over
+    identifiers and quoted strings. It is not a GitHub expression engine: anything else (a function
+    call, an unknown identifier) raises, so a rewritten condition fails loudly instead of evaluating
+    to something the table happens to accept."""
+
+    def __init__(self, expression):
+        self.tokens = tokens(expression)
+        self.position = 0
+
+    def evaluate(self, context):
+        value = self.expression(context)
+        if self.position != len(self.tokens):
+            raise AssertionError(f'unexpected {self.tokens[self.position]!r} in a cache condition')
+        return value
+
+    def peek(self):
+        return self.tokens[self.position] if self.position < len(self.tokens) else None
+
+    def take(self, expected=None):
+        found = self.peek()
+        if found is None or (expected is not None and found != expected):
+            raise AssertionError(f'expected {expected!r} in a cache condition, found {found!r}')
+        self.position += 1
+        return found
+
+    def expression(self, context):
+        value = self.conjunction(context)
+        while self.peek() == '||':
+            self.take('||')
+            value = self.conjunction(context) or value
+        return bool(value)
+
+    def conjunction(self, context):
+        value = self.unary(context)
+        while self.peek() == '&&':
+            self.take('&&')
+            value = self.unary(context) and value
+        return bool(value)
+
+    def unary(self, context):
+        if self.peek() == '!':
+            self.take('!')
+            return not self.unary(context)
+        return self.comparison(context)
+
+    def comparison(self, context):
+        left = self.operand(context)
+        if self.peek() in ('==', '!='):
+            operator = self.take()
+            right = self.operand(context)
+            return left == right if operator == '==' else left != right
+        return left
+
+    def operand(self, context):
+        found = self.peek()
+        if found == '(':
+            self.take('(')
+            value = self.expression(context)
+            self.take(')')
+            return value
+        self.take()
+        if found.startswith("'"):
+            return found[1:-1]
+        if found in ('true', 'false'):
+            return found == 'true'
+        if found.lstrip('-').isdigit():
+            return int(found)
+        if found not in context:
+            raise AssertionError(f'unknown identifier {found!r} in a cache condition')
+        return context[found]
+
+
+def evaluates(expression, event, ref, default_branch, optin):
+    """What the workflow engine would hand the action as the save-if input, as the action sees it."""
+    return str(BoundedExpression(expression).evaluate({
+        'github.event_name': event,
+        'github.ref_name': ref,
+        'github.event.repository.default_branch': default_branch,
+        'inputs.cache-save-on-dispatch': optin,
+    })).lower()
+
+
+
+class SaveConditionTests(unittest.TestCase):
+    def test_only_the_default_branch_and_opted_in_dispatch_save(self):
+        for event, ref, default_branch, optin, saves in SAVE_CONDITIONS:
+            with self.subTest(event=event, ref=ref, default_branch=default_branch, optin=optin):
+                self.assertEqual(evaluates(cache_condition(), event, ref, default_branch, optin),
+                                 'true' if saves else 'false')
+
+    def test_a_pull_request_run_never_saves(self):
+        # The default-branch clause is what a rewrite can accidentally reorder, so a pull request
+        # from the default branch must restore only, with or without the dispatch opt-in.
+        for event, ref, default_branch, optin, saves in SAVE_CONDITIONS:
+            if event != 'pull_request':
+                continue
+            with self.subTest(ref=ref, optin=optin):
+                self.assertEqual(evaluates(cache_condition(), event, ref, default_branch, optin), 'false')
+
+
+class SaveConditionShapeTests(unittest.TestCase):
+    """The reader above is the tests' instrument, so its own limits get controls."""
+
+    def test_whitespace_and_line_breaks_do_not_change_the_condition(self):
+        reformatted = APPROVED_CONDITION.replace(' && ', '\n  && ').replace('(', '( ')
+        self.assertEqual(tokens(reformatted), tokens(APPROVED_CONDITION))
+        self.assertEqual(evaluates(reformatted, 'pull_request', 'main', 'main', True), 'false')
+
+    def test_an_appended_always_true_branch_is_a_different_condition(self):
+        mutated = f'{APPROVED_CONDITION} || true'
+        self.assertNotEqual(tokens(mutated), tokens(APPROVED_CONDITION))
+        self.assertEqual(evaluates(mutated, 'pull_request', 'feature', 'main', False), 'true')
+
+    def test_unsupported_syntax_is_an_error_not_a_guess(self):
+        for expression in ('fromJSON(inputs.os)', "contains(github.ref_name, 'main')",
+                           "github.head_ref == 'main'", "github.event_name != 'pull_request' &&"):
+            with self.subTest(expression=expression):
+                with self.assertRaises(AssertionError):
+                    evaluates(expression, 'push', 'main', 'main', False)
+
+
+class GateCacheContractTests(unittest.TestCase):
+    """What the gate hands the shared action, and what the action's own script makes of it.
+
+    This is a source contract, not an Actions run: the condition is evaluated by the reader above and
+    the action's shipped policy step is executed as the caller's runner would execute it."""
+
+    ACTION = yaml.load((ROOT / 'actions/rust-cache/action.yml').read_text(), Loader=yaml.BaseLoader)
+    STEP = next(s for s in ACTION['runs']['steps'] if s.get('name') == 'Cache save policy')
+
+    def save_output(self, directory, decision):
+        output = Path(directory, 'output')
+        result = subprocess.run(
+            ['bash', '--noprofile', '--norc', '-euo', 'pipefail', '-c', self.STEP['run']],
+            cwd=directory, capture_output=True, text=True,
+            env={**os.environ, 'SAVE': decision, 'GITHUB_OUTPUT': str(output)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return output.read_text() if output.exists() else ''
+
+    def test_the_action_reads_the_condition_as_the_decision_it_is(self):
+        condition = cache_condition()
+        for event, ref, default_branch, optin, saves in SAVE_CONDITIONS:
+            decision = evaluates(condition, event, ref, default_branch, optin)
+            with self.subTest(event=event, ref=ref, optin=optin, decision=decision):
+                # The value the workflow engine passes is already a decision; the action must not
+                # turn it into anything else, and a canonical one must never be reported as blank.
+                self.assertEqual(decision, 'true' if saves else 'false')
+                with tempfile.TemporaryDirectory() as directory:
+                    self.assertEqual(self.save_output(directory, decision), f'save={decision}\n')
 
 
 # The profile half of the cache key, and the rest of the key's layout, are tested where they now
