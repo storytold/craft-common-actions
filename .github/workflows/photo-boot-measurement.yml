@@ -1,14 +1,14 @@
-name: Photo FreeBSD geometry measurement
+name: Photo FreeBSD browser bootstrap measurement
 on:
   pull_request:
     paths:
-      - .github/workflows/photo-geom-measurement.yml
+      - .github/workflows/photo-boot-measurement.yml
       - scripts/compare_cargo_unit_closure.py
       - tests/test_compare_cargo_unit_closure.py
 permissions:
   contents: read
 jobs:
-  geometry:
+  bootstrap:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -61,7 +61,7 @@ jobs:
           "$HOME/.cargo/bin/rustc" +nightly-2026-11-18 -Vv
           timeout 180s "$HOME/.cargo/bin/rustup" toolchain install 1.100.0 --profile minimal
           "$HOME/.cargo/bin/rustc" +1.100.0 -Vv
-      - name: Verify planned closure, then measure only native geometry
+      - name: Verify planned closure, then measure only native browser bootstrap
         shell: freebsd {0}
         run: |
           set -eu
@@ -81,29 +81,44 @@ jobs:
           mkdir /tmp/photo-unit-graphs
           timeout 60s cargo +nightly-2026-11-18 metadata --offline --no-deps --format-version 1 > /tmp/photo-unit-graphs/metadata.json
           timeout 120s cargo +nightly-2026-11-18 test --locked --workspace --features heif --target x86_64-unknown-freebsd --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/full.json
-          timeout 120s cargo +nightly-2026-11-18 test --locked -p photocraft-geom --lib --target x86_64-unknown-freebsd --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/isolated.json
-          timeout 30s python3 ../scripts/compare_cargo_unit_closure.py /tmp/photo-unit-graphs/full.json /tmp/photo-unit-graphs/isolated.json /tmp/photo-unit-graphs/metadata.json
-          echo 'Stable compile begins: geometry only; not the full application'
-          /usr/bin/time -l timeout 420s cargo +1.100.0 test --locked -p photocraft-geom --lib --target x86_64-unknown-freebsd --no-run --jobs 2 --message-format=json > /tmp/photo-geom-artifacts.jsonl
-          cat /tmp/photo-geom-artifacts.jsonl
+          timeout 120s cargo +nightly-2026-11-18 test --locked --workspace --features heif --bin photocraft-web-boot --target x86_64-unknown-freebsd --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/isolated.json
+          timeout 30s python3 ../scripts/compare_cargo_unit_closure.py /tmp/photo-unit-graphs/full.json /tmp/photo-unit-graphs/isolated.json /tmp/photo-unit-graphs/metadata.json photocraft-web-boot bin
+          echo 'Stable compile begins: browser bootstrap only; not the full application'
+          /usr/bin/time -l timeout 420s cargo +1.100.0 test --locked --workspace --features heif --bin photocraft-web-boot --target x86_64-unknown-freebsd --no-run --jobs 2 --message-format=json > /tmp/photo-boot-artifacts.jsonl
+          cat /tmp/photo-boot-artifacts.jsonl
           python3 - <<'PYCODE'
           import json, pathlib
           metadata = json.loads(pathlib.Path('/tmp/photo-unit-graphs/metadata.json').read_text())
-          package_ids = [p['id'] for p in metadata['packages'] if p['name'] == 'photocraft-geom']
+          package_ids = [p['id'] for p in metadata['packages'] if p['name'] == 'photocraft-web-boot']
           assert len(package_ids) == 1
-          artifacts = [json.loads(line) for line in pathlib.Path('/tmp/photo-geom-artifacts.jsonl').read_text().splitlines()]
+          artifacts = [json.loads(line) for line in pathlib.Path('/tmp/photo-boot-artifacts.jsonl').read_text().splitlines()]
           executables = [a['executable'] for a in artifacts if a.get('reason') == 'compiler-artifact'
                          and a.get('package_id') == package_ids[0] and a.get('profile', {}).get('test')
-                         and a.get('target', {}).get('kind') == ['lib'] and a.get('executable')]
+                         and a.get('target', {}).get('kind') == ['bin'] and a.get('executable')]
           assert len(executables) == 1, executables
           executable = pathlib.Path(executables[0])
           assert executable.is_file()
-          pathlib.Path('/tmp/photo-geom-executable').write_text(str(executable))
+          pathlib.Path('/tmp/photo-boot-executable').write_text(str(executable))
           PYCODE
-          executable="$(cat /tmp/photo-geom-executable)"
+          executable="$(cat /tmp/photo-boot-executable)"
           sha256 "$executable"
-          timeout 30s "$executable" --list --format pretty --color never
-          /usr/bin/time -l timeout 60s "$executable" --test-threads=1 --format pretty --color never
+          timeout 30s "$executable" --list --format pretty --color never > /tmp/photo-boot-list.txt
+          cat /tmp/photo-boot-list.txt
+          /usr/bin/time -l timeout 60s "$executable" --test-threads=1 --format pretty --color never > /tmp/photo-boot-result.txt
+          cat /tmp/photo-boot-result.txt
+          python3 - <<'PYCODE'
+          import pathlib, re
+          listed = pathlib.Path('/tmp/photo-boot-list.txt').read_text()
+          result = pathlib.Path('/tmp/photo-boot-result.txt').read_text()
+          totals = re.findall(r'(?m)^(\d+) tests?, (\d+) benchmarks?$', listed)
+          outcomes = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out;', result)
+          assert len(totals) == len(outcomes) == 1, 'missing or ambiguous libtest summary'
+          total, benches = map(int, totals[0])
+          passed, failed, ignored, measured, filtered = map(int, outcomes[0])
+          assert total > 0 and passed > 0 and total == passed + ignored
+          assert not (benches or failed or measured or filtered)
+          print(f'Validated nonzero native bootstrap coverage: {passed} passed, {ignored} ignored')
+          PYCODE
           python3 - <<'PYCODE'
           import hashlib, json, os, pathlib
           identity = json.loads(pathlib.Path('../photo-source-identity.json').read_text())
@@ -114,5 +129,5 @@ jobs:
               assert [kind, hashlib.sha256(data).hexdigest()] == expected, name
           print('Planning left all tracked source files unchanged')
           PYCODE
-          echo 'Only geometry libtest compiled/executed. No UI, application, doctest or full-gate coverage claim.'
-          echo 'Nightly closure equality is planned evidence only; stable measurement is limited to geometry.'
+          echo 'Only browser-bootstrap binary libtest compiled/executed. No UI, application, doctest or full-gate coverage claim.'
+          echo 'Nightly closure equality is planned evidence only; stable measurement is limited to browser bootstrap.'

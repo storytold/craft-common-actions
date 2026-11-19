@@ -8,12 +8,14 @@ import sys
 from compare_cargo_units import canonical, compare, read_json
 
 
-def closure(graph, package_id):
+def closure(graph, package_id, kind='lib'):
+    if kind not in ('lib', 'bin'):
+        raise ValueError('unsupported target kind')
     units = graph['units']
     if any(type(i) is not int or not 0 <= i < len(units) for i in graph['roots']):
         raise ValueError('invalid root index')
     roots = [i for i in graph['roots'] if units[i]['pkg_id'] == package_id
-             and units[i]['mode'] == 'test' and units[i]['target']['kind'] == ['lib']]
+             and units[i]['mode'] == 'test' and units[i]['target']['kind'] == [kind]]
     if len(roots) != 1:
         raise ValueError('expected exactly one matching libtest root')
     reached, pending = set(), list(roots)
@@ -36,10 +38,10 @@ def closure(graph, package_id):
     return result
 
 
-def compare_closure(full, isolated, package_id):
-    expected = closure(full, package_id)
+def compare_closure(full, isolated, package_id, kind='lib'):
+    expected = closure(full, package_id, kind)
     # The isolated invocation must itself contain only that one root/closure.
-    actual = closure(isolated, package_id)
+    actual = closure(isolated, package_id, kind)
     if len(isolated['roots']) != 1 or len(actual['units']) != len(isolated['units']):
         raise ValueError('isolated graph contains unexpected roots or unused units')
     result, _, _ = compare(expected, isolated, set())
@@ -50,12 +52,13 @@ def compare_closure(full, isolated, package_id):
 
 def main():
     full, isolated, metadata = map(read_json, sys.argv[1:4])
-    matches = [p['id'] for p in metadata['packages'] if p['name'] == 'photocraft-geom']
+    package, kind = sys.argv[4:6]
+    matches = [p['id'] for p in metadata['packages'] if p['name'] == package]
     if len(matches) != 1:
-        raise ValueError('missing or ambiguous geometry package')
-    result = compare_closure(full, isolated, matches[0])
+        raise ValueError('missing or ambiguous package')
+    result = compare_closure(full, isolated, matches[0], kind)
     print(canonical({'package': matches[0], 'planned_closure': result}))
-    print('Nightly closure only; subsequent stable compilation measures geometry, not full gate.')
+    print('Nightly closure only; subsequent stable compilation measures one target, not full gate.')
 
 
 if __name__ == '__main__':
