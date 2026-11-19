@@ -520,6 +520,11 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
 - an optional `setup-command` run from the repository root before the gate, for fetching pinned
   test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
+- with `cache-paths` and `cache-key`, those paths restored before `setup-command` and saved after
+  it where the dependency cache saves, as one entry for every OS. Put the pins of what the setup
+  fetches in `cache-key` (`psd-corpus-<commit>`), or keep them in a file and name it in
+  `cache-key-files` (its hash joins the key), and let the setup skip a fetch whose files are
+  already there;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
@@ -527,7 +532,9 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - a rust-cache dependency cache saved by the default branch by default. Pull requests only
   restore caches; callers may opt manual branch runs into branch-scoped writes with
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
-  table; dependency, version and comment edits do not discard reusable dependency artifacts.
+  table without the wasm-only profiles (names `web` or `wasm`, with or without a `-suffix`);
+  dependency, version, comment and web-profile edits do not discard reusable dependency
+  artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
   Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
 - with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
@@ -541,9 +548,79 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
   `env` sets the cache's version instead;
 
-Set `artifact-name` and `artifact-path` to upload build outputs after the gate command succeeds.
-Each leg uploads the matching files as `<artifact-name>-<matrix.os>` and fails if no files match.
-Both inputs default to empty strings; an empty `artifact-name` skips uploading.
+With `warm-command`, a default-branch run (or an opted-in manual run) adds a `cache warm (<os>)`
+leg per runner beside the gate leg. It runs only that command, for example
+`cargo test --workspace --no-run --locked`, and saves the `gate` dependency entry as soon as it
+succeeds. The gate legs then only restore. Without it, the gate saves at the end of a green run,
+so a main whose tests fail never saves and every pull request builds cold. Pull requests never
+get the leg. Give the command the build the gate does (same features, profile and targets), since
+the entry holds what that build compiled; the leg has the same setup, environment and
+`setup-command` as the gate.
+
+With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
+leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks
+that need no test build), and keeps a rust-cache entry of its own, since a check build's
+dependencies are not the test build's. Clippy then runs beside the test build instead of before
+it. Empty (the default) runs no lint legs, and the test legs keep their names:
+
+```yaml
+    with:
+      lint-command: |
+        cargo fmt --check
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+      command: cargo nextest run --workspace --locked --profile ci
+```
+
+With `test-shards: N` (N > 0), each runner runs its tests as N legs, `test <k>/<N> (<os>)`, in
+place of its `gate (<os>)` leg. The default, 0, runs one `gate (<os>)` leg per runner as described
+above.
+
+- Each shard leg has the gate leg's full setup, restores the gate's Rust cache entry, and runs
+  `shard-command` (`windows-shard-command` on Windows), which builds and runs its share of the
+  tests. The gate sets `GATE_SHARD` (1 to N), `GATE_SHARDS` (N) and `NEXTEST_PARTITION`
+  (`hash:<GATE_SHARD>/<GATE_SHARDS>`) for it.
+- Shard 1 saves the cache by the gate leg's rules; with `warm-command` the `cache warm (<os>)` leg
+  saves instead. The other shards only restore.
+- `lint (<os>)` and `cache warm (<os>)` still run once per runner.
+- A `gate (<os>)` job passes only when every shard of that runner passed, so required checks keep
+  their names. It waits for every leg of the gate job; the shards themselves start at once.
+- Each shard leg records its status in an artifact named after the runner label
+  (`gate-shard-<os>-<k>`), so a workflow run can hold one sharded gate call per runner label. A
+  re-run replaces the status of every leg it runs.
+
+```yaml
+    with:
+      test-shards: 4
+      shard-command: cargo nextest run --workspace --locked --profile ci --partition "$NEXTEST_PARTITION"
+```
+
+With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
+platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
+(`actions/select-platforms`) compares the merge commit with its first parent and runs every leg
+when a changed file is
+
+- in a workspace crate whose `.rs` files or `Cargo.toml` hold a `cfg` naming `windows`, `unix`,
+  `target_os`, `target_vendor` or a `windows`/`unix` `target_family` (or a crate in
+  `select-crates`), or in any crate that depends on one (`cargo metadata --no-deps`);
+- part of the build setup (`.github/`, `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain`,
+  `.cargo/`, `.config/`) or matches `select-paths`;
+- outside every workspace crate and not documentation (`*.md`, `docs/`, `LICENSE*`).
+
+A pull request labelled `select-label` (`full-ci` by default) runs every leg. The label is read
+when the run starts: after adding it, push or re-run from a new event (a manual run of the
+branch) to get the other legs. Legs that are not selected don't appear in the checks; a platform
+problem they would have caught shows up in the next push to main, which runs every leg.
+
+```yaml
+    with:
+      os: '["ubuntu-latest","windows-latest","macos-latest"]'
+      select-os: '["windows-latest","macos-latest"]'
+```
+
+Set `artifact-name` and `artifact-path` to upload outputs after the command and lockfile checks pass.
+Only the unsharded test/build leg uploads, never lint, cache-warm, or test-shard legs. Each OS uses
+`<artifact-name>-<matrix.os>`; missing files fail, retention is one day, and empty defaults do nothing.
+Callers must choose distinct names for different feature configurations or producer jobs.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -828,10 +905,11 @@ Individual actions are also available for composing custom pipelines:
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main
     with:
-      cache-version: v1 # Match the gate call; bump both together.
+      cache-version: v2 # Match the gate call; bump both together.
       job: gate
       align-environment: true
   ```
+- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
@@ -1030,7 +1108,7 @@ restore each other's caches. Do not pass the input until this workflow change ha
 workspace restores the gate leg's entry with the same action rather than copying the formula. Name
 the producing job (`job: gate`); the action forms the entire profile-and-job fragment, and rust-cache
 adds no further job id to that shared key. Pass the same `cache-version` literal as the gate call
-(`v1` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
+(`v2` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
 the job installs Rust with an action that
 exports `CARGO_HOME`. rust-cache hashes every `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*` and
 `RUST*` variable it can see, and the exported `CARGO_HOME` is not part of the build, so an unaligned

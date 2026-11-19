@@ -17,7 +17,7 @@ STEPS = ACTION['runs']['steps']
 GATE = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=yaml.BaseLoader)
 GATE_STEPS = GATE['jobs']['gate']['steps']
 OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
-PINNED = re.compile(r'^[a-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
+PINNED = re.compile(r'^[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
 CACHES = [s for s in STEPS if 'rust-cache' in s.get('uses', '')]
 
 
@@ -45,7 +45,20 @@ class DefinitionTests(unittest.TestCase):
 
     def test_both_cache_steps_run_the_same_pinned_action(self):
         self.assertEqual([s['uses'] for s in CACHES],
-                         ['step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e'] * 2)
+                         ['Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0'] * 2)
+
+    def test_every_rust_cache_pin_is_the_actions(self):
+        # StepSecurity's v2.9.1 (851174d9) prunes Cargo's new build-dir layout, its v2.9.2
+        # (8871c8ba) matches no cache path on Windows (#249); v2.9.3 has both fixes.
+        pinned = CACHES[0]['uses']
+        files = sorted((ROOT / '.github/workflows').glob('*.yml')) + sorted((ROOT / 'actions').glob('*/action.yml'))
+        uses = [(path.relative_to(ROOT), line.strip()) for path in files
+                for line in path.read_text().splitlines() if re.search(r'uses: [^ ]*/rust-cache@', line)
+                and 'craft-common-actions/actions/rust-cache@' not in line]
+        self.assertTrue(uses)
+        for path, line in uses:
+            with self.subTest(path=str(path), line=line):
+                self.assertIn(f'uses: {pinned} # v2.9.3', line)
 
     def test_restore_only_unless_the_caller_saves(self):
         # rust-cache reads an empty save-if as "true", so the action must never pass one through empty.
@@ -58,7 +71,7 @@ class DefinitionTests(unittest.TestCase):
 
     def test_the_key_names_one_job_and_the_gate_cache_version(self):
         self.assertEqual(INPUTS['job']['default'], '')
-        self.assertEqual(INPUTS['cache-version']['default'], 'v1')
+        self.assertEqual(INPUTS['cache-version']['default'], 'v2')
         for s in CACHES:
             self.assertEqual(s['with']['prefix-key'], '${{ inputs.cache-version }}-rust')
             self.assertEqual(s['with']['shared-key'], '${{ steps.entry.outputs.key }}')
@@ -187,6 +200,19 @@ class ProfileKeyTests(unittest.TestCase):
         self.assertNotEqual(self.key('[profile.dev.package.foo]\nopt-level = 1'),
                             self.key('[profile.dev.package.foo]\nopt-level = 2'))
 
+    def test_wasm_only_profiles_do_not_invalidate(self):
+        native = '[profile.dev]\nopt-level = 1\n'
+        for name in ('web', 'web-release', 'wasm-release'):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.key(native + f'[profile.{name}]\nlto = "thin"\n[profile.{name}.package.foo]\nopt-level = 1\n'),
+                    self.key(native + f'[profile.{name}]\nlto = "fat"\n'))
+                self.assertEqual(self.key(native + f'[profile.{name}]\nlto = "fat"\n'), self.key(native))
+
+    def test_native_profiles_with_similar_names_invalidate(self):
+        self.assertNotEqual(self.key('[profile.webkit]\nopt-level = 1'), self.key('[profile.webkit]\nopt-level = 2'))
+        self.assertNotEqual(self.key('[profile.dist]\nlto = "thin"'), self.key('[profile.dist]\nlto = "fat"'))
+
     def test_order_and_comments_do_not_invalidate(self):
         self.assertEqual(self.key('[profile.dev]\ndebug = false\nopt-level = 1'),
                          self.key('# comment\n[profile.dev]\nopt-level = 1\ndebug = false'))
@@ -203,8 +229,9 @@ class ProfileKeyTests(unittest.TestCase):
         self.assertNotEqual(profiles_only, whole_file)
 
 
-# rust-cache's key, as src/config.ts at 8871c8b builds it: prefix, the shared-key fragment, the OS
-# and architecture, then the environment and the lockfile hashes.
+# rust-cache's key, as src/config.ts at d1527c8 (v2.9.3; that file is StepSecurity's 8871c8b's apart
+# from one log level) builds it: prefix, the shared-key fragment, the OS and architecture, then the
+# environment and the lockfile hashes.
 OS_ARCH = 'Linux-x64'
 RUST = '1.99.1 x86_64-unknown-linux-gnu 58cf8f9c35b355199727627d07ae34a4e2846d67'
 HOSTED_ENV = ['CARGO_INCREMENTAL=0', 'CARGO_NET_RETRY=10', 'CARGO_TERM_COLOR=always', 'RUST_BACKTRACE=1']
@@ -349,7 +376,7 @@ class GateTests(unittest.TestCase):
     def test_no_second_copy_of_the_key_remains(self):
         for s in GATE_STEPS:
             with self.subTest(step=s.get('name')):
-                self.assertNotIn('step-security/rust-cache', s.get('uses', ''))
+                self.assertNotRegex(s.get('uses', ''), r'^[^/]+/rust-cache@')
         self.assertNotIn('Cache profile key', [s.get('name') for s in GATE_STEPS])
 
 

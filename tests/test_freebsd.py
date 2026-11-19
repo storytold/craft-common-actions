@@ -30,7 +30,7 @@ PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Bu
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
                skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False,
-               cross_env=None, root=False, build_extra_args="", test_extra_args=""):
+               cross_env=None, root=False, build_extra_args="", test_extra_args="", build_jobs="4"):
         if cross_env is None:
             cross_env = arch == "aarch64"
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
@@ -39,6 +39,7 @@ class FreeBSDRunTests(unittest.TestCase):
             "skip-tests": str(skip_tests).lower(),
             "run-package-check": str(package_check).lower(),
             "require-craft-fonts": str(require_fonts).lower(),
+            "build-jobs": build_jobs,
             "cargo-build-extra-args": build_extra_args,
             "cargo-test-extra-args": test_extra_args,
         })
@@ -70,6 +71,7 @@ set -eu
 printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$*" >> "$PWD/cargo.log"
 python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> "$PWD/args.jsonl"
 printf '%s\\n' "${CARGO_BUILD_TARGET-}" >> "$PWD/target.log"
+printf '%s\\n' "$CARGO_BUILD_JOBS" >> "$PWD/jobs.log"
 if [ "$1" = build ]; then
   [ "$FAIL_BUILD" = false ] || exit 31
 else
@@ -101,6 +103,7 @@ fi
                 path.write_text("""#!/bin/bash
 set -euo pipefail
 touch package-ran
+printf '%s\\n' "$CARGO_BUILD_JOBS" >> "$PWD/jobs.log"
 printf 'package|%s|%s|%s\\n' "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" package >> "$PWD/package.log"
 case "$PACKAGE_MODE" in
   failed) exit 43 ;;
@@ -150,9 +153,18 @@ fi
             remaining = [p.parent.name for p in (work / "guest/craft-target").glob("*/partial")]
             args_log = work / "args.jsonl"
             args = [json.loads(line) for line in args_log.read_text().splitlines()] if args_log.exists() else []
-            outcome = dict(admin=admin, work=str(work), targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
+            jobs = (work / "jobs.log").read_text().splitlines() if (work / "jobs.log").exists() else []
+            outcome = dict(jobs=jobs, admin=admin, work=str(work), targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
                            log=log, args=args, injected=(work / "injected").exists(), output=result.stdout + result.stderr)
             return outcome
+
+    def test_build_test_and_package_share_the_requested_compilation_limit(self):
+        for jobs in ("1", "4"):
+            with self.subTest(jobs=jobs):
+                result = self.run_vm(build_jobs=jobs, root=True)
+                self.assertEqual(result["code"], 0, result)
+                self.assertEqual(result["jobs"], [jobs, jobs, jobs])
+                self.assertTrue(result["packaged"])
 
     def test_extra_args_preserve_quotes_escapes_and_empty_values(self):
         value = '--features "feature one"\n\t-p path\\ with\\ spaces --config \'say "hi"\' ""'

@@ -1,15 +1,18 @@
 name: "Rust cache"
 description: >-
   The suite's rust-cache dependency cache, with one key shared by every job that builds the same
-  workspace. The restore prefix hashes the canonical root [profile] table (a dependency, version or
-  comment edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
+  workspace. The restore prefix hashes the canonical root [profile] table without the wasm-only
+  profiles, named web or wasm (a dependency, version, comment or web-profile edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
   toolchain and build environment. Restores by default and saves only where the caller allows it.
 
 inputs:
   cache-version:
     description: "gate.yml's cache-version: bump it to start the dependency cache afresh"
     required: false
-    default: "v1"
+    # v2: the entries saved under v1 lost most dependencies to the old cleanup (see the Rust cache
+    # step), and rust-cache never replaces an exact-key entry, so they would be restored as they
+    # are until the lockfile changes. The new prefix makes the next default-branch run save a full one.
+    default: "v2"
   job:
     description: >-
       The job whose cache entry to use; the calling job by default. Name the job that saves the
@@ -40,8 +43,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # Root workspace profiles are not among rust-cache's member manifests. Hash only those profiles
-    # here: a dependency/version/comment change must not discard the fallback cache for every other
+    # Root workspace profiles are not among rust-cache's member manifests. Hash only the native
+    # ones here: a dependency/version/comment change must not discard the fallback cache for every other
     # dependency. rust-cache still hashes the lockfile, toolchain, member manifests and build
     # environment, and Cargo checks fingerprints.
     - name: Cache profile key
@@ -52,10 +55,16 @@ runs:
         import hashlib
         import json
         import os
+        import re
         import tomllib
         from pathlib import Path
+        # A profile named web or wasm (web, web-release, wasm-release) builds only for a wasm
+        # target, so editing it cannot change a native build's dependency artifacts.
+        wasm_only = re.compile(r"(web|wasm)([-_].*)?")
         manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-        profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
+        native = {name: table for name, table in manifest.get("profile", {}).items()
+                  if not wasm_only.fullmatch(name)}
+        profiles = json.dumps(native, sort_keys=True, separators=(",", ":"))
         key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             output.write(f"key={key}\n")
@@ -150,9 +159,18 @@ runs:
           exit 1
         fi
 
+    # v2.9.3 is the first release with both fixes the suite needs:
+    # - Cargo's new build-dir layout (`build/<package>/<hash>/`, Rust 1.100) keeps its directories.
+    #   Older cleanups cut every name at its last `-` as if it ended in `-<hash>`, so `build/cfg-if`
+    #   became `cfg` and was deleted: each saved entry lost most dependencies (Swatinem#371).
+    # - Windows saves find their paths. A bundled minimatch 3 whose `require('path')` throws in the
+    #   ES-module build fell back to `/` as the separator, and every Windows save failed with
+    #   "Path Validation Error" (#249: step-security's v2.9.2 fork has #371 but not Swatinem#355,
+    #   which uses the top-level @actions/glob instead).
+    # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
       if: inputs.align-environment != 'true'
-      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
@@ -165,7 +183,7 @@ runs:
     # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
     - name: Rust cache (aligned environment)
       if: inputs.align-environment == 'true'
-      uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e # v2.9.2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       env:
         CARGO_HOME: ""
       with:
