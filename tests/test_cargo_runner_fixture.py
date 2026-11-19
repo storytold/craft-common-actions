@@ -122,7 +122,12 @@ assert_eq!(ACTIVE.fetch_sub(1,Ordering::SeqCst),1); }
                     return data
             version=run(['rustc','-vV'])
             print(version, end='')
-            print(run(['cargo','-Vv']), end='')
+            cargo_version=run(['cargo','-Vv'])
+            print(cargo_version, end='')
+            expected=os.environ.get('FIXTURE_EXPECTED_RUST_VERSION')
+            if expected:
+                self.assertEqual(version.splitlines()[0].split()[1],expected)
+                self.assertEqual(cargo_version.splitlines()[0].split()[1],expected)
             host=next(line.split(': ',1)[1] for line in version.splitlines() if line.startswith('host: '))
             self.assertTrue(host.endswith(('unknown-freebsd','unknown-linux-gnu')),host)
             output=run(['cargo','test','--workspace','--lib','--tests','--offline','--no-run','--message-format=json'])
