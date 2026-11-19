@@ -15,7 +15,6 @@ ACTION = yaml.load((ROOT / 'actions/rust-cache/action.yml').read_text(), Loader=
 INPUTS = ACTION['inputs']
 STEPS = ACTION['runs']['steps']
 GATE = yaml.load((ROOT / '.github/workflows/gate.yml').read_text(), Loader=yaml.BaseLoader)
-GATE_STEPS = GATE['jobs']['gate']['steps']
 OWN_ACTION = re.compile(r'^storytold/craft-common-actions/actions/[a-z0-9-]+@main$')
 PINNED = re.compile(r'^[A-Za-z0-9-]+/[A-Za-z0-9._-]+@[0-9a-f]{40}$')
 CACHES = [s for s in STEPS if 'rust-cache' in s.get('uses', '')]
@@ -457,42 +456,28 @@ class AlignEnvironmentTests(unittest.TestCase):
 
 
 class GateTests(unittest.TestCase):
+    """gate.yml's side of the key. gate-setup's call of this action: tests/test_gate_setup.py."""
+
     def test_fixed_gate_environment_is_part_of_the_restore_contract(self):
         # Callers can add build variables through env/dev-debug. Photo opts out of the debug
         # override; changing this shared fixed part still splits its restore from the gate.
+        for job in ('build', 'lint'):
+            self.assertEqual(GATE['jobs'][job]['env'], GATE['jobs']['gate']['env'], job)
         fixed = GATE['jobs']['gate']['env']
         hashed = {name: value for name, value in fixed.items()
                   if name.startswith(('CARGO', 'CC', 'CFLAGS', 'CXX', 'CMAKE', 'RUST'))}
         self.assertEqual(hashed, {'CARGO_TERM_COLOR': 'always', 'CARGO_INCREMENTAL': '0',
                                   'CARGO_NET_RETRY': '10', 'RUST_BACKTRACE': '1'})
-        install = next(s for s in GATE_STEPS if s.get('name') == 'Install Rust')
-        # Replacing rustup with an action that exports CARGO_HOME needs a cache-contract review.
-        self.assertNotIn('GITHUB_ENV', install['run'])
-
-    def test_setup_shell_steps_do_not_add_cargo_home_to_the_key(self):
-        cache = next(i for i, s in enumerate(GATE_STEPS)
-                     if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed')
-        for setup in GATE_STEPS[:cache]:
-            # Conservative source guard, not shell data-flow analysis. An opaque setup action
-            # still needs a hosted key comparison; callers' generic env input remains supported.
-            self.assertNotIn('CARGO_HOME', setup.get('run', ''), setup.get('name', setup.get('uses')))
 
     def test_gate_and_action_cache_version_defaults_agree(self):
         default = GATE['on']['workflow_call']['inputs']['cache-version']['default']
         self.assertEqual(default, INPUTS['cache-version']['default'])
 
-    def test_the_gate_restores_through_the_action(self):
-        calls = [s for s in GATE_STEPS
-                 if s.get('uses') == 'storytold/craft-common-actions/actions/rust-cache@139cccb97f9dc462b56f39ee2830718aaa782fed']
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]['with']['cache-version'], '${{ inputs.cache-version }}')
-        self.assertEqual(calls[0]['with']['cache-on-failure'], 'false')
-
-    def test_no_second_copy_of_the_key_remains(self):
-        for s in GATE_STEPS:
-            with self.subTest(step=s.get('name')):
-                self.assertNotRegex(s.get('uses', ''), r'^[^/]+/rust-cache@')
-        self.assertNotIn('Cache profile key', [s.get('name') for s in GATE_STEPS])
+    def test_no_gate_job_keys_the_cache_itself(self):
+        for name, job in GATE['jobs'].items():
+            for s in job['steps']:
+                with self.subTest(job=name, step=s.get('name')):
+                    self.assertNotRegex(s.get('uses', ''), r'/rust-cache@')
 
 
 if __name__ == '__main__':
