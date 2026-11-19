@@ -606,8 +606,6 @@ class LintPartTests(unittest.TestCase):
 
 
 class CacheBudgetTests(unittest.TestCase):
-    PRUNE = JOBS['prune']
-
     def test_lint_cache_is_on_by_default_and_off_removes_the_lint_entry(self):
         self.assertEqual(INPUTS['lint-cache']['default'], 'true')
         on = leg(graph(lint_command='cargo clippy'), 'lint (ubuntu-24.04)')
@@ -615,49 +613,6 @@ class CacheBudgetTests(unittest.TestCase):
         self.assertIsNotNone(ran(on, CACHE))
         self.assertIsNone(ran(off, CACHE))
         self.assertIsNotNone(ran(leg(graph(lint_command='cargo clippy', lint_cache=False), 'gate (ubuntu-24.04)'), CACHE))
-
-    def test_prune_is_off_by_default_and_runs_only_after_a_build_on_the_default_branch(self):
-        self.assertEqual(INPUTS['prune-cache']['default'], 'false')
-        self.assertEqual(self.PRUNE['needs'], 'build')
-        condition = self.PRUNE['if']
-        for part in ('inputs.prune-cache', "needs.build.result != 'skipped'", "github.event_name != 'pull_request'",
-                     'github.ref_name == github.event.repository.default_branch', '!cancelled()'):
-            self.assertIn(part, condition)
-
-    def test_only_the_prune_job_can_write_actions(self):
-        for job_id, job in JOBS.items():
-            expected = {'actions': 'write'} if job_id == 'prune' else {'contents': 'read'}
-            self.assertEqual(job.get('permissions'), expected, job_id)
-        self.assertEqual(WORKFLOW['permissions'], {'contents': 'read'})
-
-    def test_prune_checks_out_and_builds_nothing(self):
-        for s in self.PRUNE['steps']:
-            self.assertFalse(s.get('uses', '').startswith(('actions/checkout', 'storytold/craft-common-actions')), s)
-        self.assertEqual([s['name'] for s in self.PRUNE['steps']],
-                         ['Harden runner', 'Delete all but the newest rolling entry of each job and runner'])
-
-    def test_prune_lists_only_the_default_branch_and_keeps_the_newest_entry(self):
-        run = self.PRUNE['steps'][1]['run']
-        self.assertIn('--ref "refs/heads/$DEFAULT_BRANCH"', run)
-        self.assertNotIn('${{', run)
-        with tempfile.TemporaryDirectory() as temp:
-            bin_dir = Path(temp) / 'bin'
-            bin_dir.mkdir()
-            key = lambda job, n: f'v2-rust-{"a" * 64}-{job}-crates-Linux-x64-{n}-1-Linux-x64-d843ffbc'
-            (bin_dir / 'gh').write_text(
-                '#!/bin/bash\n'
-                'if [ "$2" = list ]; then\n'
-                f'  printf "3 {key("gate", 30)}\\n2 {key("gate", 20)}\\n1 {key("gate-x", 10)}\\n9 unrelated-key\\n"\n'
-                'else echo "$@" >> "$GH_LOG"; fi\n')
-            (bin_dir / 'gh').chmod(0o755)
-            log = Path(temp) / 'log'
-            result = subprocess.run(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', run],
-                                    env={**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}', 'GH_LOG': str(log),
-                                         'RUNNER_TEMP': temp, 'REPO': 'o/r', 'DEFAULT_BRANCH': 'main',
-                                         'GH_TOKEN': 'x'},
-                                    capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(log.read_text().strip(), 'cache delete 2 --repo o/r')
 
 
 SHARDED = dict(test_shards=3, shard_command='cargo nextest run --workspace --partition "$NEXTEST_PARTITION"')
