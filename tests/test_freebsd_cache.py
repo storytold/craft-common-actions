@@ -102,7 +102,7 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                     {"FIXTURE_PACKAGES": "gtk3-2\nrust-1\n"}, {"FIXTURE_FREEBSD": "15.0-RELEASE"},
                     {"CACHE_CONFIGURATION": '{"features":"","fonts":"abc"}'},
                     {"CACHE_CONFIGURATION": '{"features":"heif","fonts":"def"}'},
-                    {"CACHE_SOURCE_HASH": "different-lock-or-build-script"}, {"CACHE_PROFILE": "release"}):
+                    {"CACHE_SOURCE_HASH": "different-lock-or-build-script"}, {"CACHE_PROFILE": "release"}, {"CACHE_TARGET": "aarch64-unknown-freebsd"}):
             with self.subTest(env=env):
                 self.assertNotEqual(first["prefix"], self.identity(**env)["prefix"])
         updated = self.identity(GITHUB_SHA="commit2")
@@ -122,9 +122,23 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         for env in ({"FIXTURE_COMPILER": "rustc 1.98.1"}, {"FIXTURE_ARCH": "aarch64"},
                     {"FIXTURE_PACKAGES": "gtk3-2\nrust-1\n"}, {"FIXTURE_FREEBSD": "15.0-RELEASE"},
                     {"CACHE_CONFIGURATION": '{"features":"heif","fonts":"def"}'},
-                    {"CACHE_PROFILE": "release"}):
+                    {"CACHE_PROFILE": "release"}, {"CACHE_TARGET": "aarch64-unknown-freebsd"}):
             with self.subTest(env=env):
                 self.assertNotEqual(first["fallback-prefix"], self.identity(**env)["fallback-prefix"])
+
+    def test_cross_target_keys_cannot_restore_native_or_other_targets(self):
+        native = self.identity()
+        arm = self.identity(CACHE_TARGET="aarch64-unknown-freebsd")
+        other = self.identity(CACHE_TARGET="riscv64-unknown-freebsd")
+        self.assertEqual(len({item["fallback-prefix"] for item in (native, arm, other)}), 3)
+        identity_step = next(step for step in ACTION["runs"]["steps"] if step.get("id") == "identity")
+        self.assertEqual(identity_step["env"]["CACHE_TARGET"], "${{ inputs.target }}")
+        # Empty target retains the exact pre-change native compatibility bytes.
+        legacy = IDENTITY.replace('"$profile_identity" | sha256sum', '"$CACHE_PROFILE" | sha256sum')
+        result = self.run_script(legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = dict(line.split("=", 1) for line in (self.root / "outputs").read_text().splitlines())
+        self.assertEqual(outputs, native)
 
     def test_the_key_carries_the_day_before_the_revision(self):
         key = self.identity()["key"]
@@ -371,6 +385,8 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 self.assertLess(steps.index(build), steps.index(save))
                 self.assertNotIn("always()", save["if"])
                 for cache_step in cache_steps:
+                    self.assertEqual(cache_step["with"]["target"],
+                                     "${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}")
                     self.assertEqual(cache_step.get("continue-on-error"), "true")
                     self.assertEqual(cache_step.get("timeout-minutes"), "10")
                 self.assertIn("steps.cargo-cache.outputs.key != ''", save["if"])
