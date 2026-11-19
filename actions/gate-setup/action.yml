@@ -1,0 +1,307 @@
+name: "Gate setup"
+description: >-
+  The setup every leg of gate.yml runs after its checkout: craft-fonts and craft-i18n, the caller's
+  environment, Linux packages, the Rust toolchain and cargo tools, the dependency cache (and
+  restore-mtimes with cache-workspace-crates), sccache, and the caller's setup command with its
+  cache. Each gate job passes the gate's inputs through and says which parts it needs.
+
+inputs:
+  craft-fonts-ref:
+    description: "gate.yml's craft-fonts-ref; empty builds without craft-fonts"
+    required: false
+    default: ""
+  require-craft-fonts:
+    description: "gate.yml's require-craft-fonts"
+    required: false
+    default: "true"
+  env:
+    description: "gate.yml's env"
+    required: false
+    default: ""
+  linux-env:
+    description: "gate.yml's linux-env"
+    required: false
+    default: ""
+  windows-env:
+    description: "gate.yml's windows-env"
+    required: false
+    default: ""
+  dev-debug:
+    description: "gate.yml's dev-debug"
+    required: false
+    default: ""
+  dev-strip:
+    description: "gate.yml's dev-strip"
+    required: false
+    default: "false"
+  free-disk-space:
+    description: "gate.yml's free-disk-space"
+    required: false
+    default: "true"
+  packages:
+    description: "gate.yml's packages"
+    required: false
+    default: ""
+  toolchain:
+    description: "gate.yml's toolchain"
+    required: false
+    default: "stable"
+  targets:
+    description: "gate.yml's targets"
+    required: false
+    default: ""
+  tools:
+    description: "gate.yml's tools"
+    required: false
+    default: ""
+  rust-cache:
+    description: "Restore the dependency cache (`false` for a leg that builds nothing)"
+    required: false
+    default: "true"
+  cache-version:
+    description: "gate.yml's cache-version"
+    required: false
+    default: "v2"
+  cache-job:
+    description: "The dependency-cache entry the leg uses (actions/rust-cache's `job`)"
+    required: true
+  cache-save:
+    description: "Whether this leg saves the dependency cache (true/false)"
+    required: false
+    default: "false"
+  cache-workspace-crates:
+    description: "gate.yml's cache-workspace-crates, for this leg (true/false)"
+    required: false
+    default: "false"
+  cold-build:
+    description: "gate.yml's cold-build"
+    required: false
+    default: "false"
+  sccache:
+    description: "gate.yml's sccache"
+    required: false
+    default: "false"
+  writes:
+    description: "Whether this run writes caches: pushes to the default branch and opted-in manual runs (true/false)"
+    required: false
+    default: "false"
+  caller-setup:
+    description: "Run the caller's setup-command and its cache (`false` for the lint legs)"
+    required: false
+    default: "true"
+  cache-paths:
+    description: "gate.yml's cache-paths"
+    required: false
+    default: ""
+  cache-key:
+    description: "gate.yml's cache-key"
+    required: false
+    default: ""
+  cache-key-files:
+    description: "gate.yml's cache-key-files"
+    required: false
+    default: ""
+  setup-command:
+    description: "gate.yml's setup-command"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  # The first-party actions below are pinned to one reviewed revision, the commit that added
+  # rust-cache's cache-workspace-crates and restore-mtimes: a commit cannot name itself.
+  steps:
+    - name: Check out craft-fonts
+      if: inputs.craft-fonts-ref != ''
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        repository: storytold/craft-fonts
+        ref: ${{ inputs.craft-fonts-ref }}
+        path: craft-fonts
+        persist-credentials: false
+
+    - name: Build with craft-fonts
+      if: inputs.craft-fonts-ref != ''
+      shell: bash
+      env:
+        CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+        REQUIRED: ${{ inputs.require-craft-fonts }}
+      run: |
+        echo "CRAFT_FONTS_DIR=$CRAFT_FONTS_DIR" >> "$GITHUB_ENV"
+        if [ "$REQUIRED" = true ]; then echo "CRAFT_FONTS_REQUIRED=1" >> "$GITHUB_ENV"; fi
+
+    # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
+    - name: Check out craft-i18n
+      uses: storytold/craft-common-actions/actions/checkout-craft-i18n@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+
+    # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
+    - name: Caller environment
+      if: inputs.env != '' || inputs.linux-env != '' || inputs.windows-env != '' || inputs.dev-debug != '' || inputs.dev-strip == 'true'
+      shell: bash
+      env:
+        ALL: ${{ inputs.env }}
+        LINUX: ${{ inputs.linux-env }}
+        WINDOWS: ${{ inputs.windows-env }}
+        DEV_DEBUG: ${{ inputs.dev-debug }}
+        DEV_STRIP: ${{ inputs.dev-strip }}
+      run: |
+        set -euo pipefail
+        case "$RUNNER_OS" in
+          Linux) extra=$LINUX ;;
+          Windows) extra=$WINDOWS ;;
+          *) extra= ;;
+        esac
+        if [ -n "$DEV_DEBUG" ]; then echo "CARGO_PROFILE_DEV_DEBUG=$DEV_DEBUG" >> "$GITHUB_ENV"; fi
+        if [ "$DEV_STRIP" = true ]; then
+          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_TEST_STRIP=symbols" >> "$GITHUB_ENV"
+        fi
+        printf '%s\n%s\n' "$ALL" "$extra" | while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            echo "::error::env: expected KEY=VALUE, got '$line'"
+            exit 1
+          fi
+          echo "$line" >> "$GITHUB_ENV"
+        done
+
+    # Nothing waits on it: the space is free before the build needs it.
+    - name: Free disk space
+      if: runner.os == 'Linux' && inputs.free-disk-space == 'true'
+      shell: bash
+      run: |
+        nohup sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+          /opt/hostedtoolcache/CodeQL </dev/null >/dev/null 2>&1 &
+
+    - name: Install Linux build dependencies
+      if: runner.os == 'Linux' && inputs.packages != ''
+      uses: storytold/craft-common-actions/actions/install-apt-packages@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      with:
+        packages: ${{ inputs.packages }}
+
+    # The channel in rust-toolchain.toml wins over `toolchain`, so the gate builds with the
+    # toolchain contributors use and a new Rust release does not invalidate the cache.
+    - name: Install Rust
+      shell: bash
+      env:
+        TOOLCHAIN: ${{ inputs.toolchain }}
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -euo pipefail
+        if [ -f rust-toolchain.toml ]; then
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
+          TOOLCHAIN=${channel:-$TOOLCHAIN}
+        fi
+        args=(--profile minimal --no-self-update --component clippy --component rustfmt)
+        for target in ${TARGETS//,/ }; do args+=(--target "$target"); done
+        rustup toolchain install "$TOOLCHAIN" "${args[@]}"
+        rustup default "$TOOLCHAIN"
+        rustc --version
+
+    - name: Install cargo tools
+      if: inputs.tools != ''
+      uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8 # v2.87.32
+      with:
+        tool: ${{ inputs.tools }}
+
+    # The key (the canonical root [profile] table included) lives in the shared action, so an app
+    # job that builds the same workspace restores this entry instead of copying the formula.
+    # No save on failure: a main run that fails before its build has not filled the entry, and
+    # rust-cache never replaces an exact-key entry, so that half-filled entry would be restored by
+    # every run until Cargo.lock changes.
+    - uses: storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      if: inputs.rust-cache == 'true'
+      with:
+        cache-version: ${{ inputs.cache-version }}
+        job: ${{ inputs.cache-job }}
+        save-if: ${{ inputs.cache-save }}
+        cache-on-failure: "false"
+        cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
+        restore: ${{ inputs.cold-build != 'true' }}
+
+    # A cold build leaves every source newer than the (absent) outputs, so it builds everything.
+    - name: Restore mtimes
+      if: inputs.rust-cache == 'true' && inputs.cache-workspace-crates == 'true' && inputs.cold-build != 'true'
+      uses: storytold/craft-common-actions/actions/restore-mtimes@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      with:
+        mode: restore
+
+    # After rust-cache, so its key does not depend on RUSTC_WRAPPER.
+    - name: Install sccache
+      if: inputs.sccache == 'true'
+      uses: Mozilla-Actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        version: v0.18.0
+
+    - name: Use sccache
+      if: inputs.sccache == 'true'
+      shell: bash
+      env:
+        WRITES: ${{ inputs.writes }}
+        # sccache leaves `--check-cfg` out of its key, so after a change to the expected cfgs a
+        # cached compile would replay its old `unexpected_cfgs` warnings. A change to the files
+        # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
+        # fresh sccache cache instead.
+        VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+      run: |
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+          echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+        fi
+        if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+          echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+        fi
+
+    # Data the caller's setup fetches (test corpora, fixtures), keyed on the caller's pins. The
+    # key is fixed by those pins, so one entry stays valid until a pin moves.
+    - name: Caller cache key
+      id: caller-key
+      if: inputs.cache-paths != '' && inputs.caller-setup == 'true'
+      shell: bash
+      env:
+        KEY: ${{ inputs.cache-key }}
+        FILES: ${{ inputs.cache-key-files }}
+        FILES_HASH: ${{ inputs.cache-key-files != '' && hashFiles(inputs.cache-key-files) || '' }}
+      run: |
+        set -euo pipefail
+        if [ -z "$KEY" ]; then
+          echo "::error::cache-paths needs a cache-key naming the pins of what it holds"
+          exit 1
+        fi
+        if [ -n "$FILES" ] && [ -z "$FILES_HASH" ]; then
+          echo "::error::cache-key-files matches no file: $FILES"
+          exit 1
+        fi
+        echo "key=gate-caller-$KEY${FILES_HASH:+-$FILES_HASH}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore caller cache
+      id: caller-cache
+      if: inputs.cache-paths != '' && inputs.caller-setup == 'true'
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ inputs.cache-paths }}
+        key: ${{ steps.caller-key.outputs.key }}
+        enableCrossOsArchive: true
+
+    - name: Caller setup
+      if: inputs.setup-command != '' && inputs.caller-setup == 'true'
+      shell: bash
+      env:
+        SETUP: ${{ inputs.setup-command }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$SETUP" > "$RUNNER_TEMP/gate-setup.sh"
+        bash -euo pipefail "$RUNNER_TEMP/gate-setup.sh"
+
+    # Saved where the dependency cache is saved, as soon as the setup has filled it. Every leg
+    # tries; the first to finish writes the entry and the others find it reserved.
+    - name: Save caller cache
+      if: >-
+        inputs.cache-paths != '' && inputs.caller-setup == 'true' && steps.caller-cache.outputs.cache-hit != 'true'
+        && inputs.writes == 'true'
+      uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ inputs.cache-paths }}
+        key: ${{ steps.caller-key.outputs.key }}
+        enableCrossOsArchive: true
