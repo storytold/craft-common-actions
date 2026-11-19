@@ -8,7 +8,7 @@ import sys
 from compare_cargo_units import canonical, compare, read_json
 
 
-def project(graph):
+def project(graph, keep_examples=frozenset({'flat_open_bench'})):
     units = graph['units']
     if not graph['roots'] or any(type(i) is not int or not 0 <= i < len(units) for i in graph['roots']):
         raise ValueError('invalid root inventory')
@@ -16,7 +16,7 @@ def project(graph):
     for index in graph['roots']:
         unit = units[index]
         kind, name = unit['target']['kind'], unit['target']['name']
-        if kind == ['bench'] or kind == ['example'] and name != 'flat_open_bench':
+        if kind == ['bench'] or kind == ['example'] and name not in keep_examples:
             dropped.append({'package': unit['pkg_id'], 'target': name, 'kind': kind, 'mode': unit['mode']})
         else:
             kept.append(index)
