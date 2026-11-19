@@ -310,6 +310,7 @@ class GateWorkflowTests(unittest.TestCase):
             'name': '${{ inputs.artifact-name }}-${{ matrix.os }}',
             'path': '${{ inputs.artifact-path }}',
             'if-no-files-found': 'error',
+            'retention-days': '1',
         })
 
 
