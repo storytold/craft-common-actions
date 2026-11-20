@@ -1,0 +1,26 @@
+name: Windows installation policy
+
+on:
+  workflow_call:
+    inputs:
+      packaging-directory:
+        description: App packaging directory containing install-policy.json and WiX sources
+        type: string
+        required: false
+        default: packaging/windows
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Windows installation policy (no app build)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/windows-install-policy@main
+        with:
+          packaging-directory: ${{ inputs.packaging-directory }}
