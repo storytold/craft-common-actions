@@ -35,6 +35,11 @@ on:
         type: boolean
         required: false
         default: false
+      artcraft-runtime-fixtures:
+        description: "Provision FFmpeg and an isolated socket-only MySQL for ArtCraft tests"
+        type: boolean
+        required: false
+        default: false
       cargo-features:
         description: >-
           Extra cargo features for the coverage build, e.g. some-crate/skip_database_tests
@@ -429,6 +434,9 @@ jobs:
           mkdir -p "$(dirname "$target_dir")" "$NEXTEST_EXTRACT_DIR"
           ln -s "$NEXTEST_EXTRACT_DIR/target" "$target_dir"
           echo "$target_dir -> $NEXTEST_EXTRACT_DIR/target"
+      - name: Provision ArtCraft runtime fixtures
+        if: inputs.artcraft-runtime-fixtures
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures@33c01eabe9495a5c53cade0dd1986367777fc4aa
       - name: Run this shard's tests
         env:
           # Each instrumented binary writes its profile here; the scan job merges them.
@@ -480,6 +488,9 @@ jobs:
             exit 1
           fi
 
+      - name: Clean up ArtCraft runtime fixtures
+        if: always() && inputs.artcraft-runtime-fixtures
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures-cleanup@33c01eabe9495a5c53cade0dd1986367777fc4aa
       - name: Install LLVM tools for the archive's toolchain
         run: rustup toolchain install "$(cat archive/rustc-release.txt)" --profile minimal --component llvm-tools-preview
       - name: Merge this shard's profiles
@@ -675,6 +686,9 @@ jobs:
       - name: Fetch locked Rust dependencies
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         run: cargo fetch --locked
+      - name: Provision ArtCraft runtime fixtures
+        if: inputs.artcraft-runtime-fixtures && inputs.shards <= 1 && steps.token.outputs.available == 'true'
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures@33c01eabe9495a5c53cade0dd1986367777fc4aa
       - name: Generate Rust coverage
         id: coverage
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
@@ -711,6 +725,9 @@ jobs:
           echo "test_status=$test_status" >> "$GITHUB_OUTPUT"
           cargo llvm-cov report --lcov --output-path lcov.info \
             --ignore-filename-regex "$COVERAGE_IGNORE"
+      - name: Clean up ArtCraft runtime fixtures
+        if: always() && inputs.artcraft-runtime-fixtures
+        uses: storytold/craft-common-actions/actions/artcraft-runtime-fixtures-cleanup@33c01eabe9495a5c53cade0dd1986367777fc4aa
       - name: Download shard profiles and archive
         if: steps.token.outputs.available == 'true' && inputs.shards > 1 && hashFiles('Cargo.toml') != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
