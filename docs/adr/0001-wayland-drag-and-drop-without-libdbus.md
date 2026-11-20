@@ -1,6 +1,6 @@
 # 1. Wayland drag-and-drop without libdbus
 
-- Status: accepted
+- Status: accepted (amended 2026-11-11, see Amendment)
 - Date: 2026-10-22
 - Tracking: #64
 
@@ -46,3 +46,11 @@ What the craft apps already have:
 - **Patch or fork winit 0.30 with the #4787 backport.** Rejected: upstream closed it, and we'd carry a fork of the windowing stack.
 - **Give the Flatpak the `--filesystem=host` permission so drops arrive as paths.** Rejected: it gives up the sandbox to work around a UI gap.
 - **Force XWayland by unsetting `WAYLAND_DISPLAY`.** Possible stopgap, untested. It isn't a fix, because it loses native Wayland scaling and input.
+
+## Amendment 2026-11-11
+
+`libdbus-1-dev` is back in `install-linux-deps` (#186). The header is there for `deckcraft`: it pulls `scap` for screen recording (storytold/deckcraft#1838), and `scap`'s Linux build looks `libdbus-1` up through pkg-config. Point 1 of the decision no longer describes the action, and the first consequence -- no C D-Bus library in any build -- no longer holds for an app that builds `scap`.
+
+The other points stand. Flatpak drops are still resolved with zbus, and nothing in this change chooses libdbus as the portal route.
+
+If the shared action should stay free of the C library, the alternative is to install these three packages in `deckcraft`'s own release job, the way its `gate.yml` call already lists them. #186 is where that choice belongs.
