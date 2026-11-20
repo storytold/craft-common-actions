@@ -1,10 +1,12 @@
 name: Select platform legs
 description: >-
-  The gate legs a run needs: on a pull request, the legs in select-os run only when the change can
-  alter platform behaviour (a crate with platform-specific cfg code or one that depends on it, the
-  build setup, the paths given, or a non-documentation file outside every crate). Every other
-  event, and a pull request with the label, runs every leg. Run it in a checkout of the pull
-  request's merge commit with its first parent (fetch-depth 2).
+  The gate legs, and with select-tests the tests, a run needs. On a pull request the legs in
+  select-os run only when the change can alter platform behaviour (a crate with platform-specific
+  cfg code or one that depends on it, the build setup, the paths given, or a non-documentation file
+  outside every crate), and the tests are those of the changed crates, the crates that declare a
+  read of a changed file, and every crate that depends on them. Every other event, and a pull
+  request with the label, runs every leg and every test. Run it in a checkout of the pull request's
+  merge commit with its first parent (fetch-depth 2).
 
 inputs:
   os:
@@ -14,15 +16,27 @@ inputs:
     description: "JSON array of the legs that run on a pull request only when it is platform-affected"
     required: true
   paths:
-    description: "Extra globs, one per line, whose change runs every leg (`*` also matches `/`)"
+    description: "Extra globs, one per line, whose change runs every leg and every test (`*` also matches `/`)"
     required: false
     default: ""
   crates:
     description: "Extra workspace crates, one per line, treated as having platform code"
     required: false
     default: ""
+  docs:
+    description: "Extra globs, one per line, of files outside every crate that no build or test reads, beside `*.md`, `docs/*` and `LICENSE*` (`*` also matches `/`)"
+    required: false
+    default: ""
+  select-tests:
+    description: >-
+      'true' also selects the tests (the tests, filter, skip and tests-reason outputs) and checks
+      that every member whose sources name a path into another member's directory declares it in
+      its Cargo.toml under `[package.metadata.craft] reads` (repository paths, files or
+      directories); the step fails on an undeclared or stale read
+    required: false
+    default: "false"
   label:
-    description: "A pull request label that runs every leg; empty: none"
+    description: "A pull request label that runs every leg and every test; empty: none"
     required: false
     default: "full-ci"
 
@@ -36,6 +50,18 @@ outputs:
   reason:
     description: "Why: the first change that needs every leg, or the event or label"
     value: ${{ steps.select.outputs.reason }}
+  tests:
+    description: "'all', 'some' or 'none' ('all' without select-tests)"
+    value: ${{ steps.select.outputs.tests }}
+  filter:
+    description: "A nextest filterset for the tests to run: all(), none(), or package(=a) | package(=b) | ..."
+    value: ${{ steps.select.outputs.filter }}
+  skip:
+    description: "The members whose tests do not run, space-separated (empty when every test runs)"
+    value: ${{ steps.select.outputs.skip }}
+  tests-reason:
+    description: "Why: the first change that needs every test, the event or label, or the members selected"
+    value: ${{ steps.select.outputs.tests-reason }}
 
 runs:
   using: composite
@@ -51,5 +77,9 @@ runs:
         SELECT_OS: ${{ inputs.select-os }}
         PATHS: ${{ inputs.paths }}
         CRATES: ${{ inputs.crates }}
+        DOCS: ${{ inputs.docs }}
+        SELECT_TESTS: ${{ inputs.select-tests }}
         LABEL: ${{ inputs.label }}
-      run: python3 "$SCRIPT" --os "$OS" --select-os "$SELECT_OS" --paths "$PATHS" --crates "$CRATES" --label "$LABEL"
+      run: >-
+        python3 "$SCRIPT" --os "$OS" --select-os "$SELECT_OS" --paths "$PATHS" --crates "$CRATES"
+        --docs "$DOCS" --select-tests "$SELECT_TESTS" --label "$LABEL"
