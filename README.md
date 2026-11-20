@@ -6,6 +6,12 @@ Reusable GitHub Actions workflows and composite actions for Storyteller / ArtCra
 
 This repository unifies and eliminates duplicate CI/CD and release workflow definitions across the ArtCraft ecosystem into DRY, reusable GitHub Actions.
 
+Apple signing/distribution/TestFlight remains a [documentation-only proposal](docs/ios-distribution-proposal.md),
+tracked in [storytold/craft-common-actions#259](https://github.com/storytold/craft-common-actions/issues/259).
+An [opt-in unsigned Apple validation POC](#native-apple-unsigned-validation-opt-in-poc)
+is implemented. No mobile architecture is adopted; existing release behavior and
+default runner usage are unchanged.
+
 ## Workflows Included
 
 ### 1. `release.yml`
@@ -1191,6 +1197,47 @@ warns and leaves the files unsigned.
 
 Existing callers are unaffected: the shared `release.yml` still runs each app's own
 `packaging/windows/` scripts. Apps adopt the action one at a time, then delete their copy.
+
+## Native Apple unsigned validation (opt-in POC)
+
+[`apple-unsigned.yml`](.github/workflows/apple-unsigned.yml) is a reusable,
+no-secret Swift/Rust Apple orchestration POC. It does not change existing gate or
+desktop release callers. An app explicitly opts in with an exact Xcode/Rust
+version and a reviewed, app-owned Bash driver:
+
+```sh
+bash scripts/build-apple.sh <build|test|package> <all|macos|ios-simulator|ios-device> <Debug|Release>
+```
+
+The configurable `driver` path runs from the app repository root. Package outputs
+belong in `target/apple/<Debug|Release>/<platform>`; build/test retain existing
+Cargo/DerivedData locations and do not require `target/apple`. Shared CI isolates
+platform jobs, calls scoped phases without
+`eval`, preserves failure status and uploads tarred evidence with bundle modes/
+symlinks intact. `test ios-simulator` must run **both iPhone and iPad sequentially**.
+`test` is Debug-only; CI creates distinct job-owned iPhone/iPad devices from an
+explicit installed `simulator-runtime`, passes `CRAFT_IPHONE_SIMULATOR_UDID` and
+`CRAFT_IPAD_SIMULATOR_UDID`, and cleans up only those devices. `package all` means
+distribution-unsigned macOS `.app`/`.zip` (explicitly ad-hoc signed), simulator
+`.app.zip` and unsigned device `.xcarchive`, **not an installable IPA**.
+The driver owns native project generation, Rust/FFI, sequential suite execution,
+actual unsigned Xcode settings and product checks.
+
+No production signing, Apple-service upload, credentials, TestFlight, notarization
+or Store submission is implemented. Hosted native-app validation remains required; synthetic contract
+fixtures are not Apple build evidence. `macos-15` is currently ARM64 and does not
+provide every locally installed Xcode/runtime. Missing prerequisites fail rather
+than falling back. See the [contract, caller example, ownership and future
+distribution proposal](docs/ios-distribution-proposal.md) before adoption. Keep
+iOS Apple Distribution, macOS Developer ID and Mac App Store signing separate.
+
+Focused checks (existing Python 3 + PyYAML and lint tools):
+
+```sh
+python3 -m unittest discover -s tests -p test_apple_unsigned.py -v
+actionlint .github/workflows/apple-unsigned.yml
+shellcheck tests/apple/first-app/scripts/build-apple.sh tests/apple/second-app/ci/native-driver.sh
+```
 
 ## Testing workflow failure paths
 
