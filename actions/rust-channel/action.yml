@@ -1,0 +1,41 @@
+name: "Rust channel"
+description: >-
+  Names the toolchain, targets and components a job installs: those of the checkout's
+  rust-toolchain.toml when it has one, plus the caller's extra targets and components, else the
+  caller's `toolchain`. Feed the outputs to the toolchain action, so that cargo, which rustup points
+  at the file's channel, finds what the job installed (a job that installs `stable` next to a file
+  that names another release makes rustup install the file's release without the job's targets).
+  Needs the checkout first.
+
+inputs:
+  toolchain:
+    description: "Toolchain to install when the checkout has no rust-toolchain.toml"
+    default: stable
+  targets:
+    description: "Extra targets, comma-separated"
+    default: ""
+  components:
+    description: "Extra components, comma-separated"
+    default: ""
+outputs:
+  toolchain:
+    description: "The file's channel, else the input"
+    value: ${{ steps.channel.outputs.toolchain }}
+  targets:
+    description: "The file's targets and the input's, comma-separated"
+    value: ${{ steps.channel.outputs.targets }}
+  components:
+    description: "The file's components and the input's, comma-separated"
+    value: ${{ steps.channel.outputs.components }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: channel
+      shell: bash
+      env:
+        CHANNEL: ${{ github.action_path }}/channel.py
+        INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
+        INPUT_TARGETS: ${{ inputs.targets }}
+        INPUT_COMPONENTS: ${{ inputs.components }}
+      run: python3 "$CHANNEL"

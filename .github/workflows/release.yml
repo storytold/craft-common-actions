@@ -295,10 +295,15 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-macos-universal
@@ -425,10 +430,15 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: ${{ matrix.target }}
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-windows-${{ matrix.arch }}
@@ -516,9 +526,13 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: ${{ inputs.nfpm-version }}
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-linux-${{ matrix.arch }}
@@ -1090,10 +1104,15 @@ jobs:
           app-name: ${{ inputs.app-name }}
           version: ${{ needs.version.outputs.version }}
           date: ${{ needs.version.outputs.date }}
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: wasm32-unknown-unknown
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-web
@@ -1175,10 +1194,15 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: riscv64gc-unknown-linux-gnu
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: riscv64gc-unknown-linux-gnu
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-linux-riscv64
@@ -1270,9 +1294,13 @@ jobs:
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-server-${{ matrix.arch }}
