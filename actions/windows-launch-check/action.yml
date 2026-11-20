@@ -1,0 +1,29 @@
+name: "Windows launch check"
+description: "Installs an MSI and starts its programs without a desktop, as the winget-pkgs validator does; fails if the app crashes or exits with an error"
+
+inputs:
+  msi:
+    description: "Path to the MSI to install, or a wildcard that matches exactly one"
+    required: true
+  main-exe:
+    description: "File name of the main app (e.g. pdfcraft.exe); it must stay running or exit 0"
+    required: true
+  wait-seconds:
+    description: "How long each program gets before it counts as started"
+    required: false
+    default: "30"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Launch check
+      shell: pwsh
+      env:
+        MSI: ${{ inputs.msi }}
+        MAIN_EXE: ${{ inputs.main-exe }}
+        WAIT_SECONDS: ${{ inputs.wait-seconds }}
+      run: |
+        # At least 1: with 0 every program looks "still running" and nothing is checked.
+        if ($env:WAIT_SECONDS -notmatch '^[1-9][0-9]*\z') { Write-Output "::error::invalid wait-seconds '$env:WAIT_SECONDS' (a whole number of seconds, at least 1)"; exit 1 }
+        & "$env:GITHUB_ACTION_PATH/launch-check.ps1" -Msi $env:MSI -MainExe $env:MAIN_EXE -WaitSeconds ([int]$env:WAIT_SECONDS)
+        exit $LASTEXITCODE
