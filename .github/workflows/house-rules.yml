@@ -1,6 +1,6 @@
 name: House rules
 
-# Fails unless AGENTS.md copies the shared rules from craft-contrib unchanged, at a commit that is
+# Fails unless AGENTS.md copies the shared rules (the craft-agents block, or the old house-rules blocks) from craft-contrib unchanged, at a commit that is
 # on main. An intact older copy warns only when its normalized standards file changed on main, and does not fail. Callers run it beside their gate:
 #
 #   house-rules:
@@ -16,7 +16,7 @@ on:
         required: false
         default: "."
       rust:
-        description: "Require the Rust block as well as the core block"
+        description: "Old house-rules blocks only: require the Rust block as well as the core block"
         type: boolean
         required: false
         default: true

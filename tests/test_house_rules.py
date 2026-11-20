@@ -336,6 +336,124 @@ class HouseRulesTests(unittest.TestCase):
         self.assertEqual(self.check(), ([], []))
 
 
+class AgentsBlockTests(unittest.TestCase):
+    """The craft-agents block of RFC-0072: one block holding standards/app-agents.md."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.source = self.root / "craft-contrib"
+        self.source.mkdir()
+        git(self.source, "init", "-b", "main")
+        self.commit("Rules one.\n\n## This repository\n")
+        self.first = git(self.source, "rev-parse", "HEAD")
+        self.commit("Rules two.\n\n## This repository\n")
+        self.second = git(self.source, "rev-parse", "HEAD")
+        self.app = self.root / "app"
+        self.app.mkdir()
+        self.target = self.app / "AGENTS.md"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def commit(self, agents: str) -> None:
+        standards = self.source / "standards"
+        standards.mkdir(exist_ok=True)
+        (standards / "app-agents.md").write_text(agents)
+        (standards / "house-rules-core.md").write_text("Core.\n")
+        git(self.source, "add", "standards")
+        git(self.source, "commit", "-m", "standards")
+
+    def write(self, revision=None):
+        return house_rules.write_agents_block(self.app, self.source, revision)
+
+    def check(self):
+        return house_rules.check_file(self.target.read_text(encoding="utf-8"), self.source, True)
+
+    def test_write_then_check_matches_main_and_is_idempotent(self):
+        self.target.write_text("Local facts.\n")
+        self.assertEqual(self.write(), self.second)
+        text = self.target.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith(f"<!-- craft-agents:start source={self.second} sha256="))
+        self.assertIn("<!-- craft-agents:end -->\nLocal facts.\n", text)
+        self.assertEqual(self.check(), ([], []))
+        self.write()
+        self.assertEqual(self.target.read_text(encoding="utf-8"), text)
+
+    def test_the_old_blocks_are_replaced_and_local_text_is_kept(self):
+        self.commit("Rules three.\n\n## This repository\n")
+        self.target.write_text(
+            house_rules.render("core", self.second, "Core.\n")
+            + house_rules.render("rust", self.second, "Rust.\n")
+            + "Local facts.\n"
+        )
+        self.write()
+        text = self.target.read_text(encoding="utf-8")
+        self.assertNotIn("craft-house-rules", text)
+        self.assertTrue(text.endswith("<!-- craft-agents:end -->\nLocal facts.\n"))
+        self.assertEqual(self.check(), ([], []))
+
+    def test_the_old_format_still_passes(self):
+        # setUp's history has no house-rules-rust.md, so only the core block is written.
+        house_rules.write_agents(self.app, self.source, False)
+        text = self.target.read_text(encoding="utf-8")
+        self.assertEqual(house_rules.check_file(text, self.source, False), ([], []))
+
+    def test_an_edited_block_fails_even_when_its_digest_is_rewritten(self):
+        self.write()
+        text = self.target.read_text(encoding="utf-8").replace("Rules two.", "Rules edited.")
+        body = text.split("-->\n", 1)[1].split("<!-- craft-agents:end -->", 1)[0]
+        text = text.replace(house_rules.digest("Rules two.\n\n## This repository\n"), house_rules.digest(body), 1)
+        self.target.write_text(text)
+        failures, _ = self.check()
+        self.assertTrue(any("does not match standards/app-agents.md" in item for item in failures))
+
+    def test_a_digest_that_does_not_match_the_bytes_fails(self):
+        self.write()
+        self.target.write_text(self.target.read_text(encoding="utf-8").replace("Rules two.", "Rules edited."))
+        failures, _ = self.check()
+        self.assertTrue(any("does not match its sha256" in item for item in failures))
+
+    def test_an_intact_older_copy_warns(self):
+        self.write(self.first)
+        failures, warnings = self.check()
+        self.assertEqual(failures, [])
+        self.assertTrue(any("behind main" in item for item in warnings))
+
+    def test_a_commit_that_is_not_on_main_fails(self):
+        git(self.source, "switch", "-c", "side")
+        self.commit("Side rules.\n")
+        side = git(self.source, "rev-parse", "HEAD")
+        git(self.source, "switch", "main")
+        self.target.write_text(house_rules.render("agents", side, "Side rules.\n"))
+        failures, _ = self.check()
+        self.assertTrue(any("is not on main" in item for item in failures))
+        with self.assertRaises(RuntimeError):
+            self.write(side)
+
+    def test_old_and_new_blocks_together_fail(self):
+        self.target.write_text(
+            house_rules.render("agents", self.second, "Rules two.\n\n## This repository\n")
+            + house_rules.render("core", self.second, "Core.\n")
+        )
+        failures, _ = self.check()
+        self.assertTrue(any("cannot sit beside" in item for item in failures))
+
+    def test_the_old_writer_leaves_a_new_block_alone(self):
+        self.write()
+        before = self.target.read_text(encoding="utf-8")
+        with self.assertRaises(ValueError):
+            house_rules.write_agents(self.app, self.source, False)
+        self.assertEqual(self.target.read_text(encoding="utf-8"), before)
+
+    def test_the_command_line_writes_then_checks(self):
+        args = ["--directory", str(self.app), "--source", str(self.source)]
+        self.assertEqual(house_rules.main(["write-agents", *args]), 0)
+        self.assertEqual(house_rules.main(["check", *args]), 0)
+        self.target.write_text(self.target.read_text(encoding="utf-8").replace("Rules two.", "Rules edited."))
+        self.assertEqual(house_rules.main(["check", *args]), 1)
+
+
 class HouseRulesWiringTests(unittest.TestCase):
     def test_the_action_passes_its_inputs_through_the_environment(self):
         action = yaml.load((ROOT / "actions/house-rules/action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)

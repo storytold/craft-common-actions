@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Write and check the shared house-rules blocks in AGENTS.md.
+"""Write and check the shared rules in AGENTS.md.
+
+Two formats are accepted. The old one is the generated `craft-house-rules` blocks (core and
+rust). The new one is a single `craft-agents` block holding `standards/app-agents.md`
+(RFC-0072); `write-agents` generates it. A file with both formats fails.
 
 The bytes inside a block are the normalized standards file. The recorded sha256
 must match those bytes, and those bytes must match the file at the recorded
@@ -20,12 +24,15 @@ from pathlib import Path
 SOURCES = {
     "core": "standards/house-rules-core.md",
     "rust": "standards/house-rules-rust.md",
+    "agents": "standards/app-agents.md",
 }
 START = re.compile(
-    r"<!-- craft-house-rules:start ([a-z]+) source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->(?:\r\n|\r|\n)"
+    r"<!-- craft-(?:house-rules:start (?P<name>[a-z]+)|(?P<agents>agents):start)"
+    r" source=(?P<source>[0-9a-f]{40}) sha256=(?P<sha>[0-9a-f]{64}) -->(?:\r\n|\r|\n)"
 )
 END = "<!-- craft-house-rules:end -->"
-MARKER = re.compile(r"<!--\s*craft-house-rules:")
+AGENTS_END = "<!-- craft-agents:end -->"
+MARKER = re.compile(r"<!--\s*craft-(?:house-rules|agents):")
 
 
 def normalize(text: str) -> str:
@@ -73,22 +80,24 @@ def parse_blocks(text: str):
         match = START.match(text, marker.start())
         if match is None:
             raise ValueError("house rules: malformed or unexpected block marker")
+        name = match.group("name") or "agents"
+        end = AGENTS_END if match.group("agents") else END
         closing = MARKER.search(markers, match.end())
         if closing is None:
-            raise ValueError(f"house rules: {match.group(1)} block is not closed")
+            raise ValueError(f"house rules: {name} block is not closed")
         end_at = closing.start()
-        if not text.startswith(END, end_at):
+        if not text.startswith(end, end_at):
             raise ValueError("house rules: nested or malformed block marker")
         body = text[match.end() : end_at]
         blocks.append(
             {
-                "name": match.group(1),
-                "source": match.group(2),
-                "sha256": match.group(3),
+                "name": name,
+                "source": match.group("source"),
+                "sha256": match.group("sha"),
                 "body": body,
             }
         )
-        position = end_at + len(END)
+        position = end_at + len(end)
         # The marker's line ending belongs to the generated block, not local text.
         if text.startswith("\r\n", position):
             position += 2
@@ -100,6 +109,11 @@ def parse_blocks(text: str):
 
 def render(name: str, sha: str, content: str) -> str:
     body = normalize(content)
+    if name == "agents":
+        return (
+            f"<!-- craft-agents:start source={sha} sha256={digest(body)} -->\n"
+            f"{body}{AGENTS_END}\n"
+        )
     return (
         f"<!-- craft-house-rules:start {name} source={sha} sha256={digest(body)} -->\n"
         f"{body}{END}\n"
@@ -218,7 +232,13 @@ def check_file(agents: str, source: Path, require_rust: bool) -> tuple[list[str]
     by_name = {block["name"]: block for block in blocks}
     if len(by_name) != len(blocks):
         failures.append("house rules: a block name is repeated")
-    wanted = ["core", "rust"] if require_rust else ["core"]
+    if "agents" in by_name:
+        # The shared text is the whole rule set: old blocks beside it would be a second copy.
+        if len(by_name) > 1:
+            failures.append("house rules: the craft-agents block cannot sit beside house-rules blocks")
+        wanted = ["agents"]
+    else:
+        wanted = ["core", "rust"] if require_rust else ["core"]
     for name in wanted:
         if name not in by_name:
             failures.append(f"house rules: the {name} block is missing")
@@ -238,6 +258,26 @@ def source_sha(source: str) -> str:
     return recorded
 
 
+def apply_agents_block(agents: str, rendered: str) -> str:
+    """Replace the craft-agents block, or the old house-rules blocks, with `rendered`.
+
+    The new block takes the place of the first generated block; text outside the blocks is kept.
+    """
+    blocks, spans = parse_blocks(agents) if agents else ([], [])
+    if not spans:
+        bom = "\ufeff" if agents.startswith("\ufeff") else ""
+        return bom + rendered + agents[len(bom):]
+    pieces = []
+    position = 0
+    for index, (start, end) in enumerate(spans):
+        pieces.append(agents[position:start])
+        if index == 0:
+            pieces.append(rendered)
+        position = end
+    pieces.append(agents[position:])
+    return "".join(pieces)
+
+
 def apply_blocks(agents: str, rendered: list[str]) -> str:
     """Replace only generated spans; keep all surrounding local text verbatim."""
     blocks, spans = parse_blocks(agents) if agents else ([], [])
@@ -253,7 +293,7 @@ def apply_blocks(agents: str, rendered: list[str]) -> str:
     names = [block["name"] for block in blocks]
     if len(set(names)) != len(names):
         raise ValueError("house rules: a block name is repeated")
-    if any(name not in SOURCES for name in names):
+    if any(name not in ("core", "rust") for name in names):
         raise ValueError("house rules: refusing to replace an unknown block")
     pieces = []
     position = 0
@@ -300,15 +340,47 @@ def write_agents(directory: Path, source: Path, require_rust: bool) -> None:
         handle.write(updated)  # NOSONAR
 
 
+def write_agents_block(directory: Path, source: Path, revision: str | None) -> str:
+    """Write the craft-agents block at `revision` (default: main's head). Returns the revision."""
+    checkout = checkout_path(str(source))
+    if checkout is None:
+        raise RuntimeError("house rules: could not read the craft-contrib checkout")
+    sha = source_sha(checkout) if revision is None else commit_sha(revision)
+    if sha is None:
+        raise RuntimeError("house rules: the revision is not a full commit SHA")
+    if revision is not None and revision_state(checkout, sha) not in ("identical", "older"):
+        raise RuntimeError(f"house rules: {sha} is not on main")
+    content = file_at(checkout, sha, SOURCES["agents"])
+    if content is None:
+        raise RuntimeError(f"house rules: could not read {SOURCES['agents']} at {sha}")
+    path = agents_file(str(directory))
+    current = ""
+    if path.is_file():
+        with path.open(encoding="utf-8", newline="") as handle:
+            current = handle.read()
+    updated = apply_agents_block(current, render("agents", sha, content))
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(updated)  # NOSONAR
+    return sha
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("check", "write"))
+    parser.add_argument("mode", choices=("check", "write", "write-agents"))
     parser.add_argument("--directory", default=".")
     parser.add_argument("--source", required=True, help="checkout of storytold/craft-contrib at main")
-    parser.add_argument("--require-rust", action="store_true")
+    parser.add_argument("--require-rust", action="store_true", help="old format only")
+    parser.add_argument("--revision", help="write-agents: full craft-contrib commit SHA on main (default: main's head)")
     args = parser.parse_args(argv)
     directory = Path(args.directory)
     source = Path(args.source)
+    if args.mode == "write-agents":
+        try:
+            write_agents_block(directory, source, args.revision)
+        except (RuntimeError, ValueError) as error:
+            print(error)
+            return 2
+        return 0
     if args.mode == "write":
         try:
             write_agents(directory, source, args.require_rust)
