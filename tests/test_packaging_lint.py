@@ -197,5 +197,59 @@ class PackagingDownloadTests(unittest.TestCase):
             self.assertIn("--retry-connrefused", args)
 
 
+PACKAGING_ACTION = yaml.safe_load(ACTION.read_text())
+POWERSHELL = next(step for step in PACKAGING_ACTION["runs"]["steps"]
+                  if step.get("name") == "PowerShell")
+SCRIPT = POWERSHELL["run"]
+
+
+class PackagingLintTests(unittest.TestCase):
+    def run_windows_step(self, cwd):
+        # GitHub Actions runs pwsh with ErrorActionPreference=Stop. A bare listing
+        # of a missing directory otherwise only writes a non-terminating error and
+        # exits 0, so the test must reproduce the runner's preference.
+        script = "$ErrorActionPreference = 'Stop'\n" + SCRIPT
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_windows_step_checks_the_directory_before_listing_it(self):
+        guard = "if (Test-Path ./packaging/windows)"
+        listing = "Get-ChildItem packaging/windows/*.ps1"
+        self.assertIn(guard, SCRIPT)
+        self.assertLess(SCRIPT.index(guard), SCRIPT.index(listing))
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    def test_windows_step_runs_without_a_windows_packaging_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_windows_step(tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::notice::packaging/windows is absent", result.stdout)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    def test_windows_step_accepts_a_valid_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            windows = Path(tmp) / "packaging" / "windows"
+            windows.mkdir(parents=True)
+            (windows / "good.ps1").write_text('Write-Output "ok"\n', encoding="utf-8")
+            result = self.run_windows_step(tmp)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("ok good.ps1", result.stdout)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell 7 is not installed")
+    def test_windows_step_still_checks_scripts_when_the_directory_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            windows = Path(tmp) / "packaging" / "windows"
+            windows.mkdir(parents=True)
+            (windows / "bad.ps1").write_text("if (", encoding="utf-8")
+            result = self.run_windows_step(tmp)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("::error file=bad.ps1::", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
