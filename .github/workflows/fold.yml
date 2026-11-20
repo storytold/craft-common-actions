@@ -1,0 +1,145 @@
+name: "Fold"
+
+# The nightly fold of craft-contrib RFC-0017 and RFC-0018: runs the app's `cargo xtask progress
+# --write`, which moves progress-log fragments into the log, rebuilds the gap and parity tables
+# from their item files and writes the status line. When anything changed it opens (or updates)
+# one pull request from the `docjoin/fold` branch and turns on squash auto-merge; `main` only
+# changes through a pull request. A night with nothing to fold closes a fold pull request still
+# open. The fold may change only Markdown (ROADMAP.md, docs/, *.md); anything else fails the run.
+#
+# The pull request is opened with a GitHub App's token, not GITHUB_TOKEN: pull requests opened with
+# GITHUB_TOKEN don't trigger workflows, so the fold would merge without CI.
+#
+# Caller:
+#   on:
+#     schedule: [{ cron: "17 3 * * *" }]
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   concurrency: { group: fold, cancel-in-progress: false }
+#   jobs:
+#     fold:
+#       uses: storytold/craft-common-actions/.github/workflows/fold.yml@main
+#       secrets:
+#         FOLD_APP_ID: ${{ secrets.FOLD_APP_ID }}
+#         FOLD_APP_PRIVATE_KEY: ${{ secrets.FOLD_APP_PRIVATE_KEY }}
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: "The fold, run with bash from the repository root"
+        type: string
+        required: false
+        default: "cargo xtask progress --write"
+      branch:
+        description: "The branch the fold's pull request comes from"
+        type: string
+        required: false
+        default: "docjoin/fold"
+    secrets:
+      FOLD_APP_ID:
+        required: true
+      FOLD_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  fold:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Two runs for one branch (a schedule and a dispatch) must not overlap: a run that finds nothing
+    # to fold would close the pull request the other run just opened.
+    concurrency:
+      group: fold-${{ github.repository }}-${{ inputs.branch }}
+      cancel-in-progress: false
+    steps:
+      # The fold writes the default branch's docs only. Run from any other ref (a dispatch on a
+      # feature branch), it would open a fold pull request built from that branch's files.
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ github.ref }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          base=${DEFAULT:-$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)}
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          if [ "$REF" != "refs/heads/$base" ]; then
+            echo "::notice::The fold runs only on $base; this run is on $REF, so nothing is folded."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Full history: the fold orders fragments by the commits that added them. No credentials are
+      # left in .git/config: the fold runs the app's own build, which must not see a token.
+      - if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: fold
+
+      - name: Fold
+        if: steps.gate.outputs.run == 'true'
+        run: ${{ inputs.command }}
+
+      # The App's token is made after the build has run, and only this last step gets it.
+      - id: token
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.FOLD_APP_ID }}
+          private-key: ${{ secrets.FOLD_APP_PRIVATE_KEY }}
+
+      - name: Open or update the fold pull request
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BRANCH: ${{ inputs.branch }}
+          BASE: ${{ steps.gate.outputs.base }}
+        run: |
+          # The build could have written git hooks or an fsmonitor into .git/config; none run while
+          # the token is in use.
+          safe_git() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+          open_pr() { gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -qx OPEN; }
+          if [ -z "$(safe_git status --porcelain)" ]; then
+            echo "Nothing to fold."
+            # Last night's fold pull request is stale now (main already has what it folded, or
+            # someone folded by hand): close it rather than let it merge an old fold.
+            if open_pr; then
+              gh pr close "$BRANCH" --delete-branch \
+                --comment "Nothing is left to fold on \`$BASE\`, so this fold is out of date. Closed by the nightly fold."
+            fi
+            exit 0
+          fi
+          safe_git config user.name "craft-fold[bot]"
+          safe_git config user.email "craft-fold[bot]@users.noreply.github.com"
+          safe_git switch -c "$BRANCH"
+          safe_git add -A
+          # The fold writes only Markdown: ROADMAP.md and docs/. Anything else (a build output, a
+          # lockfile the build touched) must never be swept into the fold's commit. No rename
+          # detection: a file moved into docs/ is listed by the path it left too.
+          stray=$(safe_git diff --cached --name-only --no-renames | grep -Ev '^docs/|\.md$' || true)
+          if [ -n "$stray" ]; then
+            echo "::error::The fold changed files outside ROADMAP.md, docs/ and *.md:"
+            echo "$stray"
+            exit 1
+          fi
+          safe_git commit -q --no-verify -m "Fold progress-log fragments and table items"
+          # One fold pull request at a time: an unmerged one is replaced by tonight's. The token
+          # goes on this one command's header, never into .git/config.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          safe_git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push -f "https://github.com/$GITHUB_REPOSITORY.git" "HEAD:refs/heads/$BRANCH"
+          if ! open_pr; then
+            gh pr create --base "$BASE" --head "$BRANCH" --title "Fold progress-log fragments and table items" \
+              --body "The nightly fold (craft-contrib RFC-0017, RFC-0018): fragments moved into the log and deleted, tables rebuilt from their items, status line written. Generated by \`cargo xtask progress --write\`; CI's \`progress --check\` confirms it only moved what was pending."
+          fi
+          gh pr merge "$BRANCH" --squash --auto
