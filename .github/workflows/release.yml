@@ -295,13 +295,21 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-macos-universal
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
@@ -425,13 +433,21 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: ${{ matrix.target }}
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-windows-${{ matrix.arch }}
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
         if: inputs.version != ''
         shell: bash
@@ -516,12 +532,19 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: ${{ inputs.nfpm-version }}
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-linux-${{ matrix.arch }}
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
@@ -951,7 +974,7 @@ jobs:
           profile: release
           # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
           # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
-          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          # entry, and dry-run must share it, so that a dry run restores the release's cache (it saves none).
           configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
           target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
@@ -1037,7 +1060,7 @@ jobs:
           path: dist/release/*
           if-no-files-found: error
       - name: Save FreeBSD release Cargo cache
-        if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && steps.cargo-cache.outputs.key != '' && steps.cargo-cache.outputs.cache-hit != 'true'
+        if: github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && !inputs.dry-run && steps.cargo-cache.outputs.key != '' && steps.cargo-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 10
         uses: storytold/craft-common-actions/actions/freebsd-cargo-cache@main
@@ -1046,7 +1069,7 @@ jobs:
           profile: release
           # Only what changes the FreeBSD build. Not toJSON(inputs): contributors-artifact names
           # this run (contributor-snapshot-<run id>-<attempt>), so no later run could restore the
-          # entry, and dry-run must share it, so that a dry run warms the release's cache.
+          # entry, and dry-run must share it, so that a dry run restores the release's cache (it saves none).
           configuration: ${{ format('{{"app-name":{0},"arch":{1},"craft-fonts-ref":{2},"freebsd-release":{3}}}', toJSON(inputs.app-name), toJSON(matrix.arch), toJSON(inputs.craft-fonts-ref), toJSON(inputs.freebsd-release)) }}
           target: ${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
@@ -1090,13 +1113,21 @@ jobs:
           app-name: ${{ inputs.app-name }}
           version: ${{ needs.version.outputs.version }}
           date: ${{ needs.version.outputs.date }}
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: wasm32-unknown-unknown
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-web
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - uses: storytold/craft-common-actions/actions/install-trunk@main
         with:
           trunk-version: ${{ inputs.trunk-version }}
@@ -1175,13 +1206,21 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: riscv64gc-unknown-linux-gnu
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
-          targets: riscv64gc-unknown-linux-gnu
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-linux-riscv64
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
@@ -1270,12 +1309,19 @@ jobs:
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: release-server-${{ matrix.arch }}
+          # A dry run restores the entry and saves none: the nightly dry runs of every app would
+          # otherwise fill the repository's 10 GB cache budget with release entries.
+          save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION" || cargo run --locked -q -p xtask -- version set "$VERSION" || true

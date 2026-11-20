@@ -34,6 +34,20 @@ class DryRunTests(unittest.TestCase):
                 if 'skopeo copy' in step.get('run', '') or 'docker push' in step.get('run', ''):
                     self.assertIn(DRY, step.get('if', ''), f"{name}: {step.get('name')}")
 
+    def test_a_dry_run_saves_no_cache(self):
+        # The nightly dry runs of every app would otherwise fill the 10 GB cache budget.
+        saving = 0
+        for name, job in JOBS.items():
+            for step in job.get('steps', []):
+                uses = step.get('uses', '')
+                if uses.startswith('Swatinem/rust-cache@'):
+                    saving += 1
+                    self.assertEqual(step['with'].get('save-if'), '${{ !inputs.dry-run }}', name)
+                if uses.startswith('storytold/craft-common-actions/actions/freebsd-cargo-cache@') and step['with'].get('phase') == 'save':
+                    saving += 1
+                    self.assertIn(DRY, step.get('if', ''), name)
+        self.assertGreaterEqual(saving, 7)
+
 
 if __name__ == '__main__':
     unittest.main()
