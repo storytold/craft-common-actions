@@ -25,7 +25,7 @@ runs:
         # On Windows, Cargo cannot replace xtask.exe while `cargo xtask ci` is running from it.
         # Build and copy the binary first, then run the copy so the gate can rebuild its target.
         if [[ "$RUNNER_OS" == Windows && "$GATE" == "cargo xtask ci" ]]; then
-          GATE='cargo build --locked --package xtask --bin xtask && cp target/debug/xtask.exe "$(cygpath -u "$RUNNER_TEMP")/gate-xtask.exe" && "$(cygpath -u "$RUNNER_TEMP")/gate-xtask.exe" ci'
+          GATE='cargo build --locked --package xtask --bin xtask && target_dir="$(cargo metadata --no-deps --format-version 1 | jq -r .target_directory)" && cp "$(cygpath -u "$target_dir")/debug/xtask.exe" "$(cygpath -u "$RUNNER_TEMP")/gate-xtask.exe" && "$(cygpath -u "$RUNNER_TEMP")/gate-xtask.exe" ci'
         fi
         printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
         if [[ ! "$GATE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || ! timeout --version >/dev/null 2>&1; then
