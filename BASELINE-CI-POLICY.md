@@ -135,7 +135,7 @@ job without throwing away its other passing job obligations.
 | failure | failure | never green | success or demonstrated failure allowed |
 | failure | success | newly required | must succeed |
 | failure | failure | previously green | must succeed |
-| missing/unknown/skipped/pending/cancelled | any | any | refuse |
+| missing/unknown/unreviewed skipped/pending/cancelled | any | any | refuse |
 
 Historical successful jobs on either exact main revision (all bounded trusted runs
 and attempts, exact-ID check reads) also set the live green floor. A later red
@@ -159,28 +159,18 @@ read. The existing serialized final same-head checks remain. GitHub offers no
 atomic transaction spanning these reads and a release mutation: a subsequent
 administrator change remains a cooperative race, not an atomic lock guarantee.
 
-## Known adoption blockers and Sonar evidence
+## Applicability adapter and remaining adoption work
 
-The existing QA packet at
-`/home/codex/work/task-evidence/photo-nightly-ci-policy-20261121/` is historical,
-not a fresh runtime baseline. Its main source is recorded in `MAIN-REF.json`.
-`PRIVATE-POLICY-PROPOSAL.md` proposes only three aggregate contexts under v1;
-that is not a complete v2 inventory. Its CI push has successful without-HEIF,
-corpus and web jobs, while other jobs are skipped. Its newer same-source schedule
-has more skipped contexts. The strict complete-inventory v2 adapter intentionally
-refuses those unknown/skipped obligations rather than calling skips green or
-falling back to an older easier push. Activation needs reconciled triggers or an
-explicit, separately reviewed applicability adapter. It also needs a decision
-and implementation for the separate external SonarCloud app, all real immutable
-pins, trusted review-root wiring, a retained refresh history and hosted validation.
+The private v2 adapter now represents these reviewed cases explicitly:
 
-`SONAR-JOBS.json` identifies the final Actions job's failing step as **Fail on
-Rust shard test failures**. The **SonarCloud Scan step succeeded**, and all four
-instrumented shard job conclusions succeeded. The sentinel reports shard failures
-separately. No retained packet log contains the individual failing assertion or
-its source root cause, so there is no evidenced source-only Sonar fix here. Do
-not alter frozen Photo source, suppress the sentinel, or call scanner success an
-external SonarCloud quality-gate pass. No native/hosted success is claimed.
+- `applicability: "manual-input-only"` on an Actions obligation requires a reviewed skipped baseline and `green_required:false`, with the exact caller workflow Git blob and resolved reusable-workflow path/SHA inventory bound. It permits only a **skipped** result on an authenticated push/schedule run. It is not success coverage, not an allow-list based on a check name and not permission to skip a baseline-green obligation. A manual run, changed workflow/callee, unannotated skip, pending/cancelled result or generic path-filter declaration refuses. Classify only conditions actually reviewed as input-only; Photo’s seven existing explicit manual-input jobs were inspected from its real CI source.
+- `external_checks` supports only the actual Photo `SonarCloud Code Analysis` app identity (numeric app12526), exact project/main URL and exact source SHA. The repository-scoped authenticated GitHub check result—not the separate successful Actions Scan job—establishes success/failure. Completed baseline and candidate checks are read by exact ID again; missing/duplicate/wrong-app/source/URL/skipped/pending results refuse. Baseline success requires candidate success; only a verified reviewed failure may remain failure, and recovery removes that exemption. An arbitrary provider/name/endpoint cannot be supplied.
+- `managed_checks` explicitly accounts for GitHub’s optional dynamic Dependabot dependency-update workflow. It requires its independently reviewed numeric workflow ID, exact dynamic path, official Actions app ID, same-repository main/source/run/job/check linkage and completed **success** when present. Failure is never exempted, and unknown extra checks still refuse.
+- Equal display names from different authenticated workflow IDs are separate obligations; same-workflow duplicates remain invalid. Every quality run’s resolved referenced-workflow path/SHA set must equal the reviewed policy even if its caller Git blob is unchanged. This binds reusable workflow resolutions; it does not claim that every action used transitively by existing CI was independently immutable.
+
+The earlier historical audit was not an approved fresh baseline. Real read-only current-main checks and source are in the review packet’s evidence directory; Sonar’s separate external quality gate must not be called green from a successful scanner job. No profile-dropping workaround, unrelated CI source fix or real signing/hosted producer acceptance was performed.
+
+Activation still requires exact independently reviewed current policy values/digest, actual public producer/caller pins and hosted validation. The conservative refresh helper preserves green obligations and refuses an external-policy refresh across intervening main history pending explicit reconciliation; it is not an installed controller and no automated policy-refresh service or daily user-review workflow is claimed. The initial separately approved manual run can use a fresh current-main snapshot. No arbitrary historical baseline, generic skipped-check exemption or permanent red exemption is activated by these source helpers.
 
 ## Integration and validation
 

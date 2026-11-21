@@ -70,7 +70,118 @@ def full_sha(value):
     return isinstance(value,str) and n.HEX40.fullmatch(value) and value!=ZERO
 
 
+
+
+
+
+def quality_references(wanted,run=None):
+    expected=wanted.get('referenced_workflows',[])
+    n.require(isinstance(expected,list) and len(expected)<=32,'unbounded reviewed workflow references')
+    identities=[]
+    for item in expected:
+        n.fields(item,{'path','sha'},'reviewed workflow reference')
+        n.require(isinstance(item['path'],str) and re.fullmatch(r'storytold/craft-common-actions/\.github/workflows/[A-Za-z0-9._-]+\.ya?ml@[A-Za-z0-9._/-]+',item['path']) and full_sha(item['sha']),'unreviewed reusable workflow resolution')
+        identities.append((item['path'],item['sha']))
+    n.require(len(set(identities))==len(identities),'duplicate reviewed workflow reference')
+    if run is not None:
+        actual=run.get('referenced_workflows',[])
+        n.require(isinstance(actual,list) and len(actual)<=32 and all(isinstance(row,dict) and isinstance(row.get('path'),str) and isinstance(row.get('sha'),str) for row in actual),'missing resolved reusable workflow metadata')
+        resolved=[(row['path'],row['sha'])for row in actual]
+        n.require(len(set(resolved))==len(resolved) and set(resolved)==set(identities),'resolved reusable workflow changed; explicit reviewed policy update required')
+    return tuple(sorted(identities))
+
+
+
+
+def managed_contract(row):
+    entries=row.get('managed_checks',[])
+    n.require(isinstance(entries,list) and len(entries)<=1,'unbounded managed check declarations')
+    for item in entries:
+        n.fields(item,{'provider','name','app_id','workflow_id','workflow_path'},'managed check policy')
+        n.require(item['provider']=='github-dependabot-updates' and item['name']=='Dependabot' and type(item['app_id']) is int and item['app_id']==15368 and item['workflow_path']=='dynamic/dependabot/dependabot-updates','unreviewed managed check provider')
+        n.positive(item['workflow_id'],'managed workflow ID')
+    return entries
+
+
+def managed_coverage(api,row,policy,sha,checks,used):
+    for item in managed_contract(row):
+        matches=[check for check in checks.values() if check.get('name')==item['name']]
+        n.require(len(matches)<=1,'ambiguous managed check')
+        if not matches: continue # GitHub creates this workflow only for dependency-update work.
+        check=matches[0]
+        match=re.fullmatch(r'https://github.com/'+re.escape(policy['run']['repository'])+r'/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)',check.get('details_url',''))
+        n.require(match is not None and check.get('head_sha')==sha and check.get('app',{}).get('id')==item['app_id'] and type(check.get('app',{}).get('id')) is int and check.get('status')=='completed' and check.get('conclusion')=='success','managed check identity/result differs')
+        run_id,job_id=map(int,match.groups());run=api.request('GET',f'/actions/runs/{run_id}')
+        n.require(run.get('id')==run_id and run.get('workflow_id')==item['workflow_id'] and run.get('path')==item['workflow_path'] and run.get('event')=='dynamic' and run.get('head_branch')=='main' and run.get('head_sha')==sha and run.get('status')=='completed' and run.get('conclusion')=='success','managed workflow provenance differs')
+        for key in ('repository','head_repository'):
+            n.require(run.get(key,{}).get('full_name')==policy['run']['repository'],'managed run repository differs')
+        n.positive(run.get('run_attempt'),'managed run attempt')
+        jobs=bounded_rows(api,f"/actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs?filter=all",'jobs')
+        linked=[job for job in jobs if job.get('id')==job_id and job.get('check_run_url')==f"https://api.github.com/repos/{policy['run']['repository']}/check-runs/{check['id']}"]
+        n.require(len(linked)==1 and linked[0].get('name')==item['name'] and linked[0].get('head_sha')==sha and linked[0].get('run_id')==run_id and linked[0].get('status')=='completed' and linked[0].get('conclusion')=='success','managed job/check linkage differs')
+        n.require(api.request('GET',f"/check-runs/{check['id']}")==check and api.request('GET',f'/actions/runs/{run_id}')==run,'managed run/check changed during collection')
+        used.add(check['id']) # Successfully accounted for, never an exemption for a failure.
+
+
+def manual_only(check):
+    """A reviewed declaration bound to the existing exact workflow blob, not a name heuristic."""
+    if 'applicability' not in check: return False
+    n.require(check['applicability']=='manual-input-only' and check['baseline_conclusion']=='skipped' and check['green_required'] is False,
+              'manual applicability needs explicit skipped baseline/no executed green claim')
+    return True
+
+
+def external_contract(row,policy):
+    entries=row.get('external_checks',[])
+    n.require(isinstance(entries,list) and len(entries)<=8,'external check policy exceeds bound')
+    names=set(); ids=set()
+    for item in entries:
+        n.fields(item,{'provider','name','app_id','details_url','baseline_check_id','baseline_conclusion','green_required'},'external check policy')
+        n.require(item['provider']=='sonarcloud-code-analysis' and item['name']=='SonarCloud Code Analysis' and
+                  type(item['app_id']) is int and item['app_id']==12526 and
+                  item['details_url']=='https://sonarcloud.io/dashboard?id=storytold_photocraft&branch=main' and
+                  policy['run']['repository']=='storytold/photocraft','external provider/app/project identity not reviewed')
+        n.positive(item['baseline_check_id'],'external baseline check ID')
+        n.require(item['name'] not in names and item['baseline_check_id'] not in ids,'duplicate external policy')
+        names.add(item['name']);ids.add(item['baseline_check_id'])
+        n.require(item['baseline_conclusion'] in ('success','failure') and type(item['green_required']) is bool and
+                  (item['baseline_conclusion']!='success' or item['green_required']),'unknown external baseline or missing green requirement')
+    return entries
+
+
+def external_results(api,row,policy,checks_by_sha,used):
+    """App-owned check results authenticated by the repository-scoped GitHub API.
+
+    SonarCloud's external quality-gate check is not the Actions scanner job. No
+    app-selected endpoint is queried, and no feed assertion grants an exemption.
+    """
+    baseline=row['baseline'];base=baseline['source_commit'];source=policy['run']['source_commit'];readback=[]
+    for item in external_contract(row,policy):
+        results={}
+        for sha,checks in checks_by_sha.items():
+            matches=[check for check in checks.values() if check.get('name')==item['name']]
+            n.require(len(matches)==1,'missing/ambiguous external check')
+            check=matches[0];n.positive(check.get('id'),'external check ID')
+            n.require(check.get('head_sha')==sha and check.get('app',{}).get('id')==item['app_id'] and
+                      type(check.get('app',{}).get('id')) is int and check.get('details_url')==item['details_url'] and
+                      check.get('status')=='completed' and check.get('conclusion') in ('success','failure'),
+                      'external check source/app/project/status differs')
+            started=timestamp(check.get('started_at'));completed=timestamp(check.get('completed_at'))
+            n.require(started<=completed<=time.time(),'invalid external check timestamps')
+            if sha==base:
+                n.require(check['id']==item['baseline_check_id'] and completed<=timestamp(baseline['reviewed_at']),
+                          'external baseline changed or postdates review')
+                n.require(item['baseline_conclusion']!='success' or check['conclusion']=='success','reviewed external success regressed')
+            used[sha].add(check['id']);results[sha]=check['conclusion'];readback.append(check)
+        must_pass=item['green_required'] or item['baseline_conclusion']=='success' or results[base]=='success'
+        n.require(not must_pass or results[source]=='success','baseline-green external check must pass candidate')
+    for check in readback:
+        n.require(api.request('GET',f"/check-runs/{check['id']}")==check,'external check changed during witness collection')
+
+
 def baseline_contract(row,policy,now=None):
+    external_contract(row,policy)
+    managed_contract(row)
     baseline=row['baseline']
     n.fields(baseline,{'schema','repository','branch','source_commit','reviewed_at','expires_at','runs'},'reviewed baseline')
     n.require(baseline['schema']=='craft-nightly-main-baseline/v1' and baseline['repository']==policy['run']['repository'] and baseline['branch']=='main','baseline repository/branch differs')
@@ -89,12 +200,12 @@ def baseline_contract(row,policy,now=None):
     job_ids=set(); check_ids=set(); workflows={}
     for check in row['required_checks']:
         n.require(workflow_path(check['workflow_path']) and check['workflow_path']!=policy['run']['workflow_path'] and full_sha(check['workflow_blob']),'unreviewed independent workflow path/blob')
-        n.require(type(check['green_required']) is bool and check['baseline_conclusion'] in ('success','failure'),'unknown baseline result or green floor')
+        n.require(type(check['green_required']) is bool and check['baseline_conclusion'] in (('success','failure','skipped') if manual_only(check) else ('success','failure')),'unknown baseline result or green floor')
         n.require(check['baseline_conclusion']!='success' or check['green_required'],'baseline success must set persistent green floor')
         for key in ('baseline_job_id','baseline_check_id'): n.positive(check[key],key)
         n.require(check['baseline_job_id'] not in job_ids and check['baseline_check_id'] not in check_ids,'duplicate reviewed job/check ID')
         job_ids.add(check['baseline_job_id']); check_ids.add(check['baseline_check_id'])
-        identity=(check['workflow_path'],check['workflow_blob'])
+        identity=(check['workflow_path'],check['workflow_blob'],quality_references(check))
         n.require(check['workflow_id'] not in workflows or workflows[check['workflow_id']]==identity,'inconsistent workflow configuration')
         workflows[check['workflow_id']]=identity
     n.require(set(workflows)==set(by_workflow),'baseline workflow coverage differs')
@@ -109,6 +220,13 @@ def validate_baseline_refresh(previous,updated,policy,api=None):
     """
     publication_contract(updated,policy)
     n.require(baseline_mode(previous) and baseline_mode(updated),'refresh needs two v2 reviewed policies')
+    old_external=external_contract(previous['apps']['photocraft'],policy)
+    new_external=external_contract(updated['apps']['photocraft'],policy)
+    ext_key=lambda item:(item['provider'],item['name'],item['app_id'],item['details_url'])
+    old_ext={ext_key(item):item for item in old_external}; new_ext={ext_key(item):item for item in new_external}
+    n.require(set(old_ext)==set(new_ext),'external coverage changed; explicit policy migration required')
+    for identity,item in old_ext.items():
+        n.require(not(item['green_required'] or item['baseline_conclusion']=='success') or new_ext[identity]['green_required'],'external refresh cannot discard an established green requirement')
     old=previous['apps']['photocraft']['required_checks']; new=updated['apps']['photocraft']['required_checks']
     key=lambda item:(item['name'],item['workflow_id'],item['app_id'],item['workflow_path'])
     old={key(item):item for item in old}; new={key(item):item for item in new}
@@ -157,6 +275,7 @@ def require_main_head(api,policy):
 
 def trusted_quality_run(run,policy,sha,wanted):
     n.require(isinstance(run,dict),'invalid independent run')
+    quality_references(wanted,run)
     for key in ('id','run_attempt','run_number','workflow_id'): n.positive(run.get(key),'quality run '+key)
     n.require(run['workflow_id']==wanted['workflow_id'] and run.get('path')==wanted['workflow_path'] and run.get('head_sha')==sha and run.get('head_branch')=='main' and run.get('event') in ('push','schedule','workflow_dispatch') and run.get('repository',{}).get('full_name')==policy['run']['repository'] and run.get('head_repository',{}).get('full_name')==policy['run']['repository'],'independent baseline/candidate workflow identity/source differs')
     timestamp(run.get('created_at'))
@@ -208,7 +327,11 @@ def verify_quality_jobs(api,policy,sha,run,wanted,checks,baseline=False,reviewed
         n.require(isinstance(check,dict) and check.get('name')==item['name'] and type(check.get('app',{}).get('id')) is int and check['app']['id']==item['app_id'] and check.get('head_sha')==sha,'job/check/app identity differs')
         expected_url=f"https://github.com/{policy['run']['repository']}/actions/runs/{run['id']}/job/{job['id']}"
         n.require(check.get('details_url')==expected_url,'check URL does not identify authenticated job/run')
-        n.require(job.get('status')=='completed' and job.get('conclusion') in ('success','failure') and check.get('status')=='completed' and check.get('conclusion')==job['conclusion'],'missing/pending/skipped/cancelled/unknown job result')
+        inactive=manual_only(item)
+        if inactive:
+            n.require(run['event'] in ('push','schedule') and job.get('conclusion')=='skipped',
+                      'reviewed manual-input-only job is not proven inapplicable on this event')
+        n.require(job.get('status')=='completed' and job.get('conclusion') in (('skipped',) if inactive else ('success','failure')) and check.get('status')=='completed' and check.get('conclusion')==job['conclusion'],'missing/pending/skipped/cancelled/unknown job result')
         started=timestamp(check.get('started_at')); completed=timestamp(job.get('completed_at'))
         n.require(timestamp(run['created_at'])<=started<=completed<=time.time(),'inconsistent/future job witness timestamps')
         if baseline:
@@ -315,6 +438,10 @@ def validate_refresh_history(api,previous,updated,policy):
             used.update(linked); selected.append((sha,wanted[0],run))
             greens=historical_green_jobs(api,policy,sha,wanted,run,results)
             n.require(all(item['green_required'] or item['name'] not in greens for item in wanted),'refresh must ratchet every intervening recovered main check')
+        if row.get("external_checks"):
+            n.require(sha==baseline["source_commit"],"external refresh across intervening history requires explicit reconciliation")
+            external_results(api,row,policy,{sha:checks},{sha:used})
+        managed_coverage(api,row,policy,sha,checks,used)
         require_check_coverage(api,policy,sha,checks,used)
     for sha,wanted,run in selected:
         n.require(latest_quality_run(api,policy,sha,wanted)==run,'refresh run changed during review collection')
@@ -348,11 +475,16 @@ def baseline_checks(api,config,policy,required):
         for item in wanted:
             must_pass=item['green_required'] or item['baseline_conclusion']=='success' or item['name'] in green_history
             n.require(not must_pass or results[source][item['name']]=='success','baseline-green check must pass candidate: '+repr(item['name']))
-    for sha in all_checks: require_check_coverage(api,policy,sha,all_checks[sha],used[sha])
+    external_results(api,row,policy,all_checks,used)
+    for sha in all_checks:
+        managed_coverage(api,row,policy,sha,all_checks[sha],used[sha])
+        require_check_coverage(api,policy,sha,all_checks[sha],used[sha])
     # Requery latest run/attempt: no older-green fallback or rerun race.
     for sha,wanted,run in selected:
         latest=latest_quality_run(api,policy,sha,wanted)
         n.require(latest==run,'baseline/candidate run changed during witness collection')
+    for sha,observed in all_checks.items():
+        n.require(quality_check_inventory(api,sha)==observed,"check inventory changed during witness collection; no older-result fallback")
     baseline_contract(row,policy) # Expiry also checked after potentially slow reads.
     require_main_head(api,policy)
     return True
@@ -365,7 +497,7 @@ def config_row(config,app,tooling=None):
     n.require(isinstance(pin,str) and n.HEX40.fullmatch(pin) and pin!=ZERO,'reviewed published tooling SHA remains unresolved; branch/zero pins forbidden')
     if tooling is not None: n.require(tooling==pin,'tooling differs from the reviewed immutable revision')
     row=config['apps'][app]
-    n.fields(row,{'required_checks','producer_workflow'} | ({'baseline'} if baseline_mode(config) else set()),'app publication policy')
+    n.fields(row,{'required_checks','producer_workflow'} | ({'baseline'} if baseline_mode(config) else set()) | ({'external_checks'} if baseline_mode(config) and 'external_checks' in row else set()) | ({'managed_checks'} if baseline_mode(config) and 'managed_checks' in row else set()),'app publication policy')
     return row,pin
 
 
@@ -521,9 +653,9 @@ def publication_contract(config,policy):
     n.require(producer['id']==policy['run']['workflow_id'] and producer['path']==policy['run']['workflow_path'],'unrecognized producer workflow identity')
     seen=set()
     for check in required:
-        n.fields(check,{'name','workflow_id','app_id'} | ({'workflow_path','workflow_blob','green_required','baseline_job_id','baseline_check_id','baseline_conclusion'} if baseline_mode(config) else set()),'required check')
-        n.require(isinstance(check['name'],str) and 0<len(check['name'])<=256 and check['name'] not in seen,'invalid/duplicate required check name')
-        seen.add(check['name']); n.positive(check['workflow_id'],'required workflow ID'); n.positive(check['app_id'],'required check app ID')
+        n.fields(check,{'name','workflow_id','app_id'} | ({'workflow_path','workflow_blob','green_required','baseline_job_id','baseline_check_id','baseline_conclusion'} | ({'applicability'} if 'applicability' in check else set()) | ({'referenced_workflows'} if 'referenced_workflows' in check else set()) if baseline_mode(config) else set()),'required check')
+        n.require(isinstance(check['name'],str) and 0<len(check['name'])<=256 and (check['name'],check['workflow_id'],check['app_id']) not in seen,'invalid/duplicate required check identity')
+        seen.add((check['name'],check['workflow_id'],check['app_id'])); n.positive(check['workflow_id'],'required workflow ID'); n.positive(check['app_id'],'required check app ID')
         n.require(check['workflow_id']!=policy['run']['workflow_id'],'required check creates a nightly self-dependency cycle')
     require_config_binding(config,policy)
     if baseline_mode(config): baseline_contract(row,policy)
