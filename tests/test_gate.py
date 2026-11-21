@@ -20,9 +20,9 @@ STEPS = JOBS['gate']['steps']
 SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
 SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
-# The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
-# gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'ab35cb2622a77d004a8344095888bfcfbef10323'
+# The reviewed revision of the first-party actions gate.yml calls: the commit that taught
+# gate-setup sccache in a bucket. gate-setup pins its own (tests/test_gate_setup.py).
+OWN_ACTION_REV = '784d5edc317450913ace63c6714c8662bcf72adc'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
 CACHE = 'storytold/craft-common-actions/actions/rust-cache@bf191401c5b42eb6ac209e953880ae948a41570a'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
@@ -1180,6 +1180,55 @@ class WorkspaceCrateTests(unittest.TestCase):
 
 # The profile half of the cache key, and the rest of the key's layout, are tested where they now
 # live: tests/test_rust_cache.py.
+
+
+
+class SccacheBucketKeyTests(unittest.TestCase):
+    """Which of the bucket's keys a job hands the setup: the read-write key only to runs that write
+    caches, so a pull request (whose code runs with the key in its environment) can only read."""
+
+    SECRETS = {'SCCACHE_S3_ACCESS_KEY_ID': 'rw-id', 'SCCACHE_S3_SECRET_ACCESS_KEY': 'rw-secret',
+               'SCCACHE_S3_READ_ACCESS_KEY_ID': 'ro-id', 'SCCACHE_S3_READ_SECRET_ACCESS_KEY': 'ro-secret'}
+
+    def keys(self, job, event, ref, secrets=None, **inputs):
+        context = {**caller(event, ref, **inputs), 'secrets': self.SECRETS if secrets is None else secrets}
+        values = setup(job)
+        evaluate = Expression(context)
+        return (evaluate(values['sccache-access-key-id']) or '',
+                evaluate(values['sccache-secret-access-key']) or '')
+
+    def test_secrets_are_declared_and_optional(self):
+        declared = WORKFLOW['on']['workflow_call']['secrets']
+        for name in self.SECRETS:
+            with self.subTest(name=name):
+                self.assertEqual(declared[name]['required'], 'false')
+
+    def test_only_runs_that_write_get_the_read_write_key(self):
+        cases = [
+            ('pull_request', 'feature', {}, ('ro-id', 'ro-secret')),
+            ('pull_request', 'main', {}, ('ro-id', 'ro-secret')),
+            ('push', 'main', {}, ('rw-id', 'rw-secret')),
+            ('push', 'feature', {}, ('ro-id', 'ro-secret')),
+            ('workflow_dispatch', 'feature', {}, ('ro-id', 'ro-secret')),
+            ('workflow_dispatch', 'feature', {'cache_save_on_dispatch': True}, ('rw-id', 'rw-secret')),
+        ]
+        for job in SAVING_JOBS:
+            for event, ref, inputs, expected in cases:
+                with self.subTest(job=job, event=event, ref=ref, inputs=inputs):
+                    self.assertEqual(self.keys(job, event, ref, **inputs), expected)
+
+    def test_a_pull_request_never_falls_back_to_the_read_write_key(self):
+        only_rw = {'SCCACHE_S3_ACCESS_KEY_ID': 'rw-id', 'SCCACHE_S3_SECRET_ACCESS_KEY': 'rw-secret'}
+        for job in SAVING_JOBS:
+            with self.subTest(job=job):
+                self.assertEqual(self.keys(job, 'pull_request', 'feature', only_rw), ('', ''))
+
+    def test_every_setup_call_passes_the_bucket(self):
+        for job in SAVING_JOBS:
+            with self.subTest(job=job):
+                self.assertEqual(setup(job)['sccache-bucket'], '${{ inputs.sccache-bucket }}')
+                self.assertEqual(setup(job)['sccache-endpoint'], '${{ inputs.sccache-endpoint }}')
+
 
 
 if __name__ == '__main__':

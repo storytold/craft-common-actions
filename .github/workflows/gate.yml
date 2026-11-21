@@ -192,6 +192,16 @@ on:
         type: boolean
         required: false
         default: false
+      sccache-bucket:
+        description: "With sccache: keep its cache in this S3-compatible bucket (Cloudflare R2) instead of the GitHub Actions cache, under `<repository>/<sccache version>/`, on runs that get the SCCACHE_S3_* secrets. Runs without them (fork pull requests) keep the GitHub Actions cache. Pass the secrets explicitly or with `secrets: inherit`; see the README"
+        type: string
+        required: false
+        default: ""
+      sccache-endpoint:
+        description: "The bucket's S3 endpoint, e.g. https://<account-id>.r2.cloudflarestorage.com; required with sccache-bucket"
+        type: string
+        required: false
+        default: ""
       cache-version:
         description: "Bump to start the dependency cache afresh"
         type: string
@@ -228,6 +238,19 @@ on:
         type: number
         required: false
         default: 0
+    secrets:
+      SCCACHE_S3_ACCESS_KEY_ID:
+        description: "sccache-bucket's read-write access key; only runs that write caches (pushes to the default branch, opted-in manual runs) get it"
+        required: false
+      SCCACHE_S3_SECRET_ACCESS_KEY:
+        description: "The secret of SCCACHE_S3_ACCESS_KEY_ID"
+        required: false
+      SCCACHE_S3_READ_ACCESS_KEY_ID:
+        description: "sccache-bucket's read-only access key for every other run; without it those runs use the GitHub Actions cache"
+        required: false
+      SCCACHE_S3_READ_SECRET_ACCESS_KEY:
+        description: "The secret of SCCACHE_S3_READ_ACCESS_KEY_ID"
+        required: false
 
 permissions:
   contents: read
@@ -257,7 +280,7 @@ jobs:
           fetch-depth: 2
       - id: select
         if: inputs.select-os != '' && inputs.select-os != '[]'
-        uses: storytold/craft-common-actions/actions/select-platforms@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/select-platforms@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           os: ${{ inputs.os }}
           select-os: ${{ inputs.select-os }}
@@ -370,7 +393,7 @@ jobs:
       # Default-branch writes remain the default. Maintainers can explicitly opt manual branch runs
       # into branch-scoped writes; pull-request runs never save a cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-setup@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -390,6 +413,11 @@ jobs:
           cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
           cold-build: ${{ inputs.cold-build }}
           sccache: ${{ inputs.sccache }}
+          sccache-bucket: ${{ inputs.sccache-bucket }}
+          sccache-endpoint: ${{ inputs.sccache-endpoint }}
+          # The read-write key only where the run writes caches: a pull request never gets it.
+          sccache-access-key-id: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_ACCESS_KEY_ID || secrets.SCCACHE_S3_READ_ACCESS_KEY_ID }}
+          sccache-secret-access-key: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_SECRET_ACCESS_KEY || secrets.SCCACHE_S3_READ_SECRET_ACCESS_KEY }}
           writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-paths: ${{ inputs.cache-paths }}
           cache-key: ${{ inputs.cache-key }}
@@ -418,7 +446,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Build the test archive
-        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-run@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           command: ${{ inputs.archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -426,7 +454,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates
-        uses: storytold/craft-common-actions/actions/restore-mtimes@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/restore-mtimes@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           mode: record
 
@@ -561,7 +589,7 @@ jobs:
 
       - name: After the archive
         if: inputs.after-archive-command != ''
-        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-run@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           command: ${{ inputs.after-archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -573,7 +601,7 @@ jobs:
       - name: Trim the cache entry to this build
         if: env.CRAFT_CACHE_UNITS != ''
         continue-on-error: true
-        uses: storytold/craft-common-actions/actions/cache-trim@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/cache-trim@784d5edc317450913ace63c6714c8662bcf72adc
 
       # The `result` job reads it: the build job's result covers every runner.
       - name: Record the build's result
@@ -617,7 +645,7 @@ jobs:
       - *checkout
 
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-setup@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -636,11 +664,16 @@ jobs:
           cache-job: lint
           cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           sccache: ${{ inputs.sccache }}
+          sccache-bucket: ${{ inputs.sccache-bucket }}
+          sccache-endpoint: ${{ inputs.sccache-endpoint }}
+          # The read-write key only where the run writes caches: a pull request never gets it.
+          sccache-access-key-id: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_ACCESS_KEY_ID || secrets.SCCACHE_S3_READ_ACCESS_KEY_ID }}
+          sccache-secret-access-key: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_SECRET_ACCESS_KEY || secrets.SCCACHE_S3_READ_SECRET_ACCESS_KEY }}
           writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           caller-setup: "false"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-run@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           command: ${{ inputs.lint-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -682,7 +715,7 @@ jobs:
       # there is one), so the shards do not race each other for it. Shards that run the build
       # job's archive build nothing and restore no cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-setup@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -703,6 +736,11 @@ jobs:
           cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
           cold-build: ${{ inputs.cold-build }}
           sccache: ${{ inputs.sccache }}
+          sccache-bucket: ${{ inputs.sccache-bucket }}
+          sccache-endpoint: ${{ inputs.sccache-endpoint }}
+          # The read-write key only where the run writes caches: a pull request never gets it.
+          sccache-access-key-id: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_ACCESS_KEY_ID || secrets.SCCACHE_S3_READ_ACCESS_KEY_ID }}
+          sccache-secret-access-key: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && secrets.SCCACHE_S3_SECRET_ACCESS_KEY || secrets.SCCACHE_S3_READ_SECRET_ACCESS_KEY }}
           writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
           cache-paths: ${{ inputs.cache-paths }}
           cache-key: ${{ inputs.cache-key }}
@@ -738,7 +776,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/gate-run@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           command: >-
             ${{ matrix.part == 'warm' && inputs.warm-command
@@ -749,7 +787,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step, where the leg saves.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates && !(matrix.part == 'shard' && inputs.archive-command != '')
-        uses: storytold/craft-common-actions/actions/restore-mtimes@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/restore-mtimes@784d5edc317450913ace63c6714c8662bcf72adc
         with:
           mode: record
 
@@ -775,7 +813,7 @@ jobs:
       - name: Trim the cache entry to this build
         if: env.CRAFT_CACHE_UNITS != ''
         continue-on-error: true
-        uses: storytold/craft-common-actions/actions/cache-trim@ab35cb2622a77d004a8344095888bfcfbef10323
+        uses: storytold/craft-common-actions/actions/cache-trim@784d5edc317450913ace63c6714c8662bcf72adc
 
       # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
       # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest

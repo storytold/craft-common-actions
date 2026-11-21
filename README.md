@@ -548,7 +548,9 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   `unexpected_cfgs` warnings after the expected cfgs change. It also can't see files a procedural
   macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
   such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
-  `env` sets the cache's version instead;
+  `env` sets the cache's version instead. With `sccache-bucket` and `sccache-endpoint`, sccache
+  keeps its cache in an S3-compatible bucket (Cloudflare R2) instead, outside the 10 GB GitHub
+  Actions cache budget, under `<repository>/<version>/`; see [sccache in a bucket](#sccache-in-a-bucket);
 
 With `warm-command`, a default-branch run (or an opted-in manual run) adds a `cache warm (<os>)`
 leg per runner beside the gate leg. It runs only that command, for example
@@ -750,6 +752,63 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
 Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
 fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
 gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
+
+#### sccache in a bucket
+
+With `sccache: true`, `sccache-bucket` and `sccache-endpoint`, sccache stores the compiled
+workspace crates in an S3-compatible bucket instead of the GitHub Actions cache. sccache 0.18
+talks to it directly (`SCCACHE_BUCKET`, `SCCACHE_ENDPOINT`, `SCCACHE_REGION=auto`), so nothing
+else is installed. One bucket serves every app: each keeps its objects under
+`<repository>/<version>/`, where the version is the one the GitHub Actions mode uses
+(`cache-version` plus a hash of every `Cargo.toml` and `build.rs`, or `SCCACHE_GHA_VERSION`).
+
+Which key a run gets:
+
+| Run | Key | Mode |
+|---|---|---|
+| Push to the default branch, opted-in manual run (where the dependency cache saves) | `SCCACHE_S3_ACCESS_KEY_ID` | read and write |
+| Any other run that has the secrets (pull requests from branches of the repository) | `SCCACHE_S3_READ_ACCESS_KEY_ID` | read only (`SCCACHE_S3_RW_MODE=READ_ONLY`) |
+| Without the secrets (pull requests from forks, Dependabot) | none | the GitHub Actions cache, read only, as without a bucket |
+
+A pull request never gets the read-write key, so pull request code cannot write to the cache
+`main` builds from. A run without the read-only key falls back to the GitHub Actions cache, which
+a bucket-backed `main` no longer fills: those runs build the workspace crates cold (rust-cache
+still restores the dependencies).
+
+Setting it up, once per bucket:
+
+1. Create the bucket in Cloudflare R2, e.g. `craft-ci-cache`. Add an object lifecycle rule that
+   deletes objects some 30 days after upload: sccache never deletes, and each version change
+   starts a new prefix.
+2. Create two R2 API tokens scoped to that bucket only: one with Object Read & Write, one with
+   Object Read. Each gives an access key ID and a secret access key.
+3. In the organization (Settings > Secrets and variables > Actions, available to the app
+   repositories) or in each repository, add:
+
+   | Name | Kind | Value |
+   |---|---|---|
+   | `SCCACHE_S3_ACCESS_KEY_ID` | secret | access key ID of the Read & Write token |
+   | `SCCACHE_S3_SECRET_ACCESS_KEY` | secret | its secret access key |
+   | `SCCACHE_S3_READ_ACCESS_KEY_ID` | secret | access key ID of the Read token |
+   | `SCCACHE_S3_READ_SECRET_ACCESS_KEY` | secret | its secret access key |
+   | `SCCACHE_S3_BUCKET` | variable | the bucket name |
+   | `SCCACHE_S3_ENDPOINT` | variable | `https://<account-id>.r2.cloudflarestorage.com` |
+
+4. Pass them to the gate (`secrets: inherit` works too):
+
+```yaml
+  gate:
+    uses: storytold/craft-common-actions/.github/workflows/gate.yml@main
+    with:
+      sccache: true
+      sccache-bucket: ${{ vars.SCCACHE_S3_BUCKET }}
+      sccache-endpoint: ${{ vars.SCCACHE_S3_ENDPOINT }}
+    secrets:
+      SCCACHE_S3_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_ACCESS_KEY_ID }}
+      SCCACHE_S3_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_SECRET_ACCESS_KEY }}
+      SCCACHE_S3_READ_ACCESS_KEY_ID: ${{ secrets.SCCACHE_S3_READ_ACCESS_KEY_ID }}
+      SCCACHE_S3_READ_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_S3_READ_SECRET_ACCESS_KEY }}
+```
 
 #### Caller Example:
 ```yaml
