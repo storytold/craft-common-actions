@@ -1,4 +1,4 @@
-"""Deletes the build units of a Cargo target directory that the recorded build did not use.
+"""Prunes unrecorded older build units from a Cargo target directory.
 
 Cargo's unit layout keeps each unit in `<profile>/build/<package>/<hash>/` (`out/`, `fingerprint/`,
 `run/`). Cargo prints a `compiler-artifact` message for every unit a build compiled or found fresh,
@@ -205,9 +205,8 @@ def main():
     target = Path(os.environ.get('CARGO_TARGET_DIR') or 'target').resolve()
     try:
         trim(target, os.environ.get('CRAFT_CACHE_UNITS', ''))
-    except Exception as error:  # noqa: BLE001 - any failure leaves only unused units deleted
-        print(f'::warning::cache-trim stopped: {error!r}. Only units this build did not use were deleted, '
-              f'so the entry is saved as it is')
+    except Exception as error:  # noqa: BLE001 - a trim failure leaves a usable cache
+        print(f'::warning::cache-trim stopped: {error!r}. The entry is saved with whatever trimming completed')
         return 1
     return 0
 
