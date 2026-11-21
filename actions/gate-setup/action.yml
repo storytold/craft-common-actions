@@ -81,6 +81,22 @@ inputs:
     description: "gate.yml's sccache"
     required: false
     default: "false"
+  sccache-bucket:
+    description: "gate.yml's sccache-bucket"
+    required: false
+    default: ""
+  sccache-endpoint:
+    description: "gate.yml's sccache-endpoint"
+    required: false
+    default: ""
+  sccache-access-key-id:
+    description: "The bucket's access key: gate.yml's read-write key on runs that write caches, its read-only key on others; empty uses the GitHub Actions cache"
+    required: false
+    default: ""
+  sccache-secret-access-key:
+    description: "The secret of sccache-access-key-id"
+    required: false
+    default: ""
   writes:
     description: "Whether this run writes caches: pushes to the default branch and opted-in manual runs (true/false)"
     required: false
@@ -243,9 +259,39 @@ runs:
         # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
         # fresh sccache cache instead.
         VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        BUCKET: ${{ inputs.sccache-bucket }}
+        ENDPOINT: ${{ inputs.sccache-endpoint }}
+        KEY_ID: ${{ inputs.sccache-access-key-id }}
+        SECRET: ${{ inputs.sccache-secret-access-key }}
+        REPOSITORY: ${{ github.event.repository.name }}
       run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        # An S3-compatible bucket (Cloudflare R2) when the caller names one and this run has its
+        # credentials. Runs without them (fork pull requests get no secrets) keep the GitHub
+        # Actions cache. sccache prefers S3 over GHA when both are configured, so S3 mode never
+        # sets SCCACHE_GHA_*.
+        if [ -n "$BUCKET" ] && [ -n "$KEY_ID" ] && [ -n "$SECRET" ]; then
+          if [ -z "$ENDPOINT" ]; then
+            echo "::error::sccache-bucket needs sccache-endpoint, e.g. https://<account-id>.r2.cloudflarestorage.com"
+            exit 1
+          fi
+          {
+            echo "SCCACHE_BUCKET=$BUCKET"
+            echo "SCCACHE_ENDPOINT=$ENDPOINT"
+            echo "SCCACHE_REGION=${SCCACHE_REGION:-auto}"
+            # One bucket serves every app; the version keeps the GHA mode's fresh start when
+            # cache-version, a Cargo.toml or a build.rs changes. A bucket lifecycle rule deletes
+            # the prefixes no run reads any more.
+            echo "SCCACHE_S3_KEY_PREFIX=$REPOSITORY/${SCCACHE_GHA_VERSION:-$VERSION}/"
+            echo "AWS_ACCESS_KEY_ID=$KEY_ID"
+            echo "AWS_SECRET_ACCESS_KEY=$SECRET"
+          } >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_S3_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_S3_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
+          exit 0
+        fi
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
           echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
         fi

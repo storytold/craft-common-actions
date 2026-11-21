@@ -1,7 +1,10 @@
 """actions/gate-setup, the setup every gate.yml job shares: pinned actions, and a dependency cache
 that only the shared rust-cache action keys."""
 from pathlib import Path
+import os
 import re
+import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -59,6 +62,80 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(restore['if'], "inputs.rust-cache == 'true' && inputs.cache-workspace-crates == 'true' "
                                         "&& inputs.cold-build != 'true'")
         self.assertGreater(STEPS.index(restore), next(i for i, s in enumerate(STEPS) if s.get('uses') == CACHE))
+
+
+
+class SccacheBackendTests(unittest.TestCase):
+    """The "Use sccache" step: the S3-compatible bucket when the run has its key, else the GitHub
+    Actions cache as before."""
+
+    STEP = next(s for s in STEPS if s.get('name') == 'Use sccache')
+    BUCKET = dict(bucket='craft-ci-cache', endpoint='https://acct.r2.cloudflarestorage.com',
+                  key='id', secret='secret')
+
+    def run_step(self, writes='false', bucket='', endpoint='', key='', secret='', **extra):
+        env = {'WRITES': writes, 'VERSION': 'v2-hash', 'BUCKET': bucket, 'ENDPOINT': endpoint,
+               'KEY_ID': key, 'SECRET': secret, 'REPOSITORY': 'photocraft'}
+        base = {k: v for k, v in os.environ.items() if not k.startswith(('SCCACHE_', 'AWS_'))}
+        with tempfile.TemporaryDirectory() as temp:
+            github_env = Path(temp, 'github_env')
+            github_env.touch()
+            result = subprocess.run(
+                ['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', self.STEP['run']],
+                capture_output=True, text=True, timeout=60,
+                env={**base, 'GITHUB_ENV': str(github_env), **env, **extra})
+            lines = github_env.read_text().splitlines()
+        return result.returncode, result.stdout + result.stderr, dict(l.split('=', 1) for l in lines)
+
+    def test_step_env_reads_the_setup_inputs(self):
+        env = self.STEP['env']
+        self.assertEqual(env['BUCKET'], '${{ inputs.sccache-bucket }}')
+        self.assertEqual(env['ENDPOINT'], '${{ inputs.sccache-endpoint }}')
+        self.assertEqual(env['KEY_ID'], '${{ inputs.sccache-access-key-id }}')
+        self.assertEqual(env['SECRET'], '${{ inputs.sccache-secret-access-key }}')
+
+    def test_without_a_bucket_it_uses_the_github_actions_cache(self):
+        status, _, env = self.run_step()
+        self.assertEqual(status, 0)
+        self.assertEqual(env, {'RUSTC_WRAPPER': 'sccache', 'SCCACHE_GHA_ENABLED': 'true',
+                               'SCCACHE_GHA_VERSION': 'v2-hash', 'SCCACHE_GHA_RW_MODE': 'READ_ONLY'})
+
+    def test_a_bucket_without_its_key_keeps_the_github_actions_cache(self):
+        # Fork pull requests get no secrets.
+        status, _, env = self.run_step(bucket='craft-ci-cache', endpoint='https://acct.r2.cloudflarestorage.com')
+        self.assertEqual(status, 0)
+        self.assertEqual(env['SCCACHE_GHA_ENABLED'], 'true')
+        self.assertNotIn('SCCACHE_BUCKET', env)
+        self.assertNotIn('AWS_ACCESS_KEY_ID', env)
+
+    def test_a_writing_run_uses_the_bucket_read_write(self):
+        status, _, env = self.run_step(writes='true', **self.BUCKET)
+        self.assertEqual(status, 0)
+        self.assertEqual(env, {'RUSTC_WRAPPER': 'sccache', 'SCCACHE_BUCKET': 'craft-ci-cache',
+                               'SCCACHE_ENDPOINT': 'https://acct.r2.cloudflarestorage.com',
+                               'SCCACHE_REGION': 'auto', 'SCCACHE_S3_KEY_PREFIX': 'photocraft/v2-hash/',
+                               'AWS_ACCESS_KEY_ID': 'id', 'AWS_SECRET_ACCESS_KEY': 'secret'})
+
+    def test_other_runs_only_read_the_bucket(self):
+        status, _, env = self.run_step(**self.BUCKET)
+        self.assertEqual(status, 0)
+        self.assertEqual(env['SCCACHE_S3_RW_MODE'], 'READ_ONLY')
+        self.assertFalse([name for name in env if name.startswith('SCCACHE_GHA_')])
+
+    def test_the_callers_mode_region_and_version_win(self):
+        status, _, env = self.run_step(SCCACHE_S3_RW_MODE='READ_WRITE', SCCACHE_REGION='weur',
+                                       SCCACHE_GHA_VERSION='pinned', **self.BUCKET)
+        self.assertEqual(status, 0)
+        self.assertNotIn('SCCACHE_S3_RW_MODE', env)
+        self.assertEqual(env['SCCACHE_REGION'], 'weur')
+        self.assertEqual(env['SCCACHE_S3_KEY_PREFIX'], 'photocraft/pinned/')
+
+    def test_a_bucket_without_an_endpoint_fails(self):
+        status, output, env = self.run_step(bucket='craft-ci-cache', key='id', secret='secret')
+        self.assertEqual(status, 1)
+        self.assertIn('sccache-bucket needs sccache-endpoint', output)
+        self.assertNotIn('AWS_ACCESS_KEY_ID', env)
+
 
 
 if __name__ == '__main__':
