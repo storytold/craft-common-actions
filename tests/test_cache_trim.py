@@ -1,8 +1,11 @@
 """actions/cache-trim: a saved entry keeps only the build units the run's build used."""
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest import mock
 import contextlib
 import io
 import json
+import ntpath
 import os
 import sys
 import tempfile
@@ -77,6 +80,24 @@ class TrimTests(unittest.TestCase):
         self.assertFalse(stale.exists())
         self.assertIn('xtask/2222222222222222', out)
 
+    def test_a_record_can_mix_ordinary_and_extended_windows_unit_paths(self):
+        # One ordinary path matches lexically, so the no-match guard cannot save the second unit.
+        ordinary = PureWindowsPath(r'D:\t\debug\build\a\1111111111111111')
+        script = PureWindowsPath(r'D:\t\debug\build\script\abcdef0123456789')
+        alias = PureWindowsPath(r'\\?\D:\t\debug\BUILD\script\ABCDEF0123456789')
+        stale = PureWindowsPath(r'D:\t\debug\build\script\3333333333333333')
+        identities = {script: (1, 2), alias: (1, 2), stale: (1, 3)}
+        with (
+            mock.patch.object(trim, 'Path', PureWindowsPath),
+            mock.patch.object(trim, 'os', SimpleNamespace(path=ntpath, walk=lambda _: ())),
+            mock.patch.object(trim, 'identity', side_effect=lambda path: identities.get(PureWindowsPath(path))),
+        ):
+            found = [('a', ordinary), ('script', script), ('script', stale)]
+            used = trim.used_units([ordinary / 'out' / 'liba.rlib', alias / 'out'], found)
+            self.assertIn(trim.key(ordinary), used)
+            self.assertIn(trim.key(script), used)
+            self.assertNotIn(trim.key(stale), used)
+
     def test_target_triple_profiles_are_trimmed_too(self):
         used = unit(self.target, 'a', '1111111111111111')
         other = unit(self.target, 'b', '2222222222222222', profile='wasm32-unknown-unknown/debug')
@@ -109,6 +130,25 @@ class TrimTests(unittest.TestCase):
         self.assertIn('::warning::', out)
         self.assertTrue(kept.is_dir())
 
+    def test_an_unrecorded_unit_at_the_job_start_is_kept(self):
+        used = unit(self.target, 'a', '1111111111111111')
+        at_start = unit(self.target, 'b', '2222222222222222')
+        older = unit(self.target, 'c', '3333333333333333')
+        start = 2_000_000
+        for directory, mtime in [(at_start, start), (older, start - 2)]:
+            artifact = directory / 'out' / 'artifact'
+            os.utime(artifact, (mtime, mtime))
+            self.assertEqual(artifact.stat().st_mtime, mtime)
+        self.record.with_suffix('.start').write_text(f'{start}\n', encoding='utf-8')
+        self.write({'reason': 'compiler-artifact', 'filenames': [str(used / 'out' / 'liba.rlib')]})
+
+        classified_as_current = (trim.built_since(at_start, start), trim.built_since(older, start))
+        removed, _ = self.run_trim()
+        self.assertEqual(classified_as_current, (True, False))
+        self.assertEqual(removed, 1)
+        self.assertTrue(used.is_dir() and at_start.is_dir())
+        self.assertFalse(older.exists())
+
     def test_keeps_unrecorded_units_built_this_job_while_trimming_restored_units(self):
         # A build command that does not record (a new step's `cargo build`) would otherwise lose its
         # units before every save and rebuild them every run, unnoticed.
@@ -131,6 +171,26 @@ class TrimTests(unittest.TestCase):
         self.assertEqual(removed, 1)
         self.assertTrue(used.is_dir())
         self.assertFalse(unrecorded.exists())
+
+    def test_a_present_invalid_start_stamp_never_trims(self):
+        used = unit(self.target, 'a', '1111111111111111')
+        unrecorded = unit(self.target, 'b', '2222222222222222')
+        self.write({'reason': 'compiler-artifact', 'filenames': [str(used / 'out' / 'liba.rlib')]})
+        stamp = self.record.with_suffix('.start')
+        for invalid in ('not a timestamp', 'nan', 'inf'):
+            with self.subTest(invalid=invalid):
+                stamp.write_text(invalid, encoding='utf-8')
+                removed, out = self.run_trim()
+                self.assertEqual(removed, 0)
+                self.assertIn('start time is unreadable or invalid', out)
+                self.assertTrue(unrecorded.is_dir())
+
+        stamp.unlink()
+        stamp.mkdir()  # Present, but cannot be read as a timestamp file.
+        removed, out = self.run_trim()
+        self.assertEqual(removed, 0)
+        self.assertIn('start time is unreadable or invalid', out)
+        self.assertTrue(unrecorded.is_dir())
 
     def test_only_what_was_deleted_counts_as_removed(self):
         used = unit(self.target, 'a', '1111111111111111')
