@@ -3,10 +3,11 @@
 This is a private successor to the v7.2 strict-green policy. Nothing is published
 or activated. The existing v1 schema still requires every configured independent
 check and its whole workflow to succeed. It never gains an implicit exemption.
-The v2 schema below adds **only an explicitly reviewed, authenticated main-failure
-exception**. No workflow, publisher permission, signing or deletion change is made
-here. The existing pre-checkout bootstrap deliberately still accepts v1 only;
-the integration owner must review any v2 wiring separately.
+The v2 schema adds explicitly reviewed authenticated main-failure handling and
+narrow applicability adapters. The integrated defining-job bootstrap accepts v2
+only when its canonical digest matches the independently configured review root.
+Caller/publication/attestation/pruning/Unix execution remain off; this document
+is not authority to activate any of them.
 
 ## Trust boundary and setup
 
@@ -14,14 +15,17 @@ the integration owner must review any v2 wiring separately.
    reads, reviews the complete job/check inventory and exact workflow configuration,
    and pins each baseline run ID, number, attempt, job ID, check ID and result.
    Do not use candidate output, PR/fork checks, status text, a bot login, a check
-   name by itself, or the old QA packet to choose exemptions. Review all transitive
-   reusable workflow/action references too: this adapter pins the top-level
-   workflow Git blob, not the contents behind an imported mutable ref. Such mutable
-   transitive references need immutable pins/review before activation.
+   name by itself, or the old QA packet to choose exemptions. Review transitive
+   reusable workflow/action references too. This adapter pins the caller Git blob
+   AND the authenticated resolved reusable-workflow path/SHA set for every quality
+   run. It does not claim to bind every action used transitively by existing CI;
+   those dependencies still need applicable review before activation.
 2. The reviewed JSON must arrive from an independently trusted immutable snapshot.
    Compute its canonical digest with `nightly_policy.config_digest(config)`.
-   Bind `NIGHTLY_REVIEWED_POLICY_SHA256` in the trusted controller (for example an
-   independently protected reviewed environment value). It must **not** be
+   Bind `NIGHTLY_REVIEWED_POLICY_SHA256` as the independently reviewed repository
+   variable available to the identity, status and publication jobs. A value kept
+   only in the signing environment is not available to those jobs. The signing
+   environment protects actual signing secrets, not this global public digest. It must **not** be
    computed from candidate-controlled JSON at runtime, taken from dispatch/caller
    input, or supplied by an artifact. Config plus its self-reported digest is not
    authentication. Repository/environment setup is NOT performed by this change.
