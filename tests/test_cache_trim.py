@@ -196,11 +196,17 @@ class TrimTests(unittest.TestCase):
         used = unit(self.target, 'a', '1111111111111111')
         locked = unit(self.target, 'a', '2222222222222222')
         self.write({'reason': 'compiler-artifact', 'filenames': [str(used / 'out' / 'liba.rlib')]})
-        (locked / 'out').chmod(0o500)  # its files cannot be unlinked
-        try:
+        remove = trim.shutil.rmtree
+
+        def refuse_locked(path, *, ignore_errors=False):
+            if path == locked:
+                self.assertTrue(ignore_errors)
+                return
+            remove(path, ignore_errors=ignore_errors)
+
+        with mock.patch.object(trim.shutil, 'rmtree', side_effect=refuse_locked):
             removed, out = self.run_trim()
-        finally:
-            (locked / 'out').chmod(0o700)
+        self.assertTrue(locked.is_dir())
         self.assertEqual(removed, 0)
         self.assertIn('removed 0 units (0.00 GB)', out)
         self.assertIn('::warning::cache-trim: 1 units could not be deleted completely: a/2222222222222222', out)
