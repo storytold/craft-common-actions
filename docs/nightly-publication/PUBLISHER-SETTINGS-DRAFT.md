@@ -2,6 +2,8 @@
 
 No API command in this file has been run. Skylar approved immutable releases and stable-tag protection; the publisher applies and reads back settings before the separately timed first manual publication. Branch pushes, settings/secrets, actual signing and first-run activation are separate public operations, never implied by private tests.
 
+For exact maintainer UI steps, credential ownership, exposure tradeoffs and the current non-OIDC Azure limitation, see [SIGNING-ENVIRONMENT-ADMIN-STEPS.md](SIGNING-ENVIRONMENT-ADMIN-STEPS.md). The recommended environment is `nightly-signing`; do not broaden the existing stable `release` environment as incidental setup.
+
 ## Immutable releases
 
 For GitHub.com repository `storytold/photocraft`, enable repository release immutability. Current REST endpoint: `PUT /repos/storytold/photocraft/immutable-releases` (no body, Administration write; expected204). Read back `GET /repos/storytold/photocraft/immutable-releases` and record `enabled:true`. Do not use an invented `PATCH /repos/... immutable_releases` field. If organization enforcement applies, record it; do not change organization-wide policy.
