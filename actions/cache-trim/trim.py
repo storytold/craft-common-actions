@@ -11,8 +11,8 @@ binary) is reported at its uplifted copy in `<profile>/`, a hard link to the fil
 actions/rust-cache writes the job's start time beside the record (`<record stem>.start`, seconds since
 the epoch) before any build runs. Restored units keep their archived mtimes, so a unit the trim would
 remove that holds a file newer than that was built in this job: one of the leg's build commands does
-not record its units. Then nothing is deleted and a warning names the units, since deleting them would
-make every run rebuild them.
+not record its units. Keep those units and name them in a warning, while still trimming unrecorded
+units from earlier jobs.
 """
 import json
 import os
@@ -161,12 +161,14 @@ def trim(target, record):
     unused = [(package, unit) for package, unit in found if key(unit) not in used]
     start = start_time(record)
     if start is not None:
-        unrecorded = [f'{package}/{unit.name}' for package, unit in unused if built_since(unit, start)]
+        unrecorded = [(package, unit) for package, unit in unused if built_since(unit, start)]
         if unrecorded:
+            names = [f'{package}/{unit.name}' for package, unit in unrecorded[:5]]
             print(f'::warning::cache-trim: {len(unrecorded)} units built in this job are not in the record '
-                  f'({", ".join(unrecorded[:5])}{", ..." if len(unrecorded) > 5 else ""}); a build command '
-                  f'of this leg does not record its units, so nothing is trimmed')
-            return 0
+                  f'({", ".join(names)}{", ..." if len(unrecorded) > 5 else ""}); keeping them and '
+                  'trimming unrecorded units from earlier jobs')
+            used.update(key(unit) for _, unit in unrecorded)
+            unused = [(package, unit) for package, unit in unused if key(unit) not in used]
     kept_bytes = sum(size(unit) for _, unit in found if key(unit) in used)
     removed = removed_bytes = 0
     by_package, details, left_behind = {}, [], []
