@@ -35,7 +35,13 @@ FIELDS = {'schema', 'platform', 'method', 'identity_sha256', 'unsigned_sha256', 
 
 def command(argv, *, stdin=None, env=None):
     # Only fixed trusted system tools/app source scripts, never payload executables.
-    result = subprocess.run([str(x) for x in argv], input=stdin, env=env, check=True,
+    tools = {'pwsh', '/bin/bash', '/usr/bin/ditto', '/usr/bin/lipo', '/usr/bin/codesign',
+             '/usr/bin/xcrun', '/usr/sbin/spctl', '/usr/bin/gpg', '/usr/bin/gpgv'}
+    arguments = [str(value.absolute()) if isinstance(value, Path) else str(value) for value in argv]
+    n.require(arguments and arguments[0] in tools, 'unreviewed signing executable')
+    n.require(all(not any(char in value for char in '\0\r\n') for value in arguments),
+              'signing arguments contain control characters')
+    result = subprocess.run(arguments, input=stdin, env=env, check=True,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3900)
     n.require(len(result.stdout) <= n.MAX_JSON_BYTES and len(result.stderr) <= n.MAX_JSON_BYTES,
               'signing tool output exceeds bound')
@@ -158,6 +164,21 @@ def repack_windows(root, archive):
             container.write(path, path.name)
 
 
+def hardened_runtime(details):
+    """Read the codesign flags field in linear time, without overlapping regex scans."""
+    for line in details.splitlines():
+        if not line.startswith('CodeDirectory '):
+            continue
+        for field in line.split()[1:]:
+            if not field.startswith('flags=0x'):
+                continue
+            value, separator, names = field[8:].partition('(')
+            if not separator or not names.endswith(')') or not re.fullmatch('[0-9a-f]+', value):
+                return False
+            return bool(int(value, 16) & 0x10000) and 'runtime' in names[:-1].split(',')
+    return False
+
+
 def mac_verify(archive, version, pending, environment, output):
     # Inventory is not signature proof; system tools below verify separately.
     u.verify_archive(pending, 'macos-aarch64', archive, version)
@@ -177,7 +198,7 @@ def mac_verify(archive, version, pending, environment, output):
               '\nAuthority=Developer ID Application:' in '\n'+details and
               '\nTeamIdentifier='+team+'\n' in '\n'+details and
               re.search(r'^Timestamp=.+$', details, re.M) and
-              re.search(r'^CodeDirectory .*flags=0x[0-9a-f]+\([^)]*runtime', details, re.M),
+              hardened_runtime(details),
               'Mac requires Developer ID, exact team, secure timestamp and hardened runtime')
     command(['/usr/bin/xcrun', 'stapler', 'validate', app])
     assessment = command(['/usr/sbin/spctl', '--assess', '--type', 'execute', app])

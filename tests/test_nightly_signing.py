@@ -54,6 +54,42 @@ class SigningTests(unittest.TestCase):
                       identity_sha256=self.ih,unsigned_sha256=self.unsigned,final_sha256=self.final,environment=self.env)
         values.update(kw); return s.verify_receipt(**values)
 
+    def test_hardened_runtime_flags_are_exact_and_linear_on_long_input(self):
+        for value in ('CodeDirectory v=20500 flags=0x10000(runtime) hashes=x',
+                      'CodeDirectory v=20500 flags=0x10002(adhoc,runtime) hashes=x'):
+            with self.subTest(value=value):
+                self.assertTrue(s.hardened_runtime(value))
+        for value in ('CodeDirectory flags=0x10000(noruntime)',
+                      'CodeDirectory flags=0x0(runtime)',
+                      'CodeDirectory flags=0x10000(runtime',
+                      'CodeDirectory flags=0xnothex(runtime)',
+                      'Other flags=0x10000(runtime)',
+                      'CodeDirectory ' + 'flags=0x1(' * 15000):
+            with self.subTest(value=value[:80]):
+                self.assertFalse(s.hardened_runtime(value))
+
+    def test_signing_command_rejects_unreviewed_tools_and_control_characters(self):
+        for argv in ([], ['/tmp/downloaded-payload'], ['pwsh', 'bad\nargument'],
+                     ['/usr/bin/gpg', 'bad\0argument'], ['/bin/bash', 'bad\rargument']):
+            with self.subTest(argv=argv), patch.object(s.subprocess, 'run', side_effect=AssertionError('process forbidden')):
+                with self.assertRaises(ValueError):
+                    s.command(argv)
+
+    def test_signing_command_preserves_argv_without_shell_interpretation(self):
+        argv = ['pwsh', '-File', 'trusted script.ps1', '-Root', 'directory with spaces']
+        completed = s.subprocess.CompletedProcess(argv, 0, b'fixture\n', b'')
+        with patch.object(s.subprocess, 'run', return_value=completed) as process:
+            self.assertEqual(s.command(argv), 'fixture')
+        self.assertEqual(process.call_args.args[0], argv)
+        self.assertFalse(process.call_args.kwargs.get('shell', False))
+
+    def test_signing_command_path_operands_cannot_be_interpreted_as_options(self):
+        signature, payload = Path('-signature.asc'), Path('-payload')
+        completed = s.subprocess.CompletedProcess([], 0, b'', b'')
+        with patch.object(s.subprocess, 'run', return_value=completed) as process:
+            s.command(['/usr/bin/gpgv', signature, payload])
+        self.assertEqual(process.call_args.args[0], ['/usr/bin/gpgv', str(signature.absolute()), str(payload.absolute())])
+
     def test_windows_pfx_or_complete_azure_required(self):
         self.assertTrue(s.require_config('windows-x86_64',self.env))
         for missing in s.WINDOWS_SECRETS:

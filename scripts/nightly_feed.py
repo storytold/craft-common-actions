@@ -45,6 +45,25 @@ def fields(value, expected, where):
 def positive(value, where):
     require(type(value) is int and 0 < value < 2**63, f"invalid {where}")
 
+def bounded_bytes(path, limit, kind):
+    """Read a stable regular input without following a leaf link or waiting on a FIFO."""
+    path = Path(path)
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), f"{kind} must be a regular non-symlink file")
+    require(before.st_size <= limit, f"{kind} exceeds bound")
+    def stamp(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(path, flags), "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        require(stamp(before) == stamp(opened), f"{kind} changed before read")
+        raw = stream.read(limit + 1)
+        require(stamp(opened) == stamp(os.fstat(stream.fileno())) and len(raw) == opened.st_size,
+                f"{kind} changed while reading")
+    require(len(raw) <= limit, f"{kind} exceeds bound")
+    return raw
+
+
 def bounded_json(path):
     def unique(pairs):
         result = {}
@@ -52,9 +71,7 @@ def bounded_json(path):
             require(key not in result, "duplicate JSON key")
             result[key] = value
         return result
-    with open(path, "rb") as stream:
-        raw = stream.read(MAX_JSON_BYTES + 1)
-    require(len(raw) <= MAX_JSON_BYTES, "JSON exceeds 256 KiB")
+    raw = bounded_bytes(path, MAX_JSON_BYTES, "JSON")
     try:
         return json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
                           parse_constant=lambda _: (_ for _ in ()).throw(InvalidNightly("non-finite JSON")))
@@ -100,7 +117,7 @@ def regular_file(directory, name):
     path = Path(directory) / name
     require(not path.is_symlink(), "asset must not be a symlink")
     require(path.resolve().parent == Path(directory).resolve(), "asset escapes artifact directory")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     stream = os.fdopen(descriptor, "rb")
     info = os.fstat(stream.fileno())
     if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_ASSET_BYTES:
@@ -278,8 +295,7 @@ def stage_feed_v2(registry, ident, version, feed, artifacts, output):
 
 def prepare(registry, app, cargo, timestamp, environment):
     trusted_context(registry, app, environment)
-    with open(cargo, "rb") as stream:
-        data = tomllib.load(stream)
+    data = tomllib.loads(bounded_bytes(cargo, MAX_JSON_BYTES, "Cargo metadata").decode("utf-8"))
     base = data.get("workspace", {}).get("package", {}).get("version", data.get("package", {}).get("version"))
     # Existing prerelease/build suffix is not copied into a second prerelease component.
     require(isinstance(base, str), "missing package version")

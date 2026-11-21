@@ -301,9 +301,7 @@ def save_checkpoint(path, previous):
 
 
 def read_plan(path):
-    with open(path, "rb") as stream:
-        raw = stream.read(4 * 1024 * 1024 + 1)
-    n.require(len(raw) <= 4 * 1024 * 1024, "prune plan exceeds bound")
+    raw = n.bounded_bytes(path, 4 * 1024 * 1024, "prune plan")
     def unique(pairs):
         value = {}
         for key, item in pairs:

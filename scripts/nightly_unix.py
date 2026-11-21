@@ -48,8 +48,7 @@ def check_prepared(registry, pending, platform, prepared, cargo, version, enviro
     row = pending_contract(pending,platform)
     n.trusted_context(registry,"photocraft",environment)
     n.fields(prepared,{"schema","channel","app","repository","tag","source_commit","published_at","version","ready"},"prepared identity")
-    with open(cargo,'rb') as stream: manifest=stream.read(MAX_METADATA+1)
-    n.require(len(manifest)<=MAX_METADATA,"manifest exceeds metadata bound")
+    manifest=n.bounded_bytes(cargo,MAX_METADATA,'manifest')
     tomllib.loads(manifest.decode('utf-8')) # source manifest is bounded/valid; not the identity base
     fresh=p.validate_prepared(registry,prepared,policy,environment)
     n.require(prepared == fresh and version == fresh["version"] and prepared["ready"] is True, "source/run/version identity mismatch")
@@ -236,8 +235,8 @@ def main():
                         stream.write(f'{key}={value}\n')
         elif args.mode=='verify-version':
             pending_contract(pending,args.platform)
-            n.require(args.version_output and Path(args.version_output).stat().st_size<=MAX_METADATA,'bounded version output required')
-            verify_version_output(Path(args.version_output).read_text(),args.version)
+            n.require(args.version_output,'bounded version output required')
+            verify_version_output(n.bounded_bytes(args.version_output,MAX_METADATA,'version output').decode('utf-8'),args.version)
             result={'exact_version_and_flavor':True,'runtime_qualified':False,'feed_admitted':False}
         else:
             n.require(args.archive and (args.mode!='unpack-private' or args.output),'archive/output required')

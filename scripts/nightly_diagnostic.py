@@ -10,8 +10,7 @@ import nightly_feed as n
 
 def diagnostic(registry,app,cargo,environment):
     n.trusted_context(registry,app,environment)
-    with open(cargo,'rb') as stream: raw=stream.read(n.MAX_JSON_BYTES+1)
-    n.require(len(raw)<=n.MAX_JSON_BYTES,'diagnostic Cargo metadata exceeds bound')
+    raw=n.bounded_bytes(cargo,n.MAX_JSON_BYTES,'diagnostic Cargo metadata')
     manifest=tomllib.loads(raw.decode())
     base=manifest.get('workspace',{}).get('package',{}).get('version',manifest.get('package',{}).get('version'))
     n.require(isinstance(base,str),'diagnostic Cargo version missing')

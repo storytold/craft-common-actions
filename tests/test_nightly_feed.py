@@ -34,6 +34,74 @@ class NightlyTests(unittest.TestCase):
     def ready(self):
         self.registry["apps"]["photocraft"]["targets"] = [copy.deepcopy(self.target)]
 
+    def test_bounded_json_requires_regular_non_symlink_file(self):
+        path = self.root / 'input.json'
+        path.write_text('{"ok":1}')
+        self.assertEqual(n.bounded_json(path), {'ok': 1})
+        link = self.root / 'link.json'
+        link.symlink_to(path)
+        for invalid in (link, self.root):
+            with self.subTest(path=invalid), self.assertRaises(n.InvalidNightly):
+                n.bounded_json(invalid)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo'), 'POSIX FIFO test')
+    def test_bounded_json_refuses_fifo_before_opening(self):
+        path = self.root / 'fifo.json'
+        os.mkfifo(path)
+        with patch.object(n.os, 'open', side_effect=AssertionError('FIFO must not open')):
+            with self.assertRaises(n.InvalidNightly):
+                n.bounded_json(path)
+
+    @unittest.skipUnless(hasattr(os, 'mkfifo') and hasattr(os, 'O_NONBLOCK'), 'POSIX FIFO test')
+    def test_asset_fifo_cannot_block_before_regular_file_check(self):
+        path = self.root / 'fifo.asset'
+        os.mkfifo(path)
+        real_open = os.open
+        def nonblocking_open(file, flags):
+            self.assertTrue(flags & os.O_NONBLOCK)
+            return real_open(file, flags)
+        with patch.object(n.os, 'open', side_effect=nonblocking_open):
+            with self.assertRaises(n.InvalidNightly):
+                n.regular_file(self.root, path.name)
+
+    def test_bounded_json_refuses_replacement_between_stat_and_open(self):
+        path = self.root / 'input.json'
+        path.write_text('{"ok":1}')
+        replacement = self.root / 'replacement.json'
+        replacement.write_text('{"ok":2}')
+        real_open = os.open
+        def replace_then_open(file, flags):
+            replacement.replace(path)
+            return real_open(file, flags)
+        with patch.object(n.os, 'open', side_effect=replace_then_open):
+            with self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
+                n.bounded_json(path)
+
+    def test_bounded_bytes_preserves_non_json_bytes_and_exact_cap(self):
+        path = self.root / 'version.txt'
+        payload = b'1.2.3\r\n'
+        path.write_bytes(payload)
+        self.assertEqual(n.bounded_bytes(path, len(payload), 'version output'), payload)
+        with self.assertRaisesRegex(n.InvalidNightly, 'exceeds bound'):
+            n.bounded_bytes(path, len(payload) - 1, 'version output')
+
+    def test_bounded_json_refuses_change_during_read(self):
+        path = self.root / 'input.json'
+        path.write_text('{"ok":1}')
+        real_fstat = os.fstat
+        calls = 0
+        def mutate_before_final_stat(descriptor):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                path.write_text('{"ok":2}')
+                info = path.stat()
+                os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1000000000))
+            return real_fstat(descriptor)
+        with patch.object(n.os, 'fstat', side_effect=mutate_before_final_stat):
+            with self.assertRaisesRegex(n.InvalidNightly, 'changed while reading'):
+                n.bounded_json(path)
+
     def test_identity_is_immutable_semver_and_full_commit_bound(self):
         self.assertEqual(self.ident["source_commit"], "a" * 40)
         self.assertRegex(self.ident["tag"], r"^v1\.2\.3-nightly\.\d{8}\.1234\.1\.ga{12}$")
