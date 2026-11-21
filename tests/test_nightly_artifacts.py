@@ -70,8 +70,8 @@ class ArtifactBindingTests(unittest.TestCase):
     def test_live_cli_entrypoints_refuse_substitution_before_packet_semantics_or_credentials(self):
         import publish_nightly as publisher
         import nightly_attestation as attestation
-        common=['--registry','must-not-read','--identity',str(self.identity/'nightly-identity.json'),'--policy','must-not-read','--directory',str(self.packet),'--asset',self.asset,'--identity-sha256','0'*64,'--packet-sha256',self.ph,'--zip-sha256',self.zh]
-        for module,extra in ((publisher,['--app','photocraft','--config','must-not-read']),(attestation,['--config','must-not-read'])):
+        common=['--registry','must-not-read','--identity',str(self.identity/'nightly-identity.json'),'--policy','must-not-read','--directory',str(self.packet),'--asset',self.asset,'--identity-sha256','0'*64,'--packet-sha256',self.ph,'--zip-sha256',self.zh,'--signing-receipt-directory','must-not-read','--signing-receipt-sha256','a'*64,'--unsigned-sha256','b'*64]
+        for module,extra in ((publisher,['--app','photocraft','--config','must-not-read','--ownership-directory','must-not-create']),(attestation,['--config','must-not-read'])):
             with self.subTest(module=module.__name__),patch.object(sys,'argv',['fixture',*common,*extra]),patch.object(publisher,'HTTPTransport',side_effect=AssertionError('credential/transport forbidden')):
                 with self.assertRaises(SystemExit) as exit: module.main()
                 self.assertEqual(exit.exception.code,1)

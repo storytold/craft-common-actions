@@ -37,6 +37,9 @@ class AttestationTests(unittest.TestCase):
             'zip_sha256':hashlib.sha256(self.data).hexdigest(),'asset':self.filename}
     def invoke(self,policy=None):
         return a.subject(self.case.registry,self.case.prepared,self.case.policy if policy is None else policy,self.packet,self.case.env)
+    def test_live_signed_subject_rejects_legacy_unsigned_v1_descriptor(self):
+        with self.assertRaisesRegex(ValueError,'descriptor differs'):
+            a.guarded_subject(self.case.api,self.case.registry,self.case.prepared,self.case.policy,self.packet,self.case.env,self.case.config,**self.binding,signed=True)
     def test_exact_staged_digest_and_source_with_no_transport(self):
         with patch.object(a.publisher,'HTTPTransport',side_effect=AssertionError('network forbidden')): result=self.invoke()
         self.assertEqual(result['digest'],'sha256:'+hashlib.sha256(self.data).hexdigest())
@@ -55,13 +58,31 @@ class AttestationTests(unittest.TestCase):
     def guarded(self):
         return a.guarded_subject(self.case.api,self.case.registry,self.case.prepared,self.case.policy,self.packet,self.case.env,self.case.config,**self.binding)
     def cli(self):
+        # Explicitly synthetic signed-receipt fixture: hashes/context only, no OS signing proof.
+        import nightly_signing as signing
+        saved_descriptor=(self.packet/'NIGHTLY.json').read_bytes();saved_sums=(self.packet/'SHA256SUMS.txt').read_bytes()
+        saved_packet_hash=self.binding['packet_sha256']
+        feed=json.loads(saved_descriptor);feed['schema']='craft-nightly/v2'
+        (self.packet/'NIGHTLY.json').write_text(json.dumps(feed,sort_keys=True,separators=(',',':'))+'\n')
+        sums=''.join(bindings.n.digest_file(self.packet,name)[1]+'  '+name+'\n' for name in sorted([self.filename,'NIGHTLY.json']))
+        (self.packet/'SHA256SUMS.txt').write_text(sums)
+        self.binding['packet_sha256']=bindings.fingerprint(self.packet,'packet',self.filename)
+        env={**self.case.env,'NIGHTLY_WINDOWS_PUBLISHER_SUBJECT':'CN=Synthetic fixture only'}
+        receipt_dir=self.root/'signer';receipt_dir.mkdir(exist_ok=True)
+        data=signing.receipt_data('windows-x86_64',self.filename,self.binding['identity_sha256'],'b'*64,self.binding['zip_sha256'],env['NIGHTLY_WINDOWS_PUBLISHER_SUBJECT'],env)
+        receipt_path=receipt_dir/'nightly-signing.json';receipt_path.write_text(json.dumps(data))
         argv=['fixture','--registry',str(ROOT/'nightly-apps.json'),'--identity',str(self.identity/'nightly-identity.json'),
             '--policy',str(self.identity/'nightly-producer-policy.json'),'--directory',str(self.packet),'--config',str(self.config),
             '--identity-sha256',self.binding['identity_sha256'],'--packet-sha256',self.binding['packet_sha256'],
-            '--zip-sha256',self.binding['zip_sha256'],'--asset',self.filename]
+            '--zip-sha256',self.binding['zip_sha256'],'--asset',self.filename,
+            '--signing-receipt-directory',str(receipt_dir),'--signing-receipt-sha256',hashlib.sha256(receipt_path.read_bytes()).hexdigest(),'--unsigned-sha256','b'*64]
         output=self.root/'github-output'
-        with patch.object(sys,'argv',argv),patch.dict(os.environ,{**self.case.env,'GH_TOKEN':'synthetic-read-token','GITHUB_OUTPUT':str(output)},clear=True),patch.object(a.publisher,'HTTPTransport',return_value=self.case.api):
-            a.main()
+        try:
+            with patch.object(sys,'argv',argv),patch.dict(os.environ,{**env,'GH_TOKEN':'synthetic-read-token','GITHUB_OUTPUT':str(output)},clear=True),patch.object(a.publisher,'HTTPTransport',return_value=self.case.api):
+                a.main()
+        finally:
+            (self.packet/'NIGHTLY.json').write_bytes(saved_descriptor);(self.packet/'SHA256SUMS.txt').write_bytes(saved_sums)
+            self.binding['packet_sha256']=saved_packet_hash
         return output
     def test_active_reads_bracket_unchanged_chain_and_pure_subject_with_get_only(self):
         events=[]; request=self.case.api.request; verify=bindings.verify_chain; pure=a.subject

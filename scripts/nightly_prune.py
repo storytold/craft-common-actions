@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import os
+import zipfile
 from urllib.parse import quote, unquote
 
 import nightly_feed as n
@@ -321,6 +322,7 @@ def main():
     parser.add_argument("--plan"); parser.add_argument("--checkpoint")
     parser.add_argument("--config", help="reviewed Actions ownership policy; no raw receipt input")
     parser.add_argument("--approve-first-run", action="store_true")
+    parser.add_argument("--checkpoint-artifact-id"); parser.add_argument("--checkpoint-artifact-sha256")
     args = parser.parse_args()
     try:
         registry = n.bounded_json(args.registry)
@@ -331,7 +333,7 @@ def main():
             provenance = ActionsOwnership(n.bounded_json(args.config))
             n.require(provenance.config["repository"] == repository and provenance.config["bot_id"] == args.bot_id, "ownership config/app/bot mismatch")
         if args.mode == "apply":
-            n.require(args.approve_first_run is True and args.config and args.plan and args.checkpoint, "live apply is off: explicit approval, reviewed ownership config, plan and durable checkpoint required")
+            n.require(args.approve_first_run is True and args.config and args.plan and args.checkpoint and args.checkpoint_artifact_id and args.checkpoint_artifact_sha256, "live apply is off: explicit approval, reviewed ownership config, plan and durable checkpoint required")
             previous = read_plan(args.plan)
             validate_plan(previous, registry)
             n.require(previous["app"] == args.app and previous["current"]["id"] == args.current_release_id and previous["bot_id"] == args.bot_id, "plan differs from CLI publication context")
@@ -339,9 +341,11 @@ def main():
         if args.mode == "plan":
             result = plan(api, registry, args.app, args.current_release_id, args.bot_id, provenance)
         else:
+            from nightly_prune_checkpoint import verify as verify_durable
+            verify_durable(api,provenance.config,previous,args.checkpoint_artifact_id,args.checkpoint_artifact_sha256,os.environ)
             result = execute(api, registry, previous, approved=True, provenance=provenance, checkpoint=lambda value: save_checkpoint(args.checkpoint, value))
         print(json.dumps(result, sort_keys=True))
-    except (n.InvalidNightly, APIError, OSError, ValueError, KeyError, TypeError) as error:
+    except (n.InvalidNightly, APIError, OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
         parser.exit(1, f"nightly pruning stopped: {error}\n")
 
 

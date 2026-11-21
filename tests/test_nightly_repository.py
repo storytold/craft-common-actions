@@ -46,7 +46,7 @@ class RepositoryBindingTests(unittest.TestCase):
             '--policy',str(self.identity/'nightly-producer-policy.json'),'--directory',str(self.local.packet),
             '--config',str(self.local.config),'--identity-sha256',self.ih,
             '--packet-sha256',self.local.binding['packet_sha256'],'--zip-sha256',self.local.binding['zip_sha256'],
-            '--asset',self.local.filename]
+            '--asset',self.local.filename,'--signing-receipt-directory','must-not-read','--signing-receipt-sha256','a'*64,'--unsigned-sha256','b'*64]
     def refused_without_credentials(self,module,argv):
         with patch.object(sys,'argv',['fixture',*argv]),patch.object(module.os,'environ',NoToken(self.env)),patch.object(publisher,'HTTPTransport',side_effect=AssertionError('unsupported transport forbidden')),contextlib.redirect_stdout(io.StringIO()),self.assertRaises(SystemExit) as result:
             module.main()
@@ -75,7 +75,7 @@ class RepositoryBindingTests(unittest.TestCase):
     def test_current_nonphoto_attestation_cli_still_refuses_before_token_or_transport(self):
         self.refused_without_credentials(a,self.common_args())
     def test_current_nonphoto_publisher_cli_still_refuses_before_token_or_transport(self):
-        self.refused_without_credentials(publisher,[*self.common_args(),'--app',self.app])
+        self.refused_without_credentials(publisher,[*self.common_args(),'--app',self.app,'--ownership-directory','must-not-create'])
     def test_photo_prepare_keeps_real_validation_and_uses_its_validated_repository(self):
         argv=['fixture','prepare','--registry',str(ROOT/'nightly-apps.json'),'--config',str(self.local.config),'--app','photocraft',
             '--identity',str(self.local.root/'prepared.json'),'--policy',str(self.local.root/'policy.json')]

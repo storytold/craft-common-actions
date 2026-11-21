@@ -228,11 +228,13 @@ def verify_receipt(directory, expected_sha256, platform, asset, identity_sha256,
     return data
 
 
-def verify_package(directory, receipt, source, environment):
+def verify_package(directory, receipt, source, environment, *, packet=False):
     """Recheck all final/support bytes; Linux public trust is checked-out policy."""
     directory = Path(directory)
     n.require(directory.is_dir() and not directory.is_symlink(), 'signed package directory required')
     expected = {receipt['asset'], *receipt['support']}
+    if packet:
+        expected |= {'NIGHTLY.json','SHA256SUMS.txt'}
     actual = set()
     for path in directory.iterdir():
         n.require(len(actual) < len(expected) and path.name in expected, 'unexpected signed package inventory')

@@ -43,6 +43,7 @@ permissions:
   contents: read
 env:
   TOOLING_REVISION: ${{ inputs.tooling-revision }}
+  NIGHTLY_REVIEWED_POLICY_SHA256: ${{ vars.NIGHTLY_REVIEWED_POLICY_SHA256 }}
 jobs:
   linux:
     if: >-
@@ -94,7 +95,12 @@ jobs:
                   result[key]=value
               return result
           config=json.loads(data,object_pairs_hook=unique)
-          assert config.get('schema')=='craft-nightly-publication-policy/v1' and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
           PY
       - name: Check out the defining job's own immutable tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -217,7 +223,12 @@ jobs:
                   result[key]=value
               return result
           config=json.loads(data,object_pairs_hook=unique)
-          assert config.get('schema')=='craft-nightly-publication-policy/v1' and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
           PY
       - name: Check out the defining job's own immutable tooling
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

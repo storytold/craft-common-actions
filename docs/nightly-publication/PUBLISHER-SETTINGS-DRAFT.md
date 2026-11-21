@@ -25,6 +25,17 @@ Reuse actual existing release secret NAMES, no new parallel credentials:
 
 Human publisher configures actual environment secret values without exposing them to agents. Audit metadata/scopes only. Do not delete/move repository-level secrets or break the stable `release` environment/caller while setting up nightlies; any scope migration must be shown and approved with stable-route validation. Protect existing signing routes, clean temporary keychains/key material in finally/always paths and use isolated signing jobs.
 
+## Non-secret reviewed configuration
+
+Before activation, publisher/user must configure these exact values from independently reviewed identities, not from the downloaded feed:
+- `NIGHTLY_WINDOWS_PUBLISHER_SUBJECT`: exact Authenticode certificate subject for the allowed publisher (valid OS trust still required; rotating Azure leaf certificates must not silently change the allowed publisher).
+- `NIGHTLY_APPLE_TEAM_ID`: exact ten-character Apple TeamID, matching the existing signing account/team.
+- `NIGHTLY_LINUX_SIGNING_FINGERPRINT`: full uppercase primary fingerprint, plus reviewed `.github/nightly-linux-signing-key.asc`; Launcher receives an independent reviewed key/fingerprint through its own trusted delivery, never release download discovery.
+- `NIGHTLY_REVIEWED_POLICY_SHA256`: canonical digest of independently reviewed `.github/nightly-publication-policy.json` v2 policy. Its baseline must be current main or immediate first parent, fresh within24h, with authenticated complete job/check identities and a retained monotone green-floor review history. Never set it by blindly hashing candidate-controlled policy in the same untrusted run. Current skipped/external Sonar applicability needs explicit reconciliation before this policy can run; unknown checks are not an ignore-set.
+- `NIGHTLY_BOT_ID`: authenticated numeric release bot actor ID, matching the reviewed `.github/nightly-pruning-policy.json` ownership policy. That file additionally binds actual numeric repository/workflow IDs, exact caller workflow/publish job/Publish and Upload nightly ownership receipt step names, reusable tooling workflow path and reviewed historical tooling SHAs. Example IDs in documentation are not deployable values. No caller-controlled body/login/string becomes deletion authority.
+
+Caller-side environment secrets are resolved by the callee’s explicit `environment: nightly-signing`; no blanket secret forwarding is required. Do not assume environment-only values are available to a caller that merely forwards `secrets.NAME`. Keep actual key values scoped to the protected signing step, and verify the protected environment/configuration context on the hosted run.
+
 ## First manual run remains off
 
 Resolve real published tooling/caller SHAs, exact reviewed baseline evidence and bot-only ownership policy values; run source-bound hosted checks and signing/native acceptance before enabling publication. Keep source publication, pruning and schedule switches off until Skylar approves exact first-run activation/timing. On that approved first publication, keep-seven pruning runs after successful publish with authenticated ownership receipts; no stable/latest update and no broad cleanup. No commands in this draft grant extra authority.

@@ -9,9 +9,9 @@ import nightly_policy as p
 import publish_nightly as publisher
 
 
-def subject(registry,prepared,policy,directory,environment):
+def subject(registry,prepared,policy,directory,environment,*,signed=False):
     p.validate_prepared(registry,prepared,policy,environment)
-    ident,metadata=publisher.prepare_packet(registry,prepared,directory,environment)
+    ident,metadata=publisher.prepare_packet(registry,prepared,directory,environment,signed=signed)
     targets=n.app_record(registry,'photocraft')['targets']
     n.require(len(targets)==1 and targets[0]['target']=={'os':'windows','arch':'x86_64','format':'portable_zip'},'attestation subject adapter not reviewed')
     filename=targets[0]['asset_pattern'].replace('{version}',prepared['version'])
@@ -20,13 +20,13 @@ def subject(registry,prepared,policy,directory,environment):
         'digest':'sha256:'+metadata[filename][1],'source_commit':ident['source_commit']}
 
 
-def guarded_subject(api,registry,prepared,policy,directory,environment,config,*,identity_directory,identity_sha256,packet_sha256,zip_sha256,asset):
+def guarded_subject(api,registry,prepared,policy,directory,environment,config,*,identity_directory,identity_sha256,packet_sha256,zip_sha256,asset,signed=False):
     """Only two read-only active-state GETs; no signing, attestation or writes."""
     import nightly_artifacts as bindings
     p.validate_prepared(registry,prepared,policy,environment,config)
     p.require_active_workflow(api,config,policy) # Before packet hashing/subject work.
     bindings.verify_chain(identity_directory,directory,identity_sha256,packet_sha256,zip_sha256,asset)
-    result=subject(registry,prepared,policy,directory,environment)
+    result=subject(registry,prepared,policy,directory,environment,signed=signed)
     # LAST API read before main can expose any subject output. Cooperative,
     # not atomic against an administrator disabling after this read.
     p.require_active_workflow(api,config,policy)
@@ -39,6 +39,8 @@ def main():
     parser.add_argument('--identity-sha256',required=True); parser.add_argument('--packet-sha256',required=True)
     parser.add_argument('--zip-sha256',required=True); parser.add_argument('--asset',required=True)
     parser.add_argument('--config',required=True)
+    parser.add_argument('--signing-receipt-directory',required=True);parser.add_argument('--signing-receipt-sha256',required=True)
+    parser.add_argument('--unsigned-sha256',required=True)
     args=parser.parse_args()
     try:
         import nightly_artifacts as bindings
@@ -48,11 +50,14 @@ def main():
         policy=n.bounded_json(args.policy); config=n.bounded_json(args.config)
         p.validate_prepared(registry,prepared,policy,os.environ,config)
         p.publication_contract(config,policy) # Approved exact producer identity before token.
+        import nightly_signing as signing
+        checked=signing.verify_receipt(args.signing_receipt_directory,args.signing_receipt_sha256,"windows-x86_64",args.asset,args.identity_sha256,args.unsigned_sha256,args.zip_sha256,os.environ)
+        signing.verify_package(args.directory,checked,".",os.environ,packet=True)
         repository=p.trusted_repository(registry,prepared['app'],os.environ)
         api=publisher.HTTPTransport(repository,os.environ.get('GH_TOKEN',''))
         result=guarded_subject(api,registry,prepared,policy,args.directory,os.environ,config,
             identity_directory=Path(args.identity).parent,identity_sha256=args.identity_sha256,
-            packet_sha256=args.packet_sha256,zip_sha256=args.zip_sha256,asset=args.asset)
+            packet_sha256=args.packet_sha256,zip_sha256=args.zip_sha256,asset=args.asset,signed=True)
         if output:=os.environ.get('GITHUB_OUTPUT'):
             with open(output,'a') as stream:
                 for key,value in result.items():

@@ -86,7 +86,7 @@ def absent(api, suffix):
     raise n.InvalidNightly("immutable tag or release already exists; no clobber")
 
 
-def prepare_packet(registry, prepared, directory, environment):
+def prepare_packet(registry, prepared, directory, environment, *, signed=False):
     """Capability gate precedes any asset I/O or token/transport construction."""
     app = prepared.get("app")
     record = n.trusted_context(registry, app, environment)
@@ -98,10 +98,10 @@ def prepare_packet(registry, prepared, directory, environment):
     ident, version = n.identity(registry, app, environment["GITHUB_REPOSITORY"], environment["GITHUB_SHA"], base,
         int(environment.get("GITHUB_RUN_ID", "0")), int(environment.get("GITHUB_RUN_ATTEMPT", "0")), prepared["published_at"])
     n.require(prepared == {**ident, "version": version, "ready": True}, "prepared source/run/date identity mismatch")
-    feed = n.build_feed(registry, ident, version, directory)
+    feed = (n.build_feed_v2 if signed else n.build_feed)(registry, ident, version, directory)
     manifest = n.bounded_json(Path(directory) / "NIGHTLY.json")
     n.require(manifest == feed, "staged descriptor differs from exact prepared identity/payloads")
-    expected = {entry["asset"]["name"] for entry in feed["artifacts"]} | {"NIGHTLY.json", "SHA256SUMS.txt"}
+    expected = {entry["asset"]["name"] for entry in feed["artifacts"]} | {entry["signature"]["name"] for entry in feed["artifacts"] if "signature" in entry} | {"NIGHTLY.json", "SHA256SUMS.txt"}
     n.require({path.name for path in Path(directory).iterdir()} == expected, "unexpected or missing staged assets")
     metadata = {name: n.digest_file(directory, name) for name in sorted(expected)}
     stream, info = n.regular_file(directory, "SHA256SUMS.txt")
@@ -191,6 +191,9 @@ def main():
     parser.add_argument("--registry", required=True); parser.add_argument("--app", required=True)
     parser.add_argument("--identity", required=True); parser.add_argument("--directory", required=True)
     parser.add_argument("--policy"); parser.add_argument("--config")
+    parser.add_argument("--ownership-directory", required=True)
+    parser.add_argument("--signing-receipt-directory", required=True); parser.add_argument("--signing-receipt-sha256", required=True)
+    parser.add_argument("--unsigned-sha256", required=True)
     parser.add_argument('--identity-sha256',required=True); parser.add_argument('--packet-sha256',required=True)
     parser.add_argument('--zip-sha256',required=True); parser.add_argument('--asset',required=True)
     args = parser.parse_args()
@@ -199,16 +202,20 @@ def main():
         bindings.verify_chain(Path(args.identity).parent,args.directory,args.identity_sha256,args.packet_sha256,args.zip_sha256,args.asset)
         registry = n.bounded_json(args.registry); prepared = n.bounded_json(args.identity)
         n.require(prepared.get("app") == args.app, "app mismatch")
-        ident, metadata = prepare_packet(registry, prepared, args.directory, os.environ)
         import nightly_policy as v6
         n.require(args.policy and args.config,"explicit v6 publication policy/config required; no legacy CLI bypass")
         policy=n.bounded_json(args.policy); config=n.bounded_json(args.config)
         v6.validate_prepared(registry,prepared,policy,os.environ,config)
-        # Required-check names/IDs must be reconciled before reading a write token.
-        v6.publication_contract(config,policy) # Validate approved check/producer IDs before credentials.
+        v6.publication_contract(config,policy)
+        import nightly_signing as signing
+        checked_receipt = signing.verify_receipt(args.signing_receipt_directory,args.signing_receipt_sha256,"windows-x86_64",args.asset,args.identity_sha256,args.unsigned_sha256,args.zip_sha256,os.environ)
+        signing.verify_package(args.directory,checked_receipt,".",os.environ,packet=True)
+        ident, metadata = prepare_packet(registry, prepared, args.directory, os.environ, signed=True)
         api = HTTPTransport(ident["repository"], os.environ.get("GH_TOKEN", ""))
         guard=lambda: v6.publication_gate(api,registry,config,prepared,policy,os.environ)
         result = publish_packet(api, ident, metadata, args.directory,guard=guard,policy=policy)
+        from nightly_ownership_receipt import emit
+        emit(ident,result,os.environ,args.ownership_directory)
         print(json.dumps({"release_id": result["id"], "tag": ident["tag"], "source_commit": ident["source_commit"],
                           "actual_published_at": result["published_at"], "build_identity_at": ident["published_at"]}))
     except (n.InvalidNightly, APIError, OSError, ValueError, TypeError, KeyError) as error:
