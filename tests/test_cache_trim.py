@@ -109,7 +109,7 @@ class TrimTests(unittest.TestCase):
         self.assertIn('::warning::', out)
         self.assertTrue(kept.is_dir())
 
-    def test_a_unit_built_in_this_job_but_not_recorded_stops_the_trim(self):
+    def test_keeps_unrecorded_units_built_this_job_while_trimming_restored_units(self):
         # A build command that does not record (a new step's `cargo build`) would otherwise lose its
         # units before every save and rebuild them every run, unnoticed.
         used = unit(self.target, 'a', '1111111111111111')
@@ -120,14 +120,17 @@ class TrimTests(unittest.TestCase):
         self.record.with_suffix('.start').write_text('2000000\n')
         self.write({'reason': 'compiler-artifact', 'filenames': [str(used / 'out' / 'liba.rlib')]})
         removed, out = self.run_trim()
-        self.assertEqual(removed, 0)
-        self.assertTrue(stale.is_dir() and unrecorded.is_dir())
+        self.assertEqual(removed, 1)
+        self.assertTrue(used.is_dir() and unrecorded.is_dir())
+        self.assertFalse(stale.exists())
+        self.assertIn('kept 2 units', out)
         self.assertIn('::warning::cache-trim: 1 units built in this job are not in the record (b/3333333333333333)', out)
         # Built before the job started: only stale units are left, and they go.
         os.utime(unrecorded / 'out' / 'artifact', (1_000_000, 1_000_000))
         removed, _ = self.run_trim()
-        self.assertEqual(removed, 2)
+        self.assertEqual(removed, 1)
         self.assertTrue(used.is_dir())
+        self.assertFalse(unrecorded.exists())
 
     def test_only_what_was_deleted_counts_as_removed(self):
         used = unit(self.target, 'a', '1111111111111111')
