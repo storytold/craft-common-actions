@@ -66,11 +66,15 @@ The exact name is `nightly-signing`, matching the current source; calling it
    `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`.
    The IDs/endpoint/profile are identifiers, but the current adapter reads them
    through the existing secret-shaped interface; do not change that implicitly.
-7. For a platform only when its adapter is being qualified, its credential owner
-   adds the existing macOS names `APPLE_CERTIFICATE`,
-   `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`,
-   `APPLE_PASSWORD`, `APPLE_TEAM_ID`, or Linux `LINUX_SIGNING_KEY`. Do not
-   fabricate/re-export keys or enable unqualified platforms to test the setup.
+7. For the requested single credential-owner visit, pre-provision the existing
+   macOS names `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+   `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, plus Linux
+   `LINUX_SIGNING_KEY` at the same time. This stages all three credential sets in
+   one environment; any admitted job naming it can request all of them after its
+   protections pass. Mac/Linux remain unqualified/off until their separate QA;
+   do not fabricate keys or dispatch an unqualified platform to test the setup.
+   Use the [one-page owner handoff](CREDENTIAL-OWNER-HANDOFF.md) and
+   [separate admin checklist](PRE-HANDOFF-ADMIN-CHECKLIST.md).
 8. Configure the independently reviewed public identity variables described in
    [`PUBLISHER-SETTINGS-DRAFT.md`](PUBLISHER-SETTINGS-DRAFT.md). The reviewed
    policy digest must be a repository variable available to identity/status/
