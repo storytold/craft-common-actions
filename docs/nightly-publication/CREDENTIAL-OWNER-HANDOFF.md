@@ -43,10 +43,12 @@ read back the existing `release` values. Leave stable `release` unchanged.
      please confirm the private key entered above is this intended signing identity.
    - Apple: public release docs say **Learning Machines LLC**, Team ID
      **`DJ6XS33FX8`**. Confirm that this matches the entered certificate/account.
-   - Windows: confirm the exact full native `SignerCertificate.Subject`, not just
-     its CN/company name. The team is independently checking the shipped stable
-     release; do not assume a Subject from another app or a short-lived Azure
-     leaf-thumbprint pin. This public value may be shared; private keys may not.
+   - Windows: the real stable v0.23.1 EXE is native Authenticode **Valid** with a
+     timestamp certificate. Confirm the intended exact full Subject is
+     `CN=Learning Machines Inc, O=Learning Machines Inc, L=Atlanta, S=Georgia, C=US`.
+     Windows says **Inc**, Apple says **LLC**: confirm both separately, not by
+     assuming they are the same certificate/entity. Do not pin rotating Azure
+     leaf thumbprints. Only these public identity details may be shared.
 
 6. **Reply with names/status only:** all 13 names present, any missing item, and
    the client-secret expiry/rotation owner. Stop if an identity or access does
