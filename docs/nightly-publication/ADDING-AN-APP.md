@@ -10,7 +10,9 @@ but not qualified. Do not copy the example and claim an app is supported.
 
 Keep stable and nightly installations and data separate. The app owns:
 
-- A visibly badged nightly name/icon and independent package/application identity.
+- A distinct nightly name/icon and independent package/application identity.
+  PhotoCraft uses a deeper-colour background with the foreground unchanged;
+  do not add a badge, crescent or N overlay to reproduce a superseded convention.
 - An explicit nightly profile selected before any application data is opened;
   never silently fall back to stable preferences, saved state or document caches.
 - No stable file associations or default-app takeover. Turning discovery off must
