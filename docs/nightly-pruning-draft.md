@@ -45,15 +45,22 @@ python3 scripts/nightly_prune.py plan --registry nightly-apps.json --app photocr
 python3 scripts/nightly_prune.py apply --registry nightly-apps.json --app photocraft --current-release-id RELEASE_ID --bot-id BOT_ID --config ownership-policy.json --plan prune-plan.json --checkpoint prune-checkpoint.json --approve-first-run
 ```
 
-Save plan stdout to `prune-plan.json` before apply. The plan/checkpoint must be
-retained outside temporary build roots and preserved on failure. Retry **the
-same exact checkpoint** under the same serialization/approval; a fresh plan
-never adopts an orphan tag. Persist the checkpoint durably before mutation,
-e.g. retain it as a dedicated Actions artifact before calling the executor.
-`save_checkpoint` does local atomic write/fsync but cannot make an ephemeral
-runner's disk survive VM destruction: the workflow owns durable retention.
-Do not treat a downloaded checkpoint as authority: every candidate and its
-receipt are authenticated again before any mutation.
+Save plan stdout to `prune-plan.json` before apply. The exact plan and its
+immutable Actions artifact must be preserved on failure. The integrated CLI
+accepts only a checkpoint authenticated to its **current run and attempt**.
+A later Actions attempt/run cannot resume the original checkpoint. A fresh
+plan enumerates releases, not orphan refs, and cannot rediscover a release
+already deleted while its tag remains. Durable evidence is not an implemented
+cross-attempt recovery route. Do not rerun publication to repair that pair.
+
+`save_checkpoint` provides a local atomic write/fsync, not survival of runner
+destruction. The uploaded artifact retains evidence for 90 days; it is not
+itself deletion authority. Candidate eligibility and ownership still need
+fresh independent authentication. Pruning must remain disabled until an
+authenticated cross-attempt recovery/recheckpoint route and a full
+CLI/checkpoint boundary regression have landed and been reviewed. This is an
+additional implementation prerequisite before the separately approved first
+live publication/pruning timing, not a request to change the keep-seven policy.
 
 ## Receipt emitted by the publisher owner
 
@@ -140,8 +147,10 @@ or an incomplete bounded origin inventory aborts/defer the whole plan.
 - Release first. Stop on errors/uncertain responses. Require explicit confirmed
   404 absence by ID AND tag before deleting the exact still-matching lightweight
   ref. Recheck receipt and SHA; confirm tag absence. Release-delete failure never
-  authorizes tag deletion. Retry can finish its own release-gone/tag-left pair
-  only through the original authenticated receipt and exact preserved plan.
+  authorizes tag deletion. The executor can continue its own release-gone/tag-left
+  pair only with the original authenticated receipt and exact preserved plan.
+  This function-level behavior is not a later-attempt CLI/workflow recovery route;
+  the mandatory checkpoint verifier deliberately rejects that changed origin.
 - GitHub documents that an immutable release **can** be deleted, then its tag
   can be deleted, but its name cannot be reused. This is not an atomic GitHub
   transaction. Git ref DELETE has no SHA compare-and-delete precondition; races
@@ -157,6 +166,40 @@ or an incomplete bounded origin inventory aborts/defer the whole plan.
   Launcher's 30-release window contains stable: preserved unknown releases,
   drafts, other prereleases and backlog may still crowd it out. Observe/resolve
   that separate rollout limitation before unattended daily publication.
+
+## Interrupted pruning: stop and separately reviewed operator procedure
+
+This is the incident preparation/review procedure, **not an implemented repair
+command or advance authorization to delete a tag**. Infra owns recovery tooling;
+the sole publisher performs any separately approved hosted mutation.
+
+1. Stop retries and retain the original plan artifact ID, API digest, archive,
+   exact plan bytes, repository/run/attempt/head/callee identity, ownership
+   receipts and the release/ref API responses. Keep publication/pruning serialized;
+   wait for active attempts rather than cancelling unrelated work. Do not replace
+   the plan with a fresh inventory or overwrite the historical artifact.
+2. Under the reviewed historical tooling/ownership policy, independently
+   authenticate that original artifact and its origin. Read-only reconciliation
+   must establish the exact candidate is in that authenticated plan, the original
+   publication receipt still authenticates, the release is absent by both numeric
+   ID and exact tag, and the remaining lightweight ref still names the recorded
+   source SHA. A different/missing/expired/ambiguous proof means retain/refuse.
+3. Prepare a separately reviewed recovery change that either verifies the
+   independently identified historical origin, or re-checkpoints those exact
+   authenticated plan bytes in a new trusted attempt under the same publication
+   serialization. Do not hand-edit the plan/checkpoint or relax the current
+   verifier's run/attempt checks. No such route is supplied in this preview.
+4. Before any mutation, independently review that exact recovery change and its
+   full CLI/checkpoint regression: delete release, interrupt before tag deletion,
+   then recover in a different attempt; reject changed artifact bytes/origin,
+   unknown orphan refs, expired evidence and stale ownership/ref/keep-set proofs.
+   Re-run all existing fresh candidate/ref/keep-seven checks. Present the exact
+   bounded live operation and results for the required publication approval.
+5. Only the reviewed, explicitly approved recovery route may remove the exact
+   leftover tag; confirm the release remains absent and the exact tag is gone.
+   Never adopt an arbitrary orphan, reuse a deleted immutable tag name, or treat
+   a read-only incident packet/manual receipt as deletion authority. If that route
+   is unavailable, leave the tag intact and record the unresolved pair.
 
 ## Evidence scope
 
