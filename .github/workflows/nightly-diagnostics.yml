@@ -1,0 +1,122 @@
+name: Independent legacy nightly diagnostics (not installable)
+# Separate workflow RUN. Never called by the Photo installable producer.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        description: "Reviewed SHA must equal the defining job workflow SHA; no Photo publication policy required"
+        type: string
+        required: true
+      app-name:
+        required: true
+        type: string
+      app-title:
+        required: true
+        type: string
+      craft-fonts-ref:
+        required: false
+        type: string
+        default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      web-craft-fonts:
+        required: false
+        type: boolean
+        default: false
+      contributors-artifact:
+        required: false
+        type: string
+        default: ""
+      has-web:
+        required: false
+        type: boolean
+        default: true
+      has-riscv64:
+        required: false
+        type: boolean
+        default: true
+      has-freebsd:
+        required: false
+        type: boolean
+        default: true
+      has-arch:
+        required: false
+        type: boolean
+        default: true
+      has-server:
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+jobs:
+  metadata:
+    if: >-
+      github.repository_owner == 'storytold' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      ready: ${{ steps.diagnostic.outputs.ready }}
+      version: ${{ steps.diagnostic.outputs.version }}
+    steps:
+      - name: Read exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Generate Cargo-derived diagnostic metadata without policy or catalog API
+        id: diagnostic
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+        run: python3 -B .nightly-tools/scripts/nightly_diagnostic.py --registry .nightly-tools/nightly-apps.json --app "$APP_NAME"
+      - name: Explain independent diagnostic trust and scope
+        run: |
+          echo 'Diagnostic-only metadata, ready=false. No publication policy/API catalog or installable adapter is required.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Legacy mutable helper actions and write-permission ceiling remain isolated in this separate diagnostic run.' >> "$GITHUB_STEP_SUMMARY"
+  diagnostic:
+    needs: metadata
+    permissions:
+      contents: write
+      packages: write
+    uses: $/.github/workflows/release.yml
+    with:
+      app-name: ${{ inputs.app-name }}
+      app-title: ${{ inputs.app-title }}
+      version: ${{ needs.metadata.outputs.version }}
+      craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+      web-craft-fonts: ${{ inputs.web-craft-fonts }}
+      contributors-artifact: ${{ inputs.contributors-artifact }}
+      has-web: ${{ inputs.has-web }}
+      has-riscv64: ${{ inputs.has-riscv64 }}
+      has-freebsd: ${{ inputs.has-freebsd }}
+      has-arch: ${{ inputs.has-arch }}
+      has-server: ${{ inputs.has-server }}
+      dry-run: true
+      publish: false

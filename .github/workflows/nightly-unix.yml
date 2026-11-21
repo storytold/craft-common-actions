@@ -1,0 +1,478 @@
+name: Private pending Unix nightly artifacts
+
+# Source preparation only. Native build guards remain false; protected signing is authored, not native proof.
+# Windows proof, then Linux server, then Skylar Mac is the actual-run order.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        description: "Reviewed published shared-tooling SHA; must match the app-owned publication policy"
+        type: string
+        required: true
+      identity-artifact-id:
+        type: string
+        required: true
+      identity-sha256:
+        type: string
+        required: true
+      app-name:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      platform:
+        required: true
+        type: string
+      craft-fonts-ref:
+        required: false
+        type: string
+        default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+
+permissions:
+  contents: read
+
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+
+jobs:
+  git-sources:
+    if: ${{ false }} # Pending source, not execution authority.
+    name: Git dependencies come from storytold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Git dependencies come from storytold
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
+          # Source replacement, patches and path overrides in cargo config never show up
+          # in Cargo.lock. Parsed rather than grepped: TOML has many spellings of one key.
+          # Cargo still reads the legacy .cargo/config.
+          python3 - <<'PY'
+          import os, sys, tomllib
+          for path in (".cargo/config", ".cargo/config.toml"):
+              if not os.path.exists(path):
+                  continue
+              config = tomllib.load(open(path, "rb"))
+              replaced = [name for name, source in config.get("source", {}).items()
+                          if isinstance(source, dict) and "replace-with" in source]
+              if replaced or "patch" in config or "paths" in config:
+                  print(f"{path} replaces, patches or overrides a source")
+                  sys.exit(1)
+          PY
+          # Fails when Cargo.lock is out of date with the manifests.
+          cargo metadata --locked --format-version 1 > /dev/null
+          python3 - <<'PY'
+          import sys, tomllib
+          lock = tomllib.load(open("Cargo.lock", "rb"))
+          bad = sorted({p["source"] for p in lock.get("package", [])
+                        if p.get("source", "").startswith("git+")
+                        and not p["source"].startswith("git+https://github.com/storytold/")})
+          if bad:
+              print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
+              sys.exit(1)
+          PY
+
+
+  linux:
+    if: ${{ false }} # Pending app adapter/native proof; signing source is not admission.
+    needs: [git-sources, linux-signing-config]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.seal.outputs.sha256 }}
+      asset: ${{ steps.contract.outputs.asset }}
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - name: Check out exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema')=='craft-nightly-publication-policy/v1' and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Require exact numeric IDs and independent producer hashes before download
+        shell: bash
+        env:
+          IDENTITY_ID: ${{ inputs.identity-artifact-id }}
+          IDENTITY_SHA256: ${{ inputs.identity-sha256 }}
+        run: |
+          set -euo pipefail
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$IDENTITY_ID" --expected-sha256 "$IDENTITY_SHA256"
+      - name: Download exact identity artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.identity-artifact-id }}
+          path: .nightly-input
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify independent identity producer bytes before adapter/build logic
+        shell: bash
+        env:
+          IDENTITY_SHA256: ${{ inputs.identity-sha256 }}
+        run: python -B .nightly-tools/scripts/nightly_artifacts.py verify --kind identity --directory .nightly-input --expected-sha256 "$IDENTITY_SHA256"
+      - name: Validate exact source and pending private capability
+        id: contract
+        shell: bash
+        env:
+          REQUESTED_APP: ${{ inputs.app-name }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+          PREPARED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_APP" = photocraft
+          test "$REQUESTED_PLATFORM" = linux-x86_64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = x86_64
+          python3 -B .nightly-tools/scripts/nightly_unix.py check \
+            --registry .nightly-tools/nightly-apps.json --pending .nightly-tools/nightly-unix-pending.json \
+            --platform linux-x86_64 --identity .nightly-input/nightly-identity.json --policy .nightly-input/nightly-producer-policy.json \
+            --version "$PREPARED_VERSION" --target-base "$RUNNER_TEMP/nightly-targets" \
+            --dist "$RUNNER_TEMP/nightly-dist/linux-x86_64"
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          deb-arch: amd64
+          nfpm-version: 2.47.0
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Build only the app-owned nightly flavor
+        shell: bash
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.contract.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.contract.outputs.source_commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.contract.outputs.build_date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/linux-x86_64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: bash packaging/linux/nightly.sh --arch x86_64
+      - name: Verify private inventory and the built literal version without startup
+        shell: bash
+        env:
+          EXACT_VERSION: ${{ steps.contract.outputs.version }}
+          EXACT_ASSET: ${{ steps.contract.outputs.asset }}
+        run: |
+          set -euo pipefail
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private \
+            --pending .nightly-tools/nightly-unix-pending.json --platform linux-x86_64 \
+            --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/linux-x86_64/$EXACT_ASSET" \
+            --output "$RUNNER_TEMP/private-nightly-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/private-nightly-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/photocraft" \
+            --profile-root "$RUNNER_TEMP/private-nightly-profile-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --version "$EXACT_VERSION"
+      - name: Hash exact unsigned package before immutable upload
+        id: seal
+        shell: bash
+        env:
+          ASSET: ${{ steps.contract.outputs.asset }}
+        run: python3 -B .nightly-tools/scripts/nightly_signing.py hash --platform linux-x86_64 --archive "$RUNNER_TEMP/nightly-dist/linux-x86_64/$ASSET" --asset "$ASSET"
+      - name: Retain the private artifact, not a feed or installable claim
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: pending-nightly-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightly-dist/linux-x86_64/${{ steps.contract.outputs.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  macos:
+    if: ${{ false }} # Pending app adapter/native proof; signing source is not admission.
+    needs: [git-sources, macos-signing-config]
+    runs-on: macos-15-xlarge
+    timeout-minutes: 90
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.seal.outputs.sha256 }}
+      asset: ${{ steps.contract.outputs.asset }}
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - name: Check out exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema')=='craft-nightly-publication-policy/v1' and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Require exact numeric IDs and independent producer hashes before download
+        shell: bash
+        env:
+          IDENTITY_ID: ${{ inputs.identity-artifact-id }}
+          IDENTITY_SHA256: ${{ inputs.identity-sha256 }}
+        run: |
+          set -euo pipefail
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$IDENTITY_ID" --expected-sha256 "$IDENTITY_SHA256"
+      - name: Download exact identity artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ inputs.identity-artifact-id }}
+          path: .nightly-input
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify independent identity producer bytes before adapter/build logic
+        shell: bash
+        env:
+          IDENTITY_SHA256: ${{ inputs.identity-sha256 }}
+        run: python -B .nightly-tools/scripts/nightly_artifacts.py verify --kind identity --directory .nightly-input --expected-sha256 "$IDENTITY_SHA256"
+      - name: Validate exact source and pending private capability
+        id: contract
+        shell: bash
+        env:
+          REQUESTED_APP: ${{ inputs.app-name }}
+          REQUESTED_PLATFORM: ${{ inputs.platform }}
+          PREPARED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_APP" = photocraft
+          test "$REQUESTED_PLATFORM" = macos-aarch64
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          python3 -B .nightly-tools/scripts/nightly_signing.py adapter --platform macos-aarch64 --source .
+          python3 -B .nightly-tools/scripts/nightly_unix.py check \
+            --registry .nightly-tools/nightly-apps.json --pending .nightly-tools/nightly-unix-pending.json \
+            --platform macos-aarch64 --identity .nightly-input/nightly-identity.json --policy .nightly-input/nightly-producer-policy.json \
+            --version "$PREPARED_VERSION" --target-base "$RUNNER_TEMP/nightly-targets" \
+            --dist "$RUNNER_TEMP/nightly-dist/macos-aarch64"
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: aarch64-apple-darwin
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Build only the app-owned nightly flavor
+        shell: bash
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.contract.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.contract.outputs.source_commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.contract.outputs.build_date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/macos-aarch64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: bash packaging/macos/nightly.sh --arch aarch64
+      # check refuses this path until the production signing/team/notarization
+      # policy is explicitly implemented. Inventory is never signature proof.
+      - name: Inspect the exact full-version Mac bundle inventory
+        shell: bash
+        env:
+          EXACT_VERSION: ${{ steps.contract.outputs.version }}
+          EXACT_ASSET: ${{ steps.contract.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_unix.py inventory \
+            --pending .nightly-tools/nightly-unix-pending.json --platform macos-aarch64 \
+            --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/macos-aarch64/$EXACT_ASSET"
+      - name: Hash exact unsigned package before immutable upload
+        id: seal
+        shell: bash
+        env:
+          ASSET: ${{ steps.contract.outputs.asset }}
+        run: python3 -B .nightly-tools/scripts/nightly_signing.py hash --platform macos-aarch64 --archive "$RUNNER_TEMP/nightly-dist/macos-aarch64/$ASSET" --asset "$ASSET"
+      - name: Retain the private artifact, not a feed or installable claim
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: pending-nightly-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nightly-dist/macos-aarch64/${{ steps.contract.outputs.asset }}
+          if-no-files-found: error
+          retention-days: 14
+
+  linux-signing-config:
+    if: ${{ false }} # Pending native adapters; presence preflight only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: nightly-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Require signing configuration before secret-free compilation
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY != '' }}
+          FINGERPRINT: ${{ vars.NIGHTLY_LINUX_SIGNING_FINGERPRINT }}
+        run: |
+          python3 -I -B - <<'PY'
+          import os
+          assert all(os.environ[key]=='true' for key in ('LINUX_SIGNING_KEY',)), 'all required signing configuration must exist; no unsigned fallback'
+          import re
+          assert re.fullmatch(r'(?:[A-F0-9]{40}|[A-F0-9]{64})', os.environ['FINGERPRINT']), 'independently reviewed full Linux primary fingerprint required'
+          PY
+
+  macos-signing-config:
+    if: ${{ false }} # Pending native adapters; presence preflight only.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: nightly-signing
+    permissions:
+      contents: read
+    steps:
+      - name: Require signing configuration before secret-free compilation
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE != '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD != '' }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD != '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD != '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          python3 -I -B - <<'PY'
+          import os
+          assert all(os.environ[key]=='true' for key in ('APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'KEYCHAIN_PASSWORD', 'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')), 'all required signing configuration must exist; no unsigned fallback'
+          PY
+
+  sign-linux:
+    if: >-
+      inputs.platform == 'linux-x86_64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: linux
+    permissions:
+      contents: read
+    uses: $/.github/workflows/nightly-signing-unix.yml
+    with:
+      tooling-revision: ${{ inputs.tooling-revision }}
+      platform: linux-x86_64
+      app-name: ${{ inputs.app-name }}
+      version: ${{ inputs.version }}
+      identity-artifact-id: ${{ inputs.identity-artifact-id }}
+      identity-sha256: ${{ inputs.identity-sha256 }}
+      unsigned-artifact-id: ${{ needs.linux.outputs.artifact-id }}
+      unsigned-sha256: ${{ needs.linux.outputs.sha256 }}
+      asset: ${{ needs.linux.outputs.asset }}
+
+  sign-macos:
+    if: >-
+      inputs.platform == 'macos-aarch64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: macos
+    permissions:
+      contents: read
+    uses: $/.github/workflows/nightly-signing-unix.yml
+    with:
+      tooling-revision: ${{ inputs.tooling-revision }}
+      platform: macos-aarch64
+      app-name: ${{ inputs.app-name }}
+      version: ${{ inputs.version }}
+      identity-artifact-id: ${{ inputs.identity-artifact-id }}
+      identity-sha256: ${{ inputs.identity-sha256 }}
+      unsigned-artifact-id: ${{ needs.macos.outputs.artifact-id }}
+      unsigned-sha256: ${{ needs.macos.outputs.sha256 }}
+      asset: ${{ needs.macos.outputs.asset }}

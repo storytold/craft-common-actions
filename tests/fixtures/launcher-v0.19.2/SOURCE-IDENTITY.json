@@ -1,0 +1,12 @@
+{
+  "repository": "storytold/craft-launcher",
+  "tag": "v0.19.2",
+  "commit": "9f950e01ef728a3d32d997d59607051dee98a51d",
+  "file": {
+    "path": "crates/core/src/platform.rs",
+    "git_blob": "f2ef5dc6dc9f04d7a39cb8f9ffb0253285ebaacb",
+    "sha256": "df7f596217136e369585defb35774e7772f86182b0999a906a0e24b95b7cbbc9",
+    "bytes": 25172
+  },
+  "scope": "Exact released platform source; tests execute a bounded Photo hyphen-name pattern model, not old Rust or the entire Launcher."
+}
