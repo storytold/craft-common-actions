@@ -32,5 +32,40 @@ class RustChannelTests(unittest.TestCase):
         self.assertEqual(channel.resolve(self.file('[toolchain]\nprofile = "minimal"\n'), 'stable', '', '')[0], 'stable')
 
 
+class WithoutTomllibTests(RustChannelTests):
+    """Python 3.10 (the ubuntu-22.04 images) has no tomllib; the same cases hold with the fallback."""
+
+    def setUp(self):
+        saved = channel.tomllib
+        channel.tomllib = None
+        self.addCleanup(setattr, channel, 'tomllib', saved)
+
+    def test_the_fallback_reads_what_tomllib_reads(self):
+        text = (
+            '# pinned for the release\n'
+            '[toolchain]\n'
+            "channel = '1.99.1' # comment\n"
+            'profile = "minimal"\n'
+            'components = [\n'
+            '    "clippy",  # lints\n'
+            '    "rust-src",\n'
+            ']\n'
+            'targets = ["wasm32-unknown-unknown", "x86_64-pc-windows-msvc#x"]\n'
+            '\n'
+            '[other]\n'
+            'channel = "nightly"\n'
+        )
+        expected = {
+            'channel': '1.99.1',
+            'profile': 'minimal',
+            'components': ['clippy', 'rust-src'],
+            'targets': ['wasm32-unknown-unknown', 'x86_64-pc-windows-msvc#x'],
+        }
+        self.assertEqual(channel._toolchain_fallback(text), expected)
+        if sys.version_info >= (3, 11):
+            import tomllib
+            self.assertEqual(tomllib.loads(text)['toolchain'], expected)
+
+
 if __name__ == '__main__':
     unittest.main()
