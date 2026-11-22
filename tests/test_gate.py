@@ -22,9 +22,9 @@ SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
 # The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
 # gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'ab35cb2622a77d004a8344095888bfcfbef10323'
+OWN_ACTION_REV = 'ec2b41fc48ec147d5b359967ee0c27135132612e'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@bf191401c5b42eb6ac209e953880ae948a41570a'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
