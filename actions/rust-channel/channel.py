@@ -19,6 +19,8 @@ except ModuleNotFoundError:
 # `[toolchain]`, however the table's name is spelled. A nested table (`[toolchain.x]`) and an array
 # table (`[[toolchain]]`) are not this table.
 HEADER = re.compile(r'\[\s*(?:toolchain|"toolchain"|\'toolchain\')\s*\]')
+# The quotes a string can open with, longest first: a multi-line string runs past its line.
+QUOTES = ('"""', "'''", '"', "'")
 
 
 def merged(*lists):
@@ -42,15 +44,26 @@ def _items(value):
 
 
 def _without_comment(line):
+    """`line` up to a `#` that is not inside a string. A multi-line string opened here keeps its
+    line whole: what follows the opener is content, not a comment."""
     quote = None
-    for i, ch in enumerate(line):
+    i = 0
+    while i < len(line):
         if quote:
-            if ch == quote:
+            if line.startswith(quote, i):
+                i += len(quote)
                 quote = None
-        elif ch in '"\'':
-            quote = ch
-        elif ch == '#':
+            else:
+                i += 1
+            continue
+        opener = next((q for q in QUOTES if line.startswith(q, i)), None)
+        if opener:
+            quote = opener
+            i += len(opener)
+        elif line[i] == '#':
             return line[:i]
+        else:
+            i += 1
     return line
 
 
@@ -67,43 +80,58 @@ def _assignment(line):
     return key.strip().strip('"\''), value.strip()
 
 
+def _multiline(value, lines, i, key):
+    """A value that opens a multi-line string: its content, and the index of the line after it.
+
+    Escape sequences are not decoded, which no channel, target or component name needs. A value
+    that never closes is reported: a toolchain installed from half a file is worse than a failure.
+    """
+    opener = value[:3]
+    parts = [value[3:]]
+    while True:
+        end = parts[-1].find(opener)
+        if end >= 0:
+            parts[-1] = parts[-1][:end]
+            break
+        if i >= len(lines):
+            raise SystemExit(f'rust-toolchain.toml: {key!r} opens a multi-line string that never closes')
+        parts.append(lines[i])
+        i += 1
+    body = '\n'.join(parts)
+    return (body[1:] if body.startswith('\n') else body), i
+
+
 def parse_minimal(text):
     """`[toolchain]` without a TOML parser: the keys this action reads, and nothing else.
 
     Enough for the file rustup writes and people edit by hand: `channel` as a string, `components`
-    and `targets` as arrays of strings on one line or several, the table's name in any spelling, and
-    keys quoted or bare. A multi-line string keeps its lines; its escape sequences are not decoded,
-    which no channel, target or component name needs. Anything else it cannot read is reported,
-    never guessed at.
+    and `targets` as arrays of strings on one line or several, the table's name in any spelling,
+    keys quoted or bare, and values in single, double or multi-line strings. Anything else it
+    cannot read is reported, never guessed at.
     """
     table = {}
     lines = text.splitlines()
     inside = False
     i = 0
     while i < len(lines):
-        line = _without_comment(lines[i]).strip()
+        raw = lines[i]
         i += 1
+        line = _without_comment(raw).strip()
         if not line:
             continue
         if line.startswith('['):
             inside = bool(HEADER.fullmatch(line))
             continue
-        if not inside:
-            continue
         assignment = _assignment(line)
         if assignment is None:
             continue
         key, value = assignment
-        opener = next((d for d in ('"""', "'''") if value.startswith(d)), None)
-        if opener:
-            parts = [value[len(opener):]]
-            while not parts[-1].rstrip().endswith(opener) and i < len(lines):
-                parts.append(lines[i])
-                i += 1
-            body = '\n'.join(parts)
-            if body.rstrip().endswith(opener):
-                body = body.rstrip()[: -len(opener)]
-            table[key] = body[1:] if body.startswith('\n') else body
+        if value.startswith(QUOTES[:2]):
+            body, i = _multiline(value, lines, i, key)
+            if inside:
+                table[key] = body
+            continue
+        if not inside:
             continue
         while value.startswith('[') and not value.endswith(']') and i < len(lines):
             value = f'{value} {_without_comment(lines[i]).strip()}'

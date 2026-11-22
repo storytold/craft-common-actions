@@ -93,6 +93,21 @@ class RustChannelTests(unittest.TestCase):
     def test_a_hash_inside_a_multi_line_string_is_content(self):
         self.assertEqual(channel.parse_minimal('[toolchain]\nchannel = """\nnightly#1"""\n')['channel'], 'nightly#1')
 
+    def test_a_multi_line_string_in_another_table_is_not_a_header(self):
+        # The ignored table's string contains what looks like this table: it is content.
+        text = '[toolchain]\nchannel = "stable"\n\n[other]\nnotes = \'\'\'\n[toolchain]\nchannel = "nightly"\n\'\'\'\n'
+        self.assertEqual(channel.parse_minimal(text)['channel'], 'stable')
+
+    def test_a_closing_delimiter_may_be_followed_by_a_comment(self):
+        text = '[toolchain]\nchannel = """stable"""  # the release line\ntargets = ["wasm32-unknown-unknown"]\n'
+        parsed = channel.parse_minimal(text)
+        self.assertEqual(parsed['channel'], 'stable')
+        self.assertEqual(parsed['targets'], ['wasm32-unknown-unknown'])
+
+    def test_a_multi_line_string_that_never_closes_is_reported(self):
+        with self.assertRaises(SystemExit):
+            channel.parse_minimal('[toolchain]\nchannel = """stable\n')
+
     def test_an_unterminated_array_is_reported(self):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')
