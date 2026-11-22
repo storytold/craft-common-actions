@@ -10,7 +10,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = yaml.load((ROOT / '.github/workflows/release.yml').read_text(), Loader=yaml.BaseLoader)
-STEP = next(s for s in DATA['jobs']['release']['steps'] if s.get('name') == 'Publish the release')
+DRAFT_JOB = DATA['jobs']['release']
+STEP = next(s for s in DRAFT_JOB['steps'] if s.get('name') == 'Publish the release')
 
 # A gh that answers from env: NOW assets on the draft, BEFORE on the last release (LAST), and
 # records an edit in EDITED.
@@ -28,6 +29,13 @@ else:
 
 
 class PublishTests(unittest.TestCase):
+    def test_only_a_macos_failure_can_leave_a_partial_draft(self):
+        self.assertIn('macos', DRAFT_JOB['needs'])
+        self.assertNotIn('needs.macos.result', DRAFT_JOB['if'])
+        self.assertIn("needs.version.result == 'success'", DRAFT_JOB['if'])
+        for job in set(DRAFT_JOB['needs']) - {'macos', 'version'}:
+            self.assertIn(f"needs.{job}.result != 'failure'", DRAFT_JOB['if'])
+
     def run_step(self, now, before, last="v0.20.0", cancelled="false", with_summary=False):
         with tempfile.TemporaryDirectory() as d:
             tools = Path(d) / 'tools'
@@ -44,7 +52,10 @@ class PublishTests(unittest.TestCase):
             return out + (summary.read_text() if summary.exists() else '',) if with_summary else out
 
     def test_only_on_the_release_branch_when_asked_and_not_in_a_dry_run(self):
-        self.assertEqual(STEP['if'], "inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'")
+        self.assertEqual(
+            STEP['if'],
+            "inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release' && needs.macos.result != 'failure'",
+        )
         spec = DATA['on']['workflow_call']['inputs']['publish']
         self.assertEqual((spec['type'], spec['default']), ('boolean', 'false'))
 
