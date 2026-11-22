@@ -543,8 +543,10 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
   only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. On the cluster runners,
   which set `SCCACHE_WEBDAV_ENDPOINT`, sccache uses the shared cluster cache instead, under the
-  key prefix `sccache/<cache-version>` that every repository shares; the main-branch runner set
-  writes and the PR set only reads. Test, binary and
+  key prefix `sccache/<cache-version>` that every repository shares. Two controls keep PR runs
+  from writing: gate-setup sets `SCCACHE_WEBDAV_RW_MODE=READ_ONLY` wherever the dependency cache
+  doesn't save (`SCCACHE_WEBDAV_RW_MODE` in `env` overrides it), and the cache server accepts
+  writes only with the writer credential, which only the main-branch runner set holds. Test, binary and
   proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
   sccache's cache starts afresh when `cache-version` or any `Cargo.toml` or `build.rs` changes,
   because its key leaves out `--check-cfg`: a cached compile would replay its old
