@@ -48,7 +48,10 @@ for the shared nightly workflow with the app's real name/title and the same
 **published, independently reviewed immutable tooling SHA** in both `uses:` and
 `tooling-revision`. Private commits and placeholder pins are not deployable.
 Keep the caller's first-run guard off; do not introduce a cron while drafting.
-Choose a schedule only after measuring the app's whole-CI duration.
+The app chooses its own cadence: daily, occasional, or manual-only with
+`workflow_dispatch` and no `schedule` entry. Automatic nightlies are optional.
+If the app chooses a schedule, measure its whole-CI duration first and leave
+enough time between runs.
 
 ## 4. Provision signing and a Launcher capability
 
