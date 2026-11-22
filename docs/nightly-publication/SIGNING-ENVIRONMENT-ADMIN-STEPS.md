@@ -73,8 +73,6 @@ The exact name is `nightly-signing`, matching the current source; calling it
    one environment; any admitted job naming it can request all of them after its
    protections pass. Mac/Linux remain unqualified/off until their separate QA;
    do not fabricate keys or dispatch an unqualified platform to test the setup.
-   Use the [one-page owner handoff](CREDENTIAL-OWNER-HANDOFF.md) and
-   [separate admin checklist](PRE-HANDOFF-ADMIN-CHECKLIST.md).
 8. Configure the independently reviewed public identity variables described in
    [`PUBLISHER-SETTINGS-DRAFT.md`](PUBLISHER-SETTINGS-DRAFT.md). The reviewed
    policy digest must be a repository variable available to identity/status/
