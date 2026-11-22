@@ -80,10 +80,38 @@ def _closes(value, quote):
     return (len(value) - 1 - len(value[:-1].rstrip('\\'))) % 2 == 0
 
 
+def _split_outside_strings(text):
+    """`text` split on the commas that are not inside a string, so an element may hold one."""
+    parts = []
+    current = ''
+    quote = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            current += ch
+            if ch == '\\' and quote == '"' and i + 1 < len(text):
+                current += text[i + 1]
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in '"\'':
+            quote = ch
+            current += ch
+        elif ch == ',':
+            parts.append(current)
+            current = ''
+        else:
+            current += ch
+        i += 1
+    parts.append(current)
+    return parts
+
+
 def _strings(value, key):
     """The strings of a TOML array, written on one line or more, each one closed."""
     out = []
-    for part in value.strip().strip('[]').split(','):
+    for part in _split_outside_strings(value.strip().strip('[]')):
         item = part.strip()
         if not item:
             continue

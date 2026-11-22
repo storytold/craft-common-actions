@@ -129,6 +129,9 @@ class RustChannelTests(unittest.TestCase):
             ['wasm32-unknown-unknown', 'aarch64-apple-darwin'],
         )
 
+    def test_an_array_element_may_hold_a_comma(self):
+        self.assertEqual(channel.parse_minimal('[toolchain]\ntargets = ["a,b", "c"]\n')['targets'], ['a,b', 'c'])
+
     def test_an_unterminated_array_is_reported(self):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')
