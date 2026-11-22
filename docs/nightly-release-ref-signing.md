@@ -16,6 +16,10 @@ PhotoCraft's prepared callers remain literally disabled until reviewed promotion
   with a constant group, `queue: max`, and cancellation off. Actual official repo,
   branch `release`, and `workflow_dispatch` context are mandatory in every job.
   The app caller's concurrency group must remain distinct from the callee's group.
+  Every `workflow_dispatch`, including the first signer attempt, requires an
+  explicit reviewed `manual_actors` entry. An automatic dispatcher's bot login
+  must be listed deliberately; bots are not implicitly trusted. Only an initial
+  scheduled producer is exempt. No real actor allowlist is installed here.
 - A fresh Windows validator snapshots candidate quality before reading artifact
   metadata, then downloads only the authenticated producer run/attempt/artifact.
   Trusted patched `gh attestation verify` must exit successfully; its private new
@@ -31,6 +35,11 @@ PhotoCraft's prepared callers remain literally disabled until reviewed promotion
   tag/draft/release. It never overwrites, deletes, prunes or repairs an existing tag.
   Confirmed public state followed by receipt/fsync/close failure is explicitly
   unreconciled, not permission to recreate or retry. Ownership evidence is retained.
+  Restoring a local receipt does not change failed hosted run/step conclusions:
+  later publication still refuses. Before activation, a separately designed and
+  qualified authenticated reconciliation protocol is required. Meanwhile recovery
+  is a manual, release-manager-reviewed procedure, not an implemented history
+  override or permission to recreate the release.
 
 Shared tooling must match the actual immutable defining workflow revision. A small
 fixed-purpose Git reader verifies actual checkout HEADs and reads the policy from

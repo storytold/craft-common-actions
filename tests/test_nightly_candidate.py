@@ -174,6 +174,80 @@ class CandidateTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError): self.admit()
             obj[key] = old
 
+    def test_omitted_job_attempt_uses_attempt_scoped_endpoint(self):
+        del self.f.job['run_attempt']
+        receipt = self.admit()
+        self.assertEqual(self.revalidate(receipt), receipt)
+        self.assertIn(('github', '/actions/runs/600/attempts/1/jobs?filter=all&per_page=100&page=1'), self.f.calls)
+
+    def test_omitted_job_attempt_on_a_nondefault_attempt(self):
+        del self.f.job['run_attempt']
+        self.f.run['run_attempt'] = 2
+        original = self.f.reply
+        def reply(provider, suffix):
+            return original(provider, suffix.replace('/attempts/2/jobs', '/attempts/1/jobs'))
+        with patch.object(self.f, 'reply', side_effect=reply):
+            receipt = self.admit()
+            self.assertEqual(receipt['workflows'][0]['run_attempt'], 2)
+            self.assertEqual(self.revalidate(receipt), receipt)
+        self.assertTrue(any('/attempts/2/jobs' in path for _, path in self.f.calls))
+        self.assertFalse(any('/attempts/1/jobs' in path for _, path in self.f.calls))
+
+    def test_supplied_job_attempt_must_be_a_matching_integer(self):
+        for attempt in (None, True, 1.0, '1', 0, -1, 2):
+            self.f.job['run_attempt'] = attempt
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(ValueError, 'job source/attempt/result'):
+                self.admit()
+
+    def add_second_workflow(self):
+        wanted = copy.deepcopy(self.f.policy['required_workflows'][0])
+        wanted.update(workflow_id=61, workflow_path='.github/workflows/lint.yml')
+        self.f.policy['required_workflows'].append(wanted)
+        run = {**self.f.run, 'id': 800, 'workflow_id': 61, 'path': wanted['workflow_path'], 'run_number': 30}
+        job = {**self.f.job, 'id': 801, 'run_id': 800, 'check_run_url': 'https://api.github.com/repos/' + REPO + '/check-runs/802'}
+        check = {**self.f.check, 'id': 802, 'details_url': 'https://github.com/' + REPO + '/actions/runs/800/job/801'}
+        original = self.f.reply
+        def reply(provider, suffix):
+            path = urlsplit(suffix).path
+            if provider == 'github':
+                if path == '/actions/workflows/61': return {'id': 61, 'path': wanted['workflow_path'], 'state': 'active'}
+                if path == '/actions/workflows/61/runs': return {'total_count': 1, 'workflow_runs': [run]}
+                if path == '/actions/runs/800': return run
+                if path == '/actions/runs/800/attempts/1/jobs': return {'total_count': 1, 'jobs': [job]}
+                if path == '/check-runs/802': return check
+            return original(provider, suffix)
+        self.f.reply = reply
+
+    def test_collection_wide_freshness_allows_unchanged_workflows(self):
+        self.add_second_workflow()
+        receipt = self.admit()
+        self.assertEqual([row['run_id'] for row in receipt['workflows']], [600, 800])
+        self.assertEqual(self.revalidate(receipt), receipt)
+
+    def test_collection_wide_freshness_rejects_late_earlier_workflow_rerun(self):
+        for revalidate in (False, True):
+            for phase in ('later-workflow', 'final-sonar'):
+                for mutation in ('new-run', 'new-attempt'):
+                    with self.subTest(revalidate=revalidate, phase=phase, mutation=mutation):
+                        self.f = Fixture()
+                        self.add_second_workflow()
+                        receipt = self.admit() if revalidate else None
+                        seen_later = [False]; changed = [False]
+                        def hook(provider, path):
+                            if provider == 'github' and path == '/actions/workflows/61':
+                                seen_later[0] = True
+                            trigger = (phase == 'later-workflow' and provider == 'github' and path == '/actions/workflows/61') or (phase == 'final-sonar' and seen_later[0] and provider == 'sonar' and path.startswith('/api/project_analyses/search'))
+                            if trigger and not changed[0]:
+                                changed[0] = True
+                                if mutation == 'new-run':
+                                    self.f.runs.append({**self.f.run, 'id': 610, 'run_number': 21})
+                                else:
+                                    self.f.run['run_attempt'] = 2
+                        self.f.hook = hook
+                        with self.assertRaisesRegex(ValueError, 'supersedes selection'):
+                            self.revalidate(receipt) if revalidate else self.admit()
+                        self.assertTrue(changed[0])
+
     def test_manual_only_skip_is_not_claimed_as_success(self):
         wanted = self.f.policy['required_workflows'][0]
         wanted['workflow_blob'] = 'e'*40; wanted['jobs'][0]['applicability'] = 'manual-input-only'
@@ -305,15 +379,16 @@ class CandidateTests(unittest.TestCase):
             self.f.gate['conditions'][0]['actualValue'] = value
             with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'A..E'): self.admit()
 
-    def test_cross_PR_data_duplicate_unknown_scope_and_scan_reduction_refuse(self):
+    def test_cross_PR_data_duplicate_and_missing_approved_issue_refuse(self):
         self.f.issues[0]['pullRequest'] = '315'
         with self.assertRaises(ValueError): self.admit()
         del self.f.issues[0]['pullRequest']
         self.f.issues.append(copy.deepcopy(self.f.issues[0]))
         with self.assertRaisesRegex(ValueError, 'duplicate'): self.admit()
-        self.f.issues.pop(); self.f.issues.pop(); self.f.measure_count = 1
-        # API and measure totals can agree after reducing a scan; absence still
-        # needs independent fix proof and cannot be treated as green coverage.
+        self.f.issues.pop()
+        self.f.issues.pop()
+        # An approved issue missing from search results still needs independent
+        # proof of a fix; search absence alone is not green coverage.
         with self.assertRaisesRegex(ValueError, 'cannot prove fixed'): self.admit()
 
     def test_old_fake_scope_policy_fields_are_rejected(self):
@@ -323,19 +398,61 @@ class CandidateTests(unittest.TestCase):
     def test_provably_unrelated_PR_current_is_ignored_not_used_as_C_proof(self):
         self.f.task = {'id': 'PR-task', 'componentKey': PROJECT, 'organization': 'storytold', 'pullRequest': '315', 'analysisId': 'PR-analysis', 'status': 'FAILED'}
         result = self.admit()['sonar']
-        self.assertEqual(result['ce']['mode'], 'completed-main-analysis-current-pr')
+        self.assertEqual(result['ce']['mode'], 'completed-main-analysis')
         self.assertEqual(result['analysis']['revision'], C)
         self.assertEqual(result['ce']['analysisId'], 'analysis-C')
         receipt = self.admit()
         self.f.task['pullRequest'] = '316'; self.f.task['analysisId'] = 'different-PR-analysis'
         self.assertEqual(self.revalidate(receipt), receipt)
 
+    def test_main_to_unrelated_PR_to_main_keeps_exact_analysis_receipt(self):
+        main_task = copy.deepcopy(self.f.task)
+        receipt = self.admit()
+        self.f.task = {'id': 'PR-task', 'componentKey': PROJECT, 'organization': 'storytold', 'pullRequest': '315', 'status': 'FAILED'}
+        self.assertEqual(self.revalidate(receipt), receipt)
+        self.assertEqual(self.admit()['sonar'], receipt['sonar'])
+        self.f.task = main_task
+        self.assertEqual(self.revalidate(receipt), receipt)
+        self.assertEqual(self.admit()['sonar'], receipt['sonar'])
+
+    def test_unrelated_PR_current_transition_during_snapshot_is_allowed(self):
+        main_task = copy.deepcopy(self.f.task)
+        count = [0]
+        def hook(provider, path):
+            if provider == 'sonar' and path.startswith('/api/ce/component'):
+                count[0] += 1
+                self.f.task = main_task if count[0] % 2 else {'id': 'PR-task', 'componentKey': PROJECT, 'organization': 'storytold', 'pullRequest': '315', 'status': 'FAILED'}
+        self.f.hook = hook
+        receipt = self.admit()
+        self.assertEqual(self.revalidate(receipt), receipt)
+
+    def test_CE_transition_still_rejects_failed_ambiguous_and_queued_main(self):
+        for revalidate in (False, True):
+            for mutation in ('failed-main', 'ambiguous-current', 'queued-main', 'ambiguous-queue'):
+                with self.subTest(revalidate=revalidate, mutation=mutation):
+                    self.f = Fixture()
+                    receipt = self.admit() if revalidate else None
+                    count = [0]
+                    def hook(provider, path):
+                        if provider == 'sonar' and path.startswith('/api/ce/component'):
+                            count[0] += 1
+                            if count[0] == 2:
+                                if mutation == 'failed-main': self.f.task['status'] = 'FAILED'
+                                elif mutation == 'ambiguous-current': self.f.task = {'id': 'unknown', 'analysisId': 'other'}
+                                else:
+                                    self.f.task = {'componentKey': PROJECT, 'organization': 'storytold', 'pullRequest': '315'}
+                                    self.f.queue = [{'id': 'pending-main', 'branch': 'main'}] if mutation == 'queued-main' else [{'id': 'unknown'}]
+                    self.f.hook = hook
+                    with self.assertRaisesRegex(ValueError, 'CE task'):
+                        self.revalidate(receipt) if revalidate else self.admit()
+
     def test_warnings_are_trusted_as_resolved_not_claimed_warning_free(self):
         self.f.task['warnings'] = ['provider scanner warning']
         self.f.task['warningCount'] = 1
         result = self.admit()['sonar']
         self.assertEqual(result['scope_trust'], 'provider-resolved')
-        self.assertEqual(result['ce']['warningCount'], 1)
+        self.assertNotIn('warningCount', result['ce'])
+        self.assertNotIn('warnings', result['ce'])
         del self.f.task['warnings']; del self.f.task['warningCount']
         self.assertEqual(self.admit()['sonar']['scope_trust'], 'provider-resolved')
 

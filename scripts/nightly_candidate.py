@@ -243,7 +243,7 @@ def _workflows(reads, policy, producer, now):
             inactive = item['applicability'] == 'manual-input-only'
             conclusion = 'skipped' if inactive else 'success'
             n.require(not inactive or run['event'] in ('push', 'schedule'), 'manual-input-only job applicable to this event')
-            n.require(job.get('run_id') == run['id'] and job.get('run_attempt') == run['run_attempt'] and job.get('head_sha') == producer['source_commit'] and job.get('status') == 'completed' and job.get('conclusion') == conclusion, 'required job source/attempt/result differs')
+            n.require(job.get('run_id') == run['id'] and ('run_attempt' not in job or (type(job['run_attempt']) is int and job['run_attempt'] == run['run_attempt'])) and job.get('head_sha') == producer['source_commit'] and job.get('status') == 'completed' and job.get('conclusion') == conclusion, 'required job source/attempt/result differs')
             n.require(type(check.get('id')) is int and check['id'] == check_id and check.get('head_sha') == producer['source_commit'] and check.get('name') == item['name'] and type(check.get('app', {}).get('id')) is int and check['app']['id'] == 15368 and check.get('status') == 'completed' and check.get('conclusion') == conclusion and check.get('details_url') == f"https://github.com/{policy['repository']}/actions/runs/{run['id']}/job/{job['id']}", 'required official app/check/run linkage differs')
             n.require(created <= legacy.timestamp(check.get('started_at')) <= legacy.timestamp(check.get('completed_at')) <= now and created <= legacy.timestamp(job.get('completed_at')) <= now, 'quality evidence timestamps differ')
             n.require(reads.get('github', '/check-runs/' + str(check_id)) == check, 'required check changed during collection')
@@ -252,6 +252,14 @@ def _workflows(reads, policy, producer, now):
         n.require(reads.rows('github', f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?filter=all", 'jobs') == jobs, 'job inventory changed during collection')
         facts.append({'workflow_id': wanted['workflow_id'], 'workflow_path': wanted['workflow_path'], 'run_id': run['id'], 'run_attempt': run['run_attempt'], 'run_number': run['run_number'], 'jobs': evidence})
     return facts
+
+
+def _fresh_workflows(reads, policy, producer, facts):
+    # Collection-wide final pass, after all workflows and Sonar reads. Earlier
+    # workflows can be rerun while later evidence is being collected.
+    for wanted, selected in zip(policy['required_workflows'], facts):
+        run = _run(reads, policy, producer, wanted)
+        n.require((run['id'], run['run_attempt'], run['run_number']) == (selected['run_id'], selected['run_attempt'], selected['run_number']), 'newer quality run supersedes selection before collection completed')
 
 
 def fingerprint(issue, policy):
@@ -303,15 +311,15 @@ def _ce(reads, s, analysis, now):
         # never establish main or grant an exemption.
         return isinstance(task.get('pullRequest'), str) and re.fullmatch(r'[1-9][0-9]*', task['pullRequest']) is not None and task.get('componentKey') == s['project'] and task.get('organization') == s['organization'] and task.get('branch') is None
     n.require(all(unrelated_pr(task) for task in queue), 'applicable/ambiguous main CE task pending during candidate snapshot')
-    if unrelated_pr(current):
-        # A completed, exact-revision main analysis exists independently of the
-        # unrelated project-wide current PR task. Do not bind its mutable issue
-        # list or claim the PR task proves C's scanner warnings/configuration.
-        return {'mode': 'completed-main-analysis-current-pr', 'analysisId': analysis['key'], 'revision': analysis['revision']}
-    n.require(current.get('analysisId') == analysis['key'] and current.get('organization') == s['organization'] and current.get('componentKey') == s['project'] and 'pullRequest' not in current and current.get('branch', 'main') == 'main' and current.get('branchType', 'LONG') == 'LONG' and current.get('type') == 'REPORT' and current.get('status') == 'SUCCESS', 'CE task/project/main identity or success differs')
-    n.require(provider_time(current.get('submittedAt')) <= provider_time(current.get('startedAt')) <= provider_time(current.get('executedAt')) <= now, 'CE timestamps inconsistent')
-    text(current.get('id'), 'CE task ID')
-    return {'mode': 'main-ce-task', **current}
+    # A completed exact-revision main analysis exists independently of an
+    # unrelated project-wide current PR task. Validate any applicable main task,
+    # but retain only the stable main-analysis binding, not mutable PR activity
+    # or diagnostic scanner metadata.
+    if not unrelated_pr(current):
+        n.require(current.get('analysisId') == analysis['key'] and current.get('organization') == s['organization'] and current.get('componentKey') == s['project'] and 'pullRequest' not in current and current.get('branch', 'main') == 'main' and current.get('branchType', 'LONG') == 'LONG' and current.get('type') == 'REPORT' and current.get('status') == 'SUCCESS', 'CE task/project/main identity or success differs')
+        n.require(provider_time(current.get('submittedAt')) <= provider_time(current.get('startedAt')) <= provider_time(current.get('executedAt')) <= now, 'CE timestamps inconsistent')
+        text(current.get('id'), 'CE task ID')
+    return {'mode': 'completed-main-analysis', 'analysisId': analysis['key'], 'revision': analysis['revision']}
 
 
 def _qualified_source_hashes(source):
@@ -416,6 +424,7 @@ def admit_candidate(policy, producer, github, sonar, *, now):
     # Main may advance beyond C, but may not drop C during collection.
     _ancestry(reads, producer['source_commit'], None)
     n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before admission completed')
+    _fresh_workflows(reads, policy, producer, workflows)
     return {'schema': 'craft-nightly-candidate-receipt/v3', 'policy_sha256': digest(policy), 'producer_sha256': digest(producer), 'source_commit': producer['source_commit'], 'sonar': snapshot, 'workflows': workflows, 'main_at_admission': ancestry['main']}
 
 
@@ -445,4 +454,5 @@ def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
     n.require(_workflows(reads, policy, producer, now) == receipt['workflows'], 'selected exact-C quality runs changed/superseded')
     _ancestry(reads, producer['source_commit'], None)
     n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before revalidation completed')
+    _fresh_workflows(reads, policy, producer, receipt['workflows'])
     return receipt

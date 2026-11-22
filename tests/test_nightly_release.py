@@ -144,6 +144,19 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identity changed"):
                 b.revalidate(self.policy, self.state, self.env, self.fx.api, object(), self.registry, now=self.fx.now)
 
+    def test_last_remote_check_refuses_a_producer_that_appears_during_quality_or_history_reads(self):
+        original = copy.deepcopy(self.fx.api.rows["newest"])
+        for phase in ("quality", "history"):
+            self.fx.api.rows["newest"] = copy.deepcopy(original)
+            def changed(*args, **kwargs):
+                newest = self.fx.api.rows["newest"]["workflow_runs"][0]
+                newest.update(id=101, run_number=newest["run_number"]+1)
+                return self.state["quality"] if phase == "quality" else self.plan
+            with self.subTest(phase=phase), patch.object(b.c, "revalidate_candidate", side_effect=changed if phase == "quality" else None, return_value=self.state["quality"]), patch.object(b, "publication_state", side_effect=changed if phase == "history" else None, return_value=self.plan):
+                with self.assertRaisesRegex(ValueError, "newer trusted workflow ordinal"):
+                    b.revalidate(self.policy, self.state, self.env, self.fx.api, object(), self.registry, now=self.fx.now)
+        self.fx.api.rows["newest"] = original
+
     def test_verifier_is_executed_and_fixed_private_stdout_is_not_downloaded_json(self):
         directory, _ = self.payload()
         (manifest, claims), calls = self.verified(directory)

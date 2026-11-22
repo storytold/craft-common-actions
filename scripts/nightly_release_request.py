@@ -122,7 +122,8 @@ def role(policy, row, run_id, attempt, *, signer=False):
     actor = object_value(row.get('triggering_actor')).get('login')
     n.require(invocation.valid_login(actor), 'current triggering actor missing')
     actors = invocation.manual_actors(json.dumps(policy['manual_actors']))
-    if attempt > 1 or (not signer and event == 'workflow_dispatch'):
+    # Only a producer's initial schedule is automatic; dispatch bots are not implicit authority.
+    if attempt > 1 or event == 'workflow_dispatch':
         n.require(actor.lower() in actors, 'current manual/re-run actor not authorized')
     created = row.get('created_at'); started = row.get('run_started_at')
     n.require(p.timestamp(started) >= p.timestamp(created), 'run timestamps differ')
@@ -181,6 +182,8 @@ def artifact(policy, row, producer, now):
 def validate_request(policy, environment, producer_run_id, producer_run_attempt, api, *, now, before_artifacts=None):
     """Authenticate fixed-repository GET metadata; inputs never select ref/code/URL.
 
+    Every dispatch/re-run actor must be explicitly reviewed; only an initial
+    scheduled producer is exempt. No bot identity is implicitly authorized.
     No artifact download occurs here. The orchestrator takes candidate quality's
     early snapshot before it downloads anything, then checks both boundaries.
     """
@@ -260,7 +263,7 @@ def request_contract(policy, request):
     actors = invocation.manual_actors(json.dumps(policy['manual_actors']))
     for name, row in (('producer', producer), ('signer', signer)):
         n.require(p.timestamp(row['created_at']) <= p.timestamp(row['run_started_at']), 'role timestamps differ')
-        if row['run_attempt'] > 1 or (name == 'producer' and row['event'] == 'workflow_dispatch'):
+        if row['run_attempt'] > 1 or row['event'] == 'workflow_dispatch':
             n.require(row['triggering_actor'].lower() in actors, 'role current actor not authorized')
     item = request['artifact']; n.fields(item, ARTIFACT_FIELDS, 'artifact binding')
     n.positive(item['id'], 'artifact ID'); n.positive(item['size_in_bytes'], 'artifact bytes')

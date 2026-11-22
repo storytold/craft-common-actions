@@ -252,6 +252,8 @@ def revalidate(policy, state, environment, api, sonar, registry, *, now):
     n.require(actual == expected, "producer/signer/artifact admission changed")
     c.revalidate_candidate(policy["candidate_policy"], actual["producer"], state["quality"], api, sonar, now=now)
     n.require(publication_state(api, registry, policy, actual) == state["plan"], "stable/publication identity changed")
+    # Last remote read before the caller can mutate; cooperative, not atomic.
+    p.require_newest_run(api, {"run": ordinal(actual["producer"])})
     return True
 
 
