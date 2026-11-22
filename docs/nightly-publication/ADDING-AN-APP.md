@@ -52,6 +52,8 @@ drafting; do not introduce a cron. The recommended caller is **schedule-only**,
 without `workflow_dispatch`. Only at separately approved first-run activation,
 replace `on: {}` with the app's approved `schedule` **and remove the caller job's
 literal `if: ${{ false }}` guard**. Changing only the trigger leaves the job skipped.
+This enables the caller, not the shared attestation/publication jobs; distinguish
+staging-only and live-publication checks as described in section 5 below.
 Automatic nightlies are opt-in, not a suite-wide switch. Measure the app's
 whole-CI duration first and leave enough time between scheduled runs.
 
@@ -138,9 +140,28 @@ settings to the user for each push/new PR. The publisher owns public writes and
 the separately approved first-run timing. Keep stable releases unchanged;
 activate only the admitted target(s) and the app's reviewed cadence, removing
 the caller job's literal false guard as described above. For a schedule-only
-caller, wait for its **first approved scheduled run**, then verify the real
-publication/install result; that verification is not a prerequisite for giving
-the caller its first trigger. A manual first run is optional and needs a
+caller, wait for its **first approved scheduled run**, then check the outcome
+appropriate to the separately approved scope:
+
+- **Staging only:** once its other prerequisites are qualified, expect the
+  `nightly-packet-<run-id>-<run-attempt>` Actions artifact. The shared
+  `.github/workflows/nightly.yml` still hard-disables `attest-nightly` and
+  `publish-nightly`; caller activation alone cannot create a public nightly.
+  Verify the staged packet is available, not publication or Launcher installation.
+- **Live publication:** only after a separately reviewed and approved shared
+  workflow change admits attestation/publication, pin that actual published
+  revision in both `uses:` and `tooling-revision`. The current literal-false
+  `attest-nightly`/`publish-nightly` gates must be addressed by that change;
+  removing the caller guard is not enough. Complete the native/signing/quality
+  prerequisites before expecting and verifying the real publication/install result.
+  This guide neither makes that shared change nor authorizes it.
+
+The post-publication prune-plan step is independently hard-disabled. It is not
+needed to create a release and must not be enabled just to make publication
+verification pass. Any separately approved retention activation must also address
+that step after the recovery/quota prerequisites above; keep deletion off otherwise.
+First-run verification is not a prerequisite for giving the caller its first
+trigger. A manual first run is optional and needs a
 separately approved narrow `workflow_dispatch` route and the reviewed actor
 allowlist above, not a broad dispatch button. This guide grants no public or live
 activation authority.
