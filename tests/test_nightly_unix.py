@@ -1,11 +1,14 @@
 """Self-authored synthetic archives; no app, runtime, signature or E4 proof."""
+import contextlib
 import copy
+import gzip
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import socket
 import stat
 import struct
@@ -138,6 +141,53 @@ class UnixProducerTests(unittest.TestCase):
         self.assertEqual(result['members'],2)
         with self.assertRaises(n.InvalidNightly): u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
 
+    def test_unpack_is_published_only_after_validation_and_failures_are_retryable(self):
+        output=self.root/'unpacked'
+        for extra,payload in [([('PHOTOCRAFT',b'bad','file')],self.elf),([],b'not elf')]:
+            archive=self.tar(extra=extra,payload=payload)
+            original=u.member_name
+            def inspect(name):
+                self.assertFalse(output.exists())
+                return original(name)
+            with patch.object(u,'member_name',side_effect=inspect),self.assertRaises(n.InvalidNightly):
+                u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
+            self.assertFalse(output.exists())
+            self.assertFalse(list(self.root.glob('.nightly-unpack-*')))
+        u.verify_archive(self.pending,'linux-x86_64',self.tar(),self.version,output)
+        self.assertEqual((output/'photocraft').read_bytes(),self.elf)
+        self.assertFalse(list(self.root.glob('.nightly-unpack-*')))
+
+    def test_linux_gzip_crc_length_and_eof_are_checked_before_unpack_publication(self):
+        archive=self.tar(); original=archive.read_bytes(); output=self.root/'unpacked'
+        for label,data in [('crc',original[:-8]+bytes([original[-8]^1])+original[-7:]),
+                           ('length',original[:-4]+bytes([original[-4]^1])+original[-3:]),
+                           ('trailer',original[:-8]),('eof',original[:-1])]:
+            archive.write_bytes(data)
+            with self.subTest(label=label),self.assertRaises((OSError,EOFError)):
+                u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
+            self.assertFalse(output.exists())
+            self.assertFalse(list(self.root.glob('.nightly-unpack-*')))
+        archive.write_bytes(original)
+        u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
+
+    def test_linux_gzip_truncated_trailer_is_a_cli_refusal_not_a_traceback(self):
+        archive=self.tar(); archive.write_bytes(archive.read_bytes()[:-8]); errors=io.StringIO()
+        args=['fixture','inventory','--pending',str(ROOT/'nightly-unix-pending.json'),
+              '--platform','linux-x86_64','--version',self.version,'--archive',str(archive)]
+        with patch.object(sys,'argv',args),contextlib.redirect_stderr(errors),self.assertRaises(SystemExit) as exited:
+            u.main()
+        self.assertEqual(exited.exception.code,1)
+        self.assertIn('private Unix nightly unavailable:',errors.getvalue())
+        self.assertNotIn('Traceback',errors.getvalue())
+
+    def test_linux_gzip_drain_is_bounded_including_padding_after_tar_end(self):
+        archive=self.tar(); expanded=gzip.decompress(archive.read_bytes())
+        with patch.object(n,'MAX_TOTAL_BYTES',1024),patch.object(u,'MAX_CENTRAL_DIRECTORY',len(expanded)-1024):
+            u.verify_archive(self.pending,'linux-x86_64',archive,self.version)
+            archive.write_bytes(gzip.compress(expanded+b'\0'))
+            with self.assertRaisesRegex(n.InvalidNightly,'expanded archive exceeds bound'):
+                u.verify_archive(self.pending,'linux-x86_64',archive,self.version)
+
     def test_linux_wrong_arch_missing_executable_or_symlink_is_refused(self):
         for payload,mode in [(b'not elf',0o755),(self.macho,0o755),(self.elf,0o644)]:
             with self.subTest(mode=mode),self.assertRaises(n.InvalidNightly): u.verify_archive(self.pending,'linux-x86_64',self.tar(payload=payload,mode=mode),self.version)
@@ -182,14 +232,27 @@ class UnixProducerTests(unittest.TestCase):
         with self.assertRaises(n.InvalidNightly): u.zip_metadata_bound(io.BytesIO(data),len(data))
 
 class UnixWorkflowTests(unittest.TestCase):
+    def assert_unprivileged_build(self,source,job):
+        build=re.split(r'\n  [A-Za-z0-9_-]+:\n',source.split('  '+job+':\n',1)[1],maxsplit=1)[0]
+        self.assertIn('    steps:',build)
+        self.assertNotIn('secrets.',build); self.assertNotIn('environment:',build)
+
+    def test_build_isolation_assertions_cover_the_job_body_not_only_its_if(self):
+        source=(ROOT/'.github/workflows/nightly-unix.yml').read_text()
+        for job in ('linux','macos'):
+            for forbidden in ('environment: nightly-signing','env: ${{ secrets.FIXTURE }}'):
+                start=source.index('  '+job+':\n')
+                mutated=source[:start]+source[start:].replace('    steps:','    '+forbidden+'\n    steps:',1)
+                with self.subTest(job=job,forbidden=forbidden),self.assertRaises(AssertionError):
+                    self.assert_unprivileged_build(mutated,job)
+
     def test_native_workflows_are_explicitly_disabled_and_do_not_publish_or_sign(self):
         source=(ROOT/'.github/workflows/nightly-unix.yml').read_text()
         for job in ('git-sources', 'linux', 'macos', 'linux-signing-config', 'macos-signing-config'):
             block=source.split('  '+job+':\n',1)[1].split('    steps:',1)[0]
             self.assertIn('if: ${{ false }}',block)
         for job in ('linux', 'macos'):
-            build=source.split('  '+job+':\n',1)[1].split('\n  ',1)[0]
-            self.assertNotIn('secrets.',build); self.assertNotIn('environment:',build)
+            self.assert_unprivileged_build(source,job)
         for forbidden in ('secrets:','contents: write','packages: write','schedule:','workflow_dispatch:','cargo xtask version set','--skip-build','--ad-hoc','import-cert.sh','publish_nightly.py'):
             self.assertNotIn(forbidden,source)
         self.assertIn('uses: $/.github/workflows/nightly-signing-unix.yml', source)

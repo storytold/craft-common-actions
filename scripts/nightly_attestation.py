@@ -20,11 +20,12 @@ def subject(registry,prepared,policy,directory,environment,*,signed=False):
         'digest':'sha256:'+metadata[filename][1],'source_commit':ident['source_commit']}
 
 
-def guarded_subject(api,registry,prepared,policy,directory,environment,config,*,identity_directory,identity_sha256,packet_sha256,zip_sha256,asset,signed=False):
+def guarded_subject(api,registry,prepared,policy,directory,environment,config,*,identity_directory,identity_sha256,packet_sha256,zip_sha256,asset,signed=False,package_verifier=None):
     """Only two read-only active-state GETs; no signing, attestation or writes."""
     import nightly_artifacts as bindings
     p.validate_prepared(registry,prepared,policy,environment,config)
     p.require_active_workflow(api,config,policy) # Before packet hashing/subject work.
+    if package_verifier is not None: package_verifier()
     bindings.verify_chain(identity_directory,directory,identity_sha256,packet_sha256,zip_sha256,asset)
     result=subject(registry,prepared,policy,directory,environment,signed=signed)
     # LAST API read before main can expose any subject output. Cooperative,
@@ -52,12 +53,12 @@ def main():
         p.publication_contract(config,policy) # Approved exact producer identity before token.
         import nightly_signing as signing
         checked=signing.verify_receipt(args.signing_receipt_directory,args.signing_receipt_sha256,"windows-x86_64",args.asset,args.identity_sha256,args.unsigned_sha256,args.zip_sha256,os.environ)
-        signing.verify_package(args.directory,checked,".",os.environ,packet=True)
         repository=p.trusted_repository(registry,prepared['app'],os.environ)
         api=publisher.HTTPTransport(repository,os.environ.get('GH_TOKEN',''))
         result=guarded_subject(api,registry,prepared,policy,args.directory,os.environ,config,
             identity_directory=Path(args.identity).parent,identity_sha256=args.identity_sha256,
-            packet_sha256=args.packet_sha256,zip_sha256=args.zip_sha256,asset=args.asset,signed=True)
+            packet_sha256=args.packet_sha256,zip_sha256=args.zip_sha256,asset=args.asset,signed=True,
+            package_verifier=lambda: signing.verify_package(args.directory,checked,".",os.environ,packet=True))
         if output:=os.environ.get('GITHUB_OUTPUT'):
             with open(output,'a') as stream:
                 for key,value in result.items():

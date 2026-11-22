@@ -42,11 +42,13 @@ The commands below are **not run live by this work**:
 
 ```text
 python3 scripts/nightly_prune.py plan --registry nightly-apps.json --app photocraft --current-release-id RELEASE_ID --bot-id BOT_ID --config ownership-policy.json
-python3 scripts/nightly_prune.py apply --registry nightly-apps.json --app photocraft --current-release-id RELEASE_ID --bot-id BOT_ID --config ownership-policy.json --plan prune-plan.json --checkpoint prune-checkpoint.json --approve-first-run
+python3 scripts/nightly_prune.py apply --registry nightly-apps.json --app photocraft --current-release-id RELEASE_ID --bot-id BOT_ID --config ownership-policy.json --plan prune-plan.json --checkpoint prune-checkpoint.json --checkpoint-artifact-id CHECKPOINT_ARTIFACT_ID --checkpoint-artifact-sha256 CHECKPOINT_ARTIFACT_SHA256 --approve-first-run
 ```
 
-Save plan stdout to `prune-plan.json` before apply. The exact plan and its
-immutable Actions artifact must be preserved on failure. The integrated CLI
+Save plan stdout to `prune-plan.json`, then upload those exact bytes as the
+trusted checkpoint artifact in the current run and attempt before apply. Pass its
+exact artifact ID and digest from that trusted upload step, not values claimed by
+the plan. The exact plan and immutable Actions artifact must be preserved on failure. The integrated CLI
 accepts only a checkpoint authenticated to its **current run and attempt**.
 A later Actions attempt/run cannot resume the original checkpoint. A fresh
 plan enumerates releases, not orphan refs, and cannot rediscover a release
@@ -61,12 +63,21 @@ authenticated cross-attempt recovery/recheckpoint route and a full
 CLI/checkpoint boundary regression have landed and been reviewed. This is an
 additional implementation prerequisite before the separately approved first
 live publication/pruning timing, not a request to change the keep-seven policy.
+A quota-bounded ownership frontier/deletion batch is also required: the offline
+49-history proof-path regression needs 1,404 authenticated requests before the
+first DELETE, exceeding a normal 1,000-request/hour repository token quota.
+Do not enable the current full-reproof algorithm or weaken candidate ownership
+checks to make it fit. This quota design is a separate owned follow-up, not a
+performance fix claimed by the current correction.
 
 ## Receipt emitted by the publisher owner
 
 Only after exclusive ref creation returned **201**, exact ref readback, draft
 asset digest verification, successful publication and final ref verification,
-write a single `ownership.json` with these exact fields:
+finish writing a single `ownership.json` with these exact fields. The publisher
+reserves its new directory and opens the exclusive output file before its first
+API mutation. A receipt failure after confirmed publication exits with a distinct
+reconciliation error; it must never trigger a second publication/create attempt:
 
 ```json
 {

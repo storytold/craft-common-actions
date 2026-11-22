@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -132,6 +133,76 @@ class PruneTests(unittest.TestCase):
     def execute(self, plan=None, **kwargs):
         return p.execute(self.api, self.registry, plan or self.plan(), approved=True,
                          provenance=self.proof, checkpoint=self.saved.append, **kwargs)
+
+    def test_malformed_historical_policy_is_retained_without_hiding_other_candidates(self):
+        malformed = ["{}", "null", "[]", "{", '{"identity": null, "run": {}}']
+        for key in ("identity", "run", "stable_base", "tooling_revision"):
+            body = policy.body_policy(self.rows[0]["body"])
+            del body[key]
+            malformed.append(json.dumps(body))
+        for key in ("id", "attempt", "event", "repository", "workflow_path", "source_commit", "created_at"):
+            body = policy.body_policy(self.rows[0]["body"])
+            body["run"][key] = []
+            malformed.append(json.dumps(body))
+        for marker in malformed:
+            self.setUp()
+            self.api.rows[0]["body"] = policy.MARKER + marker
+            with self.subTest(marker=marker):
+                previous = self.plan()
+                self.assertIn(1, [row["release_id"] for row in previous["retained"]])
+                self.assertNotIn(1, self.proof.calls)
+                self.assertIn(2, self.proof.calls)
+                self.assertEqual(self.api.deletes(), [])
+
+    def test_successful_null_or_nonobject_lookup_is_never_absence(self):
+        api = type("Lookup", (), {})()
+        for value in (None, [], "null", 1, False):
+            api.request = lambda *args: value
+            with self.subTest(value=value), self.assertRaisesRegex(n.InvalidNightly, "must return an object"):
+                p.optional(api, "/releases/1")
+        api.request = lambda *args: {}
+        self.assertEqual(p.optional(api, "/releases/1"), {})
+        def absent(*args): raise p.APIError(404)
+        api.request = absent
+        self.assertIsNone(p.optional(api, "/releases/1"))
+
+    def test_null_after_release_delete_preserves_tag_and_later_candidate(self):
+        previous = self.plan()
+        original = self.api.request
+        def null_after_delete(method, path, data=None):
+            if method == "GET" and path == "/releases/1" and not any(row["id"] == 1 for row in self.api.rows):
+                return None
+            return original(method, path, data)
+        self.api.request = null_after_delete
+        with self.assertRaisesRegex(n.InvalidNightly, "must return an object"):
+            self.execute(previous)
+        self.assertEqual(self.api.deletes(), [("DELETE", "/releases/1")])
+        self.assertIn(self.rows[0]["tag_name"], self.api.refs)
+
+    def test_large_retained_diagnostics_fit_shared_plan_budget(self):
+        unrelated = [{"id": run, "tag_name": "x" * 195 + str(run)} for run in range(100, 450)]
+        self.api.rows.extend(unrelated)
+        previous = self.plan()
+        raw = p.encode_plan(previous)
+        self.assertGreater(len(raw), 64 * 1024)
+        self.assertLessEqual(len(raw), p.MAX_PLAN_BYTES)
+        self.assertEqual(p.parse_plan_bytes(raw), previous)
+        self.assertEqual([row["id"] for row in previous["candidates"]], [1, 2])
+        with patch.object(p, "MAX_PLAN_BYTES", len(raw) - 1), self.assertRaisesRegex(n.InvalidNightly, "checkpoint byte budget"):
+            self.plan()
+        self.assertEqual(self.api.deletes(), [])
+
+    def test_local_checkpoint_preserves_verified_bytes_and_rejects_different_plan(self):
+        previous = self.plan()
+        raw = (json.dumps(previous, indent=2) + "\n").encode()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "checkpoint.json"
+            p.save_checkpoint(path, previous, raw=raw)
+            self.assertEqual(path.read_bytes(), raw)
+            with self.assertRaisesRegex(n.InvalidNightly, "bytes differ"):
+                p.save_checkpoint(path, {**previous, "bot_id": BOT + 1}, raw=raw)
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertFalse(path.with_suffix(".json.new").exists())
 
     def test_keep_seven_oldest_first_release_then_tag(self):
         previous = self.plan()

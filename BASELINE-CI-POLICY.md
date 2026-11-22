@@ -41,7 +41,8 @@ is not authority to activate any of them.
 5. A refresh must call `validate_baseline_refresh(previous, updated, policy, api)` with
    the actual previously approved immutable v2 snapshot, then preserve that review
    history. Never substitute a candidate's claimed previous document. Coverage
-   changes require an explicit separate policy migration and equivalence review;
+   changes, including managed-check additions/removals or workflow replacements,
+   require an explicit separate policy migration and equivalence review;
    they cannot pass through the normal refresh helper. The setup controller must
    enforce this helper; the runtime has no trusted policy-history storage itself.
    The helper authenticates up to 20 intervening first-parent main revisions,
@@ -97,11 +98,14 @@ authenticated responses, never these values.
 
 `required_checks` is the complete covered independent Actions job inventory,
 including jobs reviewed red: it is **not** a candidate-derived ignore list.
-Names must be unique; each is additionally authenticated through the exact job's
+Names must be unique within each authenticated workflow; equal display names
+in different workflow IDs are distinct obligations. Each is additionally authenticated through the exact job's
 `check_run_url`, the check ID/app ID/source, the run/attempt, workflow ID/path/blob,
 trusted repository and main event. There may be 1–128 jobs and 1–32 workflows.
-Each baseline job/check ID appears once. Baseline results are only `success` or
-`failure`, and `success` mandates `green_required: true`.
+Each baseline job/check ID appears once. Ordinary baseline results are only
+`success` or `failure`, and `success` mandates `green_required: true`. The sole
+reviewed `skipped` exception is the explicit `manual-input-only` adapter described
+below; it does not count as passing coverage.
 
 The prepared policy adds `quality_policy_sha256` (64 lowercase hex characters)
 to the existing exact v6 policy fields. The identity/feed format is unchanged.
@@ -114,8 +118,12 @@ old published policies need not match a newer reviewed config to prove ordering.
 
 Every preflight and both existing publication guards reconstruct a fresh witness
 through the authenticated fixed-host transport. No untrusted witness JSON is
-accepted. The witness is bounded to 256 GET requests and a 120-second collection
+accepted. The witness is bounded to 640 GET requests and a 120-second collection
 budget (plus existing transport timeouts; preflight retains its real alarm).
+Counted 32-workflow/128-job two-SHA synthetic paths used 607/617 GETs, including
+final rechecks. Excessive history still refuses. This per-witness cap does not
+prove the combined preflight/publication flow fits the repository's hourly API
+quota; a refusal is never permission to skip authentication.
 Inventories use pages of 20, at most 20 pages each, with stable exact integer
 `total_count`, complete final-page coverage and duplicate-ID rejection. The
 attempt-history bound is 20 attempts per run; hitting any bound refuses rather
@@ -142,7 +150,11 @@ job without throwing away its other passing job obligations.
 | missing/unknown/unreviewed skipped/pending/cancelled | any | any | refuse |
 
 Historical successful jobs on either exact main revision (all bounded trusted runs
-and attempts, exact-ID check reads) also set the live green floor. A later red
+and attempts, exact-ID check reads) also set the live green floor, including
+completed successful jobs in a cancelled or partial historical attempt. Unknown
+or incomplete historical jobs grant no positive evidence; selected baseline and
+candidate runs still require their complete inventory and aggregate validation.
+A later red
 rerun cannot hide an earlier successful main result. A refresh must preserve every
 previous `green_required` bit; when its new baseline succeeds the bit must become
 true. Authenticated refresh history prevents jumping over a recovered main revision,
@@ -158,8 +170,9 @@ workflow ID. There is intentionally no general skip/neutral/external allowlist.
 
 At the end, select the latest roots again (no rerun/run-number race), check witness
 expiry again, and re-read main at the exact candidate SHA. The final publication
-guard rechecks main again immediately before the preserved last active-producer
-read. The existing serialized final same-head checks remain. GitHub offers no
+guard rechecks main, then the active producer, then the newest producer run as
+its final remote observation. A no-API baseline-expiry check follows that read.
+The existing serialized final same-head checks remain. GitHub offers no
 atomic transaction spanning these reads and a release mutation: a subsequent
 administrator change remains a cooperative race, not an atomic lock guarantee.
 
@@ -189,7 +202,7 @@ Focused local command (run through the normal task allocator with 1 GiB and SSD
 TMPDIR):
 
 ```
-python3 -m unittest discover -s candidate/craft-common-actions/tests -p 'test_nightly_policy*.py' -v
+python3 -B -m unittest discover -s tests -p 'test_nightly_policy*.py' -v
 ```
 
 These are synthetic/API-fake regression and adversarial tests, not authenticated

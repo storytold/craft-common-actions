@@ -8,12 +8,11 @@ permissions: {}
 jobs:
   diagnostic:
     permissions:
-      contents: write
-      packages: write
+      contents: read
     uses: storytold/craft-common-actions/.github/workflows/nightly-diagnostics.yml@REVIEWED_PUBLISHED_TOOLING_SHA_REQUIRED
     with:
       tooling-revision: REVIEWED_PUBLISHED_TOOLING_SHA_REQUIRED
       app-name: photocraft
       app-title: PhotoCraft
       # Known unadmitted apps use their own catalog app-name/app-title here.
-      # All legacy platform/fonts/credits inputs remain available on the callee.
+      # Metadata only; legacy packaging diagnostics are paused pending read-only Flatpak jobs.

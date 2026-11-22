@@ -42,6 +42,23 @@ class PolicyTests(unittest.TestCase):
         self.ci={**self.run,'id':3456,'workflow_id':72,'path':'.github/workflows/fixture-ci.yml','event':'push','status':'completed','conclusion':'success'}
         self.api=FixtureAPI(self)
     def gate(self): return p.publication_gate(self.api,self.registry,self.config,self.prepared,self.policy,self.env)
+    def test_verify_cli_reports_only_local_sidecar_validation(self):
+        import io
+        import os
+        import publish_nightly
+        paths={'registry':self.registry,'config':self.config,'identity':self.prepared,'policy':self.policy}
+        argv=['nightly_policy.py','verify','--registry','registry','--config','config','--app','photocraft','--identity','identity','--policy','policy']
+        with patch.object(sys,'argv',argv),patch.dict(os.environ,self.env,clear=True), \
+             patch.object(n,'bounded_json',side_effect=paths.__getitem__), \
+             patch.object(p,'summary') as report,patch.object(publish_nightly,'HTTPTransport') as transport, \
+             patch.object(sys,'stdout',io.StringIO()):
+            p.main()
+        transport.assert_not_called()
+        label,body=report.call_args.args
+        self.assertEqual(label,'local validation passed')
+        self.assertIn('were not queried',body)
+        self.assertNotIn('workflow is active',body)
+
     def test_stable_numeric_semver_not_cargo_or_release_api_order(self):
         rows=[dict(self.stable,id=34,tag_name='v0.9.0'),self.stable,dict(self.stable,id=35,tag_name='v0.24.0+build.2'),dict(self.stable,id=36,tag_name='v99.0.0',draft=True),dict(self.stable,id=37,tag_name='v88.0.0-beta',prerelease=True)]
         self.assertEqual(p.stable_base(rows)['version'],'0.24.0')
@@ -211,9 +228,10 @@ class PolicyTests(unittest.TestCase):
             with self.subTest(change=change),self.assertRaisesRegex(ValueError,'publication paused'): self.gate()
         self.api.workflow={}
         with self.assertRaises(ValueError): p.preflight(self.api,self.config,self.policy)
-    def test_fresh_active_read_is_last_in_every_publication_guard(self):
+    def test_fresh_run_order_read_follows_final_active_check(self):
         self.assertTrue(self.gate())
-        self.assertEqual(self.api.calls[-1],('GET','/actions/workflows/91'))
+        self.assertEqual(self.api.calls[-2],('GET','/actions/workflows/91'))
+        self.assertTrue(self.api.calls[-1][1].startswith('/actions/workflows/91/runs?'))
         self.api.workflow['state']='disabled_manually'
         with self.assertRaisesRegex(ValueError,'paused'): self.gate()
         self.assertEqual(self.api.calls[-1],('GET','/actions/workflows/91'))

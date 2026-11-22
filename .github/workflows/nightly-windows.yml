@@ -4,6 +4,23 @@ name: Private nightly Windows artifact
 # Deliberate extraction of the existing Windows setup, NOT a full release matrix.
 on:
   workflow_call:
+    secrets:
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERT_PROFILE:
+        required: false
     inputs:
       tooling-revision:
         description: "Reviewed published shared-tooling SHA; must match the app-owned publication policy"
@@ -447,6 +464,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: signed-nightly-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signed/${{ steps.contract.outputs.asset }}
           if-no-files-found: error
@@ -455,6 +473,7 @@ jobs:
         id: receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: nightly-signing-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signing/nightly-signing.json
           if-no-files-found: error

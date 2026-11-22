@@ -135,6 +135,16 @@ class WindowsCandidateTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             w.stage_local(self.registry, "photocraft", self.prepared, self.cargo, self.context, self.source_receipt, self.artifacts, staged)
 
+    def test_noncanonical_manifest_is_refused_before_identity_derivation(self):
+        alternate=self.root/'Alternate.toml'
+        alternate.write_text('[workspace.package]\nversion = "2.3.4"\n')
+        prepared=n.prepare(self.registry,'photocraft',alternate,self.prepared['published_at'],self.context)
+        output=self.root/'must-not-exist'
+        with patch.object(w,'validate_prepared',side_effect=AssertionError('must reject before identity derivation')) as validate:
+            with self.assertRaisesRegex(n.InvalidNightly,'E3 receipt binds only Cargo.toml'):
+                w.stage_local(self.registry,'photocraft',prepared,alternate,self.context,self.source_receipt,self.artifacts,output)
+        validate.assert_not_called(); self.assertFalse(output.exists())
+
     def test_missing_nightly_zip_never_uses_a_stable_dry_run_zip(self):
         (self.artifacts / self.asset).unlink()
         (self.artifacts / "photocraft-1.2.3-windows-x64-portable.zip").write_bytes(b"stable")
@@ -164,17 +174,13 @@ class WindowsCandidateTests(unittest.TestCase):
 class WorkflowSourceTests(unittest.TestCase):
     # Safety-contract wiring checks requested for this cross-workflow source-only slice.
     # These do not substitute for actionlint, hosted execution or Windows checks.
-    def test_release_postimage_is_byte_identical_and_windows_setup_is_bounded_extraction(self):
-        release = (ROOT / ".github/workflows/release.yml").read_bytes()
-        self.assertEqual(hashlib.sha256(release).hexdigest(), "83a8ddd749d3637ac64a3cc46c69f4be4ce1391c343ea28c0acc7b95d1fa58c5")
+    def test_windows_setup_is_bounded_extraction(self):
         source = (ROOT / ".github/workflows/nightly-windows.yml").read_text()
         for action in ("actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
                        "step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f"):
             self.assertIn(action, source)
-            self.assertIn(action, release.decode())
         for action in ("checkout-craft-fonts","checkout-craft-i18n","rust-channel"):
             self.assertIn("actions/"+action+"@f5141455aac7b2eb4708aa259d8ffcdf10fde939",source)
-            self.assertIn("actions/"+action+"@main",release.decode()) # stable workflow is not rewritten
         self.assertIn("cargo metadata --locked", source)
         self.assertIn("no Windows nightly adapter", (ROOT / "scripts/nightly_windows.py").read_text())
         build = source.split('  build:\n', 1)[1].split('\n  # Fresh runner:', 1)[0]
@@ -205,10 +211,12 @@ class WorkflowSourceTests(unittest.TestCase):
         source = (ROOT / ".github/workflows/nightly.yml").read_text()
         diagnostic = (ROOT / ".github/workflows/nightly-diagnostics.yml").read_text()
         self.assertNotIn('release.yml',source)
-        self.assertIn('uses: $/.github/workflows/release.yml',diagnostic)
-        self.assertIn('dry-run: true',diagnostic); self.assertIn('publish: false',diagnostic)
-        self.assertIn('has-freebsd: ${{ inputs.has-freebsd }}',diagnostic)
-        self.assertIn('contributors-artifact: ${{ inputs.contributors-artifact }}',diagnostic)
+        self.assertNotIn('uses: $/.github/workflows/release.yml',diagnostic)
+        self.assertNotIn(': write',diagnostic)
+        self.assertIn('contents: read',diagnostic)
+        self.assertIn('scripts/nightly_diagnostic.py',diagnostic)
+        self.assertNotIn('nightly_policy.py',diagnostic)
+        self.assertNotIn('GH_TOKEN',diagnostic)
         windows=source.split('  build-windows:',1)[1].split('  build-linux:',1)[0]
         self.assertIn("if: needs.identity.outputs.ready == 'true'",windows)
         self.assertIn('uses: $/.github/workflows/nightly-windows.yml',windows)

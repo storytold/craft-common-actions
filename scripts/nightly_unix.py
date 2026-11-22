@@ -12,9 +12,11 @@ import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
+import shutil
 import stat
 import struct
 import tarfile
+import tempfile
 import tomllib
 import zipfile
 import nightly_feed as n
@@ -127,10 +129,12 @@ def verify_archive(pending,platform,archive,version,output=None):
     if out is not None: require_build_policy(platform)
     raw, info = n.regular_file(archive.parent,archive.name)
     names=set(); files=set(); required_dirs=set(); total=0; entry_header=None; plist=None; executable=False
+    staging=None
     try:
         if out is not None:
             n.require(out.is_absolute() and not out.exists() and not out.is_symlink(),"unpack output must be a new absolute directory")
-            out.mkdir(parents=True,exist_ok=False)
+            out.parent.mkdir(parents=True,exist_ok=True)
+            staging=Path(tempfile.mkdtemp(prefix=".nightly-unpack-",dir=out.parent))
         def consume(name,size,is_dir,mode,read):
             nonlocal total,entry_header,plist,executable
             n.require(not name.endswith('/') or is_dir,"regular file has directory spelling")
@@ -149,7 +153,7 @@ def verify_archive(pending,platform,archive,version,output=None):
             n.require(type(size) is int and 0<=size<=n.MAX_ASSET_BYTES,"member exceeds size bound")
             total+=size
             n.require(total<=n.MAX_TOTAL_BYTES,"expanded payload exceeds bound")
-            destination=out/name if out is not None else None
+            destination=staging/name if staging is not None else None
             if is_dir:
                 n.require(size==0,"directory contains payload")
                 if destination is not None: destination.mkdir(parents=True,exist_ok=True)
@@ -187,6 +191,12 @@ def verify_archive(pending,platform,archive,version,output=None):
                         finally:
                             reader.metadata=True
                             if stream is not None: stream.close()
+                # TAR stops at its end marker; gzip integrity is checked only at EOF.
+                limit=n.MAX_TOTAL_BYTES + MAX_CENTRAL_DIRECTORY
+                while True:
+                    block=expanded.read(min(CHUNK,limit-expanded.tell()+1))
+                    n.require(expanded.tell()<=limit,"expanded archive exceeds bound")
+                    if not block: break
         else:
             with raw:
                 zip_metadata_bound(raw,info.st_size)
@@ -210,9 +220,14 @@ def verify_archive(pending,platform,archive,version,output=None):
             n.require(not any(plist.get(key) for key in ('CFBundleDocumentTypes','CFBundleURLTypes','UTExportedTypeDeclarations','UTImportedTypeDeclarations')),"Mac document/URL associations forbidden")
         after=archive.stat(follow_symlinks=False)
         n.require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns),"archive changed during inspection")
+        if staging is not None:
+            n.require(not out.exists() and not out.is_symlink(),"unpack output must remain a new directory")
+            staging.rename(out)
+            staging=None
         return {'members':len(names),'expanded_bytes':total,'entrypoint':row['entrypoint'],'inventory_only':True,'feed_admitted':False,'runtime_qualified':False,'signature_verified':False}
     finally:
         raw.close()
+        if staging is not None: shutil.rmtree(staging)
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
@@ -243,7 +258,7 @@ def main():
             n.require(args.mode!='inventory' or args.output is None,'inventory never extracts')
             result=verify_archive(pending,args.platform,args.archive,args.version,args.output)
         print(json.dumps(result,sort_keys=True))
-    except (n.InvalidNightly,OSError,ValueError,KeyError,TypeError,RecursionError,tarfile.TarError,zipfile.BadZipFile,plistlib.InvalidFileException) as error:
+    except (n.InvalidNightly,OSError,EOFError,ValueError,KeyError,TypeError,RecursionError,tarfile.TarError,zipfile.BadZipFile,plistlib.InvalidFileException) as error:
         parser.exit(78 if isinstance(error,n.Unavailable) else 1,f'private Unix nightly unavailable: {error}\n')
 
 if __name__=='__main__': main()

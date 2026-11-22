@@ -1,5 +1,6 @@
 """Emit finite source-bound Actions ownership evidence; not an independent tag-creator attestation."""
 import json
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import re
@@ -24,13 +25,25 @@ def receipt(ident, release, environment):
             'tag':ident['tag'],'source_commit':ident['source_commit'],'release_id':release['id'],
             'run_id':int(run),'run_attempt':int(attempt),'tooling_revision':tooling}
 
-def emit(ident, release, environment, directory):
-    data = receipt(ident,release,environment)
-    output=Path(directory); n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
+@contextmanager
+def reserve(directory):
+    output=Path(directory)
+    n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
     output.mkdir(parents=True,exist_ok=False)
-    path=output/'ownership.json'
-    with path.open('x',encoding='utf-8') as stream:
-        json.dump(data,stream,sort_keys=True,separators=(',',':'));stream.write('\n');stream.flush();os.fsync(stream.fileno())
+    with (output/'ownership.json').open('x',encoding='utf-8') as stream:
+        yield stream
+
+
+def emit(ident, release, environment, directory, *, reserved_stream=None):
+    data = receipt(ident,release,environment)
+    if reserved_stream is None:
+        with reserve(directory) as stream:
+            return emit(ident,release,environment,directory,reserved_stream=stream)
+    path=Path(directory)/'ownership.json'
+    n.require(not reserved_stream.closed and reserved_stream.writable() and
+              Path(reserved_stream.name).absolute()==path.absolute(),'ownership reservation differs')
+    json.dump(data,reserved_stream,sort_keys=True,separators=(',',':'))
+    reserved_stream.write('\n');reserved_stream.flush();os.fsync(reserved_stream.fileno())
     if destination:=environment.get('GITHUB_OUTPUT'):
         with open(destination,'a',encoding='utf-8') as stream:
             stream.write('release-id='+str(data['release_id'])+'\nownership-artifact-name=nightly-ownership-'+data['app']+'-'+str(data['run_id'])+'-'+str(data['run_attempt'])+'\n')

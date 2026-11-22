@@ -186,6 +186,26 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None):
     return result
 
 
+class PublishedWithoutReceipt(n.InvalidNightly):
+    """Publication is confirmed; creating the release again is not a recovery path."""
+
+
+def publish_with_receipt(api, ident, metadata, directory, *, guard, policy, environment, ownership_directory):
+    from nightly_ownership_receipt import reserve, emit
+    result = None
+    try:
+        with reserve(ownership_directory) as stream:
+            result = publish_packet(api, ident, metadata, directory,guard=guard,policy=policy)
+            emit(ident,result,environment,ownership_directory,reserved_stream=stream)
+    except (n.InvalidNightly, OSError, ValueError, TypeError, KeyError) as error:
+        if result is not None:
+            raise PublishedWithoutReceipt(
+                f"release {result['id']} is public; ownership receipt reconciliation required; "
+                "do not recreate or retry publication") from error
+        raise
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--registry", required=True); parser.add_argument("--app", required=True)
@@ -213,11 +233,14 @@ def main():
         ident, metadata = prepare_packet(registry, prepared, args.directory, os.environ, signed=True)
         api = HTTPTransport(ident["repository"], os.environ.get("GH_TOKEN", ""))
         guard=lambda: v6.publication_gate(api,registry,config,prepared,policy,os.environ)
-        result = publish_packet(api, ident, metadata, args.directory,guard=guard,policy=policy)
-        from nightly_ownership_receipt import emit
-        emit(ident,result,os.environ,args.ownership_directory)
+        result = publish_with_receipt(api, ident, metadata, args.directory,guard=guard,policy=policy,
+            environment=os.environ,ownership_directory=args.ownership_directory)
         print(json.dumps({"release_id": result["id"], "tag": ident["tag"], "source_commit": ident["source_commit"],
                           "actual_published_at": result["published_at"], "build_identity_at": ident["published_at"]}))
+    except PublishedWithoutReceipt as error:
+        from nightly_policy import summary
+        summary('publication confirmed; ownership receipt reconciliation required',error)
+        parser.exit(2,f"{error}\n")
     except (n.InvalidNightly, APIError, OSError, ValueError, TypeError, KeyError) as error:
         from nightly_policy import summary
         summary('publication refused',error)

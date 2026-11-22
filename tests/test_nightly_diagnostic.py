@@ -1,4 +1,6 @@
 """No API/socket/policy for known unadmitted apps or separate Photo diagnostics."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import socket
@@ -30,6 +32,25 @@ class DiagnosticTests(unittest.TestCase):
         for field,value in [('GITHUB_REF','refs/heads/other'),('GITHUB_EVENT_NAME','pull_request'),('GITHUB_REPOSITORY','fork/photocraft')]:
             with self.subTest(field=field),self.assertRaises(ValueError): d.diagnostic(self.registry,'photocraft',self.cargo,{**self.env('photocraft'),field:value})
         with self.assertRaises(ValueError): d.diagnostic(self.registry,'unknown',self.cargo,self.env('unknown'))
+    def test_workspace_and_package_only_versions_remain_supported(self):
+        for manifest,base in [('[workspace.package]\nversion="1.2.3"\n','1.2.3'),
+                              ('[package]\nversion="2.3.4"\n','2.3.4'),
+                              ('[workspace.package]\nversion="1.2.3"\n[package]\nversion="2.3.4"\n','1.2.3')]:
+            self.cargo.write_text(manifest)
+            with self.subTest(manifest=manifest):
+                self.assertTrue(d.diagnostic(self.registry,'photocraft',self.cargo,self.env('photocraft'))['version'].startswith(base+'-nightly.'))
+
+    def test_non_table_cargo_sections_are_cli_refusals_without_tracebacks(self):
+        for manifest in ('workspace=true\n','package=true\n','[workspace]\npackage=true\n',
+                         'workspace=[]\n','package="invalid"\n'):
+            self.cargo.write_text(manifest); errors=io.StringIO()
+            args=['fixture','--registry',str(ROOT/'nightly-apps.json'),'--app','photocraft','--cargo',str(self.cargo)]
+            with self.subTest(manifest=manifest),patch.object(sys,'argv',args),patch.dict(d.os.environ,self.env('photocraft')),contextlib.redirect_stderr(errors),self.assertRaises(SystemExit) as exited:
+                d.main()
+            self.assertEqual(exited.exception.code,1)
+            self.assertIn('diagnostic metadata refused: Cargo',errors.getvalue())
+            self.assertIn('table',errors.getvalue()); self.assertNotIn('Traceback',errors.getvalue())
+
     def test_missing_or_oversized_diagnostic_version_refuses(self):
         for contents in ('[workspace]\n', 'x'*(d.n.MAX_JSON_BYTES+1)):
             self.cargo.write_text(contents)

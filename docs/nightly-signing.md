@@ -54,10 +54,17 @@ normal human review. Decide reviewer/automation policy before enabling any
 schedule: protected configuration and signer jobs can require separate reviews.
 Do not remove protection merely to make scheduled runs unattended.
 
-The callee signing job explicitly names this environment. GitHub resolves its
-environment secrets there; no blanket `secrets: inherit` and no caller-secret
-forwarding is required for this design. See GitHub's reusable-workflow docs,
-“Passing inputs and secrets to a reusable workflow”, environment-secret warning.
+The callee signing job explicitly names this environment. Each reusable-workflow
+boundary must also declare and explicitly forward the permitted secret names;
+without that handoff, GitHub resolves an environment-only secret to an empty
+string. The Windows recipe forwards only the PFX pair and six Azure names at
+both app → nightly and nightly → Windows boundaries. Do not use blanket
+`secrets: inherit`. Future Unix caller qualification must include its own explicit
+named contract. See [GitHub's reusable-workflow secret rules](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#passing-inputs-and-secrets-to-a-reusable-workflow).
+Before activation, audit secret-name scopes without reading values: same-name
+repository/organization secrets must not leak into compiler jobs through this
+contract. Stop and review any collision; do not delete or migrate existing stable
+signing secrets implicitly.
 Actual secret values appear only in each platform's signing step, not workflow
 or job env, checkout/build/smoke steps, or downstream publishing jobs.
 

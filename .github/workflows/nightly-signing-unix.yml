@@ -63,6 +63,10 @@ jobs:
       receipt-artifact-id: ${{ steps.receipt.outputs.artifact-id }}
       receipt-sha256: ${{ steps.sign.outputs.receipt-sha256 }}
     steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
@@ -160,6 +164,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: signed-nightly-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signed/*
           if-no-files-found: error
@@ -168,6 +173,7 @@ jobs:
         id: receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: nightly-signing-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signing/nightly-signing.json
           if-no-files-found: error
@@ -293,6 +299,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: signed-nightly-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signed/*
           if-no-files-found: error
@@ -301,6 +308,7 @@ jobs:
         id: receipt
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
+          include-hidden-files: true
           name: nightly-signing-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-signing/nightly-signing.json
           if-no-files-found: error

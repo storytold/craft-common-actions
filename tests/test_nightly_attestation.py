@@ -84,6 +84,15 @@ class AttestationTests(unittest.TestCase):
             (self.packet/'NIGHTLY.json').write_bytes(saved_descriptor);(self.packet/'SHA256SUMS.txt').write_bytes(saved_sums)
             self.binding['packet_sha256']=saved_packet_hash
         return output
+    def test_cli_pause_refuses_before_native_package_verification(self):
+        import nightly_signing as signing
+        self.case.api.workflow['state']='disabled_manually'
+        with patch.object(signing,'verify_package',side_effect=AssertionError('package verification forbidden')), self.assertRaises(SystemExit) as result:
+            self.cli()
+        self.assertEqual(result.exception.code,1)
+        self.assertEqual(self.case.api.calls,[('GET','/actions/workflows/91')])
+        self.assertFalse((self.root/'github-output').exists())
+
     def test_active_reads_bracket_unchanged_chain_and_pure_subject_with_get_only(self):
         events=[]; request=self.case.api.request; verify=bindings.verify_chain; pure=a.subject
         def read(method,path,data=None):

@@ -1,5 +1,7 @@
 """Synthetic finite files only; no artifact service, token or native execution."""
+import contextlib
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -72,9 +74,15 @@ class ArtifactBindingTests(unittest.TestCase):
         import nightly_attestation as attestation
         common=['--registry','must-not-read','--identity',str(self.identity/'nightly-identity.json'),'--policy','must-not-read','--directory',str(self.packet),'--asset',self.asset,'--identity-sha256','0'*64,'--packet-sha256',self.ph,'--zip-sha256',self.zh,'--signing-receipt-directory','must-not-read','--signing-receipt-sha256','a'*64,'--unsigned-sha256','b'*64]
         for module,extra in ((publisher,['--app','photocraft','--config','must-not-read','--ownership-directory','must-not-create']),(attestation,['--config','must-not-read'])):
-            with self.subTest(module=module.__name__),patch.object(sys,'argv',['fixture',*common,*extra]),patch.object(publisher,'HTTPTransport',side_effect=AssertionError('credential/transport forbidden')):
+            errors=io.StringIO()
+            with self.subTest(module=module.__name__),patch.object(sys,'argv',['fixture',*common,*extra]), \
+                 patch.object(publisher,'HTTPTransport',side_effect=AssertionError('credential/transport forbidden')) as transport, \
+                 patch.object(module.n,'bounded_json',side_effect=AssertionError('metadata read before binding')) as metadata, \
+                 contextlib.redirect_stderr(errors):
                 with self.assertRaises(SystemExit) as exit: module.main()
                 self.assertEqual(exit.exception.code,1)
+                self.assertIn('identity artifact differs from its independent producer output',errors.getvalue())
+                metadata.assert_not_called(); transport.assert_not_called()
 
     def test_wrong_packet_name_or_absent_original_zip_hash_refuses(self):
         with self.assertRaises(ValueError): a.verify(self.packet,'packet',self.ph,'other-nightly.zip',self.zh)
@@ -104,8 +112,10 @@ class WorkflowBoundaryTests(unittest.TestCase):
         for workflow in ('nightly-windows.yml','nightly-unix.yml'):
             self.assertIn('uses: $/.github/workflows/'+workflow,source)
         diagnostic=(ROOT/'.github/workflows/nightly-diagnostics.yml').read_text()
-        self.assertIn('uses: $/.github/workflows/release.yml',diagnostic)
-        self.assertIn('dry-run: true',diagnostic); self.assertIn('publish: false',diagnostic)
+        self.assertNotIn('uses: $/.github/workflows/release.yml',diagnostic)
+        self.assertNotIn(': write',diagnostic)
+        self.assertIn('contents: read',diagnostic)
+        self.assertIn('scripts/nightly_diagnostic.py',diagnostic)
         self.assertNotIn('nightly-publication-policy.json',diagnostic)
         self.assertNotIn('nightly_policy.py',diagnostic)
         self.assertNotIn('GH_TOKEN',diagnostic)
@@ -113,7 +123,7 @@ class WorkflowBoundaryTests(unittest.TestCase):
         caller=(ROOT/'examples/photocraft-nightly.yml').read_text()
         for scope in ('contents: write','actions: read','checks: read','id-token: write','attestations: write'): self.assertIn(scope,caller)
         self.assertNotIn('packages: write',caller)
-        self.assertNotIn('secrets:',caller)
+        self.assertNotIn('secrets: inherit',caller)
         native=(ROOT/'.github/workflows/nightly-windows.yml').read_text()
         for scope in ('contents: write','id-token: write','attestations: write','packages: write'): self.assertNotIn(scope,native)
         source=(ROOT/'.github/workflows/nightly.yml').read_text()

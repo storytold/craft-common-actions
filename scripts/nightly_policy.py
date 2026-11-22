@@ -21,6 +21,9 @@ MAX_PAGES=20
 PAGE_SIZE=20
 MAX_CHECKS=32
 MAX_BASELINE_CHECKS=128
+# Fits the counted 32-workflow/128-job normal witness; excessive history still
+# fails closed, and the independent 120-second wall-clock cap is unchanged.
+MAX_BASELINE_READS=640
 ZERO='0'*40
 STABLE=re.compile(r'v?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?')
 NIGHTLY=re.compile(r'((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-nightly\.([0-9]{8})\.([1-9][0-9]*)\.([1-9][0-9]*)\.g([0-9a-f]{12})')
@@ -220,6 +223,7 @@ def validate_baseline_refresh(previous,updated,policy,api=None):
     """
     publication_contract(updated,policy)
     n.require(baseline_mode(previous) and baseline_mode(updated),'refresh needs two v2 reviewed policies')
+    n.require(managed_contract(previous['apps']['photocraft'])==managed_contract(updated['apps']['photocraft']),'managed coverage changed; explicit policy migration required')
     old_external=external_contract(previous['apps']['photocraft'],policy)
     new_external=external_contract(updated['apps']['photocraft'],policy)
     ext_key=lambda item:(item['provider'],item['name'],item['app_id'],item['details_url'])
@@ -241,7 +245,7 @@ def validate_baseline_refresh(previous,updated,policy,api=None):
 class BaselineReads:
     """One read-only, bounded live witness; no cached/unsigned witness input."""
     def __init__(self,api):
-        self.api=api; self.remaining=256; self.deadline=time.monotonic()+120
+        self.api=api; self.remaining=MAX_BASELINE_READS; self.deadline=time.monotonic()+120
     def request(self,method,path):
         n.require(method=='GET' and path.startswith('/') and not path.startswith('//'),'baseline API reads only')
         n.require(self.remaining>0 and time.monotonic()<self.deadline,'baseline API request/time budget reached')
@@ -307,6 +311,34 @@ def complete_quality_run(run,failed):
     n.require(run.get('status')=='completed' and run.get('conclusion')==('failure' if failed else 'success'),'independent workflow incomplete or aggregate result differs from witnessed jobs')
 
 
+def quality_job_check_id(policy,job):
+    match=re.fullmatch(r'https://api.github.com/repos/'+re.escape(policy['run']['repository'])+r'/check-runs/([1-9][0-9]*)',job.get('check_run_url',''))
+    n.require(match is not None,'job lacks fixed-host check identity')
+    return int(match.group(1))
+
+
+def verify_quality_job(policy,sha,run,item,job,check,baseline=False,reviewed_at=None):
+    for key in ('id','run_id','run_attempt'): n.positive(job.get(key),'quality job '+key)
+    n.require(job['run_id']==run['id'] and job['run_attempt']==run['run_attempt'] and job.get('head_sha')==sha,'job source/attempt differs')
+    check_id=quality_job_check_id(policy,job)
+    n.require(isinstance(check,dict) and check.get('name')==item['name'] and type(check.get('app',{}).get('id')) is int and check['app']['id']==item['app_id'] and check.get('head_sha')==sha,'job/check/app identity differs')
+    expected_url=f"https://github.com/{policy['run']['repository']}/actions/runs/{run['id']}/job/{job['id']}"
+    n.require(check.get('details_url')==expected_url,'check URL does not identify authenticated job/run')
+    inactive=manual_only(item)
+    if inactive:
+        n.require(run['event'] in ('push','schedule') and job.get('conclusion')=='skipped',
+                  'reviewed manual-input-only job is not proven inapplicable on this event')
+    n.require(job.get('status')=='completed' and job.get('conclusion') in (('skipped',) if inactive else ('success','failure')) and check.get('status')=='completed' and check.get('conclusion')==job['conclusion'],'missing/pending/skipped/cancelled/unknown job result')
+    started=timestamp(check.get('started_at')); completed=timestamp(job.get('completed_at'))
+    n.require(timestamp(run['created_at'])<=started<=completed<=time.time(),'inconsistent/future job witness timestamps')
+    if baseline:
+        n.require(job['id']==item['baseline_job_id'] and check_id==item['baseline_check_id'],'reviewed baseline job/check changed')
+        n.require(timestamp(run['created_at'])<=reviewed_at and timestamp(job['completed_at'])<=reviewed_at,'baseline evidence postdates review')
+        # A reviewed success never becomes an exemption on later failure.
+        n.require(item['baseline_conclusion']!='success' or job['conclusion']=='success','baseline success regressed; refresh without lowering green floor')
+    return check_id,job['conclusion']
+
+
 def verify_quality_jobs(api,policy,sha,run,wanted,checks,baseline=False,reviewed_at=None):
     jobs=bounded_rows(api,f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?filter=all",'jobs')
     n.require(len(jobs)==len(wanted),'workflow job coverage drift/missing jobs')
@@ -318,28 +350,9 @@ def verify_quality_jobs(api,policy,sha,run,wanted,checks,baseline=False,reviewed
     n.require(set(by_name)=={item['name'] for item in wanted},'workflow job coverage drift')
     for item in wanted:
         job=by_name[item['name']]
-        for key in ('id','run_id','run_attempt'): n.positive(job.get(key),'quality job '+key)
-        n.require(job['run_id']==run['id'] and job['run_attempt']==run['run_attempt'] and job.get('head_sha')==sha,'job source/attempt differs')
-        url=job.get('check_run_url','')
-        match=re.fullmatch(r'https://api.github.com/repos/'+re.escape(policy['run']['repository'])+r'/check-runs/([1-9][0-9]*)',url)
-        n.require(match is not None,'job lacks fixed-host check identity')
-        check_id=int(match.group(1)); check=checks.get(check_id)
-        n.require(isinstance(check,dict) and check.get('name')==item['name'] and type(check.get('app',{}).get('id')) is int and check['app']['id']==item['app_id'] and check.get('head_sha')==sha,'job/check/app identity differs')
-        expected_url=f"https://github.com/{policy['run']['repository']}/actions/runs/{run['id']}/job/{job['id']}"
-        n.require(check.get('details_url')==expected_url,'check URL does not identify authenticated job/run')
-        inactive=manual_only(item)
-        if inactive:
-            n.require(run['event'] in ('push','schedule') and job.get('conclusion')=='skipped',
-                      'reviewed manual-input-only job is not proven inapplicable on this event')
-        n.require(job.get('status')=='completed' and job.get('conclusion') in (('skipped',) if inactive else ('success','failure')) and check.get('status')=='completed' and check.get('conclusion')==job['conclusion'],'missing/pending/skipped/cancelled/unknown job result')
-        started=timestamp(check.get('started_at')); completed=timestamp(job.get('completed_at'))
-        n.require(timestamp(run['created_at'])<=started<=completed<=time.time(),'inconsistent/future job witness timestamps')
-        if baseline:
-            n.require(job['id']==item['baseline_job_id'] and check_id==item['baseline_check_id'],'reviewed baseline job/check changed')
-            n.require(timestamp(run['created_at'])<=reviewed_at and timestamp(job['completed_at'])<=reviewed_at,'baseline evidence postdates review')
-            # A reviewed success never becomes an exemption on later failure.
-            n.require(item['baseline_conclusion']!='success' or job['conclusion']=='success','baseline success regressed; refresh without lowering green floor')
-        used.add(check_id); results[item['name']]=job['conclusion']
+        check_id=quality_job_check_id(policy,job)
+        check_id,result=verify_quality_job(policy,sha,run,item,job,checks.get(check_id),baseline,reviewed_at)
+        used.add(check_id); results[item['name']]=result
     complete_quality_run(run,any(value=='failure' for value in results.values()))
     return results,used
 
@@ -394,19 +407,22 @@ def historical_green_jobs(api,policy,sha,wanted,current,current_results):
             run=api.request('GET',f"/actions/runs/{root['id']}/attempts/{attempt}")
             trusted_quality_run(run,policy,sha,wanted[0])
             n.require(run['id']==root['id'] and run['run_attempt']==attempt and run['run_number']==root['run_number'],'historical attempt identity differs')
-            if run.get('status')!='completed' or run.get('conclusion') not in ('success','failure'): continue
             jobs=bounded_rows(api,f"/actions/runs/{run['id']}/attempts/{attempt}/jobs?filter=all",'jobs')
-            checks={}
+            by_name={}
             for job in jobs:
-                match=re.fullmatch(r'https://api.github.com/repos/'+re.escape(policy['run']['repository'])+r'/check-runs/([1-9][0-9]*)',job.get('check_run_url',''))
-                n.require(match is not None,'historical job lacks authenticated check identity')
-                check_id=int(match.group(1)); check=api.request('GET',f'/check-runs/{check_id}')
-                n.require(isinstance(check,dict),'invalid historical check')
-                n.positive(check.get('id'),'historical check ID')
-                n.require(check['id']==check_id,'historical check identity differs')
-                checks[check_id]=check
-            results,_=verify_quality_jobs(api,policy,sha,run,wanted,checks)
-            greens.update(name for name,value in results.items() if value=='success')
+                name=job.get('name')
+                n.require(isinstance(name,str) and name not in by_name,'ambiguous historical workflow job identity')
+                by_name[name]=job
+            for item in wanted:
+                job=by_name.get(item['name'])
+                # A cancelled/partial aggregate cannot erase an already completed
+                # success. Other historical results never grant an exemption.
+                if job is None or job.get('status')!='completed' or job.get('conclusion')!='success': continue
+                check_id=quality_job_check_id(policy,job)
+                check=api.request('GET',f'/check-runs/{check_id}')
+                n.require(isinstance(check,dict) and type(check.get('id')) is int and check['id']==check_id,'historical check identity differs')
+                verify_quality_job(policy,sha,run,item,job,check)
+                greens.add(item['name'])
     n.require(current['id'] in seen,'current run absent from history')
     return greens
 
@@ -791,10 +807,12 @@ def publication_gate(api,registry,config,prepared,policy,environment):
     n.require(stable_base(rows)==policy['stable_base'],'published stable base changed; prepare a new attempt')
     previous=newest_nightly(rows)
     if previous is not None: freshness(policy,verify_prior(api,registry,previous))
-    # This is the LAST API read in either live guard, immediately before the
-    # caller can mutate. Cooperative pause, not an administrator-atomic lock.
     if baseline_mode(config): require_main_head(api,policy)
     require_active_workflow(api,config,policy)
+    # Observe run order after every other remote check, immediately before the
+    # caller can mutate. Cooperative checks, not an administrator-atomic lock.
+    require_newest_run(api,policy)
+    if baseline_mode(config): baseline_contract(config_row(config,'photocraft',policy['tooling_revision'])[0],policy)
     return True
 
 
@@ -843,7 +861,10 @@ def main():
                     value=str(prepared[key]).lower() if isinstance(prepared[key],bool) else str(prepared[key])
                     n.require('\n' not in value and '\r' not in value,'invalid output'); destination.write(f'{key}={value}\n')
                 destination.write('build='+str(build).lower()+'\n')
-        summary('preflight passed', 'Exact-source approved Actions checks satisfy the reviewed quality policy; dedicated workflow is active. Build='+str(build)+'. No external SonarCloud adapter is inferred.')
+        if args.mode=='prepare':
+            summary('preflight passed', 'Exact-source approved Actions checks satisfy the reviewed quality policy; dedicated workflow is active. Build='+str(build)+'. No external SonarCloud adapter is inferred.')
+        else:
+            summary('local validation passed', 'Prepared identity and policy sidecars passed local validation. CI results and producer workflow state were not queried. Build='+str(build)+'.')
         print(json.dumps({'identity':prepared,'build':build,'feed_admitted':False},sort_keys=True))
     except (n.InvalidNightly,APIError,OSError,ValueError,TypeError,KeyError) as error:
         summary('refused',error)

@@ -9,13 +9,15 @@ uses the app-owned `packaging/windows/package.ps1 -Arch x64 -Nightly` entry.
 PHOTOCRAFT_BUILD_CHANNEL=nightly-v1 and the validated prepared identity version
 are explicit build-step env; the script owns the locked HEIF-enabled compiler,
 GUI-only packaging, licenses and flavor checks. No stable dry-run ZIP is used.
-The existing release.yml is byte-identical. When the source/tooling/stable-base
-key changes or manual force is requested, its full diagnostic dry-run still runs
-for Photo (including MSI/other-OS release-breakage guards). Unchanged-source skip
-covers both diagnostics and native packages; the isolated nightly build is
-additional, never a replacement. Status reports
-both results and requires diagnostic success plus registered-nightly success.
-No stable release mode is changed.
+The existing release.yml is byte-identical. The installable producer never calls
+it or combines diagnostic results with its status. The independent
+`nightly-diagnostics.yml` workflow currently validates metadata only: its legacy
+packaging call is paused because Flatpak packaging would otherwise receive a
+package-write token even during a dry run. MSI/other-OS legacy packaging coverage
+is not provided by this metadata-only workflow. Restoring it requires a separate
+read-only packaging/privileged publication split in the stable workflow.
+Unchanged-source skip applies only to the installable producer. No stable release
+mode is changed.
 
 Staging only downloads this run's exact dedicated nightly Windows artifact.
 nightly_feed.build_feed and stage_feed are local filesystem-only functions.

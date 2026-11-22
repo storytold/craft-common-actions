@@ -12,7 +12,11 @@ def diagnostic(registry,app,cargo,environment):
     n.trusted_context(registry,app,environment)
     raw=n.bounded_bytes(cargo,n.MAX_JSON_BYTES,'diagnostic Cargo metadata')
     manifest=tomllib.loads(raw.decode())
-    base=manifest.get('workspace',{}).get('package',{}).get('version',manifest.get('package',{}).get('version'))
+    workspace=manifest.get('workspace',{}); package=manifest.get('package',{})
+    n.require(isinstance(workspace,dict) and isinstance(package,dict),'Cargo workspace and package must be tables')
+    workspace_package=workspace.get('package',{})
+    n.require(isinstance(workspace_package,dict),'Cargo workspace.package must be a table')
+    base=workspace_package.get('version',package.get('version'))
     n.require(isinstance(base,str),'diagnostic Cargo version missing')
     base=base.split('-',1)[0].split('+',1)[0]
     n.require(n.BASE.fullmatch(base),'diagnostic Cargo base must be canonical')

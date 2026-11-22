@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import stat
 import struct
@@ -335,17 +336,25 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertNotIn('${{ secrets.WINDOWS_CERTIFICATE }}',config)
         self.assertIn('needs: signing-config',self.windows)
 
+    def assert_protected_signer(self,source,job):
+        block=re.split(r'\n  [A-Za-z0-9_-]+:\n',source.split('  '+job+':\n',1)[1],maxsplit=1)[0]
+        self.assertIn('environment: nightly-signing',block)
+        for guard in ("github.repository == 'storytold/photocraft'","github.ref == 'refs/heads/main'",
+                      "github.event_name == 'schedule'","github.event_name == 'workflow_dispatch'"):
+            self.assertIn(guard,block)
+        self.assertNotIn('cargo build',block); self.assertNotIn('nightly_smoke.py',block)
+        self.assertNotIn('secrets: inherit',block)
+        self.assertIn('job.workflow_sha',block); self.assertIn('digest-mismatch: error',block)
+
     def test_clean_signer_uses_protected_environment_and_literal_trust_guard(self):
         for source,jobs in ((self.windows,('windows',)),(self.sign_unix,('linux','macos'))):
             for job in jobs:
-                block=source.split('  '+job+':\n',1)[1]
-                self.assertIn('environment: nightly-signing',block)
-                for guard in ("github.repository == 'storytold/photocraft'","github.ref == 'refs/heads/main'",
-                              "github.event_name == 'schedule'","github.event_name == 'workflow_dispatch'"):
-                    self.assertIn(guard,block)
-                self.assertNotIn('cargo build',block); self.assertNotIn('nightly_smoke.py',block)
-                self.assertNotIn('secrets: inherit',block)
-                self.assertIn('job.workflow_sha',block); self.assertIn('digest-mismatch: error',block)
+                with self.subTest(job=job): self.assert_protected_signer(source,job)
+
+    def test_linux_cannot_borrow_the_macos_protected_environment(self):
+        mutated=self.sign_unix.replace('    environment: nightly-signing\n','',1)
+        self.assertIn('environment: nightly-signing',mutated) # macOS still has it.
+        with self.assertRaises(AssertionError): self.assert_protected_signer(mutated,'linux')
 
     def test_actual_secret_values_are_only_scoped_to_signing_steps(self):
         for source in (self.windows,self.sign_unix):

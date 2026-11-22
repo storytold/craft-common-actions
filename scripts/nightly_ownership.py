@@ -8,6 +8,7 @@ without overwrite, only after exclusive ref creation and verified publication.
 It is not a platform-signed assertion of the tag creator. Missing historical
 pins, origin metadata, timing, digest or receipts fail closed.
 """
+import datetime as dt
 import hashlib
 import http.client
 import io
@@ -47,8 +48,19 @@ def artifact_name(receipt):
 
 
 def receipt_for(release):
-    previous = policy.body_policy(release.get("body"))
-    identity, run = previous["identity"], previous["run"]
+    try:
+        previous = policy.body_policy(release.get("body"))
+    except (ValueError, RecursionError) as error:
+        raise n.InvalidNightly("malformed historical policy marker") from error
+    n.require(isinstance(previous, dict), "malformed historical policy marker")
+    identity, run = previous.get("identity"), previous.get("run")
+    n.require(isinstance(identity, dict) and isinstance(run, dict), "missing historical identity/run")
+    for key in ("app", "repository"):
+        n.require(isinstance(identity.get(key), str) and bool(identity[key]), "invalid historical identity " + key)
+    for key in ("id", "attempt"):
+        n.positive(run.get(key), "historical run " + key)
+    pin = previous.get("tooling_revision")
+    n.require(isinstance(pin, str) and n.HEX40.fullmatch(pin) and pin != "0" * 40, "invalid historical tooling revision")
     return {"schema": SCHEMA, "app": identity["app"], "repository": identity["repository"], "tag": release["tag_name"],
             "source_commit": release["target_commitish"], "release_id": release["id"], "run_id": run["id"],
             "run_attempt": run["attempt"], "tooling_revision": previous["tooling_revision"]}
@@ -126,13 +138,25 @@ def read_receipt(raw):
         raise n.InvalidNightly("invalid ownership receipt archive/JSON") from error
 
 
-def download_artifact(api, artifact_id):
+def download_artifact(api, artifact_id, *, max_bytes=MAX_ARCHIVE):
+    # Transport exceptions may embed a signed URL. Never expose their text or
+    # chained traceback to the CLI; ordinary API status errors remain distinct.
+    try:
+        return _download_artifact(api, artifact_id, max_bytes=max_bytes)
+    except n.InvalidNightly:
+        raise
+    except (http.client.HTTPException, OSError, ValueError):
+        raise n.Unavailable("artifact download transport failed") from None
+
+
+def _download_artifact(api, artifact_id, *, max_bytes):
     """One authenticated API redirect, then one token-free signed blob GET.
 
     The redirect is never returned/logged. Unknown hosts, ports, redirects,
     responses or oversized archives stop without following arbitrary origins.
     """
     n.positive(artifact_id, "artifact ID")
+    n.positive(max_bytes, "artifact download bound")
     connection = http.client.HTTPSConnection("api.github.com", timeout=30)
     try:
         connection.request("GET", api.prefix + f"/actions/artifacts/{artifact_id}/zip", headers={
@@ -142,7 +166,7 @@ def download_artifact(api, artifact_id):
         if response.status != 302:
             raise APIError(response.status)
         location = response.getheader("Location")
-        n.require(isinstance(location, str) and 0 < len(location) <= 8192 and not any(ord(char) < 32 for char in location), "invalid artifact redirect")
+        n.require(isinstance(location, str) and 0 < len(location) <= 8192 and all(33 <= ord(char) <= 126 for char in location), "invalid artifact redirect")
         target = urlsplit(location)
         n.require(target.scheme == "https" and target.port in (None, 443) and not target.username and not target.password and not target.fragment
                   and isinstance(target.hostname, str) and re.fullmatch(r"productionresultssa[0-9]+\.blob\.core\.windows\.net", target.hostname)
@@ -155,11 +179,22 @@ def download_artifact(api, artifact_id):
         response = blob.getresponse()
         if response.status != 200:
             raise APIError(response.status)
-        raw = response.read(MAX_ARCHIVE + 1)
-        n.require(len(raw) <= MAX_ARCHIVE, "ownership archive exceeds bound")
+        raw = response.read(max_bytes + 1)
+        n.require(len(raw) <= max_bytes, "artifact archive exceeds bound")
         return raw
     finally:
         blob.close()
+
+
+def actions_timestamp(value):
+    """Parse Actions job/step instants locally, retaining subsecond precision."""
+    n.require(isinstance(value, str) and re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])", value),
+        "invalid Actions ownership timestamp")
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(dt.timezone.utc)
+    except (ValueError, OverflowError) as error:
+        raise n.InvalidNightly("invalid Actions ownership timestamp") from error
 
 
 class ActionsOwnership:
@@ -211,9 +246,9 @@ class ActionsOwnership:
             n.require(step.get("status") == "completed" and step.get("conclusion") == "success", "ownership step did not succeed")
             n.positive(step.get("number"), "ownership step number")
         n.require(publish["number"] < upload["number"], "receipt uploaded before publication")
-        job_start, job_end = policy.timestamp(job.get("started_at")), policy.timestamp(job.get("completed_at"))
-        publish_start, publish_end = policy.timestamp(publish.get("started_at")), policy.timestamp(publish.get("completed_at"))
-        upload_start, upload_end = policy.timestamp(upload.get("started_at")), policy.timestamp(upload.get("completed_at"))
+        job_start, job_end = actions_timestamp(job.get("started_at")), actions_timestamp(job.get("completed_at"))
+        publish_start, publish_end = actions_timestamp(publish.get("started_at")), actions_timestamp(publish.get("completed_at"))
+        upload_start, upload_end = actions_timestamp(upload.get("started_at")), actions_timestamp(upload.get("completed_at"))
         n.require(job_start <= publish_start <= publish_end <= upload_start <= upload_end <= job_end, "ownership step chronology differs")
         artifacts = bounded_list(api, f"/actions/runs/{run_id}/artifacts", "artifacts")
         artifacts = [artifact for artifact in artifacts if artifact.get("name") == artifact_name(expected)]
@@ -231,7 +266,7 @@ class ActionsOwnership:
         n.require(isinstance(origin, dict) and origin.get("id") == run_id and origin.get("repository_id") == config["repository_id"]
                   and origin.get("head_repository_id") == config["repository_id"] and origin.get("head_sha") == expected["source_commit"]
                   and origin.get("head_branch") == "main", "artifact run/repository/source differs")
-        created, updated = policy.timestamp(artifact.get("created_at")), policy.timestamp(artifact.get("updated_at"))
+        created, updated = actions_timestamp(artifact.get("created_at")), actions_timestamp(artifact.get("updated_at"))
         n.require(upload_start <= created <= upload_end and created <= updated <= job_end, "artifact was not created during trusted upload step")
         raw = api.download_artifact(artifact["id"])
         n.require(isinstance(raw, bytes) and len(raw) == artifact["size_in_bytes"] and hashlib.sha256(raw).hexdigest() == digest[7:], "ownership ZIP differs from authenticated API digest")

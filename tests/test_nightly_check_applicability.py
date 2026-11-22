@@ -117,3 +117,23 @@ class ApplicabilityTests(unittest.TestCase):
    return None
   self.api.hook=changed
   with self.assertRaisesRegex(ValueError,'inventory changed'):self.gate()
+
+ def test_normal_refresh_preserves_managed_contract_even_when_no_check_exists(self):
+  declaration={'provider':'github-dependabot-updates','name':'Dependabot','app_id':15368,'workflow_id':88,'workflow_path':'dynamic/dependabot/dependabot-updates'}
+  self.row['baseline']['reviewed_at']='2026-11-21T12:01:00Z'
+  for old,new in (([declaration],None),(None,[declaration]),([declaration],[{**declaration,'workflow_id':89}])):
+   previous=copy.deepcopy(self.config)
+   previous['apps']['photocraft']['baseline']['reviewed_at']='2026-11-21T12:00:00Z'
+   if old is None: previous['apps']['photocraft'].pop('managed_checks',None)
+   else: previous['apps']['photocraft']['managed_checks']=copy.deepcopy(old)
+   if new is None: self.row.pop('managed_checks',None)
+   else: self.row['managed_checks']=copy.deepcopy(new)
+   self.bind()
+   with self.subTest(old=old,new=new),self.assertRaisesRegex(ValueError,'managed coverage changed'):
+    p.validate_baseline_refresh(previous,self.config,self.policy,self.api)
+ def test_omitted_and_empty_managed_refresh_contracts_are_equivalent(self):
+  previous=copy.deepcopy(self.config)
+  self.row['managed_checks']=[];self.row['baseline']['reviewed_at']='2026-11-21T12:01:00Z';self.bind()
+  self.assertTrue(p.validate_baseline_refresh(previous,self.config,self.policy,self.api))
+  previous['apps']['photocraft']['managed_checks']=[];self.row.pop('managed_checks');self.bind()
+  self.assertTrue(p.validate_baseline_refresh(previous,self.config,self.policy,self.api))

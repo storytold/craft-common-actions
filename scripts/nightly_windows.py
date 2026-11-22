@@ -46,6 +46,7 @@ def validate_prepared(registry, app, prepared, cargo, version, environment, poli
 
 def stage_local(registry, app, prepared, cargo, context, source_receipt, artifacts, output):
     # Explicit local replay context, NOT a claim this run/tag/URL exists on GitHub.
+    n.require(Path(cargo).name == "Cargo.toml", "E3 receipt binds only Cargo.toml")
     n.fields(context, CONTEXT_FIELDS, "local E4 context")
     n.require(all(isinstance(value, str) for value in context.values()), "context values must be strings")
     validate_prepared(registry, app, prepared, cargo, prepared["version"], context)

@@ -2,6 +2,23 @@ name: Dedicated Photo nightly producer (private source)
 # GitHub.com only. Protected isolated signing; no diagnostic matrix or enabled schedule.
 on:
   workflow_call:
+    secrets:
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERT_PROFILE:
+        required: false
     inputs:
       force:
         type: boolean
@@ -109,6 +126,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          include-hidden-files: true
           name: nightly-identity-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-input/*
           if-no-files-found: error
@@ -127,6 +145,15 @@ jobs:
       identity-artifact-id: ${{ needs.identity.outputs.artifact-id }}
       identity-sha256: ${{ needs.identity.outputs.sha256 }}
       craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+    secrets:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+      AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
 
   build-linux:
     if: ${{ false }} # Pending native source, never tuple admission or execution authority.
@@ -160,7 +187,7 @@ jobs:
 
   status:
     if: always()
-    needs: [identity, build-windows, build-linux, build-macos]
+    needs: [identity, build-windows, build-linux, build-macos, stage-nightly]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -170,11 +197,13 @@ jobs:
         env:
           IDENTITY_RESULT: ${{ needs.identity.result }}
           WINDOWS_RESULT: ${{ needs.build-windows.result }}
+          STAGING_RESULT: ${{ needs.stage-nightly.result }}
           BUILD_REQUESTED: ${{ needs.identity.outputs.build }}
         run: |
           {
             echo '## Dedicated nightly source candidate'
             printf 'Identity/preflight: `%s`. Windows build: `%s`. Build requested: `%s`.\n' "$IDENTITY_RESULT" "$WINDOWS_RESULT" "$BUILD_REQUESTED"
+            printf 'Packet staging: `%s`.\n' "$STAGING_RESULT"
             echo 'Named policy refusal is in the identity step summary; a failed/red check is not bypassed.'
             echo 'Legacy diagnostics have a separate workflow/run and cannot contribute artifacts here.'
             echo 'Windows requires verified signing; Linux/macOS rows are pending and disabled; skipped native jobs are not platform coverage.'
@@ -182,7 +211,10 @@ jobs:
             echo 'Publication and attestation are literally disabled; no native/quality/admission proof is implied.'
           } >> "$GITHUB_STEP_SUMMARY"
           test "$IDENTITY_RESULT" = success
-          if [ "$BUILD_REQUESTED" = true ]; then test "$WINDOWS_RESULT" = success; fi
+          if [ "$BUILD_REQUESTED" = true ]; then
+            test "$WINDOWS_RESULT" = success
+            test "$STAGING_RESULT" = success
+          fi
 
   stage-nightly:
     if: >-
@@ -322,6 +354,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          include-hidden-files: true
           name: nightly-packet-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-publish/*
           if-no-files-found: error
@@ -590,6 +623,7 @@ jobs:
         id: ownership-upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          include-hidden-files: true
           name: ${{ steps.publish.outputs.ownership-artifact-name }}
           path: .nightly-ownership/ownership.json
           if-no-files-found: error
@@ -614,6 +648,7 @@ jobs:
         id: prune-plan-upload
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          include-hidden-files: true
           name: nightly-prune-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: .nightly-prune-plan/plan.json
           if-no-files-found: error

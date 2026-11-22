@@ -46,6 +46,23 @@ class SmokeTests(unittest.TestCase):
         start.assert_not_called()
         with patch.object(s.subprocess,'Popen') as start,self.assertRaises(ValueError): s.smoke(self.exe,self.exe.parent/'profile',self.version)
         start.assert_not_called()
+    def test_resolved_installation_ancestry_refuses_symlinked_parent_before_creation(self):
+        alias=self.root/'alias'; alias.symlink_to(self.exe.parent,target_is_directory=True)
+        profile=alias/'fresh-profile'
+        with patch.object(s.subprocess,'Popen') as start,self.assertRaisesRegex(ValueError,'separate from the installation'):
+            s.smoke(self.exe,profile,self.version)
+        start.assert_not_called(); self.assertFalse(profile.exists())
+        with patch.object(s.subprocess,'Popen') as start,self.assertRaisesRegex(ValueError,'separate from the installation'):
+            s.smoke(alias/self.exe.name,self.exe.parent/'fresh-profile',self.version)
+        start.assert_not_called()
+
+    def test_resolved_separate_sibling_profile_is_still_allowed(self):
+        sibling=self.root/'profiles'; sibling.mkdir()
+        alias=self.root/'alias'; alias.symlink_to(sibling,target_is_directory=True)
+        self.profile=alias/'fresh-profile'
+        self.assertTrue(self.invoke()['exact_version_and_flavor'])
+        self.assertEqual(self.argv[4],str(sibling/'fresh-profile'))
+
     def test_timeout_kills_only_the_owned_mock_process(self):
         process=types.SimpleNamespace(returncode=None,killed=False)
         process.poll=lambda: process.returncode

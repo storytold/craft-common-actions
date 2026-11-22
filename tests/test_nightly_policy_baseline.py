@@ -180,7 +180,8 @@ class BaselineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'main head moved'): self.gate()
     def test_publication_gate_keeps_last_active_and_fresh_same_head_check(self):
         self.assertTrue(p.publication_gate(self.api,self.registry,self.config,self.prepared,self.policy,self.env))
-        self.assertEqual(self.api.calls[-2:],[('GET','/git/ref/heads/main'),('GET','/actions/workflows/91')])
+        self.assertEqual(self.api.calls[-3:-1],[('GET','/git/ref/heads/main'),('GET','/actions/workflows/91')])
+        self.assertTrue(self.api.calls[-1][1].startswith('/actions/workflows/91/runs?'))
     def test_config_digest_survives_serialization_and_prior_validation(self):
         restored=json.loads(json.dumps(self.policy))
         p.validate_prepared(self.registry,self.prepared,restored,self.env,self.config)
@@ -202,6 +203,63 @@ class BaselineTests(unittest.TestCase):
         for url in ('https://api.github.com.evil/repos/storytold/photocraft/check-runs/200','http://api.github.com/repos/storytold/photocraft/check-runs/200','https://api.github.com/repos/fork/photocraft/check-runs/200'):
             self.job['check_run_url']=url
             with self.subTest(url=url),self.assertRaisesRegex(ValueError,'fixed-host'): self.gate()
+    def expand_policy_workflows(self,counts):
+        template=copy.deepcopy(self.wanted)
+        self.row['required_checks']=[]; self.row['baseline']['runs']=[]
+        self.api.runs={1234:self.run}; self.api.jobs={}; self.api.checks={}
+        paths={}
+        for index,count in enumerate(counts):
+            workflow=100+index; path=f'.github/workflows/fixture-{workflow}.yml'; paths[workflow]=path
+            for sha,run_template,job_template,check_template,run_id in (
+                    ('c'*40,self.base_run,self.base_job,self.base_check,10000+index),
+                    ('a'*40,self.ci,self.job,self.check,20000+index)):
+                run={**run_template,'id':run_id,'workflow_id':workflow,'path':path}
+                self.api.runs[run_id]=run; jobs=[]
+                if sha=='c'*40:
+                    self.row['baseline']['runs'].append({'workflow_id':workflow,'id':run_id,'attempt':1,'number':16})
+                for number in range(count):
+                    ident=run_id*1000+number; check_id=ident+100000000; name=f'quality {index}/{number}'
+                    job={**job_template,'id':ident,'run_id':run_id,'name':name,'check_run_url':f'https://api.github.com/repos/storytold/photocraft/check-runs/{check_id}'}
+                    check={**check_template,'id':check_id,'name':name,'details_url':f'https://github.com/storytold/photocraft/actions/runs/{run_id}/job/{ident}'}
+                    jobs.append(job); self.api.checks[check_id]=check
+                    if sha=='c'*40:
+                        self.row['required_checks'].append({**template,'name':name,'workflow_id':workflow,'workflow_path':path,'baseline_job_id':ident,'baseline_check_id':check_id})
+                self.api.jobs[(run_id,1)]=jobs
+        def hook(path):
+            parsed=urlsplit(path); query=parse_qs(parsed.query)
+            match=re.fullmatch(r'/actions/workflows/([0-9]+)(/runs)?',parsed.path)
+            if match and int(match[1]) in paths:
+                workflow=int(match[1])
+                if not match[2]: return {'id':workflow,'path':paths[workflow],'state':'active'}
+                rows=[run for run in self.api.runs.values() if run['workflow_id']==workflow and run['head_sha']==query['head_sha'][0]]
+                page=int(query['page'][0]); size=int(query['per_page'][0])
+                return {'total_count':len(rows),'workflow_runs':rows[(page-1)*size:page*size]}
+        self.api.hook=hook; self.bind()
+    def test_supported_32_workflow_128_job_normal_witness_fits_read_budget(self):
+        self.expand_policy_workflows([4]*32)
+        self.assertTrue(self.gate())
+        self.assertEqual(len(self.api.calls),607)
+        self.assertLess(len(self.api.calls),p.MAX_BASELINE_READS)
+    def test_supported_policy_with_more_job_pages_retains_final_rechecks(self):
+        self.expand_policy_workflows([20]*5+[2]+[1]*26)
+        self.assertTrue(self.gate())
+        self.assertEqual(len(self.api.calls),617)
+        self.assertEqual(sum(path.startswith('/actions/workflows/100/runs?') for _,path in self.api.calls),6)
+    def test_read_limit_is_hard_and_deadline_remains_120_seconds(self):
+        class API:
+            calls=0
+            def request(self,method,path): self.calls+=1; return {}
+        api=API()
+        with patch.object(p.time,'monotonic',return_value=0):
+            bounded=p.BaselineReads(api)
+            self.assertEqual(bounded.deadline,120)
+            for _ in range(p.MAX_BASELINE_READS): bounded.request('GET','/fixture')
+            with self.assertRaisesRegex(ValueError,'budget reached'): bounded.request('GET','/fixture')
+        self.assertEqual(api.calls,p.MAX_BASELINE_READS)
+        with patch.object(p.time,'monotonic',side_effect=[0,0,120]):
+            bounded=p.BaselineReads(api)
+            with self.assertRaisesRegex(ValueError,'time budget reached during read'): bounded.request('GET','/fixture')
+
     def test_read_budget_and_deadline_fail_closed(self):
         budget=p.BaselineReads(self.api); budget.remaining=0
         with self.assertRaisesRegex(ValueError,'budget reached'): budget.request('GET','/git/ref/heads/main')
@@ -233,6 +291,74 @@ class BaselineTests(unittest.TestCase):
             if path=='/check-runs/202': return old_check
         self.api.hook=hook
         with self.assertRaisesRegex(ValueError,'baseline-green'): self.gate()
+    def historical_run(self,conclusion='cancelled'):
+        self.baseline_red(); self.candidate_red()
+        old={**self.ci,'id':2444,'run_number':16,'conclusion':conclusion}
+        job={**self.job,'id':97,'run_id':2444,'conclusion':'success','check_run_url':'https://api.github.com/repos/storytold/photocraft/check-runs/202'}
+        check={**self.check,'id':202,'conclusion':'success','details_url':'https://github.com/storytold/photocraft/actions/runs/2444/job/97'}
+        self.api.runs[2444]=old; self.api.jobs[(2444,1)]=[job]
+        self.api.hook=lambda path:check if path=='/check-runs/202' else None
+        return old,job,check
+    def test_completed_success_survives_cancelled_or_unknown_historical_aggregate(self):
+        for conclusion in ('cancelled','timed_out',None):
+            with self.subTest(conclusion=conclusion):
+                self.historical_run(conclusion)
+                with self.assertRaisesRegex(ValueError,'baseline-green'): self.gate()
+                self.assertIn(('GET','/check-runs/202'),self.api.calls)
+    def test_cancelled_partial_history_retains_success_without_full_inventory(self):
+        self.historical_run()
+        self.api.jobs[(2444,1)].append({'name':'unfinished sibling','status':'completed','conclusion':'cancelled'})
+        with self.assertRaisesRegex(ValueError,'baseline-green'): self.gate()
+    def test_cancelled_historical_job_cannot_supply_success_or_failure_exemption(self):
+        _,job,_=self.historical_run()
+        for result in ('cancelled','skipped',None):
+            job['conclusion']=result
+            self.assertTrue(self.gate()) # Only the selected, reviewed red jobs permit failure.
+        self.api.jobs[(3456,1)]=[]
+        with self.assertRaisesRegex(ValueError,'coverage'): self.gate()
+    def test_historical_success_keeps_job_check_source_and_attempt_authentication(self):
+        _,job,check=self.historical_run()
+        for obj,key,value in ((job,'head_sha','e'*40),(job,'run_attempt',2),(job,'run_id',1111),
+                              (check,'app',{'id':999}),(check,'head_sha','e'*40),
+                              (check,'id',999),(check,'conclusion','cancelled'),
+                              (check,'details_url','https://github.com/storytold/photocraft/actions/runs/2444/job/999')):
+            original=copy.deepcopy(obj[key]); obj[key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError): self.gate()
+            obj[key]=original
+    def test_cancelled_prior_attempt_keeps_completed_success(self):
+        self.baseline_red(); self.candidate_red(); self.ci['run_attempt']=2; self.job['run_attempt']=2
+        self.api.jobs[(3456,2)]=[self.job]
+        self.api.jobs[(3456,1)]=[{**self.job,'id':97,'run_attempt':1,'conclusion':'success','check_run_url':'https://api.github.com/repos/storytold/photocraft/check-runs/202'}]
+        check={**self.check,'id':202,'conclusion':'success','details_url':'https://github.com/storytold/photocraft/actions/runs/3456/job/97'}
+        def hook(path):
+            if path=='/check-runs/202': return check
+            if path=='/actions/runs/3456/attempts/1': return {**self.ci,'run_attempt':1,'conclusion':'cancelled'}
+        self.api.hook=hook
+        with self.assertRaisesRegex(ValueError,'baseline-green'): self.gate()
+    def test_selected_cancelled_aggregate_is_still_refused(self):
+        self.ci['conclusion']='cancelled'
+        with self.assertRaisesRegex(ValueError,'aggregate result differs'): self.gate()
+    def test_publication_expiry_is_rechecked_after_last_remote_read(self):
+        reads=[0]
+        def hook(path):
+            if path.startswith('/actions/workflows/91/runs?'):
+                reads[0]+=1
+                if reads[0]==2: p.time.time.return_value=p.timestamp(self.row['baseline']['expires_at'])
+        self.api.hook=hook
+        with self.assertRaisesRegex(ValueError,'stale/future'):
+            p.publication_gate(self.api,self.registry,self.config,self.prepared,self.policy,self.env)
+        self.assertEqual(reads[0],2)
+        self.assertTrue(self.api.calls[-1][1].startswith('/actions/workflows/91/runs?'))
+    def test_newer_run_appearing_during_final_active_read_is_refused(self):
+        paused=[False]
+        def hook(path):
+            if path=='/actions/workflows/91': paused[0]=True
+            if paused[0] and path.startswith('/actions/workflows/91/runs?'):
+                return {'total_count':2,'workflow_runs':[self.run,{**self.run,'id':12,'run_number':18}]}
+        self.api.hook=hook
+        with self.assertRaisesRegex(ValueError,'newer trusted workflow ordinal'):
+            p.publication_gate(self.api,self.registry,self.config,self.prepared,self.policy,self.env)
+
     def test_schema_rejects_extra_keys_and_non_boolean_floor(self):
         self.wanted['green_required']=1; self.bind()
         with self.assertRaisesRegex(ValueError,'green floor'): self.gate()

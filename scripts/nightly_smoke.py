@@ -18,6 +18,7 @@ def smoke(executable,profile_root,version):
     executable=Path(executable); profile_root=Path(profile_root)
     n.require(executable.is_absolute() and executable.is_file() and not executable.is_symlink(),'explicit packaged GUI executable required')
     n.require(profile_root.is_absolute() and not profile_root.exists() and not profile_root.is_symlink(),'fresh absolute isolated smoke profile required')
+    executable=executable.resolve(); profile_root=profile_root.resolve()
     n.require(executable.parent not in profile_root.parents and profile_root not in executable.parents,'smoke profile must be separate from the installation')
     profile_root.mkdir(parents=True,exist_ok=False)
     # No shell, descriptor-provided selector, startup files, version override or stable fallback.

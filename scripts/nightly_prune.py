@@ -15,7 +15,8 @@ from urllib.parse import quote, unquote
 import nightly_feed as n
 import nightly_policy as policy
 from publish_nightly import APIError, HTTPTransport
-from nightly_ownership import AmbiguousOwnership
+from nightly_ownership import AmbiguousOwnership, MAX_ARCHIVE
+from nightly_prune_checkpoint import MAX_PLAN_BYTES
 
 SCHEMA = "craft-nightly-prune/v1"
 KEEP = 7
@@ -45,9 +46,9 @@ class PublicationProvenance:
 
 class PruneTransport(HTTPTransport):
     """Keep publisher transport unchanged; DELETE requires an exact empty 204."""
-    def download_artifact(self, artifact_id):
+    def download_artifact(self, artifact_id, *, max_bytes=MAX_ARCHIVE):
         from nightly_ownership import download_artifact
-        return download_artifact(self, artifact_id)
+        return download_artifact(self, artifact_id, max_bytes=max_bytes)
 
     def exchange(self, host, method, path, **kwargs):
         if method != "DELETE":
@@ -91,7 +92,9 @@ def parse_tag(tag):
 
 def optional(api, path):
     try:
-        return api.request("GET", path)
+        reply = api.request("GET", path)
+        n.require(isinstance(reply, dict), "successful optional lookup must return an object")
+        return reply
     except APIError as error:
         if error.status == 404:
             return None
@@ -150,6 +153,15 @@ def shape(release, app, bot_id):
 def prove(api, registry, app, release, bot_id, provenance, absent_release=False):
     shape(release, app, bot_id)
     repository = n.app_record(registry, app)["repository"]
+    # Validate untrusted local marker data before any authenticated proof reads.
+    # Keep this catch narrow: transport failures/ambiguity must abort the plan.
+    try:
+        previous = policy.body_policy(release.get("body"))
+        policy.validate_prepared(registry, previous["identity"], previous, policy.prior_environment(previous))
+    except n.InvalidNightly:
+        raise
+    except (KeyError, TypeError, ValueError, RecursionError, OverflowError) as error:
+        raise n.InvalidNightly("malformed historical policy marker") from error
     # A persisted snapshot never grants authority. The adapter must independently
     # reauthenticate the original publication even in release-gone recovery.
     n.require(provenance.verify(api, repository, copy.deepcopy(release), bot_id) is True,
@@ -203,12 +215,15 @@ def plan(api, registry, app, current_release_id, bot_id, provenance=None):
     historical = [row for row in proven if row["id"] != current_release_id]
     kept = [current[0]] + historical[:KEEP - 1]
     candidates = list(reversed(historical[KEEP - 1:]))[:MAX_REMOVALS]
-    return {"schema": SCHEMA, "app": app, "repository": repository, "bot_id": bot_id,
-            "current": snapshot(current[0]), "keep": [row["id"] for row in kept],
-            "candidates": [snapshot(row) for row in candidates], "retained": retained}
+    result = {"schema": SCHEMA, "app": app, "repository": repository, "bot_id": bot_id,
+              "current": snapshot(current[0]), "keep": [row["id"] for row in kept],
+              "candidates": [snapshot(row) for row in candidates], "retained": retained}
+    encode_plan(result)  # Refuse before stdout/upload if the checkpoint cannot fit.
+    return result
 
 
 def validate_plan(previous, registry):
+    encode_plan(previous)
     n.fields(previous, {"schema", "app", "repository", "bot_id", "current", "keep", "candidates", "retained"}, "prune plan")
     n.require(previous["schema"] == SCHEMA and previous["repository"] == n.app_record(registry, previous["app"])["repository"], "plan repository/schema mismatch")
     n.positive(previous["bot_id"], "approved bot ID")
@@ -284,13 +299,15 @@ def execute(api, registry, previous, *, approved=False, provenance=None, checkpo
     return {"completed_release_ids": completed}
 
 
-def save_checkpoint(path, previous):
+def save_checkpoint(path, previous, *, raw=None):
     """Atomic local receipt; caller must retain it outside temporary build roots."""
     from pathlib import Path
     destination = Path(path)
     temporary = destination.with_name(destination.name + ".new")
-    with open(temporary, "x", encoding="utf-8") as stream:
-        json.dump(previous, stream, sort_keys=True)
+    raw = encode_plan(previous) if raw is None else raw
+    n.require(parse_plan_bytes(raw) == previous, "local checkpoint bytes differ from validated plan")
+    with open(temporary, "xb") as stream:
+        stream.write(raw)
         stream.flush(); os.fsync(stream.fileno())
     os.replace(temporary, destination)
     descriptor = os.open(destination.parent, os.O_RDONLY)
@@ -300,8 +317,18 @@ def save_checkpoint(path, previous):
         os.close(descriptor)
 
 
+def encode_plan(previous):
+    raw = (json.dumps(previous, sort_keys=True) + "\n").encode("utf-8")
+    n.require(len(raw) <= MAX_PLAN_BYTES, "prune plan exceeds checkpoint byte budget")
+    return raw
+
+
 def read_plan(path):
-    raw = n.bounded_bytes(path, 4 * 1024 * 1024, "prune plan")
+    return parse_plan_bytes(n.bounded_bytes(path, MAX_PLAN_BYTES, "prune plan"))
+
+
+def parse_plan_bytes(raw):
+    n.require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_PLAN_BYTES, "prune plan exceeds bound")
     def unique(pairs):
         value = {}
         for key, item in pairs:
@@ -332,7 +359,8 @@ def main():
             n.require(provenance.config["repository"] == repository and provenance.config["bot_id"] == args.bot_id, "ownership config/app/bot mismatch")
         if args.mode == "apply":
             n.require(args.approve_first_run is True and args.config and args.plan and args.checkpoint and args.checkpoint_artifact_id and args.checkpoint_artifact_sha256, "live apply is off: explicit approval, reviewed ownership config, plan and durable checkpoint required")
-            previous = read_plan(args.plan)
+            plan_bytes = n.bounded_bytes(args.plan, MAX_PLAN_BYTES, "prune plan")
+            previous = parse_plan_bytes(plan_bytes)
             validate_plan(previous, registry)
             n.require(previous["app"] == args.app and previous["current"]["id"] == args.current_release_id and previous["bot_id"] == args.bot_id, "plan differs from CLI publication context")
         api = PruneTransport(repository, os.environ.get("GH_TOKEN", ""))
@@ -340,8 +368,8 @@ def main():
             result = plan(api, registry, args.app, args.current_release_id, args.bot_id, provenance)
         else:
             from nightly_prune_checkpoint import verify as verify_durable
-            verify_durable(api,provenance.config,previous,args.checkpoint_artifact_id,args.checkpoint_artifact_sha256,os.environ)
-            result = execute(api, registry, previous, approved=True, provenance=provenance, checkpoint=lambda value: save_checkpoint(args.checkpoint, value))
+            verify_durable(api,provenance.config,plan_bytes,args.checkpoint_artifact_id,args.checkpoint_artifact_sha256,os.environ)
+            result = execute(api, registry, previous, approved=True, provenance=provenance, checkpoint=lambda value: save_checkpoint(args.checkpoint, value, raw=plan_bytes))
         print(json.dumps(result, sort_keys=True))
     except (n.InvalidNightly, APIError, OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
         parser.exit(1, f"nightly pruning stopped: {error}\n")

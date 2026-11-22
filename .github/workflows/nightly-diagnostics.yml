@@ -1,4 +1,4 @@
-name: Independent legacy nightly diagnostics (not installable)
+name: Independent nightly metadata (legacy packaging paused)
 # Separate workflow RUN. Never called by the Photo installable producer.
 on:
   workflow_call:
@@ -99,24 +99,4 @@ jobs:
       - name: Explain independent diagnostic trust and scope
         run: |
           echo 'Diagnostic-only metadata, ready=false. No publication policy/API catalog or installable adapter is required.' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Legacy mutable helper actions and write-permission ceiling remain isolated in this separate diagnostic run.' >> "$GITHUB_STEP_SUMMARY"
-  diagnostic:
-    needs: metadata
-    permissions:
-      contents: write
-      packages: write
-    uses: $/.github/workflows/release.yml
-    with:
-      app-name: ${{ inputs.app-name }}
-      app-title: ${{ inputs.app-title }}
-      version: ${{ needs.metadata.outputs.version }}
-      craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
-      web-craft-fonts: ${{ inputs.web-craft-fonts }}
-      contributors-artifact: ${{ inputs.contributors-artifact }}
-      has-web: ${{ inputs.has-web }}
-      has-riscv64: ${{ inputs.has-riscv64 }}
-      has-freebsd: ${{ inputs.has-freebsd }}
-      has-arch: ${{ inputs.has-arch }}
-      has-server: ${{ inputs.has-server }}
-      dry-run: true
-      publish: false
+          echo 'Legacy packaging diagnostics are paused until Flatpak packaging can run without package-write permission.' >> "$GITHUB_STEP_SUMMARY"
