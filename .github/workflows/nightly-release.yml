@@ -1,0 +1,258 @@
+name: Windows release-ref nightly signer
+# No push, schedule, workflow_run or workflow_dispatch entry point here.
+# Only the protected app caller can satisfy the real release-ref admission.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        type: string
+        required: true
+      producer_run_id:
+        type: string
+        required: true
+      producer_run_attempt:
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: craft-release-ref-signer-photocraft
+  cancel-in-progress: false
+  queue: max
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+jobs:
+  validate:
+    if: github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.validate.outputs.bundle-sha256 }}
+      unsigned-asset: ${{ steps.validate.outputs.unsigned-asset }}
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Snapshot exact-C quality before artifact work
+        id: admit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py admit --source .release-source --producer-run-id "$env:PRODUCER_RUN_ID" --producer-run-attempt "$env:PRODUCER_RUN_ATTEMPT" --output .admission
+          if ($LASTEXITCODE -ne 0) { throw 'producer/quality admission refused' }
+      - name: Download exact authenticated producer artifact; verify transport ZIP digest
+        if: steps.admit.outputs.admitted == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify unsigned payload with trusted patched gh, then revalidate admission
+        if: steps.admit.outputs.admitted == 'true'
+        id: validate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py validate --source .release-source --state .admission --directory .unsigned --output .validated
+          if ($LASTEXITCODE -ne 0) { throw 'cryptographic unsigned provenance or retained quality refused' }
+      - name: Upload only trusted validator handoff
+        if: steps.admit.outputs.admitted == 'true'
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .validated/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  sign:
+    needs: validate
+    if: needs.validate.outputs.admitted == 'true' && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.sign.outputs.bundle-sha256 }}
+      asset: ${{ steps.sign.outputs.asset }}
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only the trusted same-run validator artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact-id }}
+          path: .validated
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck real ref, quality, pause and freshness before raw signing-secret exports
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXACT_ASSET: ${{ needs.validate.outputs.unsigned-asset }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.validate.outputs.bundle-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py guard --source .release-source --directory .validated --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'pre-secret signing gate refused' }
+      - name: Sign data only through protected existing Windows adapter
+        id: sign
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXACT_ASSET: ${{ needs.validate.outputs.unsigned-asset }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.validate.outputs.bundle-sha256 }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py sign --source .release-source --directory .validated --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256" --output .signed
+          if ($LASTEXITCODE -ne 0) { throw 'mandatory native signing/verification refused' }
+      - name: Upload only finite signed bytes and two-role receipts
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-signed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    name: Publish signed nightly
+    needs: sign
+    if: github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # Fresh Windows verifier, but NO release environment or platform secrets.
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only exact signer-produced artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign.outputs.artifact-id }}
+          path: .signed
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Revalidate actual producer and independently verify final native signatures
+        id: final
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXACT_ASSET: ${{ needs.sign.outputs.asset }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.sign.outputs.bundle-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py final --source .release-source --directory .signed --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'fresh native signature or publication preflight refused' }
+      - name: Attest actual final signed-output bytes from trusted publisher
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.final.outputs.subject-path }}
+      - name: Publish the signed nightly and preserve ownership
+        id: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXACT_ASSET: ${{ needs.sign.outputs.asset }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.sign.outputs.bundle-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256" --packet .packet --ownership .ownership
+          if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
+      - name: Retain ownership evidence, including public-but-unreconciled failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-ownership-v2-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ownership/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90

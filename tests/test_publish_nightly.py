@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/nightly_feed.py")
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 sys.modules["nightly_feed"] = n
