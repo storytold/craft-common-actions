@@ -1,4 +1,4 @@
-"""Deletes the build units of a Cargo target directory that the recorded build did not use.
+"""Prunes unrecorded older build units from a Cargo target directory.
 
 Cargo's unit layout keeps each unit in `<profile>/build/<package>/<hash>/` (`out/`, `fingerprint/`,
 `run/`). Cargo prints a `compiler-artifact` message for every unit a build compiled or found fresh,
@@ -11,10 +11,11 @@ binary) is reported at its uplifted copy in `<profile>/`, a hard link to the fil
 actions/rust-cache writes the job's start time beside the record (`<record stem>.start`, seconds since
 the epoch) before any build runs. Restored units keep their archived mtimes, so a unit the trim would
 remove that holds a file newer than that was built in this job: one of the leg's build commands does
-not record its units. Then nothing is deleted and a warning names the units, since deleting them would
-make every run rebuild them.
+not record its units. Keep those units and name them in a warning, while still trimming unrecorded
+units from earlier jobs. An unreadable or invalid start file leaves the target unchanged.
 """
 import json
+import math
 import os
 import re
 import shutil
@@ -54,8 +55,8 @@ def unit_of(path):
     """The `build/<package>/<hash>` directory a path lies in, if any."""
     path = Path(path)
     for directory in (path, *path.parents):
-        if UNIT.fullmatch(directory.name) and directory.parent.parent.name == 'build':
-            return key(directory)
+        if UNIT.fullmatch(os.path.normcase(directory.name)) and os.path.normcase(directory.parent.parent.name) == 'build':
+            return directory
     return None
 
 
@@ -68,14 +69,23 @@ def identity(path):
 
 
 def used_units(paths, found):
-    """The unit directories the recorded paths name, directly or through a hard link."""
-    used, uplifted = set(), []
+    """The unit directories the recorded paths name, by path or by file identity."""
+    known = {key(unit) for _, unit in found}
+    used, aliases, uplifted = set(), set(), []
     for path in paths:
         unit = unit_of(path)
         if unit:
-            used.add(unit)
+            name = key(unit)
+            used.add(name)
+            if name not in known:
+                aliases.add(unit)
         else:
             uplifted.append(path)
+    if aliases:
+        # A recorded unit can use a different spelling of the same directory, such as a Windows extended path.
+        wanted_units = {i for i in map(identity, aliases) if i}
+        if wanted_units:
+            used.update(key(unit) for _, unit in found if identity(unit) in wanted_units)
     if uplifted:
         wanted = {i for i in map(identity, uplifted) if i}
         for _, unit in found:
@@ -122,15 +132,20 @@ def size(directory):
 
 
 def built_since(unit, start):
-    return any(mtime > start for _, mtime in files(unit))
+    return any(mtime >= start for _, mtime in files(unit))
 
 
 def start_time(record):
     """The job's start time actions/rust-cache wrote beside the record, if it did."""
+    stamp = Path(record).with_suffix('.start')
     try:
-        return float(Path(record).with_suffix('.start').read_text().strip())
-    except (OSError, ValueError):
+        stamp.lstat()
+    except FileNotFoundError:
         return None
+    start = float(stamp.read_text(encoding='utf-8').strip())
+    if not math.isfinite(start):
+        raise ValueError('non-finite start time')
+    return start
 
 
 def contents(unit):
@@ -153,20 +168,26 @@ def trim(target, record):
     if not target.is_dir():
         print(f'cache-trim: no target directory at {target}')
         return 0
+    try:
+        start = start_time(record)
+    except (OSError, ValueError):
+        print('::warning::cache-trim: the unit record start time is unreadable or invalid, so nothing is trimmed')
+        return 0
     found = list(units(target))
     used = used_units(recorded_paths(record), found)
     if not any(key(unit) in used for _, unit in found):
         print(f'::warning::cache-trim: none of the {len(used)} recorded units is in {target}, so nothing is trimmed')
         return 0
     unused = [(package, unit) for package, unit in found if key(unit) not in used]
-    start = start_time(record)
     if start is not None:
-        unrecorded = [f'{package}/{unit.name}' for package, unit in unused if built_since(unit, start)]
+        unrecorded = [(package, unit) for package, unit in unused if built_since(unit, start)]
         if unrecorded:
+            names = [f'{package}/{unit.name}' for package, unit in unrecorded[:5]]
             print(f'::warning::cache-trim: {len(unrecorded)} units built in this job are not in the record '
-                  f'({", ".join(unrecorded[:5])}{", ..." if len(unrecorded) > 5 else ""}); a build command '
-                  f'of this leg does not record its units, so nothing is trimmed')
-            return 0
+                  f'({", ".join(names)}{", ..." if len(unrecorded) > 5 else ""}); keeping them and '
+                  'trimming unrecorded units from earlier jobs')
+            used.update(key(unit) for _, unit in unrecorded)
+            unused = [(package, unit) for package, unit in unused if key(unit) not in used]
     kept_bytes = sum(size(unit) for _, unit in found if key(unit) in used)
     removed = removed_bytes = 0
     by_package, details, left_behind = {}, [], []
@@ -203,9 +224,8 @@ def main():
     target = Path(os.environ.get('CARGO_TARGET_DIR') or 'target').resolve()
     try:
         trim(target, os.environ.get('CRAFT_CACHE_UNITS', ''))
-    except Exception as error:  # noqa: BLE001 - any failure leaves only unused units deleted
-        print(f'::warning::cache-trim stopped: {error!r}. Only units this build did not use were deleted, '
-              f'so the entry is saved as it is')
+    except Exception as error:  # noqa: BLE001 - a trim failure leaves a usable cache
+        print(f'::warning::cache-trim stopped: {error!r}. The entry is saved with whatever trimming completed')
         return 1
     return 0
 

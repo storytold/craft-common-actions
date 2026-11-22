@@ -4,9 +4,10 @@ description: >-
   post step saves it. The build records them in the file actions/rust-cache names in
   CRAFT_CACHE_UNITS (Cargo's JSON messages: `--message-format json-render-diagnostics`, or nextest's
   `--cargo-message-format json-render-diagnostics`, with the lines that start with `{"reason":`
-  appended to the file). Every unit directory (`<profile>/build/<package>/<hash>/`) that no recorded
-  path lies in is deleted, so a saved entry holds only the current build and not older builds of
-  repinned dependencies. Without a record it changes nothing, and rust-cache trims by package name.
+  appended to the file). Unrecorded unit directories (`<profile>/build/<package>/<hash>/`) from
+  earlier jobs are removed. Unrecorded units built during this job are kept and named in a
+  warning, so an incomplete record still lets the cache drop older builds of repinned
+  dependencies. Without a record it changes nothing, and rust-cache trims by package name.
 
 runs:
   using: "composite"
