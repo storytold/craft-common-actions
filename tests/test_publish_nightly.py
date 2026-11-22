@@ -3,6 +3,8 @@ import copy
 import importlib.util
 import io
 import json
+import os
+import tempfile
 from pathlib import Path
 import sys
 import types
@@ -68,6 +70,8 @@ def ref_body(api, wrong=False):
 
 class PublisherTests(unittest.TestCase):
     def setUp(self):
+        owned_temp = patch.dict(os.environ, {"RUNNER_TEMP": tempfile.gettempdir()})
+        owned_temp.start(); self.addCleanup(owned_temp.stop)
         self.registry = json.loads((ROOT / "nightly-apps.json").read_text())
         self.env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": "storytold/photocraft",
                     "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1"}

@@ -235,7 +235,7 @@ class RequestTests(unittest.TestCase):
         for signer,event,attempt,actor,producer,allowed in cases:
             with self.subTest(signer=signer,event=event,attempt=attempt,actor=actor,producer=producer):
                 if allowed:
-                    self.assertTrue(r.require_actor(self.policy,event,attempt,actor,signer=signer,producer=producer))
+                    self.assertIsNone(r.require_actor(self.policy,event,attempt,actor,signer=signer,producer=producer))
                 else:
                     with self.assertRaises(ValueError):
                         r.require_actor(self.policy,event,attempt,actor,signer=signer,producer=producer)

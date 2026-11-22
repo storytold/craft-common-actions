@@ -416,14 +416,24 @@ WAIT = ROOT / 'actions/configure-apt-mirrors/wait-for-cloud-init.sh'
 
 
 class WaitForCloudInitTests(unittest.TestCase):
-    def wait(self, body, limit='300'):
+    def wait(self, body, limit='300', *, elapsed=None):
         with tempfile.TemporaryDirectory() as tmpdir:
             fake = Path(tmpdir) / 'cloud-init'
             fake.write_text('#!/bin/bash\n' + body, newline='\n')
             fake.chmod(0o755)
-            return subprocess.run(['bash', str(WAIT)], capture_output=True, text=True, timeout=60,
-                                  env={**os.environ, 'CRAFT_CLOUD_INIT': str(fake),
-                                       'CRAFT_CLOUD_INIT_TIMEOUT': limit})
+            env = {**os.environ, 'CRAFT_CLOUD_INIT': str(fake), 'CRAFT_CLOUD_INIT_TIMEOUT': limit}
+            if elapsed is not None:
+                self.assertIn(elapsed, (0, 1))
+                clock = Path(tmpdir) / 'clock.bash'
+                # Unsetting SECONDS removes its special clock behavior. Delegate
+                # to the real timeout and preserve its exit status, but set exact
+                # elapsed ticks before the helper reads its diagnostic clock.
+                clock.write_text('unset SECONDS\nSECONDS=0\n'
+                                 'timeout() {\n  local result\n  command timeout "$@"\n'
+                                 '  result=$?\n  SECONDS=' + str(elapsed) + '\n  return "$result"\n}\n',
+                                 newline='\n')
+                env['BASH_ENV'] = str(clock)
+            return subprocess.run(['bash', str(WAIT)], capture_output=True, text=True, timeout=60, env=env)
 
     def test_waits_until_cloud_init_is_done(self):
         res = self.wait('[ "$*" = "status --wait" ] && sleep 2\n')
@@ -436,9 +446,14 @@ class WaitForCloudInitTests(unittest.TestCase):
         self.assertIn('::warning::cloud-init was still running after 1s', res.stdout)
 
     def test_a_cloud_init_that_reports_an_error_does_not_fail_the_job(self):
-        res = self.wait('exit 1\n')
-        self.assertEqual(res.returncode, 0)
-        self.assertEqual(res.stdout, '')
+        # A fast failure may cross a one-second clock tick: both diagnostics are
+        # valid, independently of wall-clock phase or runner scheduling.
+        for elapsed in (0, 1):
+            with self.subTest(elapsed=elapsed):
+                res = self.wait('exit 1\n', elapsed=elapsed)
+                self.assertEqual(res.returncode, 0)
+                expected = '' if elapsed == 0 else 'Waited 1s for cloud-init to finish before changing the apt sources.\n'
+                self.assertEqual(res.stdout, expected)
 
     def test_without_cloud_init_it_returns_at_once(self):
         res = subprocess.run(['bash', str(WAIT)], capture_output=True, text=True, timeout=10,

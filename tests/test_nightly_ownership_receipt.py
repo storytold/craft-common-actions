@@ -1,15 +1,18 @@
 import copy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'scripts'))
 import nightly_ownership_receipt as r
 import nightly_feed as n
 class ReceiptTests(unittest.TestCase):
  def setUp(self):
+  owned_temp=patch.dict(os.environ,{"RUNNER_TEMP":tempfile.gettempdir()});owned_temp.start();self.addCleanup(owned_temp.stop)
   self.env={'GITHUB_REPOSITORY':'storytold/photocraft','GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','TOOLING_REVISION':'b'*40}
   reg=json.loads((ROOT/'nightly-apps.json').read_text());self.ident,_=n.identity(reg,'photocraft','storytold/photocraft','a'*40,'1.2.3',123,1,1795190400)
   self.release={'id':7,'tag_name':self.ident['tag'],'target_commitish':'a'*40,'prerelease':True,'draft':False}
@@ -43,6 +46,27 @@ class ReceiptTests(unittest.TestCase):
      r.emit(self.ident,self.release,self.env,out,reserved_stream=stream)
     self.assertEqual(stream.tell(),0)
    self.assertFalse((out/'ownership.json').exists())
+ def test_reservation_confines_both_names_before_any_creation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);workspace=root/'workspace';workspace.mkdir();runner=root/'runner';runner.mkdir()
+   outside=root/'external';outside.mkdir();(workspace/'link').symlink_to(outside,target_is_directory=True)
+   (workspace/'dangling').symlink_to(outside/'missing',target_is_directory=True)
+   paths=[outside/'receipt',root/'workspace-lookalike'/'receipt',workspace/'..'/'escape',str(workspace)+r'\..\escape',workspace/'link'/'receipt',workspace/'dangling',workspace]
+   with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
+    for filename in ('ownership.json','ownership.pending.json'):
+     for path in paths:
+      with self.subTest(filename=filename,path=str(path)),self.assertRaises(ValueError):
+       with r.reserve(path,filename=filename):self.fail('unowned path reached file reservation')
+   self.assertEqual(list(outside.iterdir()),[])
+   self.assertFalse((root/'escape').exists());self.assertFalse((root/'workspace-lookalike').exists())
+ def test_reservation_accepts_owned_workspace_and_runner_temp(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);workspace=root/'workspace';workspace.mkdir();runner=root/'runner';runner.mkdir()
+   with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
+    for index,(base,filename) in enumerate(((workspace,'ownership.json'),(runner,'ownership.pending.json'))):
+     out=base/'nested'/str(index)
+     with r.reserve(out,filename=filename) as stream:stream.write('{}\n')
+     self.assertEqual({path.name for path in out.iterdir()},{filename})
  def test_context_and_run_drift_refuse(self):
   for changes in [{'GITHUB_SHA':'c'*40},{'GITHUB_RUN_ID':'124'},{'GITHUB_RUN_ATTEMPT':'2'},{'GITHUB_REF':'refs/pull/1/head'},{'GITHUB_REPOSITORY':'attacker/photocraft'},{'GITHUB_EVENT_NAME':'pull_request'},{'TOOLING_REVISION':'0'*40}]:
    with self.subTest(changes=changes),self.assertRaises(ValueError):r.receipt(self.ident,self.release,{**self.env,**changes})

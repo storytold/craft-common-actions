@@ -59,6 +59,17 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.assertFalse(any(call[0]=='DELETE' for call in case.api.calls))
         return result.exception.code,output.getvalue()
 
+    def test_cli_unowned_receipt_path_refuses_before_publication(self):
+        root=Path(self.temp.name);workspace=root/'workspace';workspace.mkdir();runner=root/'runner';runner.mkdir()
+        self.output=root/'unowned-output'
+        with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
+            code,message=self.run_cli(OSError('not reached'))
+        self.assertEqual(code,1)
+        self.assertIn('owned workspace or runner temp',message)
+        self.assertFalse(self.case.api.published)
+        self.assertFalse(self.output.exists())
+        self.assertFalse(any(call[0] in ('POST','PATCH','DELETE') for call in self.case.api.calls))
+
     def assert_reconciliation(self, failure, **kwargs):
         code,message=self.run_cli(failure,**kwargs)
         self.assertTrue(self.case.api.published)

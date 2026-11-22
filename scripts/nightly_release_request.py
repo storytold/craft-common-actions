@@ -117,14 +117,13 @@ def require_actor(policy, event, attempt, actor, *, signer=False, producer=None,
     n.require(event == 'workflow_dispatch' if signer else event in ('schedule', 'workflow_dispatch'),
         'run event differs')
     if not signer and event == 'schedule' and attempt == 1:
-        return True
+        return
     if actor.lower() in manual:
-        return True
+        return
     automatic_request = (signer and attempt == 1 and isinstance(producer, dict) and
         producer.get('event') == 'schedule' and type(producer.get('run_attempt')) is int and
         producer['run_attempt'] == 1)
     n.require(automatic_request and actor.lower() in automatic, reason)
-    return True
 
 
 def role(policy, row, run_id, attempt, *, signer=False, producer=None):

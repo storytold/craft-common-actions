@@ -1,5 +1,6 @@
 """Synthetic boundary regressions for the private PR315 review correction."""
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -80,6 +81,7 @@ class PublicationReceiptReviewTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.output=Path(self.temp.name)/'ownership'
+        owned_temp=patch.dict(os.environ,{'RUNNER_TEMP':self.temp.name});owned_temp.start();self.addCleanup(owned_temp.stop)
         registry=json.loads((ROOT/'nightly-apps.json').read_text())
         self.ident,_=n.identity(registry,'photocraft','storytold/photocraft','a'*40,'1.2.3',123,1,1795190400)
         self.env={'GITHUB_REPOSITORY':'storytold/photocraft','GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','TOOLING_REVISION':'b'*40}

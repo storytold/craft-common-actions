@@ -10,7 +10,7 @@ import hashlib
 import http.client
 import json
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -18,6 +18,7 @@ import tempfile
 import time
 from urllib.parse import quote
 import nightly_feed as n
+import nightly_ownership_receipt as ownership
 import nightly_policy as p
 import nightly_release_request as r
 import nightly_candidate as c
@@ -46,28 +47,8 @@ def loads(raw):
 
 
 def owned_output(path):
-    """New files may only be created beneath this job's workspace or runner temp.
-
-    CLI path strings are not authority. Fresh trusted jobs run no concurrent
-    untrusted code; reject internal symlinks as well as traversal before IO.
-    """
-    n.require(isinstance(path, (str, Path)) and str(path) and
-        not any(char in str(path) for char in ("\0", "\r", "\n")), "invalid output path")
-    path = Path(path)
-    n.require(".." not in path.parts and ".." not in PureWindowsPath(str(path)).parts, "output traversal refused")
-    path = path.absolute()
-    roots = [Path(os.environ.get("GITHUB_WORKSPACE", str(Path.cwd()))).resolve()]
-    if os.environ.get("RUNNER_TEMP"):
-        roots.append(Path(os.environ["RUNNER_TEMP"]).resolve())
-    for root in roots:
-        if path != root and path.is_relative_to(root):
-            current = root
-            for part in path.relative_to(root).parts:
-                current = current/part
-                n.require(not current.is_symlink(), "symlink output path refused")
-            n.require(path.resolve().is_relative_to(root), "output escaped owned job directory")
-            return path
-    raise n.InvalidNightly("output must be beneath the owned workspace or runner temp")
+    """Use the same job-owned output boundary as receipt reservation."""
+    return ownership.owned_output(path)
 
 
 def write_json(path, value):
