@@ -244,13 +244,21 @@ runs:
         # fresh sccache cache instead.
         VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
       run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
-          echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
-        fi
-        if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
-          echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+        if [ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then
+          # Runner pod provides WebDAV sccache (read-write on trusted runners with writer
+          # credentials, anonymous read-only on untrusted runners).
+          if [ -z "${SCCACHE_WEBDAV_KEY_PREFIX:-}" ]; then
+            echo "SCCACHE_WEBDAV_KEY_PREFIX=$VERSION" >> "$GITHUB_ENV"
+          fi
+        else
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+            echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
         fi
 
     # Data the caller's setup fetches (test corpora, fixtures), keyed on the caller's pins. The
