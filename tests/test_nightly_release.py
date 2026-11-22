@@ -59,6 +59,56 @@ class BridgeTests(unittest.TestCase):
         digest = b.stage_bundle(output, self.state, directory, manifest, claims)
         return output, digest
 
+    def test_output_capability_allows_only_workspace_and_runner_temp_descendants(self):
+        workspace, runner = self.root/"workspace", self.root/"runner"
+        workspace.mkdir(); runner.mkdir()
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner)}):
+            for root in (workspace, runner):
+                target = root/"metadata.json"
+                b.write_json(target, {"synthetic": True})
+                self.assertEqual(json.loads(target.read_text()), {"synthetic": True})
+            for target in (self.root/"outside.json", workspace, runner,
+                           workspace/".."/"escape.json", workspace/"..\\escape.json"):
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    b.write_json(target, {})
+        self.assertFalse((self.root/"outside.json").exists())
+        self.assertFalse((self.root/"escape.json").exists())
+
+    def test_output_capability_refuses_symlink_parents_even_if_the_target_is_owned(self):
+        target = self.root/"target"; target.mkdir()
+        link = self.root/"link"
+        try: link.symlink_to(target, target_is_directory=True)
+        except OSError as error: self.skipTest(str(error))
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            b.write_json(link/"metadata.json", {})
+        self.assertFalse((target/"metadata.json").exists())
+
+    def test_unowned_bundle_and_native_outputs_refuse_before_native_or_public_mutation(self):
+        directory, manifest = self.payload()
+        (_, claims), _ = self.verified(directory)
+        state = {**self.state, "unsigned": manifest, "unsigned-claims": claims}
+        workspace = self.root/"owned"; workspace.mkdir()
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(workspace)}), patch.object(b.signing, "sign_windows") as native, patch.object(b.pub, "publish_packet") as publish:
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.stage_bundle(self.root/"escaped-bundle", self.state, directory, manifest, claims)
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.native_sign(self.policy, state, directory, self.root, self.root/"escaped-signed", {})
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.publish(self.policy, state, directory, self.root/"escaped-packet", self.root/"ownership.json", None, lambda: True, self.registry)
+        native.assert_not_called(); publish.assert_not_called()
+        self.assertFalse((self.root/"escaped-bundle").exists())
+        self.assertFalse((self.root/"escaped-signed").exists())
+        self.assertFalse((self.root/"escaped-packet").exists())
+
+    def test_bundle_metadata_keys_and_asset_names_cannot_become_output_paths(self):
+        directory, manifest = self.payload()
+        (_, claims), _ = self.verified(directory)
+        for extra in ({**self.state, "../escape": {}},
+                      {**self.state, "plan": {**self.plan, "unsigned_asset": "../escape.zip"}}):
+            with self.subTest(state=extra), self.assertRaises(ValueError):
+                b.stage_bundle(self.root/"rejected-bundle", extra, directory, manifest, claims)
+        self.assertFalse((self.root/"rejected-bundle").exists())
+
     def test_identity_uses_original_main_role_without_spoofing_real_release_sha(self):
         before = copy.deepcopy(self.env)
         self.assertEqual(self.plan["identity"]["source_commit"], "a"*40)

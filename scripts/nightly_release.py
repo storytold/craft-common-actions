@@ -10,7 +10,7 @@ import hashlib
 import http.client
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
 import tempfile
@@ -44,10 +44,37 @@ def loads(raw):
         parse_constant=lambda value: (_ for _ in ()).throw(ValueError("nonfinite JSON")))
 
 
+def owned_output(path):
+    """New files may only be created beneath this job's workspace or runner temp.
+
+    CLI path strings are not authority. Fresh trusted jobs run no concurrent
+    untrusted code; reject internal symlinks as well as traversal before IO.
+    """
+    n.require(isinstance(path, (str, Path)) and str(path) and
+        not any(char in str(path) for char in ("\0", "\r", "\n")), "invalid output path")
+    path = Path(path)
+    n.require(".." not in path.parts and ".." not in PureWindowsPath(str(path)).parts, "output traversal refused")
+    path = path.absolute()
+    roots = [Path(os.environ.get("GITHUB_WORKSPACE", str(Path.cwd()))).resolve()]
+    if os.environ.get("RUNNER_TEMP"):
+        roots.append(Path(os.environ["RUNNER_TEMP"]).resolve())
+    for root in roots:
+        if path != root and path.is_relative_to(root):
+            current = root
+            for part in path.relative_to(root).parts:
+                current = current/part
+                n.require(not current.is_symlink(), "symlink output path refused")
+            n.require(path.resolve().is_relative_to(root), "output escaped owned job directory")
+            return path
+    raise n.InvalidNightly("output must be beneath the owned workspace or runner temp")
+
+
 def write_json(path, value):
     raw = (json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)+"\n").encode()
     n.require(len(raw) <= n.MAX_JSON_BYTES, "metadata exceeds bound")
-    with Path(path).open("xb") as stream:
+    path = owned_output(path)
+    n.require(n.NAME.fullmatch(path.name) and path.suffix == ".json", "metadata basename must be a JSON file")
+    with path.open("xb") as stream:
         stream.write(raw)
 
 
@@ -251,8 +278,10 @@ def verified_unsigned(policy, state, directory, *, runner=subprocess.run):
 
 
 def stage_bundle(output, state, directory, manifest, claims):
-    output = Path(output); output.mkdir(parents=True, exist_ok=False)
+    n.fields(state, {"request", "quality", "plan"}, "validator state")
     asset = state["plan"]["unsigned_asset"]
+    n.require(isinstance(asset, str) and n.NAME.fullmatch(asset), "unsafe unsigned asset basename")
+    output = owned_output(output); output.mkdir(parents=True, exist_ok=False)
     for name, value in {**state, "unsigned": manifest, "unsigned-claims": claims}.items():
         write_json(output/(name+".json"), value)
     stream, _ = n.regular_file(directory, asset)
@@ -268,7 +297,9 @@ def native_sign(policy, state, directory, source, output, environment):
     n.require(state["unsigned-claims"]["request_sha256"] == r.digest(request) and
         state["unsigned-claims"]["payload_sha256"] == state["unsigned"]["unsigned_sha256"], "unsigned claims binding differs")
     n.require(n.digest_file(directory, plan["unsigned_asset"])[1] == state["unsigned"]["unsigned_sha256"], "unsigned bytes changed")
-    output = Path(output); output.mkdir(parents=True, exist_ok=False)
+    output = owned_output(output)
+    n.require(n.NAME.fullmatch(plan["asset"]) and n.NAME.fullmatch(plan["unsigned_asset"]), "unsafe native asset basename")
+    output.mkdir(parents=True, exist_ok=False)
     env = {**environment, "NIGHTLY_WINDOWS_PUBLISHER_SUBJECT": policy["windows_publisher_subject"]}
     signing.adapter("windows-x86_64", source)
     signing.require_config("windows-x86_64", env)
@@ -293,6 +324,8 @@ def verify_final(policy, state, directory, environment):
 
 def publish(policy, state, directory, packet, ownership, api, guard, registry):
     """Only new immutable nightlies; public-but-unreconciled state is never retried."""
+    packet = owned_output(packet)
+    ownership = owned_output(ownership)
     plan = state["plan"]; prepared = plan["identity"]
     ident = {key: value for key, value in prepared.items() if key not in {"version", "ready"}}
     feed = n.build_feed_v2(registry, ident, prepared["version"], directory)
@@ -378,14 +411,14 @@ def main():
             plan, producer = unsigned_plan(api, registry, env)
             if args.mode == "main-plan":
                 n.require(args.output, "new plan output required")
-                Path(args.output).mkdir(parents=True, exist_ok=False)
-                write_json(Path(args.output)/"plan.json", plan)
+                output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
+                write_json(output/"plan.json", plan)
             elif args.mode == "main-seal":
                 n.require(args.plan and args.output and args.directory, "build handoff paths required")
                 n.require(n.bounded_json(args.plan) == plan, "producer/stable identity changed during compilation")
                 _, digest = n.digest_file(args.directory, plan["unsigned_asset"])
                 manifest = unsigned_manifest(plan, producer, digest)
-                output = Path(args.output); output.mkdir(parents=True, exist_ok=False)
+                output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
                 stream, _ = n.regular_file(args.directory, plan["unsigned_asset"])
                 with stream, (output/plan["unsigned_asset"]).open("xb") as destination:
                     shutil.copyfileobj(stream, destination, 1024*1024)
@@ -406,8 +439,8 @@ def main():
         if args.mode == "admit":
             n.require(args.output and args.producer_run_id and args.producer_run_attempt, "producer inputs and new admission directory required")
             state = initial_admission(policy, env, args.producer_run_id, args.producer_run_attempt, api, sonar, registry, now=int(time.time()))
-            Path(args.output).mkdir(parents=True, exist_ok=False)
-            for key, value in state.items(): write_json(Path(args.output)/(key+".json"), value)
+            output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
+            for key, value in state.items(): write_json(output/(key+".json"), value)
             outputs({**plan_outputs(state["plan"]), "admitted": "true", "artifact-id": state["request"]["artifact"]["id"],
                 "wrapper-sha256": state["request"]["artifact"]["wrapper_sha256"]})
             return

@@ -331,7 +331,8 @@ def _source_absence(reads, s, producer, issue):
         source = base64.b64decode(blob.get('content', '').replace('\n', ''), validate=True)
     except (ValueError, TypeError) as error:
         raise n.InvalidNightly('invalid source blob encoding') from error
-    actual = hashlib.sha1(b'blob ' + str(len(source)).encode() + b'\0' + source).hexdigest()
+    # Git's protocol-defined blob object ID, not an artifact/signature hash.
+    actual = hashlib.sha1(b'blob ' + str(len(source)).encode() + b'\0' + source, usedforsecurity=False).hexdigest()
     n.require(len(source) == blob['size'] and blob.get('sha') == actual, 'source Git blob hash/size mismatch')
     hashes = _qualified_source_hashes(source)
     n.require(issue['hash'] not in hashes, 'reviewed source hash still present in exact-C component')

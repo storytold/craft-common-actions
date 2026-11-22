@@ -369,6 +369,15 @@ class CandidateTests(unittest.TestCase):
         self.f.hook = hook
         with self.assertRaisesRegex(ValueError, 'inventory changed'): self.admit()
 
+    def test_git_object_id_compatibility_hash_is_not_treated_as_a_signing_primitive(self):
+        self.f.fixed()
+        implementation = c.hashlib
+        with patch.object(c, "hashlib", wraps=implementation) as hashing:
+            with self.assertRaisesRegex(ValueError, "qualification unavailable"):
+                self.admit()
+        hashing.sha1.assert_called_once()
+        self.assertIs(hashing.sha1.call_args.kwargs["usedforsecurity"], False)
+
     def test_missing_lifecycle_audit_late_closure_and_source_blob_mismatch_refuse(self):
         self.f.fixed(); self.f.changes['issue-2'] = []
         with self.assertRaisesRegex(ValueError, 'lifecycle audit'): self.admit()

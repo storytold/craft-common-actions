@@ -36,7 +36,12 @@ Shared tooling must match the actual immutable defining workflow revision. A sma
 fixed-purpose Git reader verifies actual checkout HEADs and reads the policy from
 the committed protected release blob, not mutable/untracked worktree JSON. Its
 Git process inherits no signing credentials or external Git configuration. The
-legacy native command allowlist is not widened. Independent job outputs bind
+legacy native command allowlist is not widened. Bridge outputs are confined to
+the job workspace or runner temporary directory; traversal, internal symlinks,
+unexpected metadata keys and unsafe asset basenames refuse before writes. Git
+blob IDs retain Git's SHA-1 protocol format explicitly as compatibility hashing,
+not as an artifact/signature primitive; artifact digests remain SHA-256.
+Independent job outputs bind
 finite metadata inventories and payload bytes across fresh runners. Transport ZIP,
 unsigned package and final signed ZIP digests have distinct fields and roles.
 
