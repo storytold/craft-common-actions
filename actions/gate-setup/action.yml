@@ -243,9 +243,23 @@ runs:
         # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
         # fresh sccache cache instead.
         VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        CACHE_VERSION: ${{ inputs.cache-version }}
       run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        # The cluster runners (ARC) set SCCACHE_WEBDAV_ENDPOINT to the shared cluster cache, which
+        # every repository's builds share: dependency compiles hit across apps. Only the trusted
+        # runner set (main) holds the write credential; the PR set reads anonymously and sccache
+        # finds writes refused, so it uses the cache read-only. The key prefix is cache-version
+        # alone, not the Cargo.toml hash, so the apps keep one store: dependencies build with
+        # --cap-lints allow and replay no warnings, and a stale workspace warning after a lints
+        # change is fixed by bumping cache-version.
+        if [ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then
+          if [ -z "${SCCACHE_WEBDAV_KEY_PREFIX:-}" ]; then
+            echo "SCCACHE_WEBDAV_KEY_PREFIX=sccache/${CACHE_VERSION}" >> "$GITHUB_ENV"
+          fi
+          exit 0
+        fi
+        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
           echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
         fi
