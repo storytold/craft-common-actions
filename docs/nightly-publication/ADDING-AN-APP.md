@@ -47,10 +47,11 @@ recipe outside the active workflow directory. In the app repo, prepare a caller
 for the shared nightly workflow with the app's real name/title and the same
 **published, independently reviewed immutable tooling SHA** in both `uses:` and
 `tooling-revision`. Private commits and placeholder pins are not deployable.
-Keep the caller's first-run guard off; do not introduce a cron while drafting.
-The recommended caller is **schedule-only**, without `workflow_dispatch`. The
-recipe uses an inert `on: {}` until the app chooses and separately approves its
-cadence; replace that map with the approved `schedule` only during activation.
+Keep the caller job's literal `if: ${{ false }}` guard and inert `on: {}` while
+drafting; do not introduce a cron. The recommended caller is **schedule-only**,
+without `workflow_dispatch`. Only at separately approved first-run activation,
+replace `on: {}` with the app's approved `schedule` **and remove the caller job's
+literal `if: ${{ false }}` guard**. Changing only the trigger leaves the job skipped.
 Automatic nightlies are opt-in, not a suite-wide switch. Measure the app's
 whole-CI duration first and leave enough time between scheduled runs.
 
@@ -135,6 +136,11 @@ The current preview does not supply that recovery route.
 Finally present exact app/shared/Launcher changes, useful validation and remaining
 settings to the user for each push/new PR. The publisher owns public writes and
 the separately approved first-run timing. Keep stable releases unchanged;
-start only the admitted target(s), verify the real publication/install result,
-then activate only the app's reviewed cadence. A manual first run is optional
-and requires the reviewed actor allowlist above, not a broad dispatch button. This guide grants no public or live activation authority.
+activate only the admitted target(s) and the app's reviewed cadence, removing
+the caller job's literal false guard as described above. For a schedule-only
+caller, wait for its **first approved scheduled run**, then verify the real
+publication/install result; that verification is not a prerequisite for giving
+the caller its first trigger. A manual first run is optional and needs a
+separately approved narrow `workflow_dispatch` route and the reviewed actor
+allowlist above, not a broad dispatch button. This guide grants no public or live
+activation authority.
