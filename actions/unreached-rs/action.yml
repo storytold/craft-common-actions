@@ -1,0 +1,46 @@
+name: Check unreached Rust files
+description: >-
+  Fail when a .rs file no module reaches (no `mod`, `#[path]` or `include!` leads to it from a crate
+  target), because it never compiles. Diff mode checks only files the change adds or modifies.
+
+inputs:
+  working-directory:
+    description: "The Cargo workspace root, relative to the checkout"
+    required: false
+    default: "."
+  mode:
+    description: "diff (files the change adds or modifies), strict (every file) or off"
+    required: false
+    default: "diff"
+  allow:
+    description: "Newline-separated globs of files that are unreached on purpose (`**` crosses directories)"
+    required: false
+    default: ""
+  base:
+    description: "Diff mode: the revision the change is compared with (default: the pull request base, or the push's previous head)"
+    required: false
+    default: ""
+  token:
+    description: "Diff mode: token for fetching the base commit when the checkout lacks it (needed in private repositories)"
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    # tomllib needs Python 3.11; runner images pinned to older ones (ubuntu-22.04) ship 3.10, and this
+    # step runs before the gate's Setup.
+    - name: Python 3.12
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      with:
+        python-version: "3.12"
+    - name: Every Rust file is reached by a module
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/unreached_rs.py
+        WORKSPACE_DIR: ${{ inputs.working-directory }}
+        MODE: ${{ inputs.mode }}
+        ALLOW: ${{ inputs.allow }}
+        UNREACHED_RS_TOKEN: ${{ inputs.token }}
+        BASE: ${{ inputs.base || github.event.pull_request.base.sha || github.event.before }}
+      run: python3 "$CHECK_PATH" --directory "$WORKSPACE_DIR" --mode "$MODE" --allow "$ALLOW" --base "$BASE"
