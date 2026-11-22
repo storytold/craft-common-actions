@@ -243,13 +243,18 @@ runs:
         # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
         # fresh sccache cache instead.
         VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        CACHE_VERSION: ${{ inputs.cache-version }}
       run: |
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         if [ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then
           # Runner pod provides WebDAV sccache (read-write on trusted runners with writer
-          # credentials, anonymous read-only on untrusted runners).
+          # credentials, anonymous read-only on untrusted runners). The prefix is cache-version
+          # alone, not the Cargo.toml hash, so every repository shares one store and dependency
+          # compiles hit across apps: dependencies build with --cap-lints allow and replay no
+          # warnings, and a stale workspace warning after a lints change is fixed by bumping
+          # cache-version.
           if [ -z "${SCCACHE_WEBDAV_KEY_PREFIX:-}" ]; then
-            echo "SCCACHE_WEBDAV_KEY_PREFIX=$VERSION" >> "$GITHUB_ENV"
+            echo "SCCACHE_WEBDAV_KEY_PREFIX=sccache/$CACHE_VERSION" >> "$GITHUB_ENV"
           fi
         else
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
