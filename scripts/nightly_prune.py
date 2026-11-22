@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import os
+import tempfile
 import zipfile
 from urllib.parse import quote, unquote
 
@@ -303,18 +304,30 @@ def save_checkpoint(path, previous, *, raw=None):
     """Atomic local receipt; caller must retain it outside temporary build roots."""
     from pathlib import Path
     destination = Path(path)
-    temporary = destination.with_name(destination.name + ".new")
     raw = encode_plan(previous) if raw is None else raw
     n.require(parse_plan_bytes(raw) == previous, "local checkpoint bytes differ from validated plan")
-    with open(temporary, "xb") as stream:
-        stream.write(raw)
-        stream.flush(); os.fsync(stream.fileno())
-    os.replace(temporary, destination)
-    descriptor = os.open(destination.parent, os.O_RDONLY)
+    temporary = None
     try:
-        os.fsync(descriptor)
+        with tempfile.NamedTemporaryFile(mode="wb", dir=destination.parent,
+                                         prefix="." + destination.name + ".", suffix=".new", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(raw)
+            stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+        descriptor = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     finally:
-        os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                # Do not hide the original failure or remove another writer's file.
+                # Its unique name cannot block a later exact-plan retry.
+                pass
 
 
 def encode_plan(previous):

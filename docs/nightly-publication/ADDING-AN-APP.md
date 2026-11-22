@@ -48,16 +48,54 @@ for the shared nightly workflow with the app's real name/title and the same
 **published, independently reviewed immutable tooling SHA** in both `uses:` and
 `tooling-revision`. Private commits and placeholder pins are not deployable.
 Keep the caller's first-run guard off; do not introduce a cron while drafting.
-The app chooses its own cadence: daily, occasional, or manual-only with
-`workflow_dispatch` and no `schedule` entry. Automatic nightlies are optional.
-If the app chooses a schedule, measure its whole-CI duration first and leave
-enough time between runs.
+The recommended caller is **schedule-only**, without `workflow_dispatch`. The
+recipe uses an inert `on: {}` until the app chooses and separately approves its
+cadence; replace that map with the approved `schedule` only during activation.
+Automatic nightlies are opt-in, not a suite-wide switch. Measure the app's
+whole-CI duration first and leave enough time between scheduled runs.
+
+The intended signing/publication owners are the existing release-managers group
+and additional people Brandon authorizes. The proposed `nightly-signing`
+environment has **no per-run reviewers**, so an admitted scheduled first attempt
+would run automatically. **Signing setup and activation are currently held.**
+The protected-path review rule was declined to preserve CI-repair access. Without
+that rule, any repository writer can edit a caller/signer or add another workflow
+using the environment; the actor allowlist below is only an **accidental-use
+guard, not a security boundary** or an enforcement of team-only control. This
+source proposal does not resolve that trust gap, create an environment, change
+permissions, or authorize provisioning/activation.
+
+If an app separately opts into `workflow_dispatch`, set `manual-actors` to a
+reviewed **literal JSON array of authorized GitHub logins in the
+caller source**, for example `'["authorized-login"]'` after verifying that person's
+actual authority. Do not use that example login, accept the array from dispatch
+inputs, derive it from `github.actor`, or treat repository write access as
+signing authority. Keep the default `'[]'` unless manual control is intended;
+it admits no manual runs or re-runs. Brandon's team changes do not automatically
+update this snapshot: review the literal list when authorized membership changes.
+This simplest allowlist route needs no membership token or broader token scope.
+
+Every manual dispatch and **every re-run, including a scheduled re-run**, checks
+`github.triggering_actor`, not the actor who originally started the run. Unknown
+or malformed context/allowlists fail closed. Each signer and the publication
+path repeats admission before credential exports or mutation, so rerunning a
+failed signing/publication job cannot reuse the original actor's admission.
+A first scheduled attempt needs no allowlist membership or per-run approval.
+Keep the same literal list throughout the caller; the producer forwards it to
+native callees. Do not enable a manual caller until this authority is reviewed.
 
 ## 4. Provision signing and a Launcher capability
 
 The repository admin/credential owner follows
 [`SIGNING-ENVIRONMENT-ADMIN-STEPS.md`](SIGNING-ENVIRONMENT-ADMIN-STEPS.md).
 Build without credentials, then sign/verify in the isolated trusted signing job.
+Before any separately authorized activation, review all credential-bearing code
+and its transitive helpers/installers, not
+just the workflow filename: Windows invokes `packaging/windows/sign.ps1`, and
+the pending Mac route invokes `packaging/macos/nightly-sign.sh` with its import
+helper. Those are trusted app code, never downloaded-payload executables. Audit
+same-name repo/org signing secrets before activation; a settings-plan review
+alone does not establish credential isolation or native signing acceptance.
 Public trust anchors are independently reviewed source configuration: Windows
 full certificate subject after native trust, Linux public key/full fingerprint,
 and Apple's team for signed/notarized Mac packages. Release downloads do not
@@ -96,6 +134,7 @@ The current preview does not supply that recovery route.
 
 Finally present exact app/shared/Launcher changes, useful validation and remaining
 settings to the user for each push/new PR. The publisher owns public writes and
-the separately approved first manual timing. Keep stable releases unchanged;
+the separately approved first-run timing. Keep stable releases unchanged;
 start only the admitted target(s), verify the real publication/install result,
-then consider a schedule. This guide grants no public or live activation authority.
+then activate only the app's reviewed cadence. A manual first run is optional
+and requires the reviewed actor allowlist above, not a broad dispatch button. This guide grants no public or live activation authority.

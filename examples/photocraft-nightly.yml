@@ -2,14 +2,10 @@
 # a real published tooling SHA, approved policy, and explicit activation authority.
 # This example outside .github/workflows is not an active caller.
 name: Dedicated Photo nightly
-on:
-  workflow_dispatch:
-    inputs:
-      force:
-        type: boolean
-        default: false
-# Photo/QA must choose a future cron from measured whole-CI duration.
-# No cron value is selected or activated here.
+# Schedule-only recommendation. This inert event map selects NO cron.
+# During separately approved activation, replace it with an app-reviewed schedule.
+# Photo/QA must choose that cadence from measured whole-CI duration.
+on: {}
 permissions: {}
 jobs:
   nightly:
@@ -36,4 +32,5 @@ jobs:
       tooling-revision: REVIEWED_PUBLISHED_TOOLING_SHA_REQUIRED
       app-name: photocraft
       app-title: PhotoCraft
-      force: ${{ inputs.force || false }}
+      force: false
+      manual-actors: '[]' # Manual runs and all re-runs stay denied until separately reviewed.

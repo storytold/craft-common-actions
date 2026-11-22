@@ -23,6 +23,10 @@ on:
       force:
         type: boolean
         default: false
+      manual-actors:
+        description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
+        type: string
+        default: '[]'
       tooling-revision:
         type: string
         required: true
@@ -45,7 +49,9 @@ jobs:
     if: >-
       inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -108,6 +114,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Prepare immutable identity and run cheap bounded quality and pause preflight
         id: prepare
         env:
@@ -139,6 +150,7 @@ jobs:
       contents: read
     uses: $/.github/workflows/nightly-windows.yml
     with:
+      manual-actors: ${{ inputs.manual-actors }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -162,6 +174,7 @@ jobs:
       contents: read
     uses: $/.github/workflows/nightly-unix.yml
     with:
+      manual-actors: ${{ inputs.manual-actors }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -177,6 +190,7 @@ jobs:
       contents: read
     uses: $/.github/workflows/nightly-unix.yml
     with:
+      manual-actors: ${{ inputs.manual-actors }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -220,7 +234,9 @@ jobs:
     if: >-
       needs.identity.outputs.ready == 'true' && needs.build-windows.result == 'success' && needs.identity.outputs.build == 'true' &&
       github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: [identity, build-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -277,6 +293,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact signer receipt ID and independent signer hash
         shell: bash
         env:
@@ -418,6 +439,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact signer receipt ID and independent signer hash
         shell: bash
         env:
@@ -551,6 +577,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact signer receipt ID and independent signer hash
         shell: bash
         env:

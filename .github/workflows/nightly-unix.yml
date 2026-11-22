@@ -5,6 +5,10 @@ name: Private pending Unix nightly artifacts
 on:
   workflow_call:
     inputs:
+      manual-actors:
+        description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
+        type: string
+        default: '[]'
       tooling-revision:
         description: "Reviewed published shared-tooling SHA; must match the app-owned publication policy"
         type: string
@@ -155,6 +159,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact numeric IDs and independent producer hashes before download
         shell: bash
         env:
@@ -318,6 +327,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact numeric IDs and independent producer hashes before download
         shell: bash
         env:
@@ -456,12 +470,15 @@ jobs:
     if: >-
       inputs.platform == 'linux-x86_64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: linux
     permissions:
       contents: read
     uses: $/.github/workflows/nightly-signing-unix.yml
     with:
+      manual-actors: ${{ inputs.manual-actors }}
       tooling-revision: ${{ inputs.tooling-revision }}
       platform: linux-x86_64
       app-name: ${{ inputs.app-name }}
@@ -476,12 +493,15 @@ jobs:
     if: >-
       inputs.platform == 'macos-aarch64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: macos
     permissions:
       contents: read
     uses: $/.github/workflows/nightly-signing-unix.yml
     with:
+      manual-actors: ${{ inputs.manual-actors }}
       tooling-revision: ${{ inputs.tooling-revision }}
       platform: macos-aarch64
       app-name: ${{ inputs.app-name }}

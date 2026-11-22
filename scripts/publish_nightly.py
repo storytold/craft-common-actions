@@ -134,7 +134,7 @@ def verify_ref(ref, ident):
               ref["object"].get("sha") == ident["source_commit"], "tag ref is not exact prepared source")
 
 
-def publish_packet(api, ident, metadata, directory, guard=None, policy=None):
+def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, on_published=None):
     """Only mutates the draft returned from OUR create call in this invocation."""
     # Legacy no-policy calls exist only for frozen offline fixture generation.
     # The sole CLI always supplies the v6 live guard and bound policy below.
@@ -177,6 +177,8 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None):
     if guard is not None: n.require(guard() is True,"final serialized publication gate refused")
     result = api.request("PATCH", f"/releases/{release_id}", {"draft": False, "prerelease": True, "make_latest": "false"})
     verify_release(result, ident, False, release_id)
+    # Preserve confirmed public state before timestamp/ref checks can fail.
+    if on_published is not None: on_published(result)
     timestamp = result.get("published_at")
     n.require(isinstance(timestamp, str), "actual publication timestamp absent")
     actual = int(dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp())
@@ -193,11 +195,14 @@ class PublishedWithoutReceipt(n.InvalidNightly):
 def publish_with_receipt(api, ident, metadata, directory, *, guard, policy, environment, ownership_directory):
     from nightly_ownership_receipt import reserve, emit
     result = None
+    def confirmed(release):
+        nonlocal result
+        result = release
     try:
         with reserve(ownership_directory) as stream:
-            result = publish_packet(api, ident, metadata, directory,guard=guard,policy=policy)
+            result = publish_packet(api, ident, metadata, directory,guard=guard,policy=policy,on_published=confirmed)
             emit(ident,result,environment,ownership_directory,reserved_stream=stream)
-    except (n.InvalidNightly, OSError, ValueError, TypeError, KeyError) as error:
+    except (n.InvalidNightly, APIError, http.client.HTTPException, OSError, ValueError, TypeError, KeyError) as error:
         if result is not None:
             raise PublishedWithoutReceipt(
                 f"release {result['id']} is public; ownership receipt reconciliation required; "
@@ -241,7 +246,7 @@ def main():
         from nightly_policy import summary
         summary('publication confirmed; ownership receipt reconciliation required',error)
         parser.exit(2,f"{error}\n")
-    except (n.InvalidNightly, APIError, OSError, ValueError, TypeError, KeyError) as error:
+    except (n.InvalidNightly, APIError, http.client.HTTPException, OSError, ValueError, TypeError, KeyError) as error:
         from nightly_policy import summary
         summary('publication refused',error)
         parser.exit(1, f"nightly publication stopped: {error}; do not update/delete/retry an existing ref/draft/tag\n")

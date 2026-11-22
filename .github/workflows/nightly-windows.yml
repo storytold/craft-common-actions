@@ -22,6 +22,10 @@ on:
       AZURE_CERT_PROFILE:
         required: false
     inputs:
+      manual-actors:
+        description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
+        type: string
+        default: '[]'
       tooling-revision:
         description: "Reviewed published shared-tooling SHA; must match the app-owned publication policy"
         type: string
@@ -73,7 +77,9 @@ jobs:
     if: >-
       inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: nightly-signing
@@ -153,7 +159,9 @@ jobs:
     if: >-
       inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: git-sources
     runs-on: windows-latest
     timeout-minutes: 90
@@ -217,6 +225,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact numeric IDs and independent producer hashes before download
         shell: bash
         env:
@@ -318,7 +331,9 @@ jobs:
     if: >-
       inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: build
     runs-on: windows-latest
     timeout-minutes: 30
@@ -384,6 +399,11 @@ jobs:
       - name: Verify exact tooling checkout
         shell: bash
         run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
       - name: Require exact numeric IDs and independent producer hashes before download
         shell: bash
         env:
