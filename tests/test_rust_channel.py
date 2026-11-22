@@ -108,6 +108,11 @@ class RustChannelTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\nchannel = """stable\n')
 
+    def test_an_unterminated_string_is_reported(self):
+        # Half a value must not become a toolchain: `tomllib` rejects this file too.
+        with self.assertRaises(SystemExit):
+            channel.parse_minimal('[toolchain]\nchannel = "nightly\n')
+
     def test_an_unterminated_array_is_reported(self):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')

@@ -138,7 +138,14 @@ def parse_minimal(text):
             i += 1
         if value.startswith('[') and not value.endswith(']'):
             raise SystemExit(f'rust-toolchain.toml: unterminated array for {key!r}')
-        table[key] = _strings(value) if value.startswith('[') else value.strip('"\'')
+        if value.startswith('['):
+            table[key] = _strings(value)
+        elif value.startswith(('"', "'")):
+            if len(value) < 2 or not value.endswith(value[0]):
+                raise SystemExit(f'rust-toolchain.toml: unterminated string for {key!r}')
+            table[key] = value[1:-1]
+        else:
+            table[key] = value
     return table
 
 
