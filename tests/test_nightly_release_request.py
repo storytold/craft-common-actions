@@ -28,14 +28,15 @@ class API:
 
 class RequestTests(unittest.TestCase):
     def setUp(self):
-        self.policy = {'schema': 'craft-nightly-release-policy/v1', 'repository': 'storytold/photocraft',
+        self.policy = {'schema': 'craft-nightly-release-policy/v2', 'repository': 'storytold/photocraft',
             'repository_id': 123, 'producer_workflow_id': 91,
             'producer_workflow_path': '.github/workflows/nightly.yml',
             'producer_tooling_revision': 'b'*40,
             'producer_workflow_ref': 'storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@'+'b'*40,
             'signer_workflow_path': '.github/workflows/nightly-sign.yml', 'signer_tooling_revision': 'c'*40,
             # Synthetic dispatcher identity is explicitly reviewed, never implicitly trusted.
-            'release_branch': 'release', 'manual_actors': ['github-actions[bot]'], 'platform': 'windows-x86_64',
+            'release_branch': 'release', 'manual_actors': [],
+            'automatic_signer_actors': ['github-actions[bot]'], 'platform': 'windows-x86_64',
             'windows_publisher_subject': 'CN=Synthetic fixture only',
             'max_age_seconds': 86400, 'candidate_policy': {'schema': 'craft-nightly-candidate-policy/v3'},
             'unsigned_artifact_name': 'nightly-unsigned-windows-x86_64', 'max_artifact_bytes': 1000000}
@@ -134,7 +135,10 @@ class RequestTests(unittest.TestCase):
     def test_manual_producer_and_all_reruns_use_current_not_original_actor(self):
         self.modify_run(100,'event','workflow_dispatch'); self.modify_run(100,'actor',{'login':'approved'})
         self.modify_run(100,'triggering_actor',{'login':'unapproved'})
-        self.policy['manual_actors']=['approved', 'github-actions[bot]']
+        self.policy['manual_actors']=['approved']
+        self.policy['automatic_signer_actors']=[]
+        self.modify_run(200,'triggering_actor',{'login':'approved'})
+        self.env['GITHUB_TRIGGERING_ACTOR']='approved'
         with self.assertRaisesRegex(ValueError,'actor not authorized'): self.invoke()
         self.modify_run(100,'triggering_actor',{'login':'Approved'})
         self.assertEqual(self.invoke()['producer']['triggering_actor'],'Approved')
@@ -160,6 +164,7 @@ class RequestTests(unittest.TestCase):
             (['github-actions[bot]'], 'unapproved', False), (['approved'], 'Approved', True)):
             with self.subTest(actors=actors,actor=actor):
                 self.policy['manual_actors']=actors
+                self.policy['automatic_signer_actors']=[]
                 self.modify_run(200,'triggering_actor',{'login':actor})
                 self.env['GITHUB_TRIGGERING_ACTOR']=actor
                 self.api.calls.clear()
@@ -182,6 +187,10 @@ class RequestTests(unittest.TestCase):
             self.invoke()
 
     def test_retained_request_rechecks_each_manual_and_rerun_role_actor(self):
+        self.policy['manual_actors']=['approved']
+        self.policy['automatic_signer_actors']=[]
+        for which in (100,200): self.modify_run(which,'triggering_actor',{'login':'approved'})
+        self.env['GITHUB_TRIGGERING_ACTOR']='approved'
         original=self.invoke()
         for name in ('producer','signer'):
             for attempt in (1,2):
@@ -189,7 +198,7 @@ class RequestTests(unittest.TestCase):
                     retained=copy.deepcopy(original)
                     retained[name].update(event='workflow_dispatch',run_attempt=attempt)
                     retained['artifact']['name']=r.artifact_name(self.policy,retained['producer'])
-                    r.request_contract(self.policy,retained)  # Explicitly allowed bot still passes.
+                    r.request_contract(self.policy,retained)  # Reviewed manual actor still passes.
                     retained[name]['triggering_actor']='unapproved'
                     with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
                         r.request_contract(self.policy,retained)
@@ -201,6 +210,115 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'current manual/re-run actor not authorized'):
             r.validate_request(self.policy,self.env,retained['producer']['run_id'],
                 retained['producer']['run_attempt'],self.api,now=self.now)
+
+    def test_v2_complete_role_actor_admission_table(self):
+        self.policy['manual_actors']=['approved']
+        self.policy['automatic_signer_actors']=['dispatcher']
+        scheduled={'event':'schedule','run_attempt':1}
+        manual={'event':'workflow_dispatch','run_attempt':1}
+        rerun={'event':'schedule','run_attempt':2}
+        cases=[(False,'schedule',1,'unlisted',None,True),
+            (False,'schedule',2,'dispatcher',None,False),
+            (False,'workflow_dispatch',1,'dispatcher',None,False),
+            (False,'workflow_dispatch',2,'dispatcher',None,False),
+            (False,'schedule',2,'Approved',None,True),
+            (False,'workflow_dispatch',1,'Approved',None,True),
+            (False,'workflow_dispatch',2,'Approved',None,True),
+            (True,'workflow_dispatch',1,'dispatcher',scheduled,True),
+            (True,'workflow_dispatch',1,'dispatcher',manual,False),
+            (True,'workflow_dispatch',1,'dispatcher',rerun,False),
+            (True,'workflow_dispatch',1,'dispatcher',None,False),
+            (True,'workflow_dispatch',2,'dispatcher',scheduled,False),
+            (True,'workflow_dispatch',1,'Approved',manual,True),
+            (True,'workflow_dispatch',2,'Approved',scheduled,True),
+            (True,'schedule',1,'Approved',scheduled,False)]
+        for signer,event,attempt,actor,producer,allowed in cases:
+            with self.subTest(signer=signer,event=event,attempt=attempt,actor=actor,producer=producer):
+                if allowed:
+                    self.assertTrue(r.require_actor(self.policy,event,attempt,actor,signer=signer,producer=producer))
+                else:
+                    with self.assertRaises(ValueError):
+                        r.require_actor(self.policy,event,attempt,actor,signer=signer,producer=producer)
+
+    def test_automatic_only_actor_cannot_dispatch_or_rerun_producer_or_rerun_signer(self):
+        original=copy.deepcopy(self.api.rows)
+        for event,attempt in (('workflow_dispatch',1),('schedule',2),('workflow_dispatch',2)):
+            self.api.rows=copy.deepcopy(original)
+            self.modify_run(100,'event',event); self.modify_run(100,'run_attempt',attempt)
+            if attempt == 2:
+                self.api.rows['/actions/runs/100/attempts/2']=copy.deepcopy(self.api.rows['/actions/runs/100'])
+            with self.subTest(event=event,attempt=attempt),self.assertRaisesRegex(ValueError,'actor not authorized'):
+                r.validate_request(self.policy,self.env,100,attempt,self.api,now=self.now)
+        self.api.rows=copy.deepcopy(original)
+        self.modify_run(200,'run_attempt',2)
+        self.api.rows['/actions/runs/200/attempts/2']=copy.deepcopy(self.api.rows['/actions/runs/200'])
+        env={**self.env,'GITHUB_RUN_ATTEMPT':'2'}
+        with self.assertRaisesRegex(ValueError,'actor not authorized'):
+            r.validate_request(self.policy,env,100,1,self.api,now=self.now)
+
+    def test_automatic_signer_requires_authenticated_initial_schedule_producer(self):
+        self.policy['manual_actors']=['approved']
+        original=copy.deepcopy(self.api.rows)
+        for event,attempt in (('workflow_dispatch',1),('schedule',2)):
+            self.api.rows=copy.deepcopy(original)
+            self.modify_run(100,'event',event); self.modify_run(100,'run_attempt',attempt)
+            self.modify_run(100,'triggering_actor',{'login':'approved'})
+            if attempt == 2:
+                self.api.rows['/actions/runs/100/attempts/2']=copy.deepcopy(self.api.rows['/actions/runs/100'])
+            with self.subTest(event=event,attempt=attempt),self.assertRaisesRegex(ValueError,'actor not authorized'):
+                r.validate_request(self.policy,self.env,100,attempt,self.api,now=self.now)
+            self.assertFalse(any('/artifacts' in path for _,path in self.api.calls))
+        self.api.rows=original
+        request=self.invoke()
+        self.assertEqual(self.api.calls[0][1],'/actions/runs/100')
+        r.request_contract(self.policy,request)
+        request['producer'].update(event='workflow_dispatch',triggering_actor='approved')
+        with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
+            r.request_contract(self.policy,request)
+        request['producer'].update(event='schedule',run_attempt=2)
+        request['artifact']['name']=r.artifact_name(self.policy,request['producer'])
+        with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
+            r.request_contract(self.policy,request)
+
+    def test_automatic_signer_without_producer_proof_is_denied_and_final_reread_repeats_it(self):
+        row=self.api.rows['/actions/runs/200']
+        with self.assertRaisesRegex(ValueError,'actor not authorized'):
+            r.role(self.policy,row,200,1,signer=True)
+        def changed(suffix):
+            if suffix == '/actions/runs/200/attempts/1' and sum(path == suffix for _,path in self.api.calls) == 2:
+                self.api.rows[suffix]['triggering_actor']={'login':'unapproved'}
+        self.api.hook=changed
+        with self.assertRaisesRegex(ValueError,'actor not authorized'): self.invoke()
+
+    def test_v2_actor_lists_are_required_explicit_bounded_disjoint_and_deny_by_default(self):
+        missing=copy.deepcopy(self.policy); del missing['automatic_signer_actors']
+        with self.assertRaises(ValueError): r.validate_policy(missing)
+        for actors in (None,{},['invalid_login'],['same','SAME'],['actor']*65):
+            policy={**self.policy,'automatic_signer_actors':actors}
+            with self.subTest(actors=actors),self.assertRaises(ValueError): r.validate_policy(policy)
+        overlap={**self.policy,'manual_actors':['GITHUB-ACTIONS[bot]']}
+        with self.assertRaisesRegex(ValueError,'overlap'): r.validate_policy(overlap)
+        self.policy['automatic_signer_actors']=[]
+        with self.assertRaisesRegex(ValueError,'actor not authorized'): self.invoke()
+
+    def test_frozen_v1_historical_contract_is_explicit_and_never_a_live_fallback(self):
+        request=self.invoke()
+        old=copy.deepcopy(self.policy); old['schema']='craft-nightly-release-policy/v1'
+        del old['automatic_signer_actors']; old['manual_actors']=['github-actions[bot]']
+        request['policy_sha256']=r.digest(old)
+        r.validate_policy(old); r.request_contract(old,request)
+        receipt=r.release_receipt(old,request,'f'*64,'1'*64,old['windows_publisher_subject'])
+        self.assertEqual(receipt['policy_sha256'],r.digest(old))
+        request['producer']['event']='workflow_dispatch'
+        r.request_contract(old,request)  # Explicit historical v1 broad manual grant stays broad.
+        self.api.calls.clear()
+        with self.assertRaisesRegex(ValueError,'live admission requires.*v2'):
+            r.validate_request(old,self.env,100,1,self.api,now=self.now)
+        self.assertEqual(self.api.calls,[])
+        with self.assertRaises(ValueError): r.validate_policy({**old,'automatic_signer_actors':[]})
+        old['manual_actors']=[]; request['policy_sha256']=r.digest(old)
+        with self.assertRaisesRegex(ValueError,'actor not authorized'): r.request_contract(old,request)
+        with self.assertRaises(ValueError): r.validate_policy({**self.policy,'schema':'unknown'})
 
     def test_missing_expired_substituted_oversized_cross_attempt_artifacts(self):
         for key,value in [('expired',True), ('expires_at','2026-11-22T00:30:00Z'),

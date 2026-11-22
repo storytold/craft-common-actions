@@ -1,7 +1,7 @@
 # Windows release-ref nightly signer source
 
 This is a separate source implementation, not activation or release qualification.
-The existing stable `release.yml`, v1/v2 policy parsers, signing adapter and public
+The existing stable `release.yml`, legacy candidate v1/v2 policy parsers, signing adapter and public
 pruning behavior are unchanged. No production policy is installed by this repository.
 PhotoCraft's prepared callers remain literally disabled until reviewed promotion.
 
@@ -16,10 +16,11 @@ PhotoCraft's prepared callers remain literally disabled until reviewed promotion
   with a constant group, `queue: max`, and cancellation off. Actual official repo,
   branch `release`, and `workflow_dispatch` context are mandatory in every job.
   The app caller's concurrency group must remain distinct from the callee's group.
-  Every `workflow_dispatch`, including the first signer attempt, requires an
-  explicit reviewed `manual_actors` entry. An automatic dispatcher's bot login
-  must be listed deliberately; bots are not implicitly trusted. Only an initial
-  scheduled producer is exempt. No real actor allowlist is installed here.
+  Live admission requires explicit role-scoped release policy v2. Reviewed
+  `manual_actors` grant manual producer/signer/rerun authority; a separate
+  `automatic_signer_actors` list grants only the first signer attempt for an
+  authenticated first scheduled producer. Neither list implicitly trusts bots.
+  No real actor allowlist is installed here.
 - A fresh Windows validator snapshots candidate quality before reading artifact
   metadata, then downloads only the authenticated producer run/attempt/artifact.
   Trusted patched `gh attestation verify` must exit successfully; its private new
@@ -33,13 +34,23 @@ PhotoCraft's prepared callers remain literally disabled until reviewed promotion
   the independently hashed signed handoff, revalidates admission and native
   signatures, attests the actual final bytes, and exclusively creates a new nightly
   tag/draft/release. It never overwrites, deletes, prunes or repairs an existing tag.
-  Confirmed public state followed by receipt/fsync/close failure is explicitly
-  unreconciled, not permission to recreate or retry. Ownership evidence is retained.
-  Restoring a local receipt does not change failed hosted run/step conclusions:
-  later publication still refuses. Before activation, a separately designed and
-  qualified authenticated reconciliation protocol is required. Meanwhile recovery
-  is a manual, release-manager-reviewed procedure, not an implemented history
-  override or permission to recreate the release.
+  Only after the packet publisher returns through every guard, asset, timestamp
+  and final-ref check can a local receipt I/O failure become a warning. Callback
+  confirmation of a public PATCH alone is insufficient: uncertain publication,
+  post-public verification failures and non-I/O bugs remain fatal. A valid v2
+  ownership receipt is written to `ownership.pending.json`, flushed, fsynced and
+  closed before atomic promotion to `ownership.json`. Failed write, flush, fsync,
+  close or promotion supplies no canonical ownership or pruning authority.
+  The workflow uploads only the canonical filename; a missing receipt warns.
+  Only this finalized-ownership upload step tolerates artifact-service failures,
+  so bookkeeping cannot fail an otherwise verified publication. Verification and
+  publication steps remain fatal. Final `GITHUB_OUTPUT`
+  I/O is likewise bookkeeping only after that verified return. This lets the
+  hosted execution finish successfully and the unchanged success-only historical
+  checks authenticate the nightly on a later run, even if its local receipt is
+  missing. No pending file becomes trusted history. Existing failed runs or runner
+  loss remain manual, release-manager-reviewed recovery; restoring a local receipt
+  cannot change hosted conclusions or authorize recreating an existing release.
 
 Shared tooling must match the actual immutable defining workflow revision. A small
 fixed-purpose Git reader verifies actual checkout HEADs and reads the policy from
@@ -53,6 +64,38 @@ not as an artifact/signature primitive; artifact digests remain SHA-256.
 Independent job outputs bind
 finite metadata inventories and payload bytes across fresh runners. Transport ZIP,
 unsigned package and final signed ZIP digests have distinct fields and roles.
+
+## Role-scoped actor policy
+
+`craft-nightly-release-policy/v2` requires both bounded, case-normalized actor
+lists; normalized overlaps refuse. Reviewed `manual_actors` intentionally grant
+both producer and signer manual authority. An automatic-only identity must never
+be unioned into that list or the unsigned caller's `manual-actors` input.
+
+| Authenticated role/event | Required authority |
+|---|---|
+| Producer `schedule`, attempt 1 | Valid current actor; existing schedule exemption |
+| Producer manual dispatch or any producer rerun | `manual_actors` only |
+| Signer dispatch, attempt 1, for a first scheduled producer | `manual_actors` or `automatic_signer_actors` |
+| Signer attempt 1 for a manual/rerun producer, or any signer rerun | `manual_actors` only |
+
+The validator authenticates the producer before applying an automatic signer
+grant, and retained requests enforce the same rule. Missing producer proof denies
+an automatic-only actor. A bot login does not identify which editable main
+workflow transported the request; every independently inadmissible request still
+refuses. Original initiators never substitute for current rerun actors.
+
+Old successful history keeps its exact committed `craft-nightly-release-policy/v1`
+fieldset, policy digest and reviewed broad manual-list semantics. It does not gain
+an automatic list. Live v1 refuses; neither a missing field nor an old schema
+silently selects v2. Request, signing and publication record versions do not change:
+their policy digests already bind the explicit policy version and lists.
+
+Before activation, Photo's non-authorizing policy example must declare v2 with
+`manual_actors: []` and `automatic_signer_actors: []`, leaving every unresolved real
+value null and every prepared caller literally off. A real dispatcher identity
+requires separate explicit review; this source installs none. No workflow input,
+token/secret scope, release environment or schedule is changed by this split.
 
 ## Candidate contract and deliberate limits
 

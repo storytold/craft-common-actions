@@ -62,6 +62,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn(required, block)
             self.assertNotIn("actions/cache", block)
             self.assertNotIn("secrets: inherit", block)
+            self.assertIn("config['schema']=='craft-nightly-release-policy/v2'", block)
+            self.assertNotIn("config['schema']=='craft-nightly-release-policy/v1'", block)
             self.assertNotIn("GITHUB_SHA:", block)
             self.assertNotIn("GITHUB_REF:", block)
 
@@ -93,9 +95,28 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertLess(publisher.index("uses: actions/attest-build-provenance@"), publisher.index("nightly_release_entry.py publish"))
         self.assertIn("- name: Publish the signed nightly and preserve ownership", publisher)
         self.assertIn("if: always()", publisher)
-        self.assertIn("path: .ownership/*", publisher)
+        self.assertIn("path: .ownership/ownership.json", publisher)
+        self.assertNotIn("path: .ownership/*", publisher)
+        self.assertNotIn("ownership.pending.json", publisher)
+        self.assertIn("if-no-files-found: warn", publisher)
         self.assertIn("include-hidden-files: true", publisher)
         self.assertNotIn("prune", publisher.lower())
+
+    def test_only_finalized_ownership_upload_is_tolerant_not_verification_or_publication(self):
+        publisher = jobs(self.release)["publish"]
+        steps = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - |\Z)", publisher)
+        tolerant = {name for name, block in steps if "continue-on-error:" in block}
+        self.assertEqual(tolerant, {"Retain only finalized ownership evidence"})
+        self.assertEqual(self.release.count("continue-on-error:"), 1)
+        upload = dict(steps)["Retain only finalized ownership evidence"]
+        self.assertIn("        continue-on-error: true\n", upload)
+        self.assertIn("path: .ownership/ownership.json", upload)
+        self.assertIn("if-no-files-found: warn", upload)
+        for name, block in steps:
+            if "nightly_release_entry.py final" in block or "nightly_release_entry.py publish" in block:
+                self.assertNotIn("continue-on-error:", block)
+                self.assertIn("if ($LASTEXITCODE -ne 0) { throw", block)
+        self.assertNotRegex(self.release, r"(?m)^    continue-on-error:")
 
     def test_no_key_ci_can_only_check_out_source_and_run_unit_tests(self):
         self.assertEqual(set(jobs(self.safe)), {"offline"})

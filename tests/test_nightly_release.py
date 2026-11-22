@@ -16,6 +16,52 @@ import nightly_release as b
 import test_nightly_release_request as fixtures
 
 
+class PacketAPI(fixtures.API):
+    """Synthetic public state, while the actual packet publisher does its checks."""
+    def __init__(self, rows):
+        super().__init__(copy.deepcopy(rows))
+        self.release = None; self.ref = None; self.assets = []; self.writes = []
+        self.bad_final_ref = False; self.bad_timestamp = False; self.post_patch_io = False
+
+    def request(self, method, suffix, data=None):
+        self.calls.append((method, suffix))
+        if method != "GET": self.writes.append((method, suffix, copy.deepcopy(data)))
+        if method == "POST" and suffix == "/releases":
+            self.release = {**data, "id": 7, "published_at": None}
+            return copy.deepcopy(self.release)
+        if method == "PATCH" and suffix == "/releases/7":
+            self.release.update(data, published_at="2026-11-21T00:00:00Z" if self.bad_timestamp else "2026-11-22T02:00:00Z")
+            return copy.deepcopy(self.release)
+        if method == "GET" and suffix.startswith("/releases/tags/"):
+            if self.release is None: raise b.pub.APIError(404)
+            return copy.deepcopy(self.release)
+        if method == "GET" and suffix.startswith("/git/ref/tags/"):
+            if self.ref is None: raise b.pub.APIError(404)
+            if self.release and self.release["draft"] is False:
+                if self.post_patch_io: raise OSError("synthetic post-PATCH ref read failed")
+                if self.bad_final_ref: return {**self.ref, "object": {"type": "commit", "sha": "f"*40}}
+            return copy.deepcopy(self.ref)
+        if method == "GET" and suffix == "/releases/7/assets?per_page=100": return copy.deepcopy(self.assets)
+        if method == "GET" and suffix == "/releases/7": return copy.deepcopy(self.release)
+        if method == "GET" and suffix == "/releases?per_page=20&page=1":
+            return [{"id": 2, "tag_name": "v1.2.3", "draft": False, "prerelease": False,
+                "published_at": "2026-11-21T00:00:00Z"}] + ([copy.deepcopy(self.release)] if self.release else [])
+        if method == "GET" and suffix in self.rows: return copy.deepcopy(self.rows[suffix])
+        raise AssertionError((method, suffix))
+
+    def create_ref(self, tag, source_commit):
+        self.writes.append(("POST", "/git/refs", {"tag": tag, "sha": source_commit}))
+        self.ref = {"ref": "refs/tags/"+tag, "object": {"type": "commit", "sha": source_commit}}
+        return copy.deepcopy(self.ref)
+
+    def upload(self, release_id, name, directory, size):
+        actual_size, digest = b.n.digest_file(directory, name)
+        assert release_id == 7 and actual_size == size
+        asset = {"id": len(self.assets)+1, "name": name, "size": size, "digest": "sha256:"+digest, "state": "uploaded"}
+        self.assets.append(asset); self.writes.append(("UPLOAD", name, size))
+        return copy.deepcopy(asset)
+
+
 class BridgeTests(unittest.TestCase):
     def setUp(self):
         self.fx = fixtures.RequestTests(); self.fx.setUp()
@@ -277,6 +323,41 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(previous["run"]["source_commit"], "a"*40)
         self.assertNotEqual(previous["run"]["source_commit"], self.request["signer"]["source_commit"])
 
+    def test_successful_historical_job_can_include_a_failed_bookkeeping_upload_only(self):
+        api, release = self.history()
+        job = api.rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"]["jobs"][0]
+        # Synthetic API state for a continued upload failure. This checks only
+        # historical admission, not hosted Actions outcome/conclusion behavior.
+        job["steps"].append({"name": "Retain only finalized ownership evidence", "conclusion": "failure"})
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        self.assertEqual(job["conclusion"], "success")
+        self.assertEqual(job["steps"][0]["conclusion"], "success")
+        self.assertEqual(api.rows["/actions/runs/200/attempts/1"]["conclusion"], "success")
+        # The exception for bookkeeping must not become a historical failure override.
+        for failed in (job, api.rows["/actions/runs/200/attempts/1"]):
+            failed["conclusion"] = "failure"
+            with self.assertRaises(ValueError):
+                b.previous_publication(api, self.registry, self.policy, self.request, [release])
+            failed["conclusion"] = "success"
+
+
+    def test_previous_v1_policy_stays_historical_under_current_v2_live_policy(self):
+        api, release = self.history()
+        old = copy.deepcopy(self.policy); old['schema'] = 'craft-nightly-release-policy/v1'
+        del old['automatic_signer_actors']; old['manual_actors'] = ['github-actions[bot]']
+        publication = json.loads(release['body'].split(b.MARKER, 1)[1])
+        publication['request']['policy_sha256'] = b.r.digest(old)
+        publication['signing'] = b.r.release_receipt(old, publication['request'], '1'*64, '2'*64,
+            old['windows_publisher_subject'])
+        release['body'] = b.MARKER+json.dumps(publication)
+        raw = json.dumps(old).encode()
+        api.rows['/contents/.github/nightly-signing-policy.json?ref='+'d'*40] = {
+            'encoding':'base64', 'size':len(raw), 'content':b.base64.b64encode(raw).decode()}
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous['identity'], self.plan['identity'])
+        self.assertEqual(self.policy['schema'], 'craft-nightly-release-policy/v2')
+
     def test_previous_publication_refuses_history_run_step_tag_digest_and_pagination_substitution(self):
         mutations = [
             lambda rows: rows["/compare/"+"d"*40+"..."+"d"*40].update(behind_by=1),
@@ -317,38 +398,162 @@ class BridgeTests(unittest.TestCase):
         native.assert_not_called()
 
     def publication_fixture(self):
-        state = {**self.state, "signing": {"synthetic": "not a native signature"}}
-        packet = self.root/"packet"; packet.mkdir(); (packet/"NIGHTLY.json").write_bytes(b"synthetic")
-        return state, packet
+        (self.root/self.plan["asset"]).write_bytes(b"synthetic signed bytes, not native qualification")
+        digest = b.n.digest_file(self.root, self.plan["asset"])[1]
+        receipt = b.r.release_receipt(self.policy, self.request, "1"*64, digest, self.policy["windows_publisher_subject"])
+        state = {**self.state, "signing": receipt}
+        return state, self.root/"packet"
 
-    def test_ownership_fsync_failure_after_confirmed_publication_never_becomes_safe_retry(self):
-        state, packet = self.publication_fixture()
-        def publish(*args, **kwargs):
-            kwargs["on_published"]({"id": 7}); return {"id": 7}
-        with patch.object(b.n, "build_feed_v2"), patch.object(b.n, "stage_feed"), patch.object(b.pub, "publish_packet", side_effect=publish), patch.object(b.os, "fsync", side_effect=OSError("synthetic fsync failure")):
-            with self.assertRaisesRegex(b.pub.PublishedWithoutReceipt, "reconcile ownership"):
-                b.publish(self.policy, state, self.root, packet, self.root/"ownership", None, lambda: True, self.registry)
+    def publication_api(self):
+        history, _ = self.history()
+        return PacketAPI(history.rows)
 
-    def test_ownership_close_failure_after_confirmed_publication_is_also_not_retryable(self):
+    def test_verified_publication_fsync_failure_warns_without_canonical_receipt_and_next_run_continues(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        ownership = self.root/"ownership"
+        with patch.object(b.os, "fsync", side_effect=OSError("synthetic fsync failure")), patch.object(b, "bookkeeping_warning") as warning:
+            result = b.publish(self.policy, state, self.root, packet, ownership, api, lambda: True, self.registry)
+        self.assertEqual(result["id"], 7); self.assertFalse(result["draft"])
+        self.assertEqual(len([write for write in api.writes if write[:2] == ("PATCH", "/releases/7")]), 1)
+        warning.assert_called_once()
+        self.assertFalse((ownership/"ownership.json").exists())
+        self.assertEqual(json.loads((ownership/"ownership.pending.json").read_text())["schema"], "craft-nightly-ownership/v2")
+        writes = copy.deepcopy(api.writes)
+        # The hosted execution can now complete successfully despite receipt I/O.
+        # Historical admission stays unchanged and never reads the pending file.
+        prior = b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
+        self.assertEqual(prior["run"]["source_commit"], "a"*40)
+        with self.assertRaises(b.UpToDate): b.publication_state(api, self.registry, self.policy, self.request)
+        newer = copy.deepcopy(self.request)
+        newer["producer"].update(run_id=101, run_number=11, source_commit="f"*40)
+        newer["signer"].update(run_id=201, run_number=21)
+        api.rows["/git/ref/heads/main"] = {"ref":"refs/heads/main", "object":{"type":"commit", "sha":"f"*40}}
+        for base in ("a"*40, "f"*40):
+            api.rows["/compare/"+base+"..."+"f"*40] = {"status":"identical" if base == "f"*40 else "ahead",
+                "behind_by":0,"ahead_by":int(base != "f"*40),"base_commit":{"sha":base},"merge_base_commit":{"sha":base}}
+        self.assertEqual(b.publication_state(api, self.registry, self.policy, newer)["identity"]["source_commit"], "f"*40)
+        self.assertEqual(api.writes, writes)
+
+    def test_receipt_write_flush_close_or_promotion_IO_failure_never_creates_canonical_authority(self):
         from contextlib import contextmanager
-        import io
+        state, _ = self.publication_fixture()
+        for failure in ("write", "flush", "close", "promotion"):
+            ownership = self.root/("ownership-"+failure)
+            @contextmanager
+            def faulty_reserve(directory, *, filename):
+                self.assertEqual(filename, "ownership.pending.json")
+                directory.mkdir()
+                raw = (directory/filename).open("x", encoding="utf-8")
+                def write(value):
+                    if failure == "write": raise OSError("synthetic write failed")
+                    return raw.write(value)
+                def flush():
+                    if failure == "flush": raise OSError("synthetic flush failed")
+                    return raw.flush()
+                stream = types.SimpleNamespace(write=write, flush=flush, fileno=raw.fileno)
+                try: yield stream
+                finally:
+                    raw.close()
+                    if failure == "close": raise OSError("synthetic close failed")
+            api = self.publication_api()
+            replace = b.os.replace
+            def promote(source, destination):
+                if failure == "promotion": raise OSError("synthetic promotion failed")
+                return replace(source, destination)
+            with self.subTest(failure=failure), patch("nightly_ownership_receipt.reserve", side_effect=faulty_reserve), patch.object(b.os, "replace", side_effect=promote), patch.object(b, "bookkeeping_warning") as warning:
+                result = b.publish(self.policy, state, self.root, self.root/("packet-"+failure), ownership, api, lambda: True, self.registry)
+            self.assertEqual(result["id"], 7); warning.assert_called_once()
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertTrue((ownership/"ownership.pending.json").exists())
+
+    def test_receipt_is_promoted_only_after_successful_fsync_and_close(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        ownership = self.root/"ownership"
+        from contextlib import contextmanager
+        import nightly_ownership_receipt
+        reserve = nightly_ownership_receipt.reserve
+        streams = []
         @contextmanager
-        def fail_close(_):
-            stream = io.StringIO(); stream.fileno = lambda: 123
-            yield stream
-            raise OSError("synthetic close failure")
-        state, packet = self.publication_fixture()
-        def publish(*args, **kwargs):
-            kwargs["on_published"]({"id": 7}); return {"id": 7}
-        with patch.object(b.n, "build_feed_v2"), patch.object(b.n, "stage_feed"), patch.object(b.pub, "publish_packet", side_effect=publish), patch.object(b.os, "fsync"), patch("nightly_ownership_receipt.reserve", side_effect=fail_close):
-            with self.assertRaises(b.pub.PublishedWithoutReceipt):
-                b.publish(self.policy, state, self.root, packet, self.root/"ownership", None, lambda: True, self.registry)
+        def observe(directory, *, filename):
+            with reserve(directory, filename=filename) as stream:
+                streams.append(stream)
+                yield stream
+        replace = b.os.replace; calls = []
+        def fsync(fd):
+            calls.append("fsync")
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertTrue((ownership/"ownership.pending.json").exists())
+        def promote(source, destination):
+            calls.append("promote")
+            # Windows rename also requires the source handle to be closed.
+            self.assertTrue(streams[0].closed)
+            self.assertEqual(Path(source), ownership/"ownership.pending.json")
+            self.assertEqual(Path(destination), ownership/"ownership.json")
+            return replace(source, destination)
+        with patch("nightly_ownership_receipt.reserve", side_effect=observe), patch.object(b.os, "fsync", side_effect=fsync), patch.object(b.os, "replace", side_effect=promote), patch.object(b, "bookkeeping_warning") as warning:
+            result = b.publish(self.policy, state, self.root, packet, ownership, api, lambda: True, self.registry)
+        self.assertEqual(result["id"], 7); self.assertEqual(calls, ["fsync", "promote"])
+        warning.assert_not_called()
+        self.assertFalse((ownership/"ownership.pending.json").exists())
+        receipt = json.loads((ownership/"ownership.json").read_text())
+        self.assertEqual(receipt["schema"], "craft-nightly-ownership/v2")
+        self.assertEqual(receipt["release_id"], 7)
+        self.assertEqual(receipt["producer"], self.request["producer"])
+        self.assertNotIn("prune", receipt)
+
+    def test_callback_confirmation_without_verified_return_stays_fatal(self):
+        state, _ = self.publication_fixture()
+        for failure in ("bad_final_ref", "bad_timestamp", "post_patch_io"):
+            api = self.publication_api(); setattr(api, failure, True)
+            ownership = self.root/("ownership-"+failure)
+            with self.subTest(failure=failure), patch.object(b, "bookkeeping_warning") as warning:
+                with self.assertRaises(b.pub.PublishedWithoutReceipt):
+                    b.publish(self.policy, state, self.root, self.root/("packet-"+failure), ownership, api, lambda: True, self.registry)
+            self.assertFalse(api.release["draft"])
+            self.assertFalse((ownership/"ownership.json").exists())
+            warning.assert_not_called()
+
+    def test_initial_and_final_guard_refusals_stay_fatal_without_canonical_receipt(self):
+        state, _ = self.publication_fixture()
+        for failed_gate in (1, 2):
+            api = self.publication_api(); calls = []
+            def guard():
+                calls.append(True)
+                if len(calls) == failed_gate: raise ValueError("synthetic guard refusal")
+                return True
+            ownership = self.root/("ownership-"+str(failed_gate))
+            with self.subTest(failed_gate=failed_gate), self.assertRaisesRegex(ValueError, "guard refusal"):
+                b.publish(self.policy, state, self.root, self.root/("packet-"+str(failed_gate)), ownership, api, guard, self.registry)
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertFalse(any(write[0] == "PATCH" for write in api.writes))
+
+    def test_non_IO_receipt_bug_is_not_downgraded_to_a_warning(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        with patch.object(b.json, "dumps", wraps=b.json.dumps) as dumps:
+            original = dumps._mock_wraps
+            def serialize(value, *args, **kwargs):
+                if isinstance(value, dict) and value.get("schema") == "craft-nightly-ownership/v2": raise ValueError("synthetic serialization bug")
+                return original(value, *args, **kwargs)
+            dumps.side_effect = serialize
+            with patch.object(b, "bookkeeping_warning") as warning, self.assertRaises(b.pub.PublishedWithoutReceipt):
+                b.publish(self.policy, state, self.root, packet, self.root/"ownership", api, lambda: True, self.registry)
+        warning.assert_not_called()
+        self.assertFalse((self.root/"ownership"/"ownership.json").exists())
 
     def test_prepublication_failure_preserves_original_failure_not_public_state(self):
         state, packet = self.publication_fixture()
-        with patch.object(b.n, "build_feed_v2"), patch.object(b.n, "stage_feed"), patch.object(b.pub, "publish_packet", side_effect=OSError("synthetic before publication")):
+        with patch.object(b.pub, "publish_packet", side_effect=OSError("synthetic before publication")):
             with self.assertRaisesRegex(OSError, "before publication"):
                 b.publish(self.policy, state, self.root, packet, self.root/"ownership", None, lambda: True, self.registry)
+
+    def test_postpublication_GITHUB_OUTPUT_IO_warns_but_non_IO_errors_still_fail(self):
+        with patch.object(b, "outputs", side_effect=OSError("synthetic output failed")), patch.object(b, "bookkeeping_warning") as warning:
+            b.publication_outputs({"id": 7})
+        warning.assert_called_once()
+        with patch.object(b, "outputs", side_effect=ValueError("synthetic programming bug")), self.assertRaises(ValueError):
+            b.publication_outputs({"id": 7})
+        with patch.object(b, "print", side_effect=OSError("synthetic diagnostic stream failed"), create=True):
+            b.bookkeeping_warning({"id": 7}, "synthetic warning", OSError("synthetic output failure"))
 
     def test_json_duplicate_keys_and_nonfinite_values_are_not_metadata(self):
         for raw in (b'{"x":1,"x":2}', b'{"x":NaN}'):

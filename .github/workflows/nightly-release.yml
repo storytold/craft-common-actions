@@ -50,7 +50,7 @@ jobs:
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v2'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,7 +128,7 @@ jobs:
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v2'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,7 +207,7 @@ jobs:
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v1'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v2'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -247,12 +247,13 @@ jobs:
         run: |
           python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256" --packet .packet --ownership .ownership
           if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
-      - name: Retain ownership evidence, including public-but-unreconciled failures
+      - name: Retain only finalized ownership evidence
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-ownership-v2-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .ownership/*
+          path: .ownership/ownership.json
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90

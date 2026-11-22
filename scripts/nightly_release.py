@@ -13,6 +13,7 @@ import os
 from pathlib import Path, PureWindowsPath
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from urllib.parse import quote
@@ -336,9 +337,9 @@ def publish(policy, state, directory, packet, ownership, api, guard, registry):
     publication = {"schema": "craft-nightly-release-publication/v1", "request": state["request"],
         "plan": plan, "quality": state["quality"], "signing": state["signing"]}
     from nightly_ownership_receipt import reserve
-    confirmed = []
+    confirmed = []; result = None
     try:
-        with reserve(ownership) as stream:
+        with reserve(ownership, filename="ownership.pending.json") as stream:
             result = pub.publish_packet(api, ident, metadata, packet, guard=guard, policy=publication,
                 policy_marker=MARKER, on_published=lambda release: confirmed.append(release))
             receipt = {"schema": "craft-nightly-ownership/v2", "app": "photocraft", "repository": ident["repository"],
@@ -347,11 +348,38 @@ def publish(policy, state, directory, packet, ownership, api, guard, registry):
                 "policy_sha256": r.digest(policy), "signing_receipt_sha256": r.digest(state["signing"])}
             stream.write(json.dumps(receipt, sort_keys=True, separators=(",", ":"))+"\n")
             stream.flush(); os.fsync(stream.fileno())
-    except (n.InvalidNightly, pub.APIError, http.client.HTTPException, OSError, ValueError, TypeError, KeyError):
+        # Only a successfully closed, fsynced pending file can become ownership
+        # authority. Incomplete bookkeeping is never uploaded under that name.
+        os.replace(ownership/"ownership.pending.json", ownership/"ownership.json")
+    except OSError as error:
+        # Assignment occurs only after publish_packet returns through every
+        # guard, asset, publication timestamp and final ref verification check.
+        # A callback-confirmed public PATCH alone is deliberately insufficient.
+        if result is not None:
+            bookkeeping_warning(result, "ownership receipt was not finalized; this attempt supplies no canonical ownership or pruning authority", error)
+            return result
+        if confirmed:
+            raise pub.PublishedWithoutReceipt("release "+str(confirmed[-1]["id"])+" is public; reconcile ownership, do not recreate/retry") from error
+        raise
+    except (n.InvalidNightly, pub.APIError, http.client.HTTPException, ValueError, TypeError, KeyError):
         if confirmed:
             raise pub.PublishedWithoutReceipt("release "+str(confirmed[-1]["id"])+" is public; reconcile ownership, do not recreate/retry")
         raise
     return result
+
+
+def bookkeeping_warning(result, detail, error):
+    try:
+        print("warning: release "+str(result["id"])+" is verified public; "+detail+": "+str(error), file=sys.stderr)
+    except OSError:
+        pass  # A broken diagnostic stream is also post-verification bookkeeping.
+
+
+def publication_outputs(result):
+    try:
+        outputs({"release-id": result["id"]})
+    except OSError as error:
+        bookkeeping_warning(result, "GITHUB_OUTPUT could not be recorded", error)
 
 
 def outputs(values):
@@ -472,7 +500,7 @@ def main():
         n.require(args.packet and args.ownership, "new packet/ownership paths required")
         guard = lambda: revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
         result = publish(policy, state, args.directory, args.packet, args.ownership, api, guard, registry)
-        outputs({"release-id": result["id"]})
+        publication_outputs(result)
     except UpToDate as error:
         if args.mode != "admit":
             parser.exit(1, str(error)+"; no further signing/publication permitted\n")

@@ -19,6 +19,30 @@ class ReceiptTests(unittest.TestCase):
    self.assertEqual(set(data),r.FIELDS);self.assertEqual(json.loads((out/'ownership.json').read_text()),data)
    self.assertEqual(set(p.name for p in out.iterdir()),{'ownership.json'})
    with self.assertRaises(ValueError):r.emit(self.ident,self.release,self.env,out)
+ def test_pending_reservation_never_creates_the_canonical_receipt(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   out=Path(tmp)/'owned'
+   with r.reserve(out,filename='ownership.pending.json') as stream:
+    stream.write('{}\n')
+    self.assertEqual(Path(stream.name),out/'ownership.pending.json')
+    self.assertFalse((out/'ownership.json').exists())
+   self.assertEqual({path.name for path in out.iterdir()},{'ownership.pending.json'})
+ def test_unreviewed_reservation_names_refuse_before_creating_output(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   for index,name in enumerate(('', '../ownership.json', '/ownership.json', 'other.json', None, [], {})):
+    out=Path(tmp)/str(index)
+    with self.subTest(name=name),self.assertRaisesRegex(ValueError,'unreviewed ownership filename'):
+     with r.reserve(out,filename=name):
+      self.fail('unreviewed filename reached reservation')
+    self.assertFalse(out.exists())
+ def test_pending_stream_cannot_be_used_as_a_legacy_canonical_receipt(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   out=Path(tmp)/'owned'
+   with r.reserve(out,filename='ownership.pending.json') as stream:
+    with self.assertRaisesRegex(ValueError,'ownership reservation differs'):
+     r.emit(self.ident,self.release,self.env,out,reserved_stream=stream)
+    self.assertEqual(stream.tell(),0)
+   self.assertFalse((out/'ownership.json').exists())
  def test_context_and_run_drift_refuse(self):
   for changes in [{'GITHUB_SHA':'c'*40},{'GITHUB_RUN_ID':'124'},{'GITHUB_RUN_ATTEMPT':'2'},{'GITHUB_REF':'refs/pull/1/head'},{'GITHUB_REPOSITORY':'attacker/photocraft'},{'GITHUB_EVENT_NAME':'pull_request'},{'TOOLING_REVISION':'0'*40}]:
    with self.subTest(changes=changes),self.assertRaises(ValueError):r.receipt(self.ident,self.release,{**self.env,**changes})

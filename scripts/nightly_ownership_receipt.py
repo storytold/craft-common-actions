@@ -26,11 +26,12 @@ def receipt(ident, release, environment):
             'run_id':int(run),'run_attempt':int(attempt),'tooling_revision':tooling}
 
 @contextmanager
-def reserve(directory):
+def reserve(directory, *, filename="ownership.json"):
+    n.require(filename in ("ownership.json", "ownership.pending.json"), "unreviewed ownership filename")
     output=Path(directory)
     n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
     output.mkdir(parents=True,exist_ok=False)
-    with (output/'ownership.json').open('x',encoding='utf-8') as stream:
+    with (output/filename).open('x',encoding='utf-8') as stream:
         yield stream
 
 

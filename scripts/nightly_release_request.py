@@ -17,11 +17,12 @@ import nightly_policy as p
 
 SHA256 = re.compile(r'[0-9a-f]{64}')
 WORKFLOW = re.compile(r'\.github/workflows/[A-Za-z0-9_-]+\.ya?ml')
-POLICY_FIELDS = {'schema', 'repository', 'repository_id', 'producer_workflow_id',
+POLICY_V1_FIELDS = {'schema', 'repository', 'repository_id', 'producer_workflow_id',
     'producer_workflow_path', 'producer_tooling_revision', 'producer_workflow_ref',
     'signer_workflow_path', 'signer_tooling_revision', 'release_branch',
     'manual_actors', 'platform', 'max_age_seconds', 'candidate_policy',
     'unsigned_artifact_name', 'max_artifact_bytes', 'windows_publisher_subject'}
+POLICY_FIELDS = POLICY_V1_FIELDS | {'automatic_signer_actors'}
 ROLE_FIELDS = {'repository', 'source_commit', 'run_id', 'run_attempt', 'run_number',
     'workflow_id', 'workflow_path', 'created_at', 'tooling_revision', 'event',
     'triggering_actor', 'run_started_at'}
@@ -59,9 +60,11 @@ def identifier(value):
 
 
 def validate_policy(policy):
-    n.fields(policy, POLICY_FIELDS, 'release policy')
-    n.require(policy['schema'] == 'craft-nightly-release-policy/v1' and
-        policy['release_branch'] == 'release' and policy['platform'] == 'windows-x86_64',
+    n.require(isinstance(policy, dict) and policy.get('schema') in
+        ('craft-nightly-release-policy/v1', 'craft-nightly-release-policy/v2'), 'unknown release policy schema')
+    n.fields(policy, POLICY_V1_FIELDS if policy['schema'] == 'craft-nightly-release-policy/v1' else POLICY_FIELDS,
+        'release policy')
+    n.require(policy['release_branch'] == 'release' and policy['platform'] == 'windows-x86_64',
         'unreviewed release policy')
     n.require(isinstance(policy['repository'], str) and
         re.fullmatch(r'storytold/[A-Za-z0-9][A-Za-z0-9._-]{0,127}', policy['repository']),
@@ -77,7 +80,7 @@ def validate_policy(policy):
     subject = policy['windows_publisher_subject']
     n.require(isinstance(subject, str) and 0 < len(subject) <= 2048 and
         not any(c in subject for c in '\r\n\0'), 'invalid protected Windows publisher subject')
-    invocation.manual_actors(json.dumps(policy['manual_actors']))
+    actor_sets(policy)
     n.require(type(policy['max_age_seconds']) is int and 0 < policy['max_age_seconds'] <= 604800,
         'invalid producer age bound')
     n.require(type(policy['max_artifact_bytes']) is int and
@@ -95,7 +98,36 @@ def repository(policy, value):
         type(value.get('id')) is int and value['id'] == policy['repository_id'], 'repository identity differs')
 
 
-def role(policy, row, run_id, attempt, *, signer=False):
+def actor_sets(policy):
+    """v1 stays manual-only; v2 requires an explicit separate automatic grant."""
+    manual = invocation.manual_actors(json.dumps(policy['manual_actors']))
+    if policy['schema'] == 'craft-nightly-release-policy/v1':
+        return manual, set()
+    n.require(policy['schema'] == 'craft-nightly-release-policy/v2', 'unknown actor policy schema')
+    automatic = invocation.manual_actors(json.dumps(policy['automatic_signer_actors']))
+    n.require(not manual & automatic, 'manual and automatic signer actor lists overlap')
+    return manual, automatic
+
+
+def require_actor(policy, event, attempt, actor, *, signer=False, producer=None,
+                  reason='current manual/re-run actor not authorized'):
+    manual, automatic = actor_sets(policy)
+    n.require(invocation.valid_login(actor), 'current triggering actor missing')
+    n.positive(attempt, 'actor run attempt')
+    n.require(event == 'workflow_dispatch' if signer else event in ('schedule', 'workflow_dispatch'),
+        'run event differs')
+    if not signer and event == 'schedule' and attempt == 1:
+        return True
+    if actor.lower() in manual:
+        return True
+    automatic_request = (signer and attempt == 1 and isinstance(producer, dict) and
+        producer.get('event') == 'schedule' and type(producer.get('run_attempt')) is int and
+        producer['run_attempt'] == 1)
+    n.require(automatic_request and actor.lower() in automatic, reason)
+    return True
+
+
+def role(policy, row, run_id, attempt, *, signer=False, producer=None):
     n.require(isinstance(row, dict), 'missing authenticated run metadata')
     for key in ('id', 'run_attempt', 'run_number', 'workflow_id'): n.positive(row.get(key), key)
     n.require(row['id'] == run_id and row['run_attempt'] == attempt, 'run/attempt differs or superseded')
@@ -121,10 +153,7 @@ def role(policy, row, run_id, attempt, *, signer=False):
             'pinned reusable producer provenance missing')
     actor = object_value(row.get('triggering_actor')).get('login')
     n.require(invocation.valid_login(actor), 'current triggering actor missing')
-    actors = invocation.manual_actors(json.dumps(policy['manual_actors']))
-    # Only a producer's initial schedule is automatic; dispatch bots are not implicit authority.
-    if attempt > 1 or event == 'workflow_dispatch':
-        n.require(actor.lower() in actors, 'current manual/re-run actor not authorized')
+    require_actor(policy, event, attempt, actor, signer=signer, producer=producer)
     created = row.get('created_at'); started = row.get('run_started_at')
     n.require(p.timestamp(started) >= p.timestamp(created), 'run timestamps differ')
     return {'repository': policy['repository'], 'source_commit': commit(row.get('head_sha')),
@@ -135,11 +164,11 @@ def role(policy, row, run_id, attempt, *, signer=False):
         'event': event, 'triggering_actor': actor}
 
 
-def read_role(api, policy, run_id, attempt, *, signer=False):
+def read_role(api, policy, run_id, attempt, *, signer=False, producer=None):
     # Root is current attempt authority; attempts endpoint is exact-attempt evidence.
-    root = role(policy, api.request('GET', f'/actions/runs/{run_id}'), run_id, attempt, signer=signer)
+    root = role(policy, api.request('GET', f'/actions/runs/{run_id}'), run_id, attempt, signer=signer, producer=producer)
     exact = role(policy, api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}'),
-        run_id, attempt, signer=signer)
+        run_id, attempt, signer=signer, producer=producer)
     n.require(root == exact, 'root/exact-attempt run metadata changed')
     return root
 
@@ -182,12 +211,14 @@ def artifact(policy, row, producer, now):
 def validate_request(policy, environment, producer_run_id, producer_run_attempt, api, *, now, before_artifacts=None):
     """Authenticate fixed-repository GET metadata; inputs never select ref/code/URL.
 
-    Every dispatch/re-run actor must be explicitly reviewed; only an initial
-    scheduled producer is exempt. No bot identity is implicitly authorized.
+    Manual dispatch/re-run authority is separate from first-attempt signer-only
+    automatic transport of an authenticated first scheduled producer. No bot is implicit.
     No artifact download occurs here. The orchestrator takes candidate quality's
     early snapshot before it downloads anything, then checks both boundaries.
     """
-    validate_policy(policy); n.positive(now, 'current UTC epoch')
+    validate_policy(policy)
+    n.require(policy['schema'] == 'craft-nightly-release-policy/v2', 'live admission requires role-scoped release policy v2')
+    n.positive(now, 'current UTC epoch')
     producer_id, producer_attempt = identifier(producer_run_id), identifier(producer_run_attempt)
     n.require(environment.get('GITHUB_REPOSITORY') == policy['repository'] and
         environment.get('GITHUB_REPOSITORY_ID') == str(policy['repository_id']) and
@@ -200,10 +231,11 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
         'release tooling pin differs')
     signer_id, signer_attempt = identifier(environment.get('GITHUB_RUN_ID')), identifier(environment.get('GITHUB_RUN_ATTEMPT'))
     n.require(signer_id != producer_id, 'producer and signer must be different runs')
-    signer = read_role(api, policy, signer_id, signer_attempt, signer=True)
+    # Producer authority must be established before any automatic signer grant.
+    producer = read_role(api, policy, producer_id, producer_attempt)
+    signer = read_role(api, policy, signer_id, signer_attempt, signer=True, producer=producer)
     n.require(signer['source_commit'] == commit(environment.get('GITHUB_SHA')) and
         signer['triggering_actor'] == environment.get('GITHUB_TRIGGERING_ACTOR'), 'actual signer context differs')
-    producer = read_role(api, policy, producer_id, producer_attempt)
     n.require(0 <= now-p.timestamp(producer['created_at']) <= policy['max_age_seconds'] and
         p.timestamp(signer['run_started_at']) <= now, 'producer stale or run timestamp future')
     active(api, producer); active(api, signer)
@@ -233,7 +265,7 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     n.require(artifact(policy, api.request('GET', f"/actions/artifacts/{chosen['id']}"), producer, now) == chosen,
         'live artifact substituted')
     n.require(read_role(api, policy, producer_id, producer_attempt) == producer and
-        read_role(api, policy, signer_id, signer_attempt, signer=True) == signer, 'admission changed during reads')
+        read_role(api, policy, signer_id, signer_attempt, signer=True, producer=producer) == signer, 'admission changed during reads')
     active(api, producer); active(api, signer)
     p.require_newest_run(api, {'run': {**producer, 'id': producer_id,
         'attempt': producer_attempt, 'number': producer['run_number']}})
@@ -260,11 +292,10 @@ def request_contract(policy, request):
         producer['workflow_id'] == policy['producer_workflow_id'] and
         producer['event'] in ('schedule', 'workflow_dispatch') and
         signer['event'] == 'workflow_dispatch', 'two distinct approved roles required')
-    actors = invocation.manual_actors(json.dumps(policy['manual_actors']))
     for name, row in (('producer', producer), ('signer', signer)):
         n.require(p.timestamp(row['created_at']) <= p.timestamp(row['run_started_at']), 'role timestamps differ')
-        if row['run_attempt'] > 1 or row['event'] == 'workflow_dispatch':
-            n.require(row['triggering_actor'].lower() in actors, 'role current actor not authorized')
+        require_actor(policy, row['event'], row['run_attempt'], row['triggering_actor'],
+            signer=name == 'signer', producer=producer, reason='role current actor not authorized')
     item = request['artifact']; n.fields(item, ARTIFACT_FIELDS, 'artifact binding')
     n.positive(item['id'], 'artifact ID'); n.positive(item['size_in_bytes'], 'artifact bytes')
     n.require(item['name'] == artifact_name(policy, producer) and
