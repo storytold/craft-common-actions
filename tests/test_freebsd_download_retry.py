@@ -32,7 +32,7 @@ calls = p.read_text().splitlines() if p.exists() else []
 args = sys.argv[1:]
 with p.open('a') as f: f.write(json.dumps(args) + '\\n')
 dest = pathlib.Path(args[args.index('-o') + 1])
-assert not dest.exists(), 'previous partial was not removed'
+# A failed attempt leaves dest so the next curl can resume with -C -.
 dest.write_text('partial' if len(calls) < int(os.environ['FAILURES']) else 'complete')
 sys.exit(28 if len(calls) < int(os.environ['FAILURES']) else 0)
 ''')
@@ -65,7 +65,8 @@ sys.exit(28 if len(calls) < int(os.environ['FAILURES']) else 0)
         self.assertEqual(len(calls), 3)
         self.assertEqual(sleeps, ['5', '10'])
         for args in calls:
-            self.assertEqual(args[:9], ['-fL', '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '20', '--max-time', '180'])
+            self.assertEqual(args[:9], ['-fL', '--proto', '=https', '--proto-redir', '=https', '--connect-timeout', '20', '--max-time', '600'])
+            self.assertEqual(args[9:11], ['-C', '-'])
             self.assertEqual(args[-1], 'https://download.freebsd.org/fixture')
         self.assertEqual(content, 'complete')
         self.assertFalse(partial)
