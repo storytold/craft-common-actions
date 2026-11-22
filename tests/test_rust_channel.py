@@ -71,6 +71,28 @@ class RustChannelTests(unittest.TestCase):
         path = self.file('[toolchain]\ntargets = "wasm32-unknown-unknown"\n')
         self.assertEqual(channel.resolve(path, 'stable', '', '')[1], 'wasm32-unknown-unknown')
 
+    def test_the_table_name_may_be_spaced_or_quoted(self):
+        for header in ('[ toolchain ]', '["toolchain"]', "['toolchain']"):
+            self.assertEqual(channel.parse_minimal(f'{header}\nchannel = "1.100.0"\n')['channel'], '1.100.0', header)
+        # A nested table and an array table are other tables.
+        for header in ('[toolchain.x]', '[[toolchain]]'):
+            self.assertEqual(channel.parse_minimal(f'{header}\nchannel = "1.100.0"\n'), {}, header)
+
+    def test_a_quoted_key_is_read(self):
+        self.assertEqual(channel.parse_minimal('[toolchain]\n"channel" = "1.100.0"\n')['channel'], '1.100.0')
+
+    def test_a_multi_line_string_keeps_its_lines(self):
+        # TOML writes a value over several lines like this; the reader must not store it empty.
+        text = '[toolchain]\nchannel = """\nnightly-2024-01-01"""\n'
+        self.assertEqual(channel.parse_minimal(text)['channel'], 'nightly-2024-01-01')
+        if channel.tomllib is not None:
+            self.assertEqual(channel.tomllib.loads(text)['toolchain']['channel'], 'nightly-2024-01-01')
+        literal = "[toolchain]\nchannel = '''\nnightly-2024-01-01'''\n"
+        self.assertEqual(channel.parse_minimal(literal)['channel'], 'nightly-2024-01-01')
+
+    def test_a_hash_inside_a_multi_line_string_is_content(self):
+        self.assertEqual(channel.parse_minimal('[toolchain]\nchannel = """\nnightly#1"""\n')['channel'], 'nightly#1')
+
     def test_an_unterminated_array_is_reported(self):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')

@@ -5,6 +5,7 @@ rustup itself reads, so the job installs what cargo will use) and merges the cal
 and components. Writes `toolchain`, `targets` and `components` (comma-separated) to GITHUB_OUTPUT.
 """
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -14,6 +15,10 @@ except ModuleNotFoundError:
     # Python 3.11 added `tomllib`; the ubuntu-22.04 runners still ship 3.10, and a release job that
     # installs nothing because of it fails later in a way that reads like a code problem.
     tomllib = None
+
+# `[toolchain]`, however the table's name is spelled. A nested table (`[toolchain.x]`) and an array
+# table (`[[toolchain]]`) are not this table.
+HEADER = re.compile(r'\[\s*(?:toolchain|"toolchain"|\'toolchain\')\s*\]')
 
 
 def merged(*lists):
@@ -54,35 +59,58 @@ def _strings(value):
     return [part.strip().strip('"\'') for part in value.strip().strip('[]').split(',') if part.strip().strip('"\'')]
 
 
+def _assignment(line):
+    """`key = value` as written, the key without its quotes, or `None` for a line that is neither."""
+    if '=' not in line:
+        return None
+    key, _, value = line.partition('=')
+    return key.strip().strip('"\''), value.strip()
+
+
 def parse_minimal(text):
     """`[toolchain]` without a TOML parser: the keys this action reads, and nothing else.
 
-    Enough for the file rustup writes and people edit by hand: `channel = "1.100.0"`, and
-    `components` and `targets` as arrays of strings, on one line or spread over several. Anything it
-    cannot read is reported, never guessed at.
+    Enough for the file rustup writes and people edit by hand: `channel` as a string, `components`
+    and `targets` as arrays of strings on one line or several, the table's name in any spelling, and
+    keys quoted or bare. A multi-line string keeps its lines; its escape sequences are not decoded,
+    which no channel, target or component name needs. Anything else it cannot read is reported,
+    never guessed at.
     """
     table = {}
-    lines = [_without_comment(line).strip() for line in text.splitlines()]
+    lines = text.splitlines()
     inside = False
     i = 0
     while i < len(lines):
-        line = lines[i]
+        line = _without_comment(lines[i]).strip()
         i += 1
         if not line:
             continue
         if line.startswith('['):
-            inside = line == '[toolchain]'
+            inside = bool(HEADER.fullmatch(line))
             continue
-        if not inside or '=' not in line:
+        if not inside:
             continue
-        key, _, value = line.partition('=')
-        value = value.strip()
+        assignment = _assignment(line)
+        if assignment is None:
+            continue
+        key, value = assignment
+        opener = next((d for d in ('"""', "'''") if value.startswith(d)), None)
+        if opener:
+            parts = [value[len(opener):]]
+            while not parts[-1].rstrip().endswith(opener) and i < len(lines):
+                parts.append(lines[i])
+                i += 1
+            body = '\n'.join(parts)
+            if body.rstrip().endswith(opener):
+                body = body.rstrip()[: -len(opener)]
+            table[key] = body[1:] if body.startswith('\n') else body
+            continue
         while value.startswith('[') and not value.endswith(']') and i < len(lines):
-            value = f'{value} {lines[i]}'
+            value = f'{value} {_without_comment(lines[i]).strip()}'
             i += 1
         if value.startswith('[') and not value.endswith(']'):
-            raise SystemExit(f'rust-toolchain.toml: unterminated array for {key.strip()!r}')
-        table[key.strip()] = _strings(value) if value.startswith('[') else value.strip('"\'')
+            raise SystemExit(f'rust-toolchain.toml: unterminated array for {key!r}')
+        table[key] = _strings(value) if value.startswith('[') else value.strip('"\'')
     return table
 
 
