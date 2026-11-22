@@ -17,15 +17,78 @@ jobs:
     name: eval
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      NIX_INSTALLER_URL: https://install.determinate.systems/nix-installer/stable/x86_64-linux
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # Keep the stable installer channel. Supplying the binary via local-root
+      # bypasses the installer's built-in cache, which saves on every miss.
+      - name: Resolve Nix installer cache key
+        id: nix-key
+        shell: bash
+        run: |
+          if etag=$(curl -fsSLI --proto '=https' --proto-redir '=https' --retry 3 \
+            --output /dev/null --write-out '%header{etag}' "$NIX_INSTALLER_URL") && [[ -n "$etag" ]]; then
+            digest=$(printf '%s\n%s' "$NIX_INSTALLER_URL" "$etag" | sha256sum)
+            printf 'key=nix-installer-v1-%s\n' "${digest%% *}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore Nix installer
+        if: steps.nix-key.outputs.key != ''
+        id: nix-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/craft-nix-installer/nix-installer-x86_64-linux
+          key: ${{ steps.nix-key.outputs.key }}
+
+      - name: Prepare Nix installer
+        id: nix-binary
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.nix-cache.outputs.cache-hit }}
+          CACHE_KEY: ${{ steps.nix-key.outputs.key }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          binary="$RUNNER_TEMP/craft-nix-installer/nix-installer-x86_64-linux"
+          if [[ "$CACHE_HIT" != true || ! -f "$binary" || -L "$binary" ]]; then
+            mkdir -p -- "${binary%/*}"
+            rm -f -- "$binary"
+            etag=$(curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 \
+              --output "$binary" --write-out '%header{etag}' "$NIX_INSTALLER_URL")
+            # A release can change between HEAD and GET. Install it, but only
+            # save when the binary matches the cache key from HEAD.
+            if [[ -n "$etag" && "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]]; then
+              digest=$(printf '%s\n%s' "$NIX_INSTALLER_URL" "$etag" | sha256sum)
+              if [[ "nix-installer-v1-${digest%% *}" == "$CACHE_KEY" ]]; then
+                printf 'save=true\n' >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          fi
+          chmod 0755 -- "$binary"
+
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          local-root: ${{ runner.temp }}/craft-nix-installer
+
+      - name: Save Nix installer
+        if: >-
+          steps.nix-binary.outputs.save == 'true' &&
+          steps.nix-cache.outputs.cache-hit != 'true' &&
+          github.event_name != 'pull_request' &&
+          github.event_name != 'pull_request_target'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/craft-nix-installer/nix-installer-x86_64-linux
+          key: ${{ steps.nix-key.outputs.key }}
+
       - name: Check flake evaluation
         shell: bash
         env:
