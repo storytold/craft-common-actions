@@ -256,6 +256,15 @@ runs:
           if [ -z "${SCCACHE_WEBDAV_KEY_PREFIX:-}" ]; then
             echo "SCCACHE_WEBDAV_KEY_PREFIX=sccache/$CACHE_VERSION" >> "$GITHUB_ENV"
           fi
+          # sccache picks the GitHub Actions backend before WebDAV whenever SCCACHE_GHA_VERSION
+          # is set, so a caller's value would win; an empty version and `false` turn it off.
+          echo "SCCACHE_GHA_VERSION=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+          # A run that doesn't save caches only reads, on any runner: the server refuses writes
+          # without the writer credential, and sccache doesn't attempt them.
+          if [ -z "${SCCACHE_WEBDAV_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_WEBDAV_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
         else
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
