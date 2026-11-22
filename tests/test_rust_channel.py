@@ -3,10 +3,25 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'actions/rust-channel'))
 import channel  # noqa: E402
+
+FULL = '''# the release jobs install what cargo uses
+[toolchain]
+channel = "1.100.0"
+components = [
+  "clippy",   # the lints the gate runs
+  "rustfmt",
+]
+targets = ["wasm32-unknown-unknown", 'aarch64-apple-darwin']
+profile = "minimal"
+
+[other]
+channel = "ignored"
+'''
 
 
 class RustChannelTests(unittest.TestCase):
@@ -30,6 +45,35 @@ class RustChannelTests(unittest.TestCase):
 
     def test_a_file_without_a_channel_keeps_the_callers_toolchain(self):
         self.assertEqual(channel.resolve(self.file('[toolchain]\nprofile = "minimal"\n'), 'stable', '', '')[0], 'stable')
+
+    def test_the_fallback_reader_reads_a_file_spread_over_lines(self):
+        # The ubuntu-22.04 runners run Python 3.10, which has no `tomllib`: the release jobs must
+        # still install the file's toolchain.
+        self.assertEqual(channel.parse_minimal(FULL)['channel'], '1.100.0')
+        self.assertEqual(channel.parse_minimal(FULL)['components'], ['clippy', 'rustfmt'])
+        self.assertEqual(channel.parse_minimal(FULL)['targets'], ['wasm32-unknown-unknown', 'aarch64-apple-darwin'])
+
+    @unittest.skipIf(channel.tomllib is None, 'no tomllib to compare against')
+    def test_the_fallback_reader_agrees_with_tomllib(self):
+        expected = channel.tomllib.loads(FULL)['toolchain']
+        for key in ('channel', 'components', 'targets', 'profile'):
+            self.assertEqual(channel.parse_minimal(FULL)[key], expected[key], key)
+
+    def test_without_tomllib_the_resolution_still_reads_the_file(self):
+        path = self.file(FULL)
+        with mock.patch.object(channel, 'tomllib', None):
+            self.assertEqual(
+                channel.resolve(path, 'stable', 'wasm32-unknown-unknown', ''),
+                ('1.100.0', 'wasm32-unknown-unknown,aarch64-apple-darwin', 'clippy,rustfmt'),
+            )
+
+    def test_a_key_written_as_one_string_is_one_entry(self):
+        path = self.file('[toolchain]\ntargets = "wasm32-unknown-unknown"\n')
+        self.assertEqual(channel.resolve(path, 'stable', '', '')[1], 'wasm32-unknown-unknown')
+
+    def test_an_unterminated_array_is_reported(self):
+        with self.assertRaises(SystemExit):
+            channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')
 
 
 if __name__ == '__main__':
