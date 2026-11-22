@@ -1,6 +1,5 @@
 """No HTTP, token, package, temp file or production registry writes are performed."""
 import copy
-import hashlib
 import importlib.util
 import io
 import json
@@ -269,10 +268,12 @@ class V4ReservationCases(unittest.TestCase):
         self.assertFalse(any(c[0] == "DELETE" or (c[0] == "PATCH" and "git/refs" in c[1]) for c in calls))
 
     def test_stable_release_workflow_bytes_remain_unchanged(self):
-        # v6 intentionally changes publisher/feed policy; freezing those old
-        # hashes would prohibit the successor. Their reservation behavior is
-        # covered above. The existing stable release callee stays byte-frozen.
-        self.assertEqual(hashlib.sha256((ROOT / ".github/workflows/release.yml").read_bytes()).hexdigest(),
-                         "83a8ddd749d3637ac64a3cc46c69f4be4ce1391c343ea28c0acc7b95d1fa58c5")
+        # Protect the current stable workflow during nightly publication, not a
+        # historical revision: unrelated upstream stable fixes must remain valid.
+        workflow = ROOT / ".github/workflows/release.yml"
+        before = workflow.read_bytes()
+        self.case.publish()
+        self.assertTrue(self.api.published)
+        self.assertEqual(workflow.read_bytes(), before)
 
 if __name__ == "__main__": unittest.main()

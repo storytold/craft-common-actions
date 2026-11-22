@@ -45,8 +45,12 @@ Sonar URL/check IDs or treat skipped/unknown checks as successful coverage.
 Use [`examples/photocraft-nightly.yml`](../../examples/photocraft-nightly.yml) as a
 recipe outside the active workflow directory. In the app repo, prepare a caller
 for the shared nightly workflow with the app's real name/title and the same
-**published, independently reviewed immutable tooling SHA** in both `uses:` and
-`tooling-revision`. Private commits and placeholder pins are not deployable.
+**published, independently reviewed immutable tooling SHA** in `uses:`,
+`tooling-revision`, and the app publication policy's `tooling_revision`. For a v2
+policy, its canonical digest must also match the independently reviewed
+`NIGHTLY_REVIEWED_POLICY_SHA256` repository variable before a run; follow the
+baseline policy's review/bootstrap procedure, not a candidate-computed trust root.
+Private commits and placeholder pins are not deployable.
 Keep the caller job's literal `if: ${{ false }}` guard and inert `on: {}` while
 drafting; do not introduce a cron. The recommended caller is **schedule-only**,
 without `workflow_dispatch`. Only at separately approved first-run activation,
@@ -149,12 +153,25 @@ appropriate to the separately approved scope:
   `publish-nightly`; caller activation alone cannot create a public nightly.
   Verify the staged packet is available, not publication or Launcher installation.
 - **Live publication:** only after a separately reviewed and approved shared
-  workflow change admits attestation/publication, pin that actual published
-  revision in both `uses:` and `tooling-revision`. The current literal-false
-  `attest-nightly`/`publish-nightly` gates must be addressed by that change;
-  removing the caller guard is not enough. Complete the native/signing/quality
+  workflow change admits attestation/publication. If staging used SHA A and that
+  approved change produces SHA B, publish/review B first, then update **all three
+  bindings together**: caller `uses: ...@B`, caller `tooling-revision: B`, and
+  `.github/nightly-publication-policy.json`'s `tooling_revision: B`. Keep the caller
+  disabled while preparing this transition. For v2, independently review the
+  complete updated policy/fresh baseline, recompute its canonical digest and have
+  the authorized admin update `NIGHTLY_REVIEWED_POLICY_SHA256` through the
+  separately approved setup procedure before starting the new producer. Merely
+  calculating a digest from candidate JSON is not approval.
+  Start a **fresh B-bound producer run** with its own identity/version/artifacts;
+  do not reuse or relabel A's staged packet. Both bootstrap and later validation
+  require agreement with the actual defining shared-workflow revision. The current
+  literal-false `attest-nightly`/`publish-nightly` gates must be addressed by the
+  approved shared change, not just the caller guard. Complete native/signing/quality
   prerequisites before expecting and verifying the real publication/install result.
-  This guide neither makes that shared change nor authorizes it.
+  Before any later retention activation, review the pruning policy's historical
+  tooling allowlist for B too, retaining pins needed to authenticate existing owned
+  releases. This guide performs none of these source/settings changes and grants
+  no activation authority.
 
 The post-publication prune-plan step is independently hard-disabled. It is not
 needed to create a release and must not be enabled just to make publication
