@@ -532,6 +532,10 @@ jobs:
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: ${{ inputs.nfpm-version }}
+      # Ubuntu 22.04 defaults to Python 3.10, but rust-channel uses tomllib.
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.11"
       - id: rust
         uses: storytold/craft-common-actions/actions/rust-channel@main
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -1342,7 +1346,18 @@ jobs:
   release:
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
+    # A macOS failure, including one before the runner starts, can leave a partial draft.
+    if: >-
+      ${{ !inputs.dry-run && !cancelled() &&
+          needs.version.result == 'success' &&
+          needs.windows.result != 'failure' &&
+          needs.linux.result != 'failure' &&
+          needs.linux-riscv64.result != 'failure' &&
+          needs.flatpak.result != 'failure' &&
+          needs.arch.result != 'failure' &&
+          needs.freebsd.result != 'failure' &&
+          needs.web.result != 'failure' &&
+          needs.server.result != 'failure' }}
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
     environment: ${{ !inputs.dry-run && 'release' || '' }}
@@ -1353,6 +1368,9 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      - name: Report missing macOS assets
+        if: needs.macos.result == 'failure'
+        run: echo "::warning::The macOS job failed. Review the draft for missing macOS assets."
       - uses: storytold/craft-common-actions/actions/draft-release@main
         with:
           version: ${{ needs.version.outputs.version }}
@@ -1361,7 +1379,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
       - name: Publish the release
-        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release' && needs.macos.result != 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
