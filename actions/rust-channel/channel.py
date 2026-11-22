@@ -67,9 +67,33 @@ def _without_comment(line):
     return line
 
 
-def _strings(value):
-    """The strings of a TOML array, written on one line or more."""
-    return [part.strip().strip('"\'') for part in value.strip().strip('[]').split(',') if part.strip().strip('"\'')]
+def _closes(value, quote):
+    """Does `value` end with a closing `quote` that is not escaped?
+
+    A backslash escapes in a basic string (`"`), where an odd run of them before the quote leaves
+    the string open; a literal string (`'`) has no escapes.
+    """
+    if len(value) < 2 or not value.endswith(quote):
+        return False
+    if quote == "'":
+        return True
+    return (len(value) - 1 - len(value[:-1].rstrip('\\'))) % 2 == 0
+
+
+def _strings(value, key):
+    """The strings of a TOML array, written on one line or more, each one closed."""
+    out = []
+    for part in value.strip().strip('[]').split(','):
+        item = part.strip()
+        if not item:
+            continue
+        if item[0] in '"\'':
+            if not _closes(item, item[0]):
+                raise SystemExit(f'rust-toolchain.toml: unterminated string in {key!r}')
+            out.append(item[1:-1])
+        else:
+            out.append(item)
+    return out
 
 
 def _assignment(line):
@@ -139,9 +163,9 @@ def parse_minimal(text):
         if value.startswith('[') and not value.endswith(']'):
             raise SystemExit(f'rust-toolchain.toml: unterminated array for {key!r}')
         if value.startswith('['):
-            table[key] = _strings(value)
+            table[key] = _strings(value, key)
         elif value.startswith(('"', "'")):
-            if len(value) < 2 or not value.endswith(value[0]):
+            if not _closes(value, value[0]):
                 raise SystemExit(f'rust-toolchain.toml: unterminated string for {key!r}')
             table[key] = value[1:-1]
         else:

@@ -113,6 +113,22 @@ class RustChannelTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\nchannel = "nightly\n')
 
+    def test_a_quote_escaped_by_a_backslash_does_not_close_the_string(self):
+        with self.assertRaises(SystemExit):
+            channel.parse_minimal('[toolchain]\nchannel = "nightly\\"\n')
+        # A literal string has no escapes, so the same shape closes it.
+        self.assertEqual(channel.parse_minimal("[toolchain]\nchannel = 'nightly\\'\n")['channel'], 'nightly\\')
+
+    def test_an_array_element_that_never_closes_is_reported(self):
+        with self.assertRaises(SystemExit):
+            channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown", "aarch64-apple-darwin]\n')
+
+    def test_an_array_may_end_with_a_comma(self):
+        self.assertEqual(
+            channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown", "aarch64-apple-darwin",]\n')['targets'],
+            ['wasm32-unknown-unknown', 'aarch64-apple-darwin'],
+        )
+
     def test_an_unterminated_array_is_reported(self):
         with self.assertRaises(SystemExit):
             channel.parse_minimal('[toolchain]\ntargets = ["wasm32-unknown-unknown"\n')
