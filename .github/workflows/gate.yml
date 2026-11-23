@@ -208,6 +208,16 @@ on:
         type: boolean
         required: false
         default: true
+      unreached-rs-mode:
+        description: "The lint legs' check that no `.rs` file is unreached by every `mod`, `#[path]` and `include!` (such a file never compiles). `diff` fails when the change adds or modifies one, `strict` on any, `off` skips the check. Runs on the Linux lint leg only, before setup"
+        type: string
+        required: false
+        default: "diff"
+      unreached-rs-allow:
+        description: "Newline-separated globs of `.rs` files that are unreached on purpose (fixtures, generated files), matched against the repository-relative path; `**` crosses directories. The default covers fixture trees; a repository that sets this input lists them itself"
+        type: string
+        required: false
+        default: "**/fixtures/**"
       cold-build:
         description: "With cache-workspace-crates: restore no dependency cache and build everything from source; where the cache saves, the saving leg still writes a fresh entry (a nightly cold run is the safety net for the restored mtimes, and it starts the rolling entry afresh)"
         type: boolean
@@ -615,6 +625,13 @@ jobs:
     steps:
       - *harden-runner
       - *checkout
+
+      - name: Unreached Rust files
+        if: ${{ runner.os == 'Linux' && inputs.unreached-rs-mode != 'off' }}
+        uses: storytold/craft-common-actions/actions/unreached-rs@c5a25e1fea37433cd49b0b883a00743d8b5cab3d
+        with:
+          mode: ${{ inputs.unreached-rs-mode }}
+          allow: ${{ inputs.unreached-rs-allow }}
 
       - name: Setup
         uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
