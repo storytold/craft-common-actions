@@ -1,0 +1,101 @@
+name: Keyless macOS verify test (real nightly app)
+# Test-only draft PR workflow (do not merge): one hosted Apple-silicon job, no secrets, no
+# environment, read-only token. Signs the real PhotoCraft nightly app with a throwaway
+# self-signed identity created in the job and checks that the merged macOS verify path
+# refuses wrong team, no staple and no notarization. Not a signing or release path.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/nightly-macos-keyless-test.yml
+      - tests/real/macos_keyless_driver.py
+      - tests/real/macos_keyless_input.json
+permissions:
+  contents: read
+jobs:
+  read-input:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      ready: ${{ steps.input.outputs.ready }}
+      run-id: ${{ steps.input.outputs.run-id }}
+      artifact-name: ${{ steps.input.outputs.artifact-name }}
+      version: ${{ steps.input.outputs.version }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Read and validate the committed test input
+        id: input
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, re
+          with open('tests/real/macos_keyless_input.json', 'rb') as stream: data = json.loads(stream.read(4097))
+          assert set(data) == {'photocraft_run_id', 'artifact_name', 'version', 'note'}, 'unexpected input fields'
+          out = open(os.environ['GITHUB_OUTPUT'], 'a')
+          if data['photocraft_run_id'] is None or data['version'] is None:
+              print('::notice::No PhotoCraft run recorded yet; the macOS job is skipped.')
+              out.write('ready=false\n'); raise SystemExit(0)
+          run_id, name, version = str(data['photocraft_run_id']), data['artifact_name'], data['version']
+          assert re.fullmatch(r'[1-9][0-9]{0,19}', run_id), 'numeric photocraft run ID required'
+          assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', name), 'plain artifact name required'
+          assert isinstance(version, str) and re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-nightly\.[0-9]{8}\.[1-9][0-9]*\.[1-9][0-9]*\.g[0-9a-f]{12}', version), 'canonical nightly version required'
+          out.write(f'ready=true\nrun-id={run_id}\nartifact-name={name}\nversion={version}\n')
+          PY
+  macos-keyless:
+    needs: read-input
+    if: needs.read-input.outputs.ready == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out this tooling revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require the Apple-silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Download the real unsigned app zip from the PhotoCraft run (read-only token)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: storytold/photocraft
+          run-id: ${{ needs.read-input.outputs.run-id }}
+          name: ${{ needs.read-input.outputs.artifact-name }}
+          path: ${{ runner.temp }}/real-mac
+      - name: Run the keyless verify driver against the real app
+        shell: bash
+        env:
+          VERSION: ${{ needs.read-input.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/real-mac/photocraft-$VERSION-macos-aarch64-nightly.zip"
+          ls -la "$RUNNER_TEMP/real-mac"
+          test -f "$archive" && test ! -L "$archive"
+          shasum -a 256 "$archive"
+          python3 -B tests/real/macos_keyless_driver.py --archive "$archive" --version "$VERSION" --report "$RUNNER_TEMP/macos-keyless-report.json"
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-keyless-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-keyless-report.json
+          if-no-files-found: warn
+          retention-days: 14

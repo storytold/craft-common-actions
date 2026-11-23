@@ -1,0 +1,6 @@
+{
+  "photocraft_run_id": null,
+  "artifact_name": "photocraft-nightly-macos-aarch64-unsigned",
+  "version": null,
+  "note": "Set photocraft_run_id and version to the PhotoCraft #16559 run that uploaded the unsigned macOS nightly zip; pushing this file runs the keyless test."
+}
