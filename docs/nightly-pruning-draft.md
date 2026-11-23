@@ -170,9 +170,17 @@ or an incomplete bounded origin inventory aborts/defer the whole plan.
   administrative assumption is unavailable, leave apply disabled.
 - Bounds are ceilings, not runway promises. Repeated fresh API/ZIP proofs can
   hit rate limits on a backlog; errors stop and preserve remaining entries.
-  Receipt expiry (90 days), absent/ambiguous proofs, protected drafts/unknown
-  backlog and incomplete pagination need explicit owner reconciliation, not
-  relaxed ownership checks or ad hoc deletion.
+  Receipt expiry (90 days), absent/ambiguous proofs and protected drafts/unknown
+  backlog need explicit owner reconciliation, not relaxed ownership checks or ad
+  hoc deletion.
+- A history longer than the read bound (20 pages of 20) is planned within its
+  newest window instead of refusing; GitHub serves only a bounded prefix of the
+  release list anyway. That cannot delete a kept release: a candidate already
+  has six proven newer publications plus the current one inside the window, and
+  unread releases can only add newer ones. Releases outside the window are left
+  alone, and older ones slide into view as each run removes up to ten. The
+  current publication must still be inside the window, and the per-row proof
+  budget stays at the same window size.
 - Keeping seven qualified nightlies does **not** guarantee the old stable
   Launcher's 30-release window contains stable: preserved unknown releases,
   drafts, other prereleases and backlog may still crowd it out. Observe/resolve

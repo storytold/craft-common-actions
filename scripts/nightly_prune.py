@@ -103,10 +103,17 @@ def optional(api, path):
 
 
 def inventory(api):
-    """Fetch all bounded pages, not the older Launcher's single 30-row window.
+    """Fetch the newest bounded pages, not the older Launcher's 30-row window.
 
-    Retain only required fields rather than all asset inventories. A full last
-    page is incomplete, not evidence that a lower release can safely be removed.
+    Retain only required fields rather than all asset inventories. When the
+    history is longer than MAX_PAGES the result is the newest window, not the
+    whole history (GitHub serves only a bounded prefix and documents no order).
+    That is still safe for deletion: a candidate is chosen only when at least
+    six proven newer publications plus the current one are in hand, and
+    releases outside the window can only add more newer ones, never fewer.
+    Releases outside the window are never touched. The window is the same
+    MAX_PAGES x PAGE_SIZE rows as before, so the per-row proof budget does not
+    grow.
     """
     rows, ids, tags = [], set(), set()
     for page in range(1, MAX_PAGES + 1):
@@ -124,7 +131,7 @@ def inventory(api):
                 "immutable", "author", "published_at")})
         if len(batch) < PAGE_SIZE:
             return rows
-    raise n.Unavailable("complete release inventory exceeds pagination bound; nothing may be deleted")
+    return rows  # Full window: plan only within it (see above).
 
 
 def snapshot(release):
@@ -185,7 +192,7 @@ def plan(api, registry, app, current_release_id, bot_id, provenance=None):
     provenance = provenance or PublicationProvenance()
     rows = inventory(api)
     current = [row for row in rows if row["id"] == current_release_id]
-    n.require(len(current) == 1, "successful current publication absent from complete inventory")
+    n.require(len(current) == 1, "successful current publication absent from the release inventory window")
     shape(current[0], app, bot_id)
     # Even default read-only plans bind the supplied current ID to a real
     # published producer run. Its source/text still cannot authorize deletion.

@@ -556,14 +556,28 @@ def verified_run(run,environment):
         'workflow_path':path,'source_commit':run['head_sha'],'repository':repository,'event':run['event'],'created_at':run['created_at']}
 
 
+RELEASE_FIELDS=('id','tag_name','draft','prerelease','published_at')
+
+
 def releases(api):
+    """Newest release window, complete when the history fits in it.
+
+    GitHub serves only a bounded prefix of the release list (about 1000 rows)
+    and documents no order, so a long history can never be read completely.
+    Past MAX_PAGES the window is not trusted for the stable base on its own:
+    the newest nightly in it names the stable release it was built on, and
+    that release is re-read by exact ID and must still be a published stable
+    release with the same tag. The full prior/freshness checks still run on
+    the newest nightly. No nightly in a full window, or an anchor that is gone,
+    changed or malformed, refuses as before.
+    """
     found=[]
     for page in range(1,MAX_PAGES+1):
         batch=api.request('GET',f'/releases?per_page={PAGE_SIZE}&page={page}')
         n.require(isinstance(batch,list) and len(batch)<=PAGE_SIZE,'invalid bounded release page')
         n.require(all(isinstance(item,dict) for item in batch),'invalid release object')
         for release in batch:
-            item={key:release.get(key) for key in ('id','tag_name','draft','prerelease','published_at')}
+            item={key:release.get(key) for key in RELEASE_FIELDS}
             tag=item['tag_name']
             if item['prerelease'] is True and isinstance(tag,str) and len(tag)<=129 and tag.startswith('v') and NIGHTLY.fullmatch(tag[1:]):
                 body=release.get('body')
@@ -571,7 +585,26 @@ def releases(api):
                 item['body']=body
             found.append(item) # Do not retain unused asset inventories.
         if len(batch)<PAGE_SIZE: return found
-    raise n.Unavailable('release pagination bound reached; newest stable/nightly cannot be established')
+    anchor=stable_anchor(api,found)
+    return found if any(row.get('id')==anchor['id'] for row in found) else found+[anchor]
+
+
+def stable_anchor(api,rows):
+    """Exact re-read of the stable release the newest windowed nightly used."""
+    newest=newest_nightly(rows)
+    if newest is None: raise n.Unavailable('release pagination bound reached and no nightly in the newest window anchors the stable base')
+    try:
+        base=body_policy(newest.get('body'))['stable_base']
+        n.fields(base,{'release_id','tag','version'},'anchored stable base')
+    except n.InvalidNightly: raise
+    except (KeyError,TypeError,ValueError,RecursionError) as error:
+        raise n.InvalidNightly('newest nightly policy cannot anchor the stable base') from error
+    n.positive(base['release_id'],'anchored stable release ID')
+    release=api.request('GET',f"/releases/{base['release_id']}")
+    n.require(isinstance(release,dict) and release.get('id')==base['release_id'] and release.get('tag_name')==base['tag'],'anchored stable release ID/tag changed')
+    item={key:release.get(key) for key in RELEASE_FIELDS}
+    n.require(stable_base([item])==base,'anchored stable base is no longer the same published stable release')
+    return item
 
 
 def stable_base(rows):

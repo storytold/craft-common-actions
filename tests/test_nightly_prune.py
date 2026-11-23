@@ -298,17 +298,69 @@ class PruneTests(unittest.TestCase):
         self.execute(previous)
         self.assertEqual(len(self.api.deletes()), 20)
 
-    def test_pagination_limit_malformed_and_duplicate_pages_are_no_mutation(self):
-        for mode in ("full", "duplicate", "malformed", "oversized"):
+    def test_malformed_and_duplicate_pages_are_no_mutation(self):
+        for mode in ("duplicate", "malformed", "oversized"):
             self.setUp()
-            if mode == "full":
-                self.api.list_override = lambda page: [release((page-1)*p.PAGE_SIZE+i+1) for i in range(p.PAGE_SIZE)]
-            elif mode == "duplicate": self.api.list_override = lambda page: [self.rows[0], self.rows[0]]
+            if mode == "duplicate": self.api.list_override = lambda page: [self.rows[0], self.rows[0]]
             elif mode == "malformed": self.api.list_override = lambda page: [None]
             else: self.api.list_override = lambda page: self.rows * 3
             with self.subTest(mode=mode), self.assertRaises(n.InvalidNightly): self.plan()
             self.assertEqual(self.api.deletes(), [])
-            if mode == "full": self.assertEqual(len(self.api.calls), p.MAX_PAGES)
+
+    def test_endless_full_pages_stop_at_the_read_bound(self):
+        self.api.list_override = lambda page: [release((page-1)*p.PAGE_SIZE+i+1) for i in range(p.PAGE_SIZE)]
+        self.plan()
+        self.assertEqual(len([call for call in self.api.calls if call[1].startswith("/releases?")]), p.MAX_PAGES)
+        self.assertEqual(self.api.deletes(), [])
+
+    def long_history(self, total=1000):
+        """Pruning was off for years: newest-first, far more than one window."""
+        rows = [release(run) for run in range(total, 0, -1)]
+        self.api, self.proof = FakeAPI(rows), MockProvenance(rows)
+        window = {row["id"] for row in rows[:p.MAX_PAGES * p.PAGE_SIZE]}
+        self.assertGreater(total, 2 * len(window))
+        return rows, window
+
+    def test_history_well_past_400_plans_and_prunes_inside_the_newest_window(self):
+        rows, window = self.long_history()
+        previous = self.plan(current=1000)
+        self.assertEqual(previous["keep"], list(range(1000, 993, -1)))
+        self.assertEqual([row["id"] for row in previous["candidates"]], list(range(601, 611)))
+        self.assertTrue({row["id"] for row in previous["candidates"]} <= window)
+        listed = [call for call in self.api.calls if call[1].startswith("/releases?")]
+        self.assertEqual(len(listed), p.MAX_PAGES)
+        # The per-row proof budget is the same window as before, not the history.
+        self.assertEqual(len(self.proof.calls), len(window) - 1)
+        p.encode_plan(previous)
+        result = self.execute(previous)
+        self.assertEqual(result["completed_release_ids"], list(range(601, 611)))
+        deleted = {int(suffix.rsplit("/", 1)[1]) for method, suffix in self.api.deletes() if suffix.startswith("/releases/")}
+        self.assertEqual(deleted, set(range(601, 611)))
+        remaining = {row["id"] for row in self.api.rows}
+        self.assertTrue(set(range(1, 601)) <= remaining and set(range(611, 1001)) <= remaining)
+        # The next run sees older releases slide into the window and keeps going.
+        again = self.plan(current=1000)
+        self.assertEqual([row["id"] for row in again["candidates"]], list(range(591, 601)))
+
+    def test_long_history_still_refuses_when_current_is_outside_the_window(self):
+        self.long_history()
+        with self.assertRaisesRegex(n.InvalidNightly, "current publication absent"):
+            self.plan(current=1)
+        self.assertEqual(self.api.deletes(), [])
+
+    def test_long_history_keeps_every_ownership_and_tie_check(self):
+        rows, window = self.long_history()
+        self.proof.unknown = {999, 998}
+        previous = self.plan(current=1000)
+        self.assertEqual(previous["keep"], [1000, 997, 996, 995, 994, 993, 992])
+        self.assertEqual({entry["release_id"] for entry in previous["retained"]}, {999, 998})
+        self.assertTrue(all(row["id"] < 992 for row in previous["candidates"]))
+        tied = release(700, rid=5000)
+        tied["tag_name"] = tied["tag_name"][:-12] + "b" * 12
+        self.api.rows.insert(5, tied)
+        with self.assertRaisesRegex(n.InvalidNightly, "ambiguous run/attempt"):
+            self.plan(current=1000)
+        self.assertEqual(self.api.deletes(), [])
 
     def test_all_or_none_plan_validation_checks_later_candidate_before_first_delete(self):
         previous = self.plan()

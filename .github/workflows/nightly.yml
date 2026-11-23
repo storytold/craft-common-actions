@@ -39,6 +39,10 @@ on:
       craft-fonts-ref:
         type: string
         default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      production-signing:
+        description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
+        type: boolean
+        default: false
 permissions:
   contents: read
 env:
@@ -145,12 +149,13 @@ jobs:
 
   build-windows:
     needs: identity
-    if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true'
+    if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true
     permissions:
       contents: read
     uses: $/.github/workflows/nightly-windows.yml
     with:
       manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -175,6 +180,7 @@ jobs:
     uses: $/.github/workflows/nightly-unix.yml
     with:
       manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -191,6 +197,7 @@ jobs:
     uses: $/.github/workflows/nightly-unix.yml
     with:
       manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       app-name: ${{ inputs.app-name }}
       version: ${{ needs.identity.outputs.version }}
@@ -213,11 +220,13 @@ jobs:
           WINDOWS_RESULT: ${{ needs.build-windows.result }}
           STAGING_RESULT: ${{ needs.stage-nightly.result }}
           BUILD_REQUESTED: ${{ needs.identity.outputs.build }}
+          PRODUCTION_SIGNING: ${{ inputs.production-signing }}
         run: |
           {
             echo '## Dedicated nightly source candidate'
             printf 'Identity/preflight: `%s`. Windows build: `%s`. Build requested: `%s`.\n' "$IDENTITY_RESULT" "$WINDOWS_RESULT" "$BUILD_REQUESTED"
             printf 'Packet staging: `%s`.\n' "$STAGING_RESULT"
+            printf 'Production signing opted in by the caller: `%s`.\n' "$PRODUCTION_SIGNING"
             echo 'Named policy refusal is in the identity step summary; a failed/red check is not bypassed.'
             echo 'Legacy diagnostics have a separate workflow/run and cannot contribute artifacts here.'
             echo 'Windows requires verified signing; Linux/macOS rows are pending and disabled; skipped native jobs are not platform coverage.'
@@ -225,13 +234,14 @@ jobs:
             echo 'Publication and attestation are literally disabled; no native/quality/admission proof is implied.'
           } >> "$GITHUB_STEP_SUMMARY"
           test "$IDENTITY_RESULT" = success
-          if [ "$BUILD_REQUESTED" = true ]; then
+          if [ "$BUILD_REQUESTED" = true ] && [ "$PRODUCTION_SIGNING" = true ]; then
             test "$WINDOWS_RESULT" = success
             test "$STAGING_RESULT" = success
           fi
 
   stage-nightly:
     if: >-
+      inputs.production-signing == true &&
       needs.identity.outputs.ready == 'true' && needs.build-windows.result == 'success' && needs.identity.outputs.build == 'true' &&
       github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' &&
       ((github.event_name == 'schedule' && github.run_attempt == '1') ||
