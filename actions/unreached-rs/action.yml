@@ -28,9 +28,21 @@ inputs:
 runs:
   using: composite
   steps:
-    # tomllib needs Python 3.11; runner images pinned to older ones (ubuntu-22.04) ship 3.10, and this
-    # step runs before the gate's Setup.
+    # tomllib needs Python 3.11. ubuntu-22.04 ships 3.10, so install 3.12 there. actions/setup-python
+    # has no builds for Debian (PhotoCraft's artcraft-k8s-main lint runner is Trixie), where system
+    # python3 is already 3.11+.
+    - name: Use system Python when it is 3.11 or newer
+      id: python
+      shell: bash
+      run: |
+        if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+          python3 -V
+          echo "install=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "install=true" >> "$GITHUB_OUTPUT"
+        fi
     - name: Python 3.12
+      if: steps.python.outputs.install == 'true'
       uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: "3.12"

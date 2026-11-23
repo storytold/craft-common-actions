@@ -250,5 +250,20 @@ class UnreachedRsTests(unittest.TestCase):
         self.assertEqual(run(self.root, "--mode", "diff", "--base", base, "--allow", "tools/**"), (0, []))
 
 
+class UnreachedRsActionTests(unittest.TestCase):
+    """The composite action installs Python 3.12 only when the runner's python3 is older than 3.11."""
+
+    def test_setup_python_only_when_system_python_is_old(self):
+        import yaml
+        action = yaml.load((ROOT / 'actions/unreached-rs/action.yml').read_text(), Loader=yaml.BaseLoader)
+        steps = {step['name']: step for step in action['runs']['steps']}
+        detect = steps['Use system Python when it is 3.11 or newer']
+        self.assertEqual(detect['id'], 'python')
+        self.assertIn('sys.version_info >= (3, 11)', detect['run'])
+        install = steps['Python 3.12']
+        self.assertEqual(install['if'], "steps.python.outputs.install == 'true'")
+        self.assertIn('actions/setup-python@', install['uses'])
+        self.assertEqual(install['with']['python-version'], '3.12')
+
 if __name__ == "__main__":
     unittest.main()
