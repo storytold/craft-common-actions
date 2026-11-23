@@ -41,7 +41,7 @@ class Fixture:
     def __init__(self):
         self.calls = []; self.hook = None; self.main = M
         self.latest_revision = C; self.latest_key = 'analysis-C'
-        self.workflow_state = 'active'; self.compare_override = None
+        self.workflow_state = 'active'; self.compare_override = None; self.compare_page_one_oversized = False
         self.producer = {'repository': REPO, 'source_commit': C, 'run_id': 500, 'run_attempt': 1, 'run_number': 10, 'workflow_id': 50, 'workflow_path': '.github/workflows/nightly.yml', 'created_at': CREATED, 'tooling_revision': 'f' * 40}
         self.debt = [{'key': 'issue-' + str(i), 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': str(i) * 32} for i in (1, 2)]
         self.policy = {'schema': 'craft-nightly-candidate-policy/v3', 'epoch': 'reviewed-contract-1', 'repository': REPO, 'branch': 'main', 'required_workflows': [{'workflow_id': 60, 'workflow_path': '.github/workflows/ci.yml', 'jobs': [{'name': 'Test', 'app_id': 15368, 'applicability': 'required'}]}], 'sonar': {'organization': 'storytold', 'project': PROJECT, 'app_id': 12526, 'check_name': 'SonarCloud Code Analysis', 'details_url': 'https://sonarcloud.io/dashboard?id=' + PROJECT + '&branch=main', 'issue_types': ['VULNERABILITY'], 'accepted_conditions': [{'metric': 'new_security_rating', 'comparator': 'GT', 'error_threshold': '1', 'maximum': '3'}], 'required_conditions': [{'metric': 'coverage', 'comparator': 'LT', 'error_threshold': '80'}], 'debt': copy.deepcopy(self.debt)}}
@@ -77,7 +77,12 @@ class Fixture:
             if path.startswith('/compare/'):
                 base, head = path.removeprefix('/compare/').split('...')
                 if self.compare_override is not None: return self.compare_override
-                return {'status': 'identical' if base == head else 'ahead', 'ahead_by': int(base != head), 'behind_by': 0, 'base_commit': {'sha': base}, 'merge_base_commit': {'sha': base}}
+                data = {'status': 'identical' if base == head else 'ahead', 'ahead_by': int(base != head), 'behind_by': 0, 'base_commit': {'sha': base}, 'merge_base_commit': {'sha': base}, 'commits': []}
+                if q.get('page') != ['2'] or q.get('per_page') != ['1']:
+                    # GitHub's first compare page also carries every changed file and patch.
+                    if self.compare_page_one_oversized: raise ValueError('API reply exceeds bound')
+                    data['files'] = [{'filename': 'src/file.py', 'patch': '@@ synthetic'}]
+                return data
             if path == '/actions/workflows/60': return {'id': 60, 'path': '.github/workflows/ci.yml', 'state': self.workflow_state}
             if path == '/actions/workflows/60/runs':
                 assert q['head_sha'] == [C] and q['branch'] == ['main']
@@ -141,9 +146,25 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(c.require_candidate_ancestry(self.f.github, C, P)['previous'], P)
 
     def test_divergence_rewind_wrong_merge_base_refuse(self):
-        for data in ({'status': 'diverged', 'ahead_by': 1, 'behind_by': 1}, {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C}, 'merge_base_commit': {'sha': B}}):
+        # Every override is a complete bounded lineage page (the fixture's C...main reply), so
+        # compare_page accepts it and the refusal can only come from the ancestry rule itself.
+        valid = {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C},
+                 'merge_base_commit': {'sha': C}, 'commits': []}
+        self.f.compare_override = copy.deepcopy(valid)
+        receipt = self.admit()  # Passing control: the same complete page with nothing changed is admitted.
+        self.assertEqual(self.revalidate(receipt), receipt)
+        diverged = 'candidate ancestry diverged/rewound or is not strictly advancing'
+        for change, message in (({'status': 'diverged'}, diverged),  # status alone
+                                ({'status': 'diverged', 'behind_by': 1}, diverged),
+                                ({'status': 'behind', 'ahead_by': 0, 'behind_by': 1}, diverged),
+                                ({'behind_by': 1}, diverged),
+                                ({'merge_base_commit': {'sha': B}}, diverged),
+                                ({'base_commit': {'sha': B}}, diverged),
+                                ({'status': 'identical', 'ahead_by': 0}, 'inconsistent compare metadata')):
+            data = {**copy.deepcopy(valid), **change}
+            self.assertIs(c.legacy.compare_page(data), data)  # Reaches _ancestry: the bounded-page shape is valid.
             self.f.compare_override = data
-            with self.subTest(data=data), self.assertRaises(ValueError): self.admit()
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message): self.admit()
 
     def test_latest_C_race_refuses(self):
         count = [0]
@@ -552,6 +573,43 @@ class CandidateTests(unittest.TestCase):
                 estimate = c.minimum_reads(self.f.policy['required_workflows'])
                 self.assertEqual(estimate, len(self.f.calls))
                 self.assertLessEqual(admitted, estimate)
+
+    def test_lineage_uses_the_bounded_file_free_compare_page(self):
+        # A long main advance makes GitHub's first compare page (files and patches) exceed the reply bound.
+        self.f.compare_page_one_oversized = True
+        receipt = self.admit()
+        self.assertEqual(self.revalidate(receipt), receipt)
+        self.assertEqual(c.require_candidate_ancestry(self.f.github, C, P)['previous'], P)
+        compares = [path for provider, path in self.f.calls if path.startswith('/compare/')]
+        self.assertTrue(compares)
+        self.assertTrue(all(path.endswith('?per_page=1&page=2') for path in compares))
+
+    def test_lineage_page_with_files_or_missing_lineage_fields_refuses(self):
+        good = {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C}, 'merge_base_commit': {'sha': C}, 'commits': []}
+        for change in ({'files': []}, {'commits': [{}, {}]}, {'commits': None}, {'merge_base_commit': None}, {'base_commit': None}, {'behind_by': None}):
+            data = {**good, **change}
+            data = {key: value for key, value in data.items() if value is not None}
+            self.f.compare_override = data
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                c.require_candidate_ancestry(self.f.github, C)
+
+    def test_issue_change_during_workflow_collection_refuses_admission_and_revalidation(self):
+        # Sonar severity/resolution changes need no new analysis, so the snapshot read is not enough.
+        def severity(issues): issues[0]['severity'] = 'CRITICAL'
+        def resolved(issues): issues.pop(0)
+        for revalidate in (False, True):
+            for label, mutate in (('severity', severity), ('resolved', resolved)):
+                with self.subTest(revalidate=revalidate, change=label):
+                    self.f = Fixture()
+                    receipt = self.admit() if revalidate else None
+                    changed = [False]
+                    def hook(provider, path):
+                        if provider == 'github' and path.startswith('/check-runs/602') and not changed[0]:
+                            changed[0] = True; mutate(self.f.issues)
+                    self.f.hook = hook
+                    with self.assertRaisesRegex(ValueError, 'Sonar issue inventory changed during workflow collection'):
+                        self.revalidate(receipt) if revalidate else self.admit()
+                    self.assertTrue(changed[0])
 
 
 if __name__ == '__main__':

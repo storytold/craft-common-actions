@@ -122,8 +122,8 @@ has run on a Mac or against Apple's services from this repository.
   so bookkeeping cannot fail an otherwise verified publication. Every publish
   step has its own time bound and the job budget exceeds their sum, so a slow
   upload times out as a tolerated step instead of cancelling the job. Verification and
-  publication steps remain fatal. Final `GITHUB_OUTPUT`
-  I/O is likewise bookkeeping only after that verified return. This lets the
+  publication steps remain fatal. The publish step writes no `GITHUB_OUTPUT`
+  after the release is public, so output I/O cannot fail it. This lets the
   hosted execution finish successfully and the unchanged success-only historical
   checks authenticate the nightly on a later run, even if its local receipt is
   missing. No pending file becomes trusted history. Existing failed runs or runner

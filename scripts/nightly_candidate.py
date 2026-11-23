@@ -36,8 +36,9 @@ MAX_JSON = 2 * 1024 * 1024
 ISSUE_METRICS = {'BUG': 'bugs', 'VULNERABILITY': 'vulnerabilities', 'CODE_SMELL': 'code_smells'}
 ACCEPTED_METRICS = {'bugs': 'BUG', 'vulnerabilities': 'VULNERABILITY', 'code_smells': 'CODE_SMELL', 'security_rating': 'VULNERABILITY', 'new_security_rating': 'VULNERABILITY'}
 FINGERPRINT = {'key', 'rule', 'component', 'type', 'severity', 'hash'}
-# Revalidation's fixed Sonar snapshot, gate/latest rereads and ancestry reads.
-FIXED_READS = 17
+# Revalidation's fixed Sonar snapshot, gate/latest rereads, ancestry reads and the
+# post-collection unresolved-issue reread.
+FIXED_READS = 18
 
 
 def digest(value):
@@ -198,7 +199,7 @@ def _ancestry(reads, candidate, previous):
     n.require(root.get('ref') == 'refs/heads/main' and root.get('object', {}).get('type') == 'commit', 'missing main branch commit')
     main = sha(root['object'].get('sha'))
     def compare(base, head, strict):
-        data = reads.get('github', f'/compare/{base}...{head}')
+        data = legacy.compare_page(reads.get('github', legacy.compare_path(base, head)))
         ahead = data.get('ahead_by')
         n.require(data.get('status') in (('ahead',) if strict else ('ahead', 'identical')) and type(data.get('behind_by')) is int and data['behind_by'] == 0 and type(ahead) is int and ahead >= int(strict) and data.get('merge_base_commit', {}).get('sha') == base and data.get('base_commit', {}).get('sha') == base, 'candidate ancestry diverged/rewound or is not strictly advancing')
         n.require((base == head) == (data['status'] == 'identical') and (ahead == 0) == (base == head), 'inconsistent compare metadata')
@@ -407,13 +408,14 @@ def _sonar_check(reads, s, producer, gate, analysis, now):
     return check['id']
 
 
-def _snapshot(reads, s, producer, now):
-    source = producer['source_commit']
-    analysis = _latest(reads, s, source, now)  # The very first network read.
-    gate = _gate(reads, s, analysis)
-    task = _ce(reads, s, analysis, now)
+def _issue_rows(reads, s):
+    """One complete read of the unresolved main issue scope (the same query every time)."""
     issue_path = '/api/issues/search?' + urlencode({'organization': s['organization'], 'componentKeys': s['project'], 'branch': 'main', 'types': ','.join(s['issue_types']), 'resolved': 'false'})
-    rows = reads.rows('sonar', issue_path, 'issues', 'key')
+    return reads.rows('sonar', issue_path, 'issues', 'key')
+
+
+def _remaining(rows, s):
+    """Check unresolved rows against reviewed debt; return their sorted fingerprints."""
     remaining = []
     approved = {i['key']: i for i in s['debt']}
     for issue in rows:
@@ -421,14 +423,33 @@ def _snapshot(reads, s, producer, now):
         n.require(issue.get('project') == s['project'] and issue.get('organization') == s['organization'] and 'pullRequest' not in issue and issue.get('status') in ('OPEN', 'CONFIRMED', 'REOPENED') and not issue.get('resolution'), 'unknown/resolved item in unresolved issue scope')
         n.require(approved.get(item['key']) == item, 'new/changed candidate debt fingerprint')
         remaining.append(item)
+    return sorted(remaining, key=lambda i: i['key'])
+
+
+def _same_unresolved(reads, s, snapshot):
+    # Severity or resolution can change without a new analysis, so reread after
+    # workflow collection rather than trusting the earlier snapshot read.
+    rows = _issue_rows(reads, s)
+    n.require(sorted((fingerprint(issue, s) for issue in rows), key=lambda i: i['key']) == snapshot['remaining'], 'Sonar issue inventory changed during workflow collection')
+    _remaining(rows, s)
+
+
+def _snapshot(reads, s, producer, now):
+    source = producer['source_commit']
+    analysis = _latest(reads, s, source, now)  # The very first network read.
+    gate = _gate(reads, s, analysis)
+    task = _ce(reads, s, analysis, now)
+    rows = _issue_rows(reads, s)
+    remaining = _remaining(rows, s)
+    approved = {i['key']: i for i in s['debt']}
     present = {i['key'] for i in remaining}
     fixes = [_fix(reads, s, producer, item, analysis) for key, item in sorted(approved.items()) if key not in present]
     check_id = _sonar_check(reads, s, producer, gate, analysis, now)
-    n.require(reads.rows('sonar', issue_path, 'issues', 'key') == rows, 'Sonar issue inventory changed during proof collection')
+    n.require(_issue_rows(reads, s) == rows, 'Sonar issue inventory changed during proof collection')
     n.require([_fix(reads, s, producer, item, analysis) for key, item in sorted(approved.items()) if key not in present] == fixes, 'Sonar lifecycle/source proof changed during collection')
     n.require(_gate(reads, s, analysis) == gate and _ce(reads, s, analysis, now) == task, 'Sonar selected gate/CE roots changed')
     n.require(_latest(reads, s, source, now) == analysis, 'latest Sonar analysis changed during complete issue/proof reads')
-    return {'analysis': analysis, 'ce': task, 'ce_sha256': digest(task), 'check_id': check_id, 'gate': gate, 'remaining': sorted(remaining, key=lambda i: i['key']), 'fixes': fixes, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(sorted(remaining, key=lambda i: i['key'])), 'proofs_sha256': digest(fixes)}
+    return {'analysis': analysis, 'ce': task, 'ce_sha256': digest(task), 'check_id': check_id, 'gate': gate, 'remaining': remaining, 'fixes': fixes, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(remaining), 'proofs_sha256': digest(fixes)}
 
 
 def admit_candidate(policy, producer, github, sonar, *, now):
@@ -442,6 +463,7 @@ def admit_candidate(policy, producer, github, sonar, *, now):
     # Main may advance beyond C, but may not drop C during collection.
     _ancestry(reads, producer['source_commit'], None)
     n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before admission completed')
+    _same_unresolved(reads, s, snapshot)
     _fresh_workflows(reads, policy, producer, workflows)
     return {'schema': 'craft-nightly-candidate-receipt/v3', 'policy_sha256': digest(policy), 'producer_sha256': digest(producer), 'source_commit': producer['source_commit'], 'sonar': snapshot, 'workflows': workflows, 'main_at_admission': ancestry['main']}
 
@@ -472,5 +494,6 @@ def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
     n.require(_workflows(reads, policy, producer, now) == receipt['workflows'], 'selected exact-C quality runs changed/superseded')
     _ancestry(reads, producer['source_commit'], None)
     n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before revalidation completed')
+    _same_unresolved(reads, s, snapshot)
     _fresh_workflows(reads, policy, producer, receipt['workflows'])
     return receipt

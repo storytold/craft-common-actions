@@ -90,6 +90,23 @@ def full_sha(value):
     return isinstance(value,str) and n.HEX40.fullmatch(value) and value!=ZERO
 
 
+def compare_path(base,head):
+    """Bounded ancestry compare: page 2 at one commit per page.
+
+    GitHub sends the changed-file list (with patches) only on page 1 of a
+    compare. Later pages keep status, ahead_by, behind_by and the base and
+    merge-base commits, so this page stays small however far head has moved.
+    """
+    n.require(full_sha(base) and full_sha(head),'compare needs full commit SHAs')
+    return f'/compare/{base}...{head}?per_page=1&page=2'
+
+
+def compare_page(data):
+    """Refuse anything but the bounded file-free page; callers check the lineage fields."""
+    n.require(isinstance(data,dict) and 'files' not in data and isinstance(data.get('commits'),list) and len(data['commits'])<=1 and all(key in data for key in ('status','ahead_by','behind_by','base_commit','merge_base_commit')),'compare reply is not the bounded lineage page')
+    return data
+
+
 
 
 

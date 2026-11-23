@@ -14,6 +14,7 @@ from urllib.parse import quote
 import nightly_feed as n
 import nightly_invocation as invocation
 import nightly_policy as p
+import nightly_signing as signing
 
 SHA256 = re.compile(r'[0-9a-f]{64}')
 WORKFLOW = re.compile(r'\.github/workflows/[A-Za-z0-9_-]+\.ya?ml')
@@ -89,7 +90,7 @@ def validate_policy(policy):
         and ref.rsplit('@', 1)[1] == policy['producer_tooling_revision'], 'unpinned reusable producer')
     if policy['schema'] != LIVE_POLICY:
         subject = policy['windows_publisher_subject']
-        n.require(isinstance(subject, str) and 0 < len(subject) <= 2048 and
+        n.require(isinstance(subject, str) and 0 < len(subject) <= signing.WINDOWS_PUBLISHER_SUBJECT_MAX and
             not any(c in subject for c in '\r\n\0'), 'invalid protected Windows publisher subject')
         n.require(isinstance(policy['unsigned_artifact_name'], str) and
             n.NAME.fullmatch(policy['unsigned_artifact_name']), 'invalid unsigned artifact kind')
