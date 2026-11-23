@@ -119,6 +119,19 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertNotIn("docker://ghcr.io/storytold/democraft:stable-x86_64", log)
         self.assertIn("docker://docker.io/storytold/democraft:1.2.0-rc.1-x86_64", log)
         self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
+
+    def test_a_nightly_build_pushes_nightly_tag_and_leaves_stable_alone(self):
+        result = self.publish("1.2.0-nightly.20261123", "refs/heads/main",
+                              DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        log = self.log.read_text()
+        self.assertIn("docker://ghcr.io/storytold/democraft:1.2.0-nightly.20261123-x86_64", log)
+        self.assertIn("docker://ghcr.io/storytold/democraft:nightly-x86_64", log)
+        self.assertNotIn("docker://ghcr.io/storytold/democraft:stable-x86_64", log)
+        self.assertIn("docker://docker.io/storytold/democraft:1.2.0-nightly.20261123-x86_64", log)
+        self.assertIn("docker://docker.io/storytold/democraft:nightly-x86_64", log)
+        self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
+        self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
         self.assertIn("Leaving docker.io/storytold/democraft:stable-x86_64 unchanged", result.stdout)
 
 
