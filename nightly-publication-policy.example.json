@@ -1,0 +1,10 @@
+{
+  "schema": "craft-nightly-publication-policy/v1",
+  "tooling_revision": null,
+  "apps": {
+    "photocraft": {
+      "required_checks": null,
+      "producer_workflow": null
+    }
+  }
+}

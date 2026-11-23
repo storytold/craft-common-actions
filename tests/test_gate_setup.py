@@ -11,7 +11,7 @@ SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=y
 STEPS = SETUP['runs']['steps']
 OWN = 'storytold/craft-common-actions/actions/'
 # The commit that added rust-cache's cache-workspace-crates and restore-mtimes.
-OWN_ACTION_REV = 'fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
+OWN_ACTION_REV = 'fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
 CACHE = f'{OWN}rust-cache@{OWN_ACTION_REV}'
 
 

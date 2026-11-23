@@ -541,7 +541,12 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
   Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
 - with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
   library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
-  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. Test, binary and
+  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. On the cluster runners,
+  which set `SCCACHE_WEBDAV_ENDPOINT`, sccache uses the shared cluster cache instead, under the
+  key prefix `sccache/<cache-version>` that every repository shares. Two controls keep PR runs
+  from writing: gate-setup sets `SCCACHE_WEBDAV_RW_MODE=READ_ONLY` wherever the dependency cache
+  doesn't save (`SCCACHE_WEBDAV_RW_MODE` in `env` overrides it), and the cache server accepts
+  writes only with the writer credential, which only the main-branch runner set holds. Test, binary and
   proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
   sccache's cache starts afresh when `cache-version` or any `Cargo.toml` or `build.rs` changes,
   because its key leaves out `--check-cfg`: a cached compile would replay its old
@@ -622,13 +627,71 @@ With `archive-command` as well, each runner builds its tests once instead of onc
       shard-command: cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" --workspace-remap . --partition "$NEXTEST_PARTITION"
 ```
 
+With `shard-archives: true` as well, each shard downloads only the test binaries it runs:
+
+- The build job sets `$NEXTEST_ARCHIVE_DIR`, `$NEXTEST_ARCHIVE_NAME` (the `archive-file` input)
+  and `$GATE_SHARDS` instead of `$NEXTEST_ARCHIVE_FILE`. `archive-command` writes shard k's archive
+  to `$NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME` for every k from 1 to `$GATE_SHARDS`, for
+  example with `cargo nextest archive -E 'binary_id(=...) | ...'` per shard, and the build job
+  fails if one is missing.
+- Each archive is uploaded as `gate-archive-<os>-<k>`, and shard k downloads only that one. On
+  the shard, `$NEXTEST_ARCHIVE_FILE` points at it as before.
+- Which tests each shard runs is the caller's to decide and to record: a shard runs its archive
+  without a partition. PhotoCraft balances the shards by recorded test times, splits binaries too
+  heavy for one shard by test filter, and puts its plan into every archive (its
+  `xtask/src/shards.rs`).
+- At most 8 shards: the build job has one upload step per archive, since an upload step takes one
+  artifact name. The select job rejects more.
+
+```yaml
+    with:
+      test-shards: 4
+      archive-command: cargo xtask ci archive
+      shard-archives: true
+      shard-command: bash scripts/ci-test-shard.sh
+```
+
 With `cache-workspace-crates: true`, the dependency entry also keeps the workspace crates'
 compiled libraries and unit-test executables, so a change rebuilds only the crates it reaches:
 
 - The entry rolls: the saving leg (the build job, else the warm leg or shard 1) writes an entry of
-  its own each run (`<job>-crates-<os>-<arch>-<run id>-<attempt>`), and every leg restores the
-  newest one by its prefix. A fixed key would never be replaced, so its commit would fall ever
-  further behind.
+  its own each run, and every leg restores the newest one by its prefix. A fixed key would never be
+  replaced, so its commit would fall ever further behind.
+- A run's entry is named after the entry it restored (`<job>-crates-<os>-<arch>-<parent run id>-0`,
+  from `.ci-cache-meta/entry`), so when overlapping runs restored the same entry and have the same
+  lockfile and toolchain, only the first to finish saves: GitHub refuses a key that exists, and the
+  later run logs one "Cache reservation failed" warning. Nothing restored gives `-0-0`; a cold build writes `-<run id>-<attempt>`.
+- The saved entry holds only the build units the run's build used, when the build records them
+  (Cargo's JSON messages in the file `CRAFT_CACHE_UNITS` names; see `actions/cache-trim`). Without
+  a record, rust-cache trims by package name, which keeps older builds of every package still in the
+  lockfile: after a dependency update the entry grows by the old builds.
+- The caller keeps one entry per family with `actions/cache-prune` in a job of its own that holds
+  `actions: write` (gate.yml's jobs hold no write permission). The step runs with
+  `continue-on-error`, so a failed prune warns instead of failing the run:
+
+```yaml
+  cache-prune:
+    name: cache prune
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: write
+    steps:
+      - uses: storytold/craft-common-actions/actions/cache-prune@main
+        continue-on-error: true
+        with:
+          watch: true
+          watch-minutes: 110
+          saving-jobs: |
+            ^gate( / build \(.*\))?$
+```
+
+- "Re-run failed jobs" re-runs a failed build job, which saves a new entry, but not the watch job,
+  which succeeded in the first attempt. A workflow of its own on `workflow_run` (the CI workflow,
+  `completed`, branch main) with one job that holds `actions: write` and runs
+  `actions/cache-prune` once removes the replaced entry after every attempt.
+
 - After the restore, `actions/restore-mtimes` gives every tracked file an old mtime and touches
   the files that differ from the commit the entry was built from (`.ci-cache-meta/commit`, saved
   with the entry), so Cargo's fingerprints see exactly those as changed. The craft-fonts and
@@ -950,7 +1013,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
 - `actions/check-hayro-syntax`: The check `hayro-syntax.yml` runs; `package` and `crate` select the resolved package and crate (default `craft-pdf` and `hayro-syntax`).
-- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing, and only an accepted `true` writes: an empty, whitespace-only or unrecognized value (for example the text of an expression rather than its value) restores only; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own (`<job>-crates-<os>-<arch>-<run id>-<attempt>`), since rust-cache never replaces an existing key; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
+- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing, and only an accepted `true` writes: an empty, whitespace-only or unrecognized value (for example the text of an expression rather than its value) restores only; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A self-hosted runner whose `CARGO_HOME` is a crate cache of its own (the cluster runners' node cache) names that directory in `CRAFT_RUNNER_CARGO_HOME`; when the job's `CARGO_HOME` is that directory, with or without `align-environment`, rust-cache gets a job-private directory instead, so it never restores into, prunes or saves the runner's cache, and the entry holds only the target directory. Those entries are keyed apart from GitHub-hosted legs' entries. A `CARGO_HOME` the job sets itself is still refused with `align-environment`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own, named after the entry it restored (`<job>-crates-<os>-<arch>-<parent run id>-0`, so a second child of one entry is refused), since rust-cache never replaces an existing key; a saving leg also gets `CRAFT_CACHE_UNITS` for `actions/cache-trim`; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
 
   ```yaml
   - uses: storytold/craft-common-actions/actions/rust-cache@main
@@ -959,10 +1022,20 @@ Individual actions are also available for composing custom pipelines:
       job: gate
       align-environment: true
   ```
+- `actions/cache-trim`: For a leg that saves the dependency cache (gate.yml runs it). Trims the target directory's build units (`<profile>/build/<package>/<hash>/`, Cargo's unit layout) using the build's record in `CRAFT_CACHE_UNITS`, before rust-cache's post step saves. `actions/rust-cache` sets `CRAFT_CACHE_UNITS` in a leg that saves; the build appends Cargo's JSON messages to it: run cargo with `--message-format json-render-diagnostics` (nextest: `--cargo-message-format json-render-diagnostics`), which keeps the diagnostics readable on stderr, and append the stdout lines that start with `{"reason":`. Record every cargo command of the leg, the one that builds a cargo-alias tool included. When an unrecorded unit was built in this job (a file newer than the start time actions/rust-cache writes beside the record), the trim keeps it and warns with the unit name. It still removes unrecorded units from earlier jobs, so an incomplete record does not save all restored units. An unrecorded command that used one of those restored units will rebuild it on the next run. Without a record it changes nothing. A trim that fails warns and exits 1; gate.yml runs it with `continue-on-error`, since the failure leaves a usable cache.
+- `actions/rust-channel`: Names the toolchain, targets and components a job installs: those of the checkout's `rust-toolchain.toml` (`channel`, `targets`, `components`) when it has one, merged with the caller's `targets` and `components`, else the caller's `toolchain` (default `stable`). Pass its outputs to the toolchain action (`toolchain`, `targets`, `components`) right after the checkout. rustup runs cargo with the file's channel, so a job that installs `stable` beside a file that names another release would make rustup fetch that release without the job's targets. Apps without the file get what they asked for. release.yml and windows-arm64.yml use it.
+- `actions/cache-prune`: For a caller job with `permissions: actions: write`. Deletes a branch's cache entries that no run will restore again: all but the newest rolling `cache-workspace-crates` entry per job, OS and architecture; and of the other rust-cache entries, and of `<name>-<sha256>` entries for the names in `content-keys`, each older entry once nothing has used it since the newest of its family was created. Other entries (apt packages, tool caches) stay. Families leave out the environment and lockfile hashes, so a toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different toolchains or environments would count as one family. `watch: true` runs beside the run's jobs and prunes each time one of `saving-jobs` (regular expressions on the jobs API's names, matching the skipped job's name too) finishes, ending when none is queued or running, once the cache list shows an entry created after the last one started (at most three more 30-second polls), or after `watch-minutes`, with one more pass; `dry-run: true` only lists. A failed pass warns and the next one tries again; a failure that stops the script warns and exits 1, so run it with `continue-on-error: true`.
 - `actions/restore-mtimes`: For a `cache-workspace-crates` entry. `mode: record`, in the job that saves the entry, writes the commit it was built from and the commits of the craft-i18n and craft-fonts checkouts to `.ci-cache-meta`, which the entry keeps. `mode: restore`, after the restore, gives every tracked file an old mtime and touches the files that differ between that commit and HEAD, so Cargo rebuilds only the units that read a changed file; the external checkouts get old mtimes only while they are at the recorded commits. Without a marker, or when the commit cannot be fetched, it changes nothing and Cargo rebuilds every workspace crate.
 - `actions/gate-setup`: The setup a `gate.yml` job runs after its checkout: craft-fonts and craft-i18n, the caller's environment, Linux packages, the Rust toolchain and cargo tools, the dependency cache through `actions/rust-cache` (with `actions/restore-mtimes` for `cache-workspace-crates`), sccache, and the caller's setup command and its cache. It takes `gate.yml`'s inputs plus which parts a job needs; other workflows have no use for it.
 - `actions/gate-run`: Runs one of `gate.yml`'s commands with bash; with `timeout-minutes`, GNU `timeout` stops the command after that many minutes, and the log lists the processes still running a minute before.
-- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs.
+- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs. With `select-tests: true` it also selects the tests: `tests` (`all`, `some` or `none`), `filter` (a nextest filterset) and `skip` (the members whose tests do not run). A pull request runs the tests of the crates that own a changed file, of the crates that declare a read of it, and of every crate that depends on those by any dependency kind; the build setup, `paths`, a crate's own `Cargo.toml` or a non-documentation file outside the crates (`docs` adds documentation globs) runs every test, and documentation alone runs none. Pass the filter to `cargo nextest run --workspace ... -E "$filter"`, so the build stays the whole workspace and only the run is narrowed. A crate whose build or tests read another crate's files declares them in its `Cargo.toml`:
+
+  ```toml
+  [package.metadata.craft]
+  reads = ["crates/cms/profiles"]
+  ```
+
+  The same step fails when a crate's sources name a path into another crate's directory (an `include_str!`/`include_bytes!` path, or a `../` literal in a file that uses `CARGO_MANIFEST_DIR`) that `reads` does not cover, or when a declared path matches no tracked file.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
 
 ## Storytold Organization Hosting
@@ -1072,6 +1145,9 @@ cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+The instrumented archive build and the unsharded `cargo llvm-cov` path default to two
+parallel rustc jobs (`build-jobs`, 1–4). A cold llvm-cov workspace build can otherwise
+start enough jobs to exhaust a hosted runner and shut it down mid-compile (exit 143).
 Each shard links the build job's target directory to its extracted copy of the
 archive, so tests that run a workspace binary through
 `env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.

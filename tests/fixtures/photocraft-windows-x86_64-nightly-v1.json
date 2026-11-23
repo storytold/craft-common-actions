@@ -1,0 +1,75 @@
+{
+  "schema": "craft-nightly-slice-contract/v1",
+  "slice": "photocraft windows x86_64 portable_zip \u2014 first private end-to-end target",
+  "owner_of_this_file": "nightly-builds-lead d6a64e079e6cdfb4fbb6544c8b5e1c6f",
+  "status": "Fields CONFIRMED: Photo (flavor/package) 19:46Z, Launcher (row/argv/profile root) 19:50Z; Infra G3 hook in progress",
+  "registry_entry_producer": {
+    "app": "photocraft",
+    "target": {
+      "os": "windows",
+      "arch": "x86_64",
+      "format": "portable_zip"
+    },
+    "asset_pattern": "photocraft-{version}-windows-x86_64-nightly.zip",
+    "isolation": {
+      "package_identity": "ai.storyteller.photocraft.nightly",
+      "profile_contract": "nightly",
+      "profile_version": 1,
+      "associations": "none"
+    }
+  },
+  "consumer_capability_launcher": {
+    "match_exactly": [
+      "app=photocraft",
+      "target=windows/x86_64/portable_zip",
+      "package_identity=ai.storyteller.photocraft.nightly",
+      "profile_contract=nightly",
+      "profile_version=1"
+    ],
+    "argv_constructed_by_launcher_only": [
+      "--launch-profile",
+      "nightly-v1",
+      "--profile-root",
+      "<ABS nightly data>/profiles/photocraft",
+      "--",
+      "<files>"
+    ],
+    "notes": "selector literal comes from the Launcher's typed table, never from descriptor text; anything else stays unavailable",
+    "profile_root": "<Nightly Paths.data \u2026/pre-release/v1>/profiles/photocraft \u2014 persistent, not under apps/<tag>/rollback",
+    "e5_transport": "existing non-default local-mirror feature + nightly-specific loopback mapping of physical requests for this one app; logical GitHub origin/tag/asset URLs and checksums unchanged; release/default builds ignore it"
+  },
+  "package_contents_app": {
+    "zip_root": [
+      "photocraft.exe (nightly build flavor)",
+      "license/notice files"
+    ],
+    "must_not_contain": [
+      "portable.txt",
+      "photocraft-cli.exe (first slice; CLI closure not proven)"
+    ],
+    "build_flavor": "compile-time env PHOTOCRAFT_BUILD_CHANNEL=nightly-v1 at cargo build (build.rs rerun-if-env-changed; absent=stable unchanged; unknown value fails the build); runtime env cannot flip it",
+    "nightly_flavor_behavior": [
+      "refuses to start without a valid nightly-v1 profile (explains: open from Craft Launcher) \u2014 never falls back to stable profile",
+      "stable updater never constructed",
+      "version string = descriptor version",
+      "--version/-V answers without startup, reporting nightly-v1"
+    ],
+    "stable_flavor_behavior": "defaults unchanged; refuses nightly-v1",
+    "packaging": "packaging/windows/package.ps1 -Nightly: x64 only, GUI only, no SkipBuild bypass, no MSI/CLI/portable.txt/associations, keeps licenses -> photocraft-<version>-windows-x86_64-nightly.zip"
+  },
+  "evidence_ladder": [
+    "E1 source review by a different reviewer (Photo 307 done; flavor+adapter pending)",
+    "E2 Linux compile/tests: Photo 9 (Photo owner), Launcher 22 (Keeper) \u2014 load1<10 gated",
+    "E3 Windows VM (disposable fixture from operator-approved clean baseline; Infra/VM owner names baseline/operator; never protected recovery VMs). Photo builds the one nightly-flavor zip; QA verifies the SAME zip. Phase A quiescent: stable closed, initialized stable profile hashed, nightly launch/exercise/exit, stable bytes compared. Phase B parallel stable+nightly: distinct IPC/windows/routing and actual Windows AppUserModelID. Nightly no-profile double-click refuses before logging/updater/prefs; stable no-profile still stable. Handoff needs exact source/lock/flavor build metadata, zip hash + manifest entry, extracted exe identity.",
+    "E4 Producer local: nightly_feed.py build/stage over the real E3 zip -> real NIGHTLY.json + SHA256SUMS, no network/publication (Infra)",
+    "E5 Windows VM: Launcher local-mirror build traverses the REAL feed/install/hash/launch path over Infra's staged output (no stub adapter or direct launch), exact argv recorded, uninstall/off keeps profile. New flavor/manifest/bootstrap/adapter source needs its own independent review.",
+    "E6 live: workflow + first prerelease publication \u2014 needs explicit user approval through publisher; not before E5"
+  ],
+  "out_of_scope_first_slice": [
+    "other 18 apps",
+    "MSI/DMG/deb",
+    "macOS/signing",
+    "exe icon badge (Photo follow-up; Launcher tile badge exists)",
+    "file associations"
+  ]
+}

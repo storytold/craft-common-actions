@@ -20,11 +20,13 @@ STEPS = JOBS['gate']['steps']
 SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
 SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
-# The reviewed revision of the first-party actions gate.yml calls: the commit that added
-# gate-setup, gate-run and restore-mtimes. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'd65d611f0ef67eaa94039351be5afce61102dbb0'
+# The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
+# gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
+OWN_ACTION_REV = '315eb1972c857c839c3abb3d9288bfd40d21b7da'
+# The commit that uses system Python 3.11+; the action is not in OWN_ACTION_REV.
+UNREACHED_RS_REV = '8830c54c077af2c6bf20833eb46252d775f7b35e'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
@@ -316,8 +318,23 @@ class GateWorkflowTests(unittest.TestCase):
                 with self.subTest(job=job, uses=s['uses']):
                     self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
+    def test_a_saving_leg_trims_its_entry_after_its_last_build_command(self):
+        # The trim must follow every command that builds, and it runs only where actions/rust-cache
+        # set the unit record, which it does only in a leg that saves.
+        for job, last_build in (('build', 'After the archive'), ('gate', 'Gate')):
+            with self.subTest(job=job):
+                names = [s.get('name') for s in JOBS[job]['steps']]
+                trim = JOBS[job]['steps'][names.index('Trim the cache entry to this build')]
+                self.assertEqual(trim['if'], "env.CRAFT_CACHE_UNITS != ''")
+                # Deleting stops safely anywhere, so a failed trim must not fail the build or skip the save.
+                self.assertEqual(trim.get('continue-on-error'), 'true')
+                self.assertTrue(trim['uses'].startswith('storytold/craft-common-actions/actions/cache-trim@'))
+                self.assertGreater(names.index('Trim the cache entry to this build'), names.index(last_build))
+                later = JOBS[job]['steps'][names.index('Trim the cache entry to this build') + 1:]
+                self.assertFalse([s for s in later if 'gate-run' in s.get('uses', '')])
+
     def test_first_party_actions_share_reviewed_revision(self):
-        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes'}
+        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes', 'cache-trim', 'unreached-rs'}
         actual = set()
         prefix = 'storytold/craft-common-actions/actions/'
         for _, job in JOBS.items():
@@ -326,7 +343,7 @@ class GateWorkflowTests(unittest.TestCase):
                 if not uses.startswith(prefix):
                     continue
                 name, revision = uses[len(prefix):].split('@')
-                self.assertEqual(revision, OWN_ACTION_REV, name)
+                self.assertEqual(revision, UNREACHED_RS_REV if name == 'unreached-rs' else OWN_ACTION_REV, name)
                 actual.add(name)
         self.assertEqual(actual, expected)
 
@@ -676,8 +693,9 @@ class ShardTests(unittest.TestCase):
 class ShardInputTests(unittest.TestCase):
     STEP = next(s for s in JOBS['select']['steps'] if s.get('id') == 'shards')
 
-    def run_step(self, shards='3', shard='s'):
-        status, out, outputs, _ = run_script(self.STEP['run'], {'SHARDS': shards, 'SHARD': shard})
+    def run_step(self, shards='3', shard='s', archive='', shard_archives='false'):
+        status, out, outputs, _ = run_script(self.STEP['run'], {'SHARDS': shards, 'SHARD': shard, 'ARCHIVE': archive,
+                                                                'SHARD_ARCHIVES': shard_archives})
         return status, out, outputs
 
     def test_an_archive_without_shards_is_an_error(self):
@@ -698,7 +716,9 @@ class ShardInputTests(unittest.TestCase):
 
     def test_rejects_what_cannot_run(self):
         for case, message in ((dict(shards='2.5'), 'whole number'), (dict(shards='-1'), 'whole number'),
-                              (dict(shard=''), 'needs shard-command')):
+                              (dict(shard=''), 'needs shard-command'),
+                              (dict(shard_archives='true'), 'shard-archives needs archive-command'),
+                              (dict(shards='9', archive='a', shard_archives='true'), 'at most 8 archives')):
             with self.subTest(case=case):
                 status, out, outputs = self.run_step(**case)
                 self.assertEqual(status, 1)
@@ -1060,6 +1080,71 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(JOBS['lint']['needs'], 'select')
         self.assertEqual(JOBS['gate']['needs'], ['select', 'build'])
         self.assertIn("needs.build.result != 'failure'", JOBS['gate']['if'])
+
+
+SHARD_ARCHIVES = dict(ARCHIVED, shard_archives=True)
+
+
+class ShardArchiveTests(unittest.TestCase):
+    BUILD_STEPS = JOBS['build']['steps']
+
+    def uploads(self, steps):
+        return [w for n, w, _ in steps if n.startswith('Upload shard ')]
+
+    def test_off_by_default_every_shard_downloads_the_one_archive(self):
+        self.assertEqual((INPUTS['shard-archives']['type'], INPUTS['shard-archives']['default']), ('boolean', 'false'))
+        legs = graph(**ARCHIVED)
+        names = [name for name, _, _ in leg(legs, 'build (ubuntu-24.04)')]
+        for absent in ('Archive paths', 'Archive sizes'):
+            self.assertNotIn(absent, names)
+        self.assertEqual(self.uploads(leg(legs, 'build (ubuntu-24.04)')), [])
+        for k in (1, 2, 3):
+            steps = leg(legs, f'test {k}/3 (ubuntu-24.04)')
+            self.assertEqual(ran(steps, 'Download the test archive')[0]['name'], 'gate-archive-ubuntu-24.04')
+
+    def test_each_shard_uploads_and_downloads_only_its_own_archive(self):
+        legs = graph(os=TWO_RUNNERS, after_archive_command='cargo test --doc', **SHARD_ARCHIVES)
+        build = leg(legs, 'build (windows-latest)')
+        names = [name for name, _, _ in build]
+        for absent in ('Archive path', 'Archive size', 'Upload the test archive'):
+            self.assertNotIn(absent, names)
+        self.assertEqual(ran(build, 'Archive paths')[1],
+                         {'DIR': '/runner/temp/gate-archives', 'NAME': 'nextest-archive.tar.zst', 'SHARDS': 3})
+        uploads = self.uploads(build)
+        self.assertEqual([(u['name'], u['path']) for u in uploads],
+                         [(f'gate-archive-windows-latest-{k}', f'/runner/temp/gate-archives/{k}/nextest-archive.tar.zst')
+                          for k in (1, 2, 3)])
+        for u in uploads:
+            self.assertEqual((u['overwrite'], u['compression-level'], u['if-no-files-found']), ('true', '0', 'error'))
+        self.assertLess(names.index('Archive sizes'), names.index("Upload shard 1's test archive"))
+        self.assertLess(names.index("Upload shard 3's test archive"), names.index('After the archive'))
+        for k in (1, 2, 3):
+            steps = leg(legs, f'test {k}/3 (windows-latest)')
+            self.assertEqual(ran(steps, 'Download the test archive')[0]['name'], f'gate-archive-windows-latest-{k}')
+            self.assertEqual(ran(steps, 'Archive path')[1], {'FILE': '/runner/temp/gate-archive/nextest-archive.tar.zst'})
+
+    def test_one_upload_per_shard_up_to_the_eight_the_select_job_allows(self):
+        for n in range(1, 9):
+            with self.subTest(shards=n):
+                build = leg(graph(**dict(SHARD_ARCHIVES, test_shards=n)), 'build (ubuntu-24.04)')
+                self.assertEqual([u['name'] for u in self.uploads(build)], [f'gate-archive-ubuntu-24.04-{k}' for k in range(1, n + 1)])
+        with self.assertRaises(AssertionError):
+            graph(**dict(SHARD_ARCHIVES, test_shards=9))
+        self.assertEqual(len([s for s in self.BUILD_STEPS if s.get('name', '').startswith('Upload shard ')]), 8)
+
+    def test_the_build_fails_when_a_shard_archive_is_missing(self):
+        sizes = next(s for s in self.BUILD_STEPS if s.get('name') == 'Archive sizes')
+        with tempfile.TemporaryDirectory() as directory:
+            for k in (1, 3):
+                Path(directory, str(k)).mkdir()
+                Path(directory, str(k), 'a.tar.zst').write_text('x')
+            env = {'GATE_SHARDS': '3', 'NEXTEST_ARCHIVE_DIR': directory, 'NEXTEST_ARCHIVE_NAME': 'a.tar.zst'}
+            status, out, _, _ = run_script(sizes['run'], env)
+            self.assertEqual(status, 1)
+            self.assertEqual(re.findall(r'::error::archive-command wrote no archive for shard (\d+)', out), ['2'])
+            Path(directory, '2').mkdir()
+            Path(directory, '2', 'a.tar.zst').write_text('x')
+            self.assertEqual(run_script(sizes['run'], env)[0], 0)
 
 
 class WorkspaceCrateTests(unittest.TestCase):

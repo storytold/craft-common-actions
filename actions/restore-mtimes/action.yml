@@ -51,7 +51,7 @@ runs:
         done > /dev/null
         changed=$(git diff --name-only "$base" HEAD | wc -l)
         echo "cache commit $base, $changed changed files touched"
-        git diff --name-only "$base" HEAD | head -50
+        git diff --name-only "$base" HEAD | sed -n "1,50p"
         # External checkouts: old mtimes when their pins are unchanged, else left new.
         if [ -f "$META/pins" ] && [ "$(pins)" = "$(cat "$META/pins")" ]; then
           for d in craft-i18n craft-fonts; do

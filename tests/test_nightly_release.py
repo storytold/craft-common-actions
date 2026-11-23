@@ -1,0 +1,596 @@
+"""Synthetic bridge integration only; no hosted, native, key or provider qualification."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT/"scripts"))
+import nightly_release as b
+import test_nightly_release_request as fixtures
+
+
+class PacketAPI(fixtures.API):
+    """Synthetic public state, while the actual packet publisher does its checks."""
+    def __init__(self, rows):
+        super().__init__(copy.deepcopy(rows))
+        self.release = None; self.ref = None; self.assets = []; self.writes = []
+        self.bad_final_ref = False; self.bad_timestamp = False; self.post_patch_io = False
+
+    def request(self, method, suffix, data=None):
+        self.calls.append((method, suffix))
+        if method != "GET": self.writes.append((method, suffix, copy.deepcopy(data)))
+        if method == "POST" and suffix == "/releases":
+            self.release = {**data, "id": 7, "published_at": None}
+            return copy.deepcopy(self.release)
+        if method == "PATCH" and suffix == "/releases/7":
+            self.release.update(data, published_at="2026-11-21T00:00:00Z" if self.bad_timestamp else "2026-11-22T02:00:00Z")
+            return copy.deepcopy(self.release)
+        if method == "GET" and suffix.startswith("/releases/tags/"):
+            if self.release is None: raise b.pub.APIError(404)
+            return copy.deepcopy(self.release)
+        if method == "GET" and suffix.startswith("/git/ref/tags/"):
+            if self.ref is None: raise b.pub.APIError(404)
+            if self.release and self.release["draft"] is False:
+                if self.post_patch_io: raise OSError("synthetic post-PATCH ref read failed")
+                if self.bad_final_ref: return {**self.ref, "object": {"type": "commit", "sha": "f"*40}}
+            return copy.deepcopy(self.ref)
+        if method == "GET" and suffix == "/releases/7/assets?per_page=100": return copy.deepcopy(self.assets)
+        if method == "GET" and suffix == "/releases/7": return copy.deepcopy(self.release)
+        if method == "GET" and suffix == "/releases?per_page=20&page=1":
+            return [{"id": 2, "tag_name": "v1.2.3", "draft": False, "prerelease": False,
+                "published_at": "2026-11-21T00:00:00Z"}] + ([copy.deepcopy(self.release)] if self.release else [])
+        if method == "GET" and suffix in self.rows: return copy.deepcopy(self.rows[suffix])
+        raise AssertionError((method, suffix))
+
+    def create_ref(self, tag, source_commit):
+        self.writes.append(("POST", "/git/refs", {"tag": tag, "sha": source_commit}))
+        self.ref = {"ref": "refs/tags/"+tag, "object": {"type": "commit", "sha": source_commit}}
+        return copy.deepcopy(self.ref)
+
+    def upload(self, release_id, name, directory, size):
+        actual_size, digest = b.n.digest_file(directory, name)
+        assert release_id == 7 and actual_size == size
+        asset = {"id": len(self.assets)+1, "name": name, "size": size, "digest": "sha256:"+digest, "state": "uploaded"}
+        self.assets.append(asset); self.writes.append(("UPLOAD", name, size))
+        return copy.deepcopy(asset)
+
+
+class BridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.fx = fixtures.RequestTests(); self.fx.setUp()
+        self.policy, self.env = self.fx.policy, self.fx.env
+        self.request = self.fx.invoke()
+        self.registry = json.loads((ROOT/"nightly-apps.json").read_text())
+        self.plan = b.identity_plan(self.registry, self.request["producer"], {"release_id": 2, "tag": "v1.2.3", "version": "1.2.3"})
+        self.state = {"request": self.request, "quality": {"synthetic": "not provider proof"}, "plan": self.plan}
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.addCleanup(patch.stopall)
+        patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}).start()
+
+    def payload(self):
+        directory = self.root/"payload"; directory.mkdir()
+        (directory/self.plan["unsigned_asset"]).write_bytes(b"synthetic unsigned bytes, not an executable")
+        digest = b.n.digest_file(directory, self.plan["unsigned_asset"])[1]
+        manifest = b.unsigned_manifest(self.plan, self.request["producer"], digest)
+        b.write_json(directory/"unsigned.json", manifest)
+        return directory, manifest
+
+    def verified(self, directory, *, version="2.102.0", failure=False, alter=None):
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv == ["gh", "--version"]:
+                return types.SimpleNamespace(stdout=("gh version "+version+" (fixture)\n").encode())
+            if failure: raise subprocess.CalledProcessError(1, argv)
+            result = self.fx.result()
+            result[0]["verificationResult"]["statement"]["subject"][0]["digest"]["sha256"] = b.n.digest_file(directory, self.plan["unsigned_asset"])[1]
+            if alter: alter(result)
+            kwargs["stdout"].write(json.dumps(result).encode())
+            return types.SimpleNamespace(returncode=0)
+        result = b.verified_unsigned(self.policy, self.state, directory, runner=runner)
+        return result, calls
+
+    def bundle(self):
+        directory, manifest = self.payload()
+        (manifest, claims), _ = self.verified(directory)
+        output = self.root/"bundle"
+        digest = b.stage_bundle(output, self.state, directory, manifest, claims)
+        return output, digest
+
+    def test_output_capability_allows_only_workspace_and_runner_temp_descendants(self):
+        workspace, runner = self.root/"workspace", self.root/"runner"
+        workspace.mkdir(); runner.mkdir()
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(runner)}):
+            for root in (workspace, runner):
+                target = root/"metadata.json"
+                b.write_json(target, {"synthetic": True})
+                self.assertEqual(json.loads(target.read_text()), {"synthetic": True})
+            for target in (self.root/"outside.json", workspace, runner,
+                           workspace/".."/"escape.json", workspace/"..\\escape.json"):
+                with self.subTest(target=target), self.assertRaises(ValueError):
+                    b.write_json(target, {})
+        self.assertFalse((self.root/"outside.json").exists())
+        self.assertFalse((self.root/"escape.json").exists())
+
+    def test_output_capability_refuses_symlink_parents_even_if_the_target_is_owned(self):
+        target = self.root/"target"; target.mkdir()
+        link = self.root/"link"
+        try: link.symlink_to(target, target_is_directory=True)
+        except OSError as error: self.skipTest(str(error))
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            b.write_json(link/"metadata.json", {})
+        self.assertFalse((target/"metadata.json").exists())
+
+    def test_unowned_bundle_and_native_outputs_refuse_before_native_or_public_mutation(self):
+        directory, manifest = self.payload()
+        (_, claims), _ = self.verified(directory)
+        state = {**self.state, "unsigned": manifest, "unsigned-claims": claims}
+        workspace = self.root/"owned"; workspace.mkdir()
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(workspace)}), patch.object(b.signing, "sign_windows") as native, patch.object(b.pub, "publish_packet") as publish:
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.stage_bundle(self.root/"escaped-bundle", self.state, directory, manifest, claims)
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.native_sign(self.policy, state, directory, self.root, self.root/"escaped-signed", {})
+            with self.assertRaisesRegex(ValueError, "owned"):
+                b.publish(self.policy, state, directory, self.root/"escaped-packet", self.root/"ownership.json", None, lambda: True, self.registry)
+        native.assert_not_called(); publish.assert_not_called()
+        self.assertFalse((self.root/"escaped-bundle").exists())
+        self.assertFalse((self.root/"escaped-signed").exists())
+        self.assertFalse((self.root/"escaped-packet").exists())
+
+    def test_bundle_metadata_keys_and_asset_names_cannot_become_output_paths(self):
+        directory, manifest = self.payload()
+        (_, claims), _ = self.verified(directory)
+        for extra in ({**self.state, "../escape": {}},
+                      {**self.state, "plan": {**self.plan, "unsigned_asset": "../escape.zip"}}):
+            with self.subTest(state=extra), self.assertRaises(ValueError):
+                b.stage_bundle(self.root/"rejected-bundle", extra, directory, manifest, claims)
+        self.assertFalse((self.root/"rejected-bundle").exists())
+
+    def test_identity_uses_original_main_role_without_spoofing_real_release_sha(self):
+        before = copy.deepcopy(self.env)
+        self.assertEqual(self.plan["identity"]["source_commit"], "a"*40)
+        self.assertIn(".100.1.ga", self.plan["identity"]["tag"])
+        self.assertEqual(self.env, before)
+        self.assertEqual(self.env["GITHUB_SHA"], "d"*40)
+
+    def test_quality_failure_prevents_all_artifact_metadata_reads(self):
+        self.fx.api.calls.clear()
+        with patch.object(b.c, "admit_candidate", side_effect=ValueError("synthetic quality refusal")):
+            with self.assertRaisesRegex(ValueError, "quality refusal"):
+                b.initial_admission(self.policy, self.env, 100, 1, self.fx.api, object(), self.registry, now=self.fx.now)
+        self.assertFalse(any("artifacts" in suffix for _, suffix in self.fx.api.calls))
+
+    def test_successful_early_snapshot_precedes_artifacts_and_returns_separate_roles(self):
+        observed = []
+        def quality(*args, **kwargs):
+            observed.extend(self.fx.api.calls)
+            return {"synthetic": "not provider proof"}
+        self.fx.api.calls.clear()
+        with patch.object(b.c, "admit_candidate", side_effect=quality), patch.object(b, "publication_state", return_value=self.plan):
+            state = b.initial_admission(self.policy, self.env, 100, 1, self.fx.api, object(), self.registry, now=self.fx.now)
+        self.assertFalse(any("artifacts" in suffix for _, suffix in observed))
+        self.assertTrue(any("artifacts" in suffix for _, suffix in self.fx.api.calls))
+        self.assertEqual(state["request"]["signer"]["source_commit"], "d"*40)
+
+    def test_revalidation_checks_real_admission_and_stable_identity_again(self):
+        with patch.object(b.c, "revalidate_candidate", return_value=self.state["quality"]) as quality, patch.object(b, "publication_state", return_value=self.plan):
+            self.assertTrue(b.revalidate(self.policy, self.state, self.env, self.fx.api, object(), self.registry, now=self.fx.now))
+            quality.assert_called_once()
+        changed = {**self.plan, "stable_base": {"version": "9.0.0"}}
+        with patch.object(b.c, "revalidate_candidate"), patch.object(b, "publication_state", return_value=changed):
+            with self.assertRaisesRegex(ValueError, "identity changed"):
+                b.revalidate(self.policy, self.state, self.env, self.fx.api, object(), self.registry, now=self.fx.now)
+
+    def test_last_remote_check_refuses_a_producer_that_appears_during_quality_or_history_reads(self):
+        original = copy.deepcopy(self.fx.api.rows["newest"])
+        for phase in ("quality", "history"):
+            self.fx.api.rows["newest"] = copy.deepcopy(original)
+            def changed(*args, **kwargs):
+                newest = self.fx.api.rows["newest"]["workflow_runs"][0]
+                newest.update(id=101, run_number=newest["run_number"]+1)
+                return self.state["quality"] if phase == "quality" else self.plan
+            with self.subTest(phase=phase), patch.object(b.c, "revalidate_candidate", side_effect=changed if phase == "quality" else None, return_value=self.state["quality"]), patch.object(b, "publication_state", side_effect=changed if phase == "history" else None, return_value=self.plan):
+                with self.assertRaisesRegex(ValueError, "newer trusted workflow ordinal"):
+                    b.revalidate(self.policy, self.state, self.env, self.fx.api, object(), self.registry, now=self.fx.now)
+        self.fx.api.rows["newest"] = original
+
+    def test_verifier_is_executed_and_fixed_private_stdout_is_not_downloaded_json(self):
+        directory, _ = self.payload()
+        (manifest, claims), calls = self.verified(directory)
+        self.assertEqual(len(calls), 2)
+        argv, kwargs = calls[1]
+        self.assertIn("--signer-digest", argv); self.assertIn("--deny-self-hosted-runners", argv)
+        self.assertNotEqual(Path(kwargs["stdout"].name).parent, directory)
+        self.assertTrue(kwargs["check"])
+        self.assertEqual(claims["payload_sha256"], manifest["unsigned_sha256"])
+        self.assertNotEqual(claims["payload_sha256"], self.request["artifact"]["wrapper_sha256"])
+
+    def test_old_or_failed_gh_cannot_be_replaced_with_a_verified_boolean(self):
+        directory, _ = self.payload()
+        with self.assertRaisesRegex(ValueError, "patched gh"):
+            self.verified(directory, version="2.101.0")
+        with self.assertRaises(subprocess.CalledProcessError): self.verified(directory, failure=True)
+        bad = {"verified": True}
+        (directory/"unsigned.json").write_text(json.dumps(bad))
+        with self.assertRaisesRegex(ValueError, "source/version/hash"):
+            self.verified(directory)
+
+    def test_successful_process_with_wrong_signed_attempt_is_still_refused(self):
+        directory, _ = self.payload()
+        def alter(result):
+            result[0]["verificationResult"]["statement"]["predicate"]["runDetails"]["metadata"]["invocationId"] += "0"
+        with self.assertRaisesRegex(ValueError, "invocation"):
+            self.verified(directory, alter=alter)
+
+    def test_bundle_independent_hash_covers_metadata_and_exact_payload_inventory(self):
+        directory, digest = self.bundle()
+        state = b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+        self.assertEqual(state["request"], self.request)
+        (directory/"request.json").write_text(json.dumps({**self.request, "repository": "other/repo"}))
+        with self.assertRaisesRegex(ValueError, "bundle digest"):
+            b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+
+    def test_bundle_extra_files_or_symlinks_refuse(self):
+        directory, digest = self.bundle()
+        (directory/"evil.ps1").write_text("must not run")
+        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+        (directory/"evil.ps1").unlink()
+        path = directory/"quality.json"; path.unlink(); path.symlink_to(directory/"request.json")
+        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+
+    def test_native_wrapper_uses_release_source_and_records_real_roles_and_three_digests(self):
+        directory, digest = self.bundle()
+        state = b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+        calls = []
+        def native(source, archive, output, env, version):
+            calls.append((source, archive, env, version))
+            Path(output).write_bytes(b"synthetic signed bytes, not native qualification")
+            return self.policy["windows_publisher_subject"]
+        with patch.object(b.signing, "adapter") as adapter, patch.object(b.signing, "require_config") as config, patch.object(b.signing, "sign_windows", side_effect=native):
+            output = self.root/"signed"
+            signed_digest = b.native_sign(self.policy, state, directory, "TRUSTED_RELEASE_ONLY", output, self.env)
+        signed = b.verify_bundle(output, signed_digest, self.plan["asset"], signed=True)
+        adapter.assert_called_once_with("windows-x86_64", "TRUSTED_RELEASE_ONLY")
+        config.assert_called_once()
+        self.assertEqual(calls[0][0], "TRUSTED_RELEASE_ONLY")
+        receipt = signed["signing"]
+        self.assertEqual(receipt["producer"]["source_commit"], "a"*40)
+        self.assertEqual(receipt["signer"]["source_commit"], "d"*40)
+        self.assertEqual(len({receipt["artifact"]["wrapper_sha256"], receipt["unsigned_sha256"], receipt["final_sha256"]}), 3)
+        self.assertEqual(self.env["GITHUB_SHA"], "d"*40)
+
+    def test_new_publication_marker_invalidity_refuses_before_any_api_write(self):
+        class NoCalls:
+            def __getattr__(self, name): raise AssertionError("no mutation or API call permitted")
+        for marker, policy in (("unreviewed", {}), (b.MARKER, {"schema": "legacy"})):
+            with self.assertRaises(ValueError):
+                b.pub.publish_packet(NoCalls(), {}, {}, "unused", guard=lambda: True, policy=policy, policy_marker=marker)
+
+    def test_source_policy_uses_real_fixed_git_reads_not_the_native_command_allowlist(self):
+        source = self.root/"git-fixture"; source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True).stdout
+        git("init", "--quiet")
+        (source/".github").mkdir()
+        policy = {**self.policy, "signer_tooling_revision": b.git_head(ROOT)}
+        b.write_json(source/".github/nightly-signing-policy.json", policy)
+        git("add", ".github/nightly-signing-policy.json")
+        git("-c", "user.name=Synthetic Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Synthetic policy fixture")
+        env = {**self.env, "GITHUB_SHA": b.git_head(source), "TOOLING_REVISION": policy["signer_tooling_revision"]}
+        with patch.object(b.signing, "command", side_effect=AssertionError("native executable allowlist must stay unchanged")):
+            self.assertEqual(b.source_policy(source, env), policy)
+        # A modified/untracked worktree JSON cannot replace the committed protected root.
+        (source/".github/nightly-signing-policy.json").write_text("{}")
+        self.assertEqual(b.source_policy(source, env), policy)
+        with self.assertRaises(ValueError): b.source_policy(source, {**env, "GITHUB_SHA": "f"*40})
+        with self.assertRaises(ValueError): b.git_read(source, ["push"])
+
+    def history(self):
+        request = copy.deepcopy(self.request)
+        receipt = b.r.release_receipt(self.policy, request, "1"*64, "2"*64, self.policy["windows_publisher_subject"])
+        publication = {"schema": "craft-nightly-release-publication/v1", "request": request,
+            "plan": self.plan, "quality": self.state["quality"], "signing": receipt}
+        release = {"id": 7, "tag_name": self.plan["identity"]["tag"], "target_commitish": "a"*40,
+            "draft": False, "prerelease": True, "body": b.MARKER+json.dumps(publication)}
+        rows = {"/compare/"+"d"*40+"..."+"d"*40: {"status": "identical", "behind_by": 0, "merge_base_commit": {"sha": "d"*40}}}
+        raw = json.dumps(self.policy).encode()
+        rows["/contents/.github/nightly-signing-policy.json?ref="+"d"*40] = {
+            "encoding": "base64", "size": len(raw), "content": b.base64.b64encode(raw).decode()}
+        for run_id in (100, 200):
+            run = copy.deepcopy(self.fx.api.rows[f"/actions/runs/{run_id}/attempts/1"])
+            run.update(status="completed", conclusion="success")
+            rows[f"/actions/runs/{run_id}/attempts/1"] = run
+        rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"] = {"total_count": 1,
+            "jobs": [{"id": 9, "status": "completed", "conclusion": "success",
+                "steps": [{"name": b.PUBLISH_STEP, "conclusion": "success"}]}]}
+        rows["/git/ref/tags/"+release["tag_name"]] = {"object": {"type": "commit", "sha": "a"*40}}
+        rows["/releases/7/assets?per_page=100"] = [{"name": self.plan["asset"], "digest": "sha256:"+"2"*64}]
+        return fixtures.API(rows), release
+
+    def test_previous_publication_authenticates_both_roles_protected_policy_step_tag_and_digest(self):
+        api, release = self.history()
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        self.assertEqual(previous["run"]["source_commit"], "a"*40)
+        self.assertNotEqual(previous["run"]["source_commit"], self.request["signer"]["source_commit"])
+
+    def test_successful_historical_job_can_include_a_failed_bookkeeping_upload_only(self):
+        api, release = self.history()
+        job = api.rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"]["jobs"][0]
+        # Synthetic API state for a continued upload failure. This checks only
+        # historical admission, not hosted Actions outcome/conclusion behavior.
+        job["steps"].append({"name": "Retain only finalized ownership evidence", "conclusion": "failure"})
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        self.assertEqual(job["conclusion"], "success")
+        self.assertEqual(job["steps"][0]["conclusion"], "success")
+        self.assertEqual(api.rows["/actions/runs/200/attempts/1"]["conclusion"], "success")
+        # The exception for bookkeeping must not become a historical failure override.
+        for failed in (job, api.rows["/actions/runs/200/attempts/1"]):
+            failed["conclusion"] = "failure"
+            with self.assertRaises(ValueError):
+                b.previous_publication(api, self.registry, self.policy, self.request, [release])
+            failed["conclusion"] = "success"
+
+
+    def test_previous_v1_policy_stays_historical_under_current_v2_live_policy(self):
+        api, release = self.history()
+        old = copy.deepcopy(self.policy); old['schema'] = 'craft-nightly-release-policy/v1'
+        del old['automatic_signer_actors']; old['manual_actors'] = ['github-actions[bot]']
+        publication = json.loads(release['body'].split(b.MARKER, 1)[1])
+        publication['request']['policy_sha256'] = b.r.digest(old)
+        publication['signing'] = b.r.release_receipt(old, publication['request'], '1'*64, '2'*64,
+            old['windows_publisher_subject'])
+        release['body'] = b.MARKER+json.dumps(publication)
+        raw = json.dumps(old).encode()
+        api.rows['/contents/.github/nightly-signing-policy.json?ref='+'d'*40] = {
+            'encoding':'base64', 'size':len(raw), 'content':b.base64.b64encode(raw).decode()}
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous['identity'], self.plan['identity'])
+        self.assertEqual(self.policy['schema'], 'craft-nightly-release-policy/v2')
+
+    def test_previous_publication_refuses_history_run_step_tag_digest_and_pagination_substitution(self):
+        mutations = [
+            lambda rows: rows["/compare/"+"d"*40+"..."+"d"*40].update(behind_by=1),
+            lambda rows: rows["/actions/runs/200/attempts/1"].update(conclusion="failure"),
+            lambda rows: rows["/actions/runs/100/attempts/1"].update(head_sha="f"*40),
+            lambda rows: rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"]["jobs"][0]["steps"][0].update(conclusion="skipped"),
+            lambda rows: rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"].update(total_count=2),
+            lambda rows: rows["/releases/7/assets?per_page=100"][0].update(digest="sha256:"+"3"*64),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                api, release = self.history(); mutate(api.rows)
+                with self.assertRaises(ValueError):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        api, release = self.history()
+        api.rows["/git/ref/tags/"+release["tag_name"]]["object"]["sha"] = "f"*40
+        with self.assertRaises(ValueError): b.previous_publication(api, self.registry, self.policy, self.request, [release])
+
+    def test_authenticated_equal_published_source_skips_before_freshness_or_native_work(self):
+        previous = {"identity": self.plan["identity"], "run": b.ordinal(self.request["producer"])}
+        with patch.object(b.p, "releases", return_value=[]), patch.object(b.p, "stable_base", return_value=self.plan["stable_base"]), patch.object(b, "previous_publication", return_value=previous), patch.object(b.p, "freshness") as freshness:
+            with self.assertRaisesRegex(b.UpToDate, "already published"):
+                b.publication_state(None, self.registry, self.policy, self.request)
+        freshness.assert_not_called()
+
+    def test_old_marker_uses_frozen_legacy_historical_parser_without_context_spoof(self):
+        _, release = self.history(); release["body"] = "legacy fixture"
+        previous = {"identity": self.plan["identity"], "run": {"source_commit": "a"*40}}
+        with patch.object(b.p, "verify_prior", return_value=previous) as legacy:
+            self.assertEqual(b.previous_publication(None, self.registry, self.policy, self.request, [release]), previous)
+        legacy.assert_called_once_with(None, self.registry, release)
+
+    def test_missing_native_config_refuses_before_native_signer_execution(self):
+        directory, digest = self.bundle(); state = b.verify_bundle(directory, digest, self.plan["unsigned_asset"])
+        with patch.object(b.signing, "adapter"), patch.object(b.signing, "sign_windows") as native:
+            with self.assertRaisesRegex(ValueError, "complete Windows"):
+                b.native_sign(self.policy, state, directory, "TRUSTED_RELEASE_ONLY", self.root/"signed", self.env)
+        native.assert_not_called()
+
+    def publication_fixture(self):
+        (self.root/self.plan["asset"]).write_bytes(b"synthetic signed bytes, not native qualification")
+        digest = b.n.digest_file(self.root, self.plan["asset"])[1]
+        receipt = b.r.release_receipt(self.policy, self.request, "1"*64, digest, self.policy["windows_publisher_subject"])
+        state = {**self.state, "signing": receipt}
+        return state, self.root/"packet"
+
+    def publication_api(self):
+        history, _ = self.history()
+        return PacketAPI(history.rows)
+
+    def test_verified_publication_fsync_failure_warns_without_canonical_receipt_and_next_run_continues(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        ownership = self.root/"ownership"
+        with patch.object(b.os, "fsync", side_effect=OSError("synthetic fsync failure")), patch.object(b, "bookkeeping_warning") as warning:
+            result = b.publish(self.policy, state, self.root, packet, ownership, api, lambda: True, self.registry)
+        self.assertEqual(result["id"], 7); self.assertFalse(result["draft"])
+        self.assertEqual(len([write for write in api.writes if write[:2] == ("PATCH", "/releases/7")]), 1)
+        warning.assert_called_once()
+        self.assertFalse((ownership/"ownership.json").exists())
+        self.assertEqual(json.loads((ownership/"ownership.pending.json").read_text())["schema"], "craft-nightly-ownership/v2")
+        writes = copy.deepcopy(api.writes)
+        # The hosted execution can now complete successfully despite receipt I/O.
+        # Historical admission stays unchanged and never reads the pending file.
+        prior = b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
+        self.assertEqual(prior["run"]["source_commit"], "a"*40)
+        with self.assertRaises(b.UpToDate): b.publication_state(api, self.registry, self.policy, self.request)
+        newer = copy.deepcopy(self.request)
+        newer["producer"].update(run_id=101, run_number=11, source_commit="f"*40)
+        newer["signer"].update(run_id=201, run_number=21)
+        api.rows["/git/ref/heads/main"] = {"ref":"refs/heads/main", "object":{"type":"commit", "sha":"f"*40}}
+        for base in ("a"*40, "f"*40):
+            api.rows["/compare/"+base+"..."+"f"*40] = {"status":"identical" if base == "f"*40 else "ahead",
+                "behind_by":0,"ahead_by":int(base != "f"*40),"base_commit":{"sha":base},"merge_base_commit":{"sha":base}}
+        self.assertEqual(b.publication_state(api, self.registry, self.policy, newer)["identity"]["source_commit"], "f"*40)
+        self.assertEqual(api.writes, writes)
+
+    def test_receipt_write_flush_close_or_promotion_IO_failure_never_creates_canonical_authority(self):
+        from contextlib import contextmanager
+        state, _ = self.publication_fixture()
+        for failure in ("write", "flush", "close", "promotion"):
+            ownership = self.root/("ownership-"+failure)
+            @contextmanager
+            def faulty_reserve(directory, *, filename):
+                self.assertEqual(filename, "ownership.pending.json")
+                directory.mkdir()
+                raw = (directory/filename).open("x", encoding="utf-8")
+                def write(value):
+                    if failure == "write": raise OSError("synthetic write failed")
+                    return raw.write(value)
+                def flush():
+                    if failure == "flush": raise OSError("synthetic flush failed")
+                    return raw.flush()
+                stream = types.SimpleNamespace(write=write, flush=flush, fileno=raw.fileno)
+                try: yield stream
+                finally:
+                    raw.close()
+                    if failure == "close": raise OSError("synthetic close failed")
+            api = self.publication_api()
+            replace = b.os.replace
+            def promote(source, destination):
+                if failure == "promotion": raise OSError("synthetic promotion failed")
+                return replace(source, destination)
+            with self.subTest(failure=failure), patch("nightly_ownership_receipt.reserve", side_effect=faulty_reserve), patch.object(b.os, "replace", side_effect=promote), patch.object(b, "bookkeeping_warning") as warning:
+                result = b.publish(self.policy, state, self.root, self.root/("packet-"+failure), ownership, api, lambda: True, self.registry)
+            self.assertEqual(result["id"], 7); warning.assert_called_once()
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertTrue((ownership/"ownership.pending.json").exists())
+
+    def test_receipt_is_promoted_only_after_successful_fsync_and_close(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        ownership = self.root/"ownership"
+        from contextlib import contextmanager
+        import nightly_ownership_receipt
+        reserve = nightly_ownership_receipt.reserve
+        streams = []
+        @contextmanager
+        def observe(directory, *, filename):
+            with reserve(directory, filename=filename) as stream:
+                streams.append(stream)
+                yield stream
+        replace = b.os.replace; calls = []
+        def fsync(fd):
+            calls.append("fsync")
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertTrue((ownership/"ownership.pending.json").exists())
+        def promote(source, destination):
+            calls.append("promote")
+            # Windows rename also requires the source handle to be closed.
+            self.assertTrue(streams[0].closed)
+            self.assertEqual(Path(source), ownership/"ownership.pending.json")
+            self.assertEqual(Path(destination), ownership/"ownership.json")
+            return replace(source, destination)
+        with patch("nightly_ownership_receipt.reserve", side_effect=observe), patch.object(b.os, "fsync", side_effect=fsync), patch.object(b.os, "replace", side_effect=promote), patch.object(b, "bookkeeping_warning") as warning:
+            result = b.publish(self.policy, state, self.root, packet, ownership, api, lambda: True, self.registry)
+        self.assertEqual(result["id"], 7); self.assertEqual(calls, ["fsync", "promote"])
+        warning.assert_not_called()
+        self.assertFalse((ownership/"ownership.pending.json").exists())
+        receipt = json.loads((ownership/"ownership.json").read_text())
+        self.assertEqual(receipt["schema"], "craft-nightly-ownership/v2")
+        self.assertEqual(receipt["release_id"], 7)
+        self.assertEqual(receipt["producer"], self.request["producer"])
+        self.assertNotIn("prune", receipt)
+
+    def test_callback_confirmation_without_verified_return_stays_fatal(self):
+        state, _ = self.publication_fixture()
+        for failure in ("bad_final_ref", "bad_timestamp", "post_patch_io"):
+            api = self.publication_api(); setattr(api, failure, True)
+            ownership = self.root/("ownership-"+failure)
+            with self.subTest(failure=failure), patch.object(b, "bookkeeping_warning") as warning:
+                with self.assertRaises(b.pub.PublishedWithoutReceipt):
+                    b.publish(self.policy, state, self.root, self.root/("packet-"+failure), ownership, api, lambda: True, self.registry)
+            self.assertFalse(api.release["draft"])
+            self.assertFalse((ownership/"ownership.json").exists())
+            warning.assert_not_called()
+
+    def test_initial_and_final_guard_refusals_stay_fatal_without_canonical_receipt(self):
+        state, _ = self.publication_fixture()
+        for failed_gate in (1, 2):
+            api = self.publication_api(); calls = []
+            def guard():
+                calls.append(True)
+                if len(calls) == failed_gate: raise ValueError("synthetic guard refusal")
+                return True
+            ownership = self.root/("ownership-"+str(failed_gate))
+            with self.subTest(failed_gate=failed_gate), self.assertRaisesRegex(ValueError, "guard refusal"):
+                b.publish(self.policy, state, self.root, self.root/("packet-"+str(failed_gate)), ownership, api, guard, self.registry)
+            self.assertFalse((ownership/"ownership.json").exists())
+            self.assertFalse(any(write[0] == "PATCH" for write in api.writes))
+
+    def test_non_IO_receipt_bug_is_not_downgraded_to_a_warning(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        with patch.object(b.json, "dumps", wraps=b.json.dumps) as dumps:
+            original = dumps._mock_wraps
+            def serialize(value, *args, **kwargs):
+                if isinstance(value, dict) and value.get("schema") == "craft-nightly-ownership/v2": raise ValueError("synthetic serialization bug")
+                return original(value, *args, **kwargs)
+            dumps.side_effect = serialize
+            with patch.object(b, "bookkeeping_warning") as warning, self.assertRaises(b.pub.PublishedWithoutReceipt):
+                b.publish(self.policy, state, self.root, packet, self.root/"ownership", api, lambda: True, self.registry)
+        warning.assert_not_called()
+        self.assertFalse((self.root/"ownership"/"ownership.json").exists())
+
+    def test_prepublication_failure_preserves_original_failure_not_public_state(self):
+        state, packet = self.publication_fixture()
+        with patch.object(b.pub, "publish_packet", side_effect=OSError("synthetic before publication")):
+            with self.assertRaisesRegex(OSError, "before publication"):
+                b.publish(self.policy, state, self.root, packet, self.root/"ownership", None, lambda: True, self.registry)
+
+    def test_postpublication_GITHUB_OUTPUT_IO_warns_but_non_IO_errors_still_fail(self):
+        with patch.object(b, "outputs", side_effect=OSError("synthetic output failed")), patch.object(b, "bookkeeping_warning") as warning:
+            b.publication_outputs({"id": 7})
+        warning.assert_called_once()
+        with patch.object(b, "outputs", side_effect=ValueError("synthetic programming bug")), self.assertRaises(ValueError):
+            b.publication_outputs({"id": 7})
+        with patch.object(b, "print", side_effect=OSError("synthetic diagnostic stream failed"), create=True):
+            b.bookkeeping_warning({"id": 7}, "synthetic warning", OSError("synthetic output failure"))
+
+    def test_json_duplicate_keys_and_nonfinite_values_are_not_metadata(self):
+        for raw in (b'{"x":1,"x":2}', b'{"x":NaN}'):
+            with self.assertRaises(ValueError): b.loads(raw)
+
+    def test_previous_publication_accepts_own_branch_qualified_attempt_paths_only(self):
+        api, release = self.history()
+        api.rows["/actions/runs/100/attempts/1"]["path"] = self.policy["producer_workflow_path"]+"@main"
+        api.rows["/actions/runs/200/attempts/1"]["path"] = self.policy["signer_workflow_path"]+"@release"
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        for run_id, path in ((100, self.policy["producer_workflow_path"]+"@release"),
+                             (200, self.policy["signer_workflow_path"]+"@main"),
+                             (200, self.policy["producer_workflow_path"]+"@release")):
+            with self.subTest(run_id=run_id, path=path):
+                api, release = self.history(); api.rows[f"/actions/runs/{run_id}/attempts/1"]["path"] = path
+                with self.assertRaises(ValueError):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
+
+    def test_unsigned_plan_canonicalizes_own_branch_run_path_against_the_real_workflow_ref(self):
+        env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": "storytold/photocraft",
+            "GITHUB_SHA": "a"*40, "GITHUB_RUN_ID": "100", "GITHUB_RUN_NUMBER": "10", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": "storytold/photocraft/.github/workflows/nightly.yml@refs/heads/main",
+            "TOOLING_REVISION": "b"*40}
+        def plan(path):
+            run = copy.deepcopy(self.fx.api.rows["/actions/runs/100"]); run["path"] = path
+            api = fixtures.API({"/actions/runs/100": run, "/releases?per_page=20&page=1": [{"id": 2, "tag_name": "v1.2.3",
+                "draft": False, "prerelease": False, "published_at": "2026-11-21T00:00:00Z"}]})
+            with patch("nightly_invocation.require_invocation"):
+                return b.unsigned_plan(api, self.registry, env)
+        bare_plan, bare_producer = plan(".github/workflows/nightly.yml")
+        qualified_plan, qualified_producer = plan(".github/workflows/nightly.yml@main")
+        self.assertEqual(qualified_producer["workflow_path"], ".github/workflows/nightly.yml")
+        self.assertEqual((qualified_plan, qualified_producer), (bare_plan, bare_producer))
+        for path in (".github/workflows/nightly.yml@release", ".github/workflows/other.yml@main",
+                     ".github/workflows/nightly.yml@refs/heads/main"):
+            with self.subTest(path=path), self.assertRaises(ValueError): plan(path)
+
+
+if __name__ == "__main__": unittest.main()

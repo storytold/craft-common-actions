@@ -109,7 +109,7 @@ inputs:
 runs:
   using: "composite"
   # The first-party actions below are pinned to one reviewed revision, the commit that added
-  # rust-cache's cache-workspace-crates and restore-mtimes: a commit cannot name itself.
+  # rust-cache's parent-named entry and unit record: a commit cannot name itself.
   steps:
     - name: Check out craft-fonts
       if: inputs.craft-fonts-ref != ''
@@ -132,7 +132,7 @@ runs:
 
     # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
     - name: Check out craft-i18n
-      uses: storytold/craft-common-actions/actions/checkout-craft-i18n@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      uses: storytold/craft-common-actions/actions/checkout-craft-i18n@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
 
     # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
     - name: Caller environment
@@ -175,7 +175,7 @@ runs:
 
     - name: Install Linux build dependencies
       if: runner.os == 'Linux' && inputs.packages != ''
-      uses: storytold/craft-common-actions/actions/install-apt-packages@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      uses: storytold/craft-common-actions/actions/install-apt-packages@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
       with:
         packages: ${{ inputs.packages }}
 
@@ -209,7 +209,7 @@ runs:
     # No save on failure: a main run that fails before its build has not filled the entry, and
     # rust-cache never replaces an exact-key entry, so that half-filled entry would be restored by
     # every run until Cargo.lock changes.
-    - uses: storytold/craft-common-actions/actions/rust-cache@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+    - uses: storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
       if: inputs.rust-cache == 'true'
       with:
         cache-version: ${{ inputs.cache-version }}
@@ -222,7 +222,7 @@ runs:
     # A cold build leaves every source newer than the (absent) outputs, so it builds everything.
     - name: Restore mtimes
       if: inputs.rust-cache == 'true' && inputs.cache-workspace-crates == 'true' && inputs.cold-build != 'true'
-      uses: storytold/craft-common-actions/actions/restore-mtimes@fabe5cc9f4f5c4756fe8667bfd07632ce5cebb40
+      uses: storytold/craft-common-actions/actions/restore-mtimes@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
       with:
         mode: restore
 
@@ -243,14 +243,36 @@ runs:
         # that declare them (Cargo.toml lints, build scripts), or to cache-version, starts a
         # fresh sccache cache instead.
         VERSION: ${{ inputs.cache-version }}-${{ hashFiles('**/Cargo.toml', '**/build.rs') }}
+        CACHE_VERSION: ${{ inputs.cache-version }}
       run: |
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
-          echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
-        fi
-        if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
-          echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+        if [ -n "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then
+          # Runner pod provides WebDAV sccache (read-write on trusted runners with writer
+          # credentials, anonymous read-only on untrusted runners). The prefix is cache-version
+          # alone, not the Cargo.toml hash, so every repository shares one store and dependency
+          # compiles hit across apps: dependencies build with --cap-lints allow and replay no
+          # warnings, and a stale workspace warning after a lints change is fixed by bumping
+          # cache-version.
+          if [ -z "${SCCACHE_WEBDAV_KEY_PREFIX:-}" ]; then
+            echo "SCCACHE_WEBDAV_KEY_PREFIX=sccache/$CACHE_VERSION" >> "$GITHUB_ENV"
+          fi
+          # sccache picks the GitHub Actions backend before WebDAV whenever SCCACHE_GHA_VERSION
+          # is set, so a caller's value would win; an empty version and `false` turn it off.
+          echo "SCCACHE_GHA_VERSION=" >> "$GITHUB_ENV"
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+          # A run that doesn't save caches only reads, on any runner: the server refuses writes
+          # without the writer credential, and sccache doesn't attempt them.
+          if [ -z "${SCCACHE_WEBDAV_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_WEBDAV_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
+        else
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          if [ -z "${SCCACHE_GHA_VERSION:-}" ]; then
+            echo "SCCACHE_GHA_VERSION=$VERSION" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${SCCACHE_GHA_RW_MODE:-}" ] && [ "$WRITES" != true ]; then
+            echo "SCCACHE_GHA_RW_MODE=READ_ONLY" >> "$GITHUB_ENV"
+          fi
         fi
 
     # Data the caller's setup fetches (test corpora, fixtures), keyed on the caller's pins. The

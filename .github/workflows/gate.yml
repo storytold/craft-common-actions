@@ -77,7 +77,7 @@ on:
         required: false
         default: ""
       archive-command:
-        description: "With test-shards: build the tests once per runner, in a `build (<os>)` job that runs this command to write a nextest archive to $NEXTEST_ARCHIVE_FILE. The shard legs download the archive instead of building, and only they wait for the build job. Where the dependency cache saves, the build job saves the `gate` entry. A failed build skips the shards of every runner in the call, so give each runner a call of its own. Empty (default): each shard builds its own tests; test-shards: 0 with an archive-command is an error"
+        description: "With test-shards: build the tests once per runner, in a `build (<os>)` job that runs this command to write a nextest archive to $NEXTEST_ARCHIVE_FILE (with shard-archives, one per shard). The shard legs download the archive instead of building, and only they wait for the build job. Where the dependency cache saves, the build job saves the `gate` entry. A failed build skips the shards of every runner in the call, so give each runner a call of its own. Empty (default): each shard builds its own tests; test-shards: 0 with an archive-command is an error"
         type: string
         required: false
         default: ""
@@ -86,6 +86,11 @@ on:
         type: string
         required: false
         default: "nextest-archive.tar.zst"
+      shard-archives:
+        description: "With archive-command: the build job writes one archive per shard instead of one for all, and each shard downloads only its own, so it fetches only the test binaries it runs. archive-command then writes shard k's archive to $NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME for every k from 1 to $GATE_SHARDS ($NEXTEST_ARCHIVE_FILE is not set), and records in the archives which tests each shard runs; the shard legs get $NEXTEST_ARCHIVE_FILE as before. At most 8 shards: the build job uploads each archive in a step of its own. false (default): one archive for every shard"
+        type: boolean
+        required: false
+        default: false
       after-archive-command:
         description: "With archive-command: a command the build job runs after it has uploaded the archive, for checks that need the build directory (doctests, say). The shards wait for the whole build job, so its time adds to the gate's. `gate (<os>)` passes only when it passed too. Empty runs none"
         type: string
@@ -194,7 +199,7 @@ on:
         # Same default as actions/rust-cache, which explains the v2 bump.
         default: "v2"
       cache-workspace-crates:
-        description: "Keep the workspace crates' compiled libraries and unit-test executables in the dependency cache as a rolling entry: the leg that saves writes an entry of its own each run, every leg restores the newest one, and actions/restore-mtimes resets source mtimes from the diff against the commit that entry was built from, so Cargo rebuilds only what changed. The lint legs keep their usual entry"
+        description: "Keep the workspace crates' compiled libraries and unit-test executables in the dependency cache as a rolling entry: the leg that saves writes an entry of its own each run, every leg restores the newest one, and actions/restore-mtimes resets source mtimes from the diff against the commit that entry was built from, so Cargo rebuilds only what changed. A run's entry is named after the entry it restored, so of overlapping runs that restored the same entry with the same lockfile and toolchain, only the first to finish saves; when the build records its units (actions/cache-trim), the entry holds only those. The lint legs keep their usual entry"
         type: boolean
         required: false
         default: false
@@ -203,6 +208,16 @@ on:
         type: boolean
         required: false
         default: true
+      unreached-rs-mode:
+        description: "The lint legs' check that no `.rs` file is unreached by every `mod`, `#[path]` and `include!` (such a file never compiles). `diff` fails when the change adds or modifies one, `strict` on any, `off` skips the check. Runs on the Linux lint leg only, before setup"
+        type: string
+        required: false
+        default: "diff"
+      unreached-rs-allow:
+        description: "Newline-separated globs of `.rs` files that are unreached on purpose (fixtures, generated files), matched against the repository-relative path; `**` crosses directories. The default covers fixture trees; a repository that sets this input lists them itself"
+        type: string
+        required: false
+        default: "**/fixtures/**"
       cold-build:
         description: "With cache-workspace-crates: restore no dependency cache and build everything from source; where the cache saves, the saving leg still writes a fresh entry (a nightly cold run is the safety net for the restored mtimes, and it starts the rolling entry afresh)"
         type: boolean
@@ -232,7 +247,7 @@ jobs:
   # in `os`.
   select:
     name: select legs
-    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != ''
+    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -252,7 +267,7 @@ jobs:
           fetch-depth: 2
       - id: select
         if: inputs.select-os != '' && inputs.select-os != '[]'
-        uses: storytold/craft-common-actions/actions/select-platforms@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/select-platforms@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           os: ${{ inputs.os }}
           select-os: ${{ inputs.select-os }}
@@ -263,13 +278,19 @@ jobs:
       # per runner, as shard 1.
       - name: Shards
         id: shards
-        if: inputs.test-shards != 0 || inputs.archive-command != ''
+        if: inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
         shell: bash
         env:
           SHARDS: ${{ inputs.test-shards }}
           SHARD: ${{ inputs.shard-command }}
+          ARCHIVE: ${{ inputs.archive-command }}
+          SHARD_ARCHIVES: ${{ inputs.shard-archives }}
         run: |
           set -euo pipefail
+          if [ "$SHARD_ARCHIVES" = true ] && [ -z "$ARCHIVE" ]; then
+            echo "::error::shard-archives needs archive-command: it writes the archives"
+            exit 1
+          fi
           if [ "$SHARDS" = 0 ]; then
             echo "::error::archive-command needs test-shards: the shard legs are what run its archive"
             exit 1
@@ -280,6 +301,11 @@ jobs:
           fi
           if [ -z "$SHARD" ]; then
             echo "::error::test-shards needs shard-command"
+            exit 1
+          fi
+          # The build job has one upload step per shard archive.
+          if [ "$SHARD_ARCHIVES" = true ] && [ "$SHARDS" -gt 8 ]; then
+            echo "::error::shard-archives uploads at most 8 archives, got test-shards: $SHARDS"
             exit 1
           fi
           exclude=
@@ -354,7 +380,7 @@ jobs:
       # Default-branch writes remain the default. Maintainers can explicitly opt manual branch runs
       # into branch-scoped writes; pull-request runs never save a cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -381,13 +407,28 @@ jobs:
           setup-command: ${{ inputs.setup-command }}
 
       - name: Archive path
+        if: ${{ !inputs.shard-archives }}
         shell: bash
         env:
           FILE: ${{ runner.temp }}/${{ inputs.archive-file }}
         run: echo "NEXTEST_ARCHIVE_FILE=$FILE" >> "$GITHUB_ENV"
 
+      - name: Archive paths
+        if: inputs.shard-archives
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/gate-archives
+          NAME: ${{ inputs.archive-file }}
+          SHARDS: ${{ inputs.test-shards }}
+        run: |
+          {
+            echo "NEXTEST_ARCHIVE_DIR=$DIR"
+            echo "NEXTEST_ARCHIVE_NAME=$NAME"
+            echo "GATE_SHARDS=$SHARDS"
+          } >> "$GITHUB_ENV"
+
       - name: Build the test archive
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           command: ${{ inputs.archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -395,7 +436,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates
-        uses: storytold/craft-common-actions/actions/restore-mtimes@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/restore-mtimes@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           mode: record
 
@@ -405,11 +446,29 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
 
       - name: Archive size
+        if: ${{ !inputs.shard-archives }}
         shell: bash
         run: ls -l "$NEXTEST_ARCHIVE_FILE"
 
+      - name: Archive sizes
+        if: inputs.shard-archives
+        shell: bash
+        run: |
+          status=0
+          for shard in $(seq 1 "$GATE_SHARDS"); do
+            file="$NEXTEST_ARCHIVE_DIR/$shard/$NEXTEST_ARCHIVE_NAME"
+            if [ -f "$file" ]; then
+              ls -l "$file"
+            else
+              echo "::error::archive-command wrote no archive for shard $shard ($file)"
+              status=1
+            fi
+          done
+          exit "$status"
+
       # Uncompressed: a zstd archive barely shrinks, and level 0 uploads it in seconds.
       - name: Upload the test archive
+        if: ${{ !inputs.shard-archives }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gate-archive-${{ matrix.os }}
@@ -420,12 +479,111 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+      # With shard-archives, one artifact per shard, so each shard downloads only its own. An upload
+      # step takes one artifact name, hence one step for each of up to eight shards.
+      - name: Upload shard 1's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-1
+          path: ${{ runner.temp }}/gate-archives/1/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 2's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-2
+          path: ${{ runner.temp }}/gate-archives/2/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 3's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-3
+          path: ${{ runner.temp }}/gate-archives/3/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 4's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-4
+          path: ${{ runner.temp }}/gate-archives/4/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 5's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-5
+          path: ${{ runner.temp }}/gate-archives/5/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 6's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-6
+          path: ${{ runner.temp }}/gate-archives/6/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 7's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-7
+          path: ${{ runner.temp }}/gate-archives/7/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 8's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 8
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-8
+          path: ${{ runner.temp }}/gate-archives/8/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
       - name: After the archive
         if: inputs.after-archive-command != ''
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           command: ${{ inputs.after-archive-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim). actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg
+      # that saves. A trim that stops part-way has deleted only units the build did not use, so it
+      # warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@315eb1972c857c839c3abb3d9288bfd40d21b7da
 
       # The `result` job reads it: the build job's result covers every runner.
       - name: Record the build's result
@@ -468,8 +626,15 @@ jobs:
       - *harden-runner
       - *checkout
 
+      - name: Unreached Rust files
+        if: ${{ runner.os == 'Linux' && inputs.unreached-rs-mode != 'off' }}
+        uses: storytold/craft-common-actions/actions/unreached-rs@8830c54c077af2c6bf20833eb46252d775f7b35e
+        with:
+          mode: ${{ inputs.unreached-rs-mode }}
+          allow: ${{ inputs.unreached-rs-allow }}
+
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -492,7 +657,7 @@ jobs:
           caller-setup: "false"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           command: ${{ inputs.lint-command }}
           timeout-minutes: ${{ inputs.gate-timeout-minutes }}
@@ -534,7 +699,7 @@ jobs:
       # there is one), so the shards do not race each other for it. Shards that run the build
       # job's archive build nothing and restore no cache.
       - name: Setup
-        uses: storytold/craft-common-actions/actions/gate-setup@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
           require-craft-fonts: ${{ inputs.require-craft-fonts }}
@@ -565,7 +730,7 @@ jobs:
         if: matrix.part == 'shard' && inputs.archive-command != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: gate-archive-${{ matrix.os }}
+          name: gate-archive-${{ matrix.os }}${{ inputs.shard-archives && format('-{0}', matrix.shard) || '' }}
           path: ${{ runner.temp }}/gate-archive
 
       - name: Archive path
@@ -590,7 +755,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Gate
-        uses: storytold/craft-common-actions/actions/gate-run@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           command: >-
             ${{ matrix.part == 'warm' && inputs.warm-command
@@ -601,7 +766,7 @@ jobs:
       # The marker is saved with the cache entry in rust-cache's post step, where the leg saves.
       - name: Record the cache commit
         if: inputs.cache-workspace-crates && !(matrix.part == 'shard' && inputs.archive-command != '')
-        uses: storytold/craft-common-actions/actions/restore-mtimes@d65d611f0ef67eaa94039351be5afce61102dbb0
+        uses: storytold/craft-common-actions/actions/restore-mtimes@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
           mode: record
 
@@ -619,6 +784,15 @@ jobs:
           path: ${{ inputs.artifact-path }}
           if-no-files-found: error
           retention-days: 1
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim), after the upload, which may read the target directory.
+      # actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg that saves. A trim that stops
+      # part-way has deleted only units the build did not use, so it warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@315eb1972c857c839c3abb3d9288bfd40d21b7da
 
       # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
       # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest

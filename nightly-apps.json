@@ -1,0 +1,134 @@
+{
+  "apps": {
+    "anicraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/anicraft",
+      "targets": []
+    },
+    "artcraft": {
+      "default_branch": "main",
+      "note": "Public Studio uses custom OS publish workflows, not the shared Rust release caller; adapter remains separate/unimplemented.",
+      "repository": "storytold/artcraft",
+      "targets": []
+    },
+    "cadcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/cadcraft",
+      "targets": []
+    },
+    "craft-anything": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/craft-anything",
+      "targets": []
+    },
+    "craft-launcher": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/craft-launcher",
+      "targets": []
+    },
+    "deckcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/deckcraft",
+      "targets": []
+    },
+    "designcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/designcraft",
+      "targets": []
+    },
+    "effectcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/effectcraft",
+      "targets": []
+    },
+    "figcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/figcraft",
+      "targets": []
+    },
+    "filmcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/filmcraft",
+      "targets": []
+    },
+    "gridcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/gridcraft",
+      "targets": []
+    },
+    "lightcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/lightcraft",
+      "targets": []
+    },
+    "materialcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/materialcraft",
+      "targets": []
+    },
+    "pdfcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/pdfcraft",
+      "targets": []
+    },
+    "photocraft": {
+      "default_branch": "main",
+      "note": "Private E1-E5 candidate only: Photo nightly-v1 Windows x86_64 GUI ZIP. Publication hard-disabled; native isolation qualification is still required.",
+      "repository": "storytold/photocraft",
+      "targets": [
+        {
+          "asset_pattern": "photocraft-{version}-windows-x86_64-nightly.zip",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.photocraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "portable_zip",
+            "os": "windows"
+          }
+        }
+      ]
+    },
+    "soundcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/soundcraft",
+      "targets": []
+    },
+    "texturecraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/texturecraft",
+      "targets": []
+    },
+    "vectorcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/vectorcraft",
+      "targets": []
+    },
+    "wordcraft": {
+      "default_branch": "main",
+      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "repository": "storytold/wordcraft",
+      "targets": []
+    }
+  },
+  "schema": "craft-nightly-registry/v1"
+}
