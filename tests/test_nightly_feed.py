@@ -79,6 +79,15 @@ class NightlyTests(unittest.TestCase):
         with patch.dict(os.environ, {'RUNNER_TEMP':'/tmp'}):
             with self.assertRaises(n.InvalidNightly): n.owned_path(self.root/'metadata')
 
+    def test_world_writable_job_root_refuses_until_private(self):
+        shared = self.root/'shared-scratch'; shared.mkdir()
+        shared.chmod(0o1777)
+        self.addCleanup(shared.chmod, 0o700)
+        with patch.dict(os.environ, {'RUNNER_TEMP':str(shared)}):
+            with self.assertRaisesRegex(n.InvalidNightly, 'world-writable'): n.owned_path(shared/'metadata')
+            shared.chmod(0o700)
+            self.assertEqual(n.owned_path(shared/'metadata'), shared/'metadata')
+
     def ready(self):
         self.registry["apps"]["photocraft"]["targets"] = [copy.deepcopy(self.target)]
 

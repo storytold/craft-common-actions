@@ -58,12 +58,13 @@ def owned_path(path):
     if temporary := os.environ.get("RUNNER_TEMP"):
         roots.append(Path(temporary))
     for root in roots:
-        require(root.is_absolute() and root.parent != root and
-                root.as_posix().lower() not in ("/tmp", "/var/tmp") and ".." not in root.parts,
+        require(root.is_absolute() and root.parent != root and ".." not in root.parts,
                 "job root must be an absolute private directory")
         for component in (root, *root.parents):
             require(not component.is_symlink(), "job root has a symlink ancestor")
         require(root.is_dir() and root.resolve() == root, "job root must be a real directory")
+        # Shared scratch directories are writable by every user; a job root must be private.
+        require(not root.stat().st_mode & stat.S_IWOTH, "job root must not be world-writable")
     require(any(absolute.is_relative_to(root) for root in roots), "path outside owned job roots")
     for component in (absolute, *absolute.parents):
         require(not component.is_symlink(), "owned path has a symlink ancestor or leaf")
