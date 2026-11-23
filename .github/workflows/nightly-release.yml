@@ -14,8 +14,18 @@ on:
       producer_run_attempt:
         type: string
         required: true
+      publish-linux-packages:
+        description: "Opt in to signing and publishing Linux distro packages (.deb, .rpm, .pkg.tar.zst, .AppImage, .flatpak) and Flatpak OCI tags"
+        type: boolean
+        default: false
     secrets:
       ARTCRAFT_SERVICES_DISPATCH_TOKEN:
+        required: false
+      LINUX_SIGNING_KEY:
+        required: false
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
         required: false
 permissions:
   contents: read
@@ -646,12 +656,164 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
+  publish-linux-packages:
+    name: Sign and publish Linux packages
+    needs: [validate, publish]
+    if: >-
+      inputs.publish-linux-packages && !cancelled() &&
+      needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
+      needs.publish.result == 'success' &&
+      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -I -B - <<'PY'
+          import json, os, re
+          p = os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}', p) and p != '0'*40
+          assert os.environ['DEFINING_REPOSITORY'] == 'storytold/craft-common-actions'
+          assert os.environ['DEFINING_SHA'] == p
+          config = json.load(open('.release-source/.github/nightly-signing-policy.json'))
+          assert config['schema']=='craft-nightly-release-policy/v3'
+          assert config['signer_tooling_revision'] == p
+          PY
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+      - name: Resolve published nightly tag and version
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --exclude-drafts --limit 20 --json tagName,isPrerelease,publishedAt --jq '[.[] | select(.isPrerelease)] | sort_by(.publishedAt) | last | .tagName // ""')"
+          test -n "$tag" || { echo "::error::no published nightly prerelease tag found"; exit 1; }
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install signing and OCI tools
+        uses: storytold/craft-common-actions/actions/install-apt-packages@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          packages: rpm debsigs skopeo binutils
+      - name: Push Flatpak OCI layouts to GHCR and Docker Hub (dated and nightly tags)
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          REGISTRY="${REGISTRY,,}"
+          creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
+          for arch in x86_64 aarch64; do
+            layouts=(.linux-packages/*-linux-"${arch}"-oci)
+            for layout in "${layouts[@]}"; do
+              [ -d "$layout" ] || continue
+              base="$(basename "$layout" -oci)"
+              echo "==> Pushing to $REGISTRY:$RELEASE_VERSION-$arch"
+              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:$RELEASE_VERSION-$arch"
+              echo "==> Pushing to $REGISTRY:nightly-$arch"
+              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:nightly-$arch"
+              skopeo inspect --raw --creds "$creds" "docker://$REGISTRY:$RELEASE_VERSION-$arch" >".linux-packages/$base.oci-manifest.json"
+              if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+                dh_registry="docker.io/storytold/${REGISTRY##*/}"
+                dh_creds="$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN"
+                echo "==> Pushing to $dh_registry:$RELEASE_VERSION-$arch"
+                skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:$RELEASE_VERSION-$arch"
+                echo "==> Pushing to $dh_registry:nightly-$arch"
+                skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:nightly-$arch"
+              fi
+              rm -rf "$layout"
+            done
+          done
+      - name: Import the Linux signing key
+        id: key
+        uses: storytold/craft-common-actions/actions/import-signing-key@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          key: ${{ secrets.LINUX_SIGNING_KEY }}
+      - name: Sign Linux packages and update SHA256SUMS.txt
+        env:
+          SIGNING_ENABLED: ${{ steps.key.outputs.enabled }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd .linux-packages
+          if [ "$SIGNING_ENABLED" = "true" ]; then
+            OCI_REGISTRY="ghcr.io/${GITHUB_REPOSITORY,,}" ../.nightly-tools/actions/draft-release/sign-linux.sh .
+          fi
+          rm -f SHA256SUMS.txt SHA256SUMS.txt.asc
+          gh release download "$TAG" --pattern SHA256SUMS.txt --output existing-sums.txt || true
+          {
+            if [ -f existing-sums.txt ]; then cat existing-sums.txt; fi
+            sha256sum -- * | grep -v 'existing-sums\.txt$' || true
+          } | awk '!seen[$2]++' > SHA256SUMS.txt
+          rm -f existing-sums.txt
+          if [ "$SIGNING_ENABLED" = "true" ]; then
+            gpg --batch --yes --local-user "$SIGNING_FPR" --armor --detach-sign -o SHA256SUMS.txt.asc SHA256SUMS.txt
+            gpgv --quiet --keyring "$SIGNING_PUBKEY" SHA256SUMS.txt.asc SHA256SUMS.txt
+          fi
+      - name: Upload Linux packages to the nightly release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(.linux-packages/*)
+          [ "${#files[@]}" -gt 0 ] || exit 0
+          gh release upload "$TAG" --clobber "${files[@]}"
+
   notify-website:
     name: Trigger website repo version bump
-    needs: [validate, publish]
+    needs: [validate, publish, publish-linux-packages]
     if: >-
       !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
       needs.publish.result == 'success' &&
+      (!inputs.publish-linux-packages || needs.publish-linux-packages.result == 'success') &&
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: ubuntu-24.04

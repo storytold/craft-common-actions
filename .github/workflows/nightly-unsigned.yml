@@ -19,6 +19,10 @@ on:
         description: "Reviewed literal JSON list of platforms this caller builds; the release signer still requires every admitted platform"
         type: string
         default: '["windows-x86_64"]'
+      publish-linux-packages:
+        description: "Opt in to building unsigned Linux distro packages (.deb, .rpm, .pkg.tar.zst, .AppImage, .flatpak, OCI layout) for the release-ref signer"
+        type: boolean
+        default: false
     outputs:
       unsigned-artifact-id:
         value: ${{ jobs.build.outputs.artifact-id }}
@@ -563,3 +567,137 @@ jobs:
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
+
+  build-linux-packages:
+    name: Linux packages ${{ matrix.arch }}
+    needs: [git-sources, select-platforms]
+    if: inputs.publish-linux-packages && contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04, deb: amd64, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64, target: aarch64-unknown-linux-gnu }
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
+      - name: Export the app's build variables
+        uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ steps.plan.outputs.version }}
+          date: ${{ steps.plan.outputs.build-date }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          deb-arch: ${{ matrix.deb }}
+          nfpm-version: 2.47.0
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: ${{ matrix.target }}
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Apply nightly version override
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: cargo xtask version set "$VERSION"
+      - name: Build and package (AppImage, deb, rpm, tar.gz)
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: packaging/linux/package.sh
+      - name: Build Flatpak bundle and OCI layout
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
+          if [ -x packaging/linux/flatpak-oci.sh ]; then
+            packaging/linux/flatpak-oci.sh "${tarballs[0]}"
+          fi
+      - name: Find tarball for Arch package
+        id: tarball
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
+      - uses: storytold/craft-common-actions/actions/arch-package@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          tarball: ${{ steps.tarball.outputs.path }}
+          arch: ${{ matrix.arch }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-linux-packages-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
