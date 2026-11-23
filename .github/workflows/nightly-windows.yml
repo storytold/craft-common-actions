@@ -141,8 +141,7 @@ jobs:
                   print(f"{path} replaces, patches or overrides a source")
                   sys.exit(1)
           PY
-          # Fails when Cargo.lock is out of date with the manifests.
-          cargo metadata --locked --format-version 1 > /dev/null
+          # Check locked git origins first: cargo metadata resolves and can fetch them.
           python3 - <<'PY'
           import sys, tomllib
           lock = tomllib.load(open("Cargo.lock", "rb"))
@@ -153,6 +152,8 @@ jobs:
               print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
               sys.exit(1)
           PY
+          # Fails when Cargo.lock is out of date with the manifests.
+          cargo metadata --locked --format-version 1 > /dev/null
 
 
   build:

@@ -45,6 +45,22 @@ def fields(value, expected, where):
 def positive(value, where):
     require(type(value) is int and 0 < value < 2**63, f"invalid {where}")
 
+# On Windows, os.stat() reports 0o777 for every directory without the read-only
+# attribute: the mode bits describe that attribute, not the directory's ACL.
+POSIX_MODE_PERMISSIONS = os.name != "nt"
+
+
+def world_writable(info):
+    """Report a directory any local account may write, where mode bits say so.
+
+    POSIX: the other-write bit, with or without the sticky bit, since a sticky
+    shared scratch directory is still shared. Windows: mode bits prove nothing,
+    so the root relies on the drive, traversal, real-directory (resolve also
+    follows junctions), link and containment checks.
+    """
+    return POSIX_MODE_PERMISSIONS and bool(info.st_mode & stat.S_IWOTH)
+
+
 def owned_path(path):
     """Confine CLI-derived I/O to this job's workspace or private runner temp."""
     raw = os.fspath(path)
@@ -64,7 +80,7 @@ def owned_path(path):
             require(not component.is_symlink(), "job root has a symlink ancestor")
         require(root.is_dir() and root.resolve() == root, "job root must be a real directory")
         # Shared scratch directories are writable by every user; a job root must be private.
-        require(not root.stat().st_mode & stat.S_IWOTH, "job root must not be world-writable")
+        require(not world_writable(root.stat()), "job root must not be world-writable")
     require(any(absolute.is_relative_to(root) for root in roots), "path outside owned job roots")
     for component in (absolute, *absolute.parents):
         require(not component.is_symlink(), "owned path has a symlink ancestor or leaf")

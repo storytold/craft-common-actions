@@ -14,6 +14,9 @@ from pathlib import Path
 from urllib.parse import quote
 import nightly_feed as n
 
+# GitHub rejects longer release bodies with 422 ("maximum is 125000 characters").
+MAX_RELEASE_BODY_CHARACTERS = 125000
+
 class APIError(Exception):
     def __init__(self, status):
         self.status = status
@@ -141,6 +144,13 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, 
     n.require(guard is not None or not isinstance(api,HTTPTransport),"live transport requires a reviewed v6 publication guard")
     if guard is not None: n.require(guard() is True,"initial publication gate refused")
     n.require((guard is None)==(policy is None),"publication guard/policy must be paired")
+    body="Nightly build identity (not stable). Source: " + ident["source_commit"] + "\nNIGHTLY.json SHA256: " + metadata["NIGHTLY.json"][1]
+    if policy is not None:
+        import nightly_policy as v6
+        body+='\n'+v6.MARKER+json.dumps(policy,sort_keys=True,separators=(',',':'))
+    # Check the complete body before the exclusive tag reservation: a draft
+    # refused after the tag exists cannot be retried by this flow.
+    n.require(len(body)<=MAX_RELEASE_BODY_CHARACTERS and len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")
     tag = quote(ident["tag"], safe="")
     absent(api, "/releases/tags/" + tag)
     absent(api, "/git/ref/tags/" + tag)
@@ -150,11 +160,6 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, 
     # this is not a client-side transaction against an authorized adversary.
     verify_ref(api.create_ref(ident["tag"], ident["source_commit"]), ident)
     verify_ref(api.request("GET", "/git/ref/tags/" + tag), ident)
-    body="Nightly build identity (not stable). Source: " + ident["source_commit"] + "\nNIGHTLY.json SHA256: " + metadata["NIGHTLY.json"][1]
-    if policy is not None:
-        import nightly_policy as v6
-        body+='\n'+v6.MARKER+json.dumps(policy,sort_keys=True,separators=(',',':'))
-        n.require(len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")
     release = api.request("POST", "/releases", {"tag_name": ident["tag"], "target_commitish": ident["source_commit"],
         "name": ident["app"] + " Nightly " + ident["tag"], "draft": True, "prerelease": True, "make_latest": "false",
         "body": body})

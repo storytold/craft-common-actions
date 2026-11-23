@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/nightly_feed.py")
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 sys.modules["nightly_feed"] = n
@@ -216,6 +217,28 @@ class PublisherTests(unittest.TestCase):
                 p.prepare_packet(registry, self.prepared, "RAM_ONLY", self.env)
         with patch.object(p, "Path", MemoryPath), patch.object(n, "build_feed", return_value=feed), patch.object(n, "bounded_json", return_value=feed), patch.object(n, "regular_file", side_effect=lambda *args: (io.BytesIO(b"tampered"), types.SimpleNamespace(st_size=8))), self.assertRaises(n.InvalidNightly):
             p.prepare_packet(registry, self.prepared, "RAM_ONLY", self.env)
+
+    def test_release_body_over_githubs_character_limit_refuses_before_tag_reservation(self):
+        # GitHub rejects release bodies over 125,000 characters with 422, even below MAX_JSON_BYTES.
+        import nightly_policy as v6
+        LIMIT = 125000
+        header = ("Nightly build identity (not stable). Source: " + self.ident["source_commit"] +
+            "\nNIGHTLY.json SHA256: " + self.metadata["NIGHTLY.json"][1] + "\n" + v6.MARKER)
+        def policy(total):
+            empty = len(header) + len(json.dumps({"x": ""}, separators=(",", ":")))
+            return {"x": "y"*(total-empty)}
+        too_long = policy(LIMIT+1)
+        self.assertLess(len(header) + len(json.dumps(too_long).encode()), n.MAX_JSON_BYTES)
+        with self.assertRaisesRegex(ValueError, "publication policy body exceeds bound"):
+            p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH", guard=lambda: True, policy=too_long)
+        self.assertEqual(self.api.calls, [])
+        self.assertFalse(self.api.reserved)
+        result = p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH", guard=lambda: True,
+            policy=policy(LIMIT))
+        self.assertEqual(result["id"], 7)
+        posted = next(data for method, target, data in self.api.calls if (method, target) == ("POST", "/releases"))
+        self.assertEqual(len(posted["body"]), LIMIT)
+
 
 class V4ReservationCases(unittest.TestCase):
     def setUp(self):

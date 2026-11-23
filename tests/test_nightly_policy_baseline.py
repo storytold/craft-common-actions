@@ -452,6 +452,24 @@ class BaselineTests(unittest.TestCase):
             p.validate_baseline_refresh(old,self.config,self.policy,self.api)
         self.wanted['green_required']=True; self.bind()
         self.assertTrue(p.validate_baseline_refresh(old,self.config,self.policy,self.api))
+    def test_diagnostic_run_on_candidate_or_baseline_commit_refuses_publication(self):
+        # docs/nightly-builds.md: diagnostics are not exempt from v2 check coverage.
+        self.assertTrue(self.gate())
+        for sha,check_id in (('a'*40,203),('c'*40,204)):
+            with self.subTest(sha=sha):
+                self.api.runs[5555]={**self.ci,'id':5555,'workflow_id':88,'path':'.github/workflows/nightly-diagnostics.yml','event':'workflow_dispatch','head_sha':sha}
+                self.api.checks[check_id]={**self.check,'id':check_id,'name':'diagnostic / metadata','head_sha':sha,'details_url':'https://github.com/storytold/photocraft/actions/runs/5555/job/301'}
+                with self.assertRaisesRegex(ValueError,'coverage drift'): self.gate()
+                self.api.checks.pop(check_id)
+    def test_refresh_refuses_baseline_the_runtime_gate_would_reject(self):
+        # Re-reviewing the same baseline SHA after main moved two commits ahead.
+        self.baseline_red(); old=copy.deepcopy(self.config)
+        self.row['baseline']['reviewed_at']='2026-11-21T12:01:00Z'; self.bind()
+        self.assertTrue(p.validate_baseline_refresh(old,self.config,self.policy,self.api))
+        self.api.parents=['e'*40]
+        with self.assertRaisesRegex(ValueError,'immediate first parent'):
+            p.validate_baseline_refresh(old,self.config,self.policy,self.api)
+        with self.assertRaisesRegex(ValueError,'immediate first parent'): self.gate()
     def test_refresh_unknown_intervening_ancestry_refuses(self):
         self.baseline_red(); old=copy.deepcopy(self.config)
         self.row['baseline'].update(source_commit='a'*40,reviewed_at='2026-11-21T12:01:00Z')

@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -87,6 +88,25 @@ class NightlyTests(unittest.TestCase):
             with self.assertRaisesRegex(n.InvalidNightly, 'world-writable'): n.owned_path(shared/'metadata')
             shared.chmod(0o700)
             self.assertEqual(n.owned_path(shared/'metadata'), shared/'metadata')
+
+    def test_windows_directory_mode_bits_do_not_refuse_runner_roots(self):
+        # CPython on Windows reports S_IFDIR|0o777 for any directory without the
+        # read-only attribute, so RUNNER_TEMP and the workspace look world-writable.
+        runner_temp = self.root/'runner-temp'; runner_temp.mkdir()
+        runner_temp.chmod(0o777)
+        self.addCleanup(runner_temp.chmod, 0o700)
+        windows_dir = os.stat_result((stat.S_IFDIR | 0o777,) + (0,) * 9)
+        with patch.object(n, 'POSIX_MODE_PERMISSIONS', False, create=True):
+            with patch.dict(os.environ, {'RUNNER_TEMP':str(runner_temp)}):
+                self.assertEqual(n.owned_path(runner_temp/'metadata'), runner_temp/'metadata')
+                self.assertFalse(n.world_writable(windows_dir))
+                # Structural checks still apply on Windows.
+                link = runner_temp/'link'; link.symlink_to(self.root, target_is_directory=True)
+                with self.assertRaises(n.InvalidNightly): n.owned_path(link/'metadata')
+        with patch.object(n, 'POSIX_MODE_PERMISSIONS', True, create=True):
+            self.assertTrue(n.world_writable(windows_dir))
+            with patch.dict(os.environ, {'RUNNER_TEMP':str(runner_temp)}):
+                with self.assertRaisesRegex(n.InvalidNightly, 'world-writable'): n.owned_path(runner_temp/'metadata')
 
     def ready(self):
         self.registry["apps"]["photocraft"]["targets"] = [copy.deepcopy(self.target)]

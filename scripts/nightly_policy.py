@@ -427,9 +427,20 @@ def historical_green_jobs(api,policy,sha,wanted,current,current_results):
     return greens
 
 
+def require_baseline_ancestry(api,policy,base):
+    """Runtime eligibility: the reviewed baseline is candidate main itself or its immediate first parent."""
+    source=policy['run']['source_commit']
+    commit=api.request('GET','/commits/'+source)
+    parents=commit.get('parents') if isinstance(commit,dict) else None
+    n.require(isinstance(commit,dict) and commit.get('sha')==source and isinstance(parents,list) and 0<len(parents)<=2 and all(isinstance(parent,dict) and full_sha(parent.get('sha')) for parent in parents),'missing canonical candidate ancestry')
+    n.require(base==source or parents[0]['sha']==base,'baseline must be reviewed current main or immediate first parent; arbitrary older baselines forbidden')
+
+
 def validate_refresh_history(api,previous,updated,policy):
     api=BaselineReads(api); require_main_head(api,policy)
     row=updated['apps']['photocraft']; baseline,pinned=baseline_contract(row,policy)
+    # Never approve a refresh that the runtime gate would then refuse.
+    require_baseline_ancestry(api,policy,baseline['source_commit'])
     old=previous['apps']['photocraft']['baseline']['source_commit']; current=baseline['source_commit']
     lineage=[current]
     while current!=old:
@@ -470,10 +481,7 @@ def baseline_checks(api,config,policy,required):
     baseline,pinned=baseline_contract(row,policy)
     api=BaselineReads(api); require_main_head(api,policy)
     source=policy['run']['source_commit']; base=baseline['source_commit']
-    commit=api.request('GET','/commits/'+source)
-    parents=commit.get('parents') if isinstance(commit,dict) else None
-    n.require(isinstance(commit,dict) and commit.get('sha')==source and isinstance(parents,list) and 0<len(parents)<=2 and all(isinstance(parent,dict) and full_sha(parent.get('sha')) for parent in parents),'missing canonical candidate ancestry')
-    n.require(base==source or parents[0]['sha']==base,'baseline must be reviewed current main or immediate first parent; arbitrary older baselines forbidden')
+    require_baseline_ancestry(api,policy,base)
     all_checks={sha:quality_check_inventory(api,sha) for sha in dict.fromkeys((base,source))}
     used={sha:set() for sha in all_checks}; selected=[]
     for workflow_id in pinned:
