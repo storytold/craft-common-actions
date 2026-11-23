@@ -17,8 +17,8 @@
         "profile_version": 1,
         "associations": "none"
       },
-      "status": "private-source-pending",
-      "feed_admitted": false,
+      "status": "feed-admitted",
+      "feed_admitted": true,
       "runtime_qualified": false
     },
     "macos-aarch64": {
@@ -36,8 +36,8 @@
         "profile_version": 1,
         "associations": "none"
       },
-      "status": "private-source-pending",
-      "feed_admitted": false,
+      "status": "feed-admitted",
+      "feed_admitted": true,
       "runtime_qualified": false
     }
   }

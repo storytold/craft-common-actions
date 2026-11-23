@@ -31,30 +31,41 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_main_build_and_attester_are_separate_and_credential_bound(self):
         graph = jobs(self.unsigned)
-        self.assertEqual(set(graph), {"git-sources", "build", "attest"})
-        self.assertIn("needs: git-sources", graph["build"])
+        self.assertEqual(set(graph), {"git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux"})
         self.assertIn("cargo metadata --locked", graph["git-sources"])
         self.assertIn("-Nightly -BuildOnly", graph["build"])
-        self.assertIn("nightly_smoke.py", graph["build"])
-        for name in ("git-sources", "build"):
-            for forbidden in ("secrets.", "id-token:", "attestations:", "environment:", "actions/cache", "save-cache", "restore-cache"):
-                self.assertNotIn(forbidden, graph[name])
-        attester = graph["attest"]
-        self.assertIn("needs: build", attester)
-        self.assertIn("id-token: write", attester)
-        self.assertIn("EXPECTED_COMPILER_SHA256: ${{ needs.build.outputs.unsigned-sha256 }}", attester)
-        self.assertIn("repository: ${{ job.workflow_repository }}", attester)
-        for forbidden in ("secrets.", "environment:", "nightly_smoke.py", "package.ps1", "actions/cache", "persist-credentials: true"):
-            self.assertNotIn(forbidden, attester)
+        self.assertIn("bash packaging/macos/nightly.sh --arch aarch64", graph["build-macos"])
+        self.assertIn("default: '[\"windows-x86_64\"]'", self.unsigned)
+        for build, attest, platform in (("build", "attest", "windows-x86_64"), ("build-macos", "attest-macos", "macos-aarch64")):
+            self.assertIn("needs: git-sources", graph[build])
+            self.assertIn("contains(fromJSON(inputs.platforms), '"+platform+"')", graph[build])
+            self.assertIn("nightly_smoke.py", graph[build])
+            for mode in ("main-plan", "main-seal"):
+                self.assertIn("nightly_release_entry.py "+mode+" --platform "+platform, graph[build])
+            self.assertIn("name: nightly-unsigned-"+platform+"-${{ github.run_id }}-${{ github.run_attempt }}", graph[build])
+            for forbidden in ("secrets.", "id-token:", "attestations:", "environment:", "actions/cache", "save-cache", "restore-cache", "APPLE_", "KEYCHAIN"):
+                self.assertNotIn(forbidden, graph[build])
+            attester = graph[attest]
+            self.assertIn("needs: "+build, attester)
+            self.assertIn("id-token: write", attester)
+            self.assertIn("EXPECTED_COMPILER_SHA256: ${{ needs."+build+".outputs.unsigned-sha256 }}", attester)
+            self.assertIn("main-subject --platform "+platform, attester)
+            self.assertIn("repository: ${{ job.workflow_repository }}", attester)
+            for forbidden in ("secrets.", "environment:", "nightly_smoke.py", "package.ps1", "nightly.sh", "actions/cache", "persist-credentials: true"):
+                self.assertNotIn(forbidden, attester)
+        for forbidden in ("secrets.", "environment:"):
+            self.assertNotIn(forbidden, graph["git-sources"])
 
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
         self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
-        self.assertEqual(set(graph), {"validate", "sign", "publish"})
-        self.assertIn("needs: validate", graph["sign"])
-        self.assertIn("needs.validate.outputs.admitted == 'true'", graph["sign"])
-        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 3)
-        self.assertIn("needs: sign", graph["publish"])
+        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish"})
+        for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
+            self.assertIn("needs: validate", graph[name])
+            self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
+            self.assertIn("--platform "+platform, graph[name])
+        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 4)
+        self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]", graph["publish"])
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
         for block in jobs(self.release).values():
@@ -62,32 +73,42 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn(required, block)
             self.assertNotIn("actions/cache", block)
             self.assertNotIn("secrets: inherit", block)
-            self.assertIn("config['schema']=='craft-nightly-release-policy/v2'", block)
+            self.assertIn("config['schema']=='craft-nightly-release-policy/v3'", block)
             self.assertNotIn("config['schema']=='craft-nightly-release-policy/v1'", block)
+            self.assertNotIn("config['schema']=='craft-nightly-release-policy/v2'", block)
             self.assertNotIn("GITHUB_SHA:", block)
             self.assertNotIn("GITHUB_REF:", block)
 
     def test_quality_snapshot_precedes_cross_run_artifact_download(self):
         validator = jobs(self.release)["validate"]
         self.assertLess(validator.index("nightly_release_entry.py admit"), validator.index("uses: actions/download-artifact@"))
-        for required in ("run-id: ${{ inputs.producer_run_id }}", "artifact-ids: ${{ steps.admit.outputs.artifact-id }}", "digest-mismatch: error"):
+        for required in ("run-id: ${{ inputs.producer_run_id }}", "artifact-ids: ${{ steps.admit.outputs.artifact-id-windows-x86_64 }}",
+                         "artifact-ids: ${{ steps.admit.outputs.artifact-id-macos-aarch64 }}", "path: .unsigned/windows-x86_64",
+                         "path: .unsigned/macos-aarch64", "digest-mismatch: error"):
             self.assertIn(required, validator)
+        self.assertEqual(validator.count("merge-multiple: true"), 2)
 
     def test_only_signer_has_release_environment_and_only_leaf_step_exports_keys(self):
         graph = jobs(self.release)
-        for name in ("validate", "publish"):
+        for name in ("validate", "verify-macos", "smoke-macos", "publish"):
             self.assertNotRegex(graph[name], r"(?m)^    environment:")
             self.assertNotRegex(graph[name], r"\$\{\{\s*secrets\.")
-        signer = graph["sign"]
-        self.assertIn("environment: release", signer)
-        self.assertNotIn("id-token:", signer)
-        self.assertNotIn("contents: write", signer)
-        guard = signer.index("nightly_release_entry.py guard")
-        keys = signer.index("secrets.WINDOWS_CERTIFICATE")
-        leaf = signer.index("- name: Sign data only")
-        self.assertLess(guard, leaf)
-        self.assertLess(leaf, keys)
-        self.assertNotIn("secrets.", signer[:leaf])
+        for name, key, leaf_name, foreign in (("sign-windows", "secrets.WINDOWS_CERTIFICATE", "- name: Sign data only", "APPLE_"),
+                                              ("sign-macos", "secrets.APPLE_CERTIFICATE", "- name: Sign, notarize and staple data only", "WINDOWS_")):
+            signer = graph[name]
+            self.assertIn("environment: release", signer)
+            self.assertNotIn("id-token:", signer)
+            self.assertNotIn("contents: write", signer)
+            self.assertNotIn(foreign, signer)
+            guard = signer.index("nightly_release_entry.py guard")
+            keys = signer.index(key)
+            leaf = signer.index(leaf_name)
+            self.assertLess(guard, leaf)
+            self.assertLess(leaf, keys)
+            self.assertNotIn("secrets.", signer[:leaf])
+        # Exactly the six stable Apple names, from the same `release` environment as stable.
+        self.assertEqual(sorted(set(re.findall(r"secrets\.([A-Z_]+)", graph["sign-macos"]))),
+            sorted(["APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "KEYCHAIN_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID"]))
 
     def test_publisher_reverifies_before_attesting_and_keeps_ownership_on_failure(self):
         publisher = jobs(self.release)["publish"]
@@ -144,14 +165,44 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertEqual(block.count("cargo metadata --locked"), 1)
 
     def test_only_the_sign_step_of_the_signer_references_secrets(self):
-        signer = jobs(self.release)["sign"]
-        steps = re.findall(r"(?ms)^      - (?:name: ([^\n]+)|uses: [^\n]+)\n(.*?)(?=^      - |\Z)", signer)
-        self.assertGreater(len(steps), 3)
-        with_secrets = [name for name, block in steps if "secrets." in block]
-        self.assertEqual(with_secrets, ["Sign data only through protected existing Windows adapter"])
-        self.assertNotIn("secrets.", signer.split("    steps:\n", 1)[0])
-        guard = signer.index("nightly_release_entry.py guard")
-        self.assertLess(guard, signer.index("- name: Sign data only"))
+        for name, step in (("sign-windows", "Sign data only through protected existing Windows adapter"),
+                           ("sign-macos", "Sign, notarize and staple data only through the protected app macOS adapter")):
+            signer = jobs(self.release)[name]
+            steps = re.findall(r"(?ms)^      - (?:name: ([^\n]+)|uses: [^\n]+)\n(.*?)(?=^      - |\Z)", signer)
+            self.assertGreater(len(steps), 3)
+            with_secrets = [name for name, block in steps if "secrets." in block]
+            self.assertEqual(with_secrets, [step])
+            self.assertNotIn("secrets.", signer.split("    steps:\n", 1)[0])
+            guard = signer.index("nightly_release_entry.py guard")
+            self.assertLess(guard, signer.index("- name: "+step))
+
+    def test_macos_verifier_and_smoke_are_fresh_keyless_and_bound_to_exact_signed_bytes(self):
+        graph = jobs(self.release)
+        verify, smoke = graph["verify-macos"], graph["smoke-macos"]
+        self.assertIn("needs: [validate, sign-macos]", verify)
+        self.assertIn("artifact-ids: ${{ needs.sign-macos.outputs.artifact-id }}", verify)
+        self.assertIn("verify-platform --source .release-source --platform macos-aarch64", verify)
+        self.assertIn("EXPECTED_BUNDLE_SHA256: ${{ needs.sign-macos.outputs.bundle-sha256 }}", verify)
+        self.assertIn("needs: [validate, sign-macos, verify-macos]", smoke)
+        self.assertIn("    permissions:\n      contents: read\n    steps:", smoke)
+        for forbidden in ("GH_TOKEN", "github.token", "secrets.", "environment:", "nightly-tools", "id-token"):
+            self.assertNotIn(forbidden, smoke)
+        # The signed app runs only after its bytes equal the keyless verifier's exact digest.
+        self.assertLess(smoke.index('test "$(shasum -a 256 "$final"'), smoke.index("nightly-verify.sh --input"))
+        self.assertIn("FINAL_SHA256: ${{ needs.verify-macos.outputs.final-sha256 }}", smoke)
+        self.assertIn("bash .release-source/packaging/macos/nightly-verify.sh --input \"$final\" --expect signed --team \"$team\"", smoke)
+        self.assertIn("HEAD:.github/nightly-signing-policy.json", smoke)
+
+    def test_publish_requires_every_admitted_platform_and_binds_each_digest(self):
+        publisher = jobs(self.release)["publish"]
+        for required in ("always() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true'",
+                         "(!contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') || needs.sign-windows.result == 'success')",
+                         "(!contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' && needs.smoke-macos.result == 'success'))",
+                         "SIGNED_BUNDLE_SHA256_WINDOWS_X86_64: ${{ needs.sign-windows.outputs.bundle-sha256 }}",
+                         "SIGNED_BUNDLE_SHA256_MACOS_AARCH64: ${{ needs.sign-macos.outputs.bundle-sha256 }}",
+                         "VERIFIED_FINAL_SHA256_MACOS_AARCH64: ${{ needs.verify-macos.outputs.final-sha256 }}",
+                         "path: .signed/windows-x86_64", "path: .signed/macos-aarch64", "--combined .combined"):
+            self.assertIn(required, publisher)
 
     def test_publish_job_budget_leaves_the_tolerant_ownership_upload_its_own_bound(self):
         # A job-level timeout cancels the job and fails success-only history, so every

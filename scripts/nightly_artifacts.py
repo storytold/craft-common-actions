@@ -17,13 +17,30 @@ def download_contract(artifact_id,expected_sha256):
     n.require(int(artifact_id)<=9007199254740991,'artifact ID exceeds exact JavaScript numeric transport range')
     n.require(isinstance(expected_sha256,str) and SHA256.fullmatch(expected_sha256), 'independent producer SHA256 required')
 
+LINUX_SUFFIX='-linux-x86_64-nightly.tar.gz'
+
+def asset_names(asset,kind):
+    """One exact ZIP for a build boundary; a packet may list every admitted platform (comma-separated).
+
+    Only a packet may carry the admitted Linux tar.gz, always with its detached .asc.
+    """
+    n.require(isinstance(asset,str),'exact nightly ZIP asset required')
+    names=asset.split(',') if kind=='packet' else [asset]
+    n.require(0<len(names)<=8 and len(set(names))==len(names) and
+              all(n.NAME.fullmatch(name) and 'nightly' in name and
+                  (name.endswith('.zip') or (kind=='packet' and name.endswith(LINUX_SUFFIX))) for name in names),'exact nightly ZIP asset required')
+    return names
+
+def packet_signatures(assets):
+    return {name+'.asc' for name in assets if name.endswith(LINUX_SUFFIX)}
+
 def inventory(directory,kind,asset=None):
     directory=Path(directory)
     n.require(directory.is_dir() and not directory.is_symlink(),'artifact directory must be a regular directory')
-    if kind=='identity': expected=IDENTITY_FILES
+    if kind=='identity': expected=IDENTITY_FILES; assets=set()
     else:
-        n.require(isinstance(asset,str) and n.NAME.fullmatch(asset) and 'nightly' in asset and asset.endswith('.zip'),'exact nightly ZIP asset required')
-        expected={asset} if kind=='zip' else {asset,'NIGHTLY.json','SHA256SUMS.txt'}
+        assets=asset_names(asset,kind)
+        expected=set(assets) if kind=='zip' else set(assets)|{'NIGHTLY.json','SHA256SUMS.txt'}|packet_signatures(assets)
     n.require(kind in ('identity','zip','packet'),'unknown artifact boundary')
     # Stop before retaining an attacker-controlled unbounded inventory.
     actual=set()
@@ -33,7 +50,7 @@ def inventory(directory,kind,asset=None):
     n.require(actual==expected,'missing artifact file')
     metadata={}; total=0
     for name in sorted(expected):
-        if name!=asset:
+        if name not in assets:
             stream,info=n.regular_file(directory,name)
             with stream:
                 n.require(info.st_size<=n.MAX_JSON_BYTES,'artifact metadata exceeds bound')
@@ -58,10 +75,13 @@ def verify(directory,kind,expected_sha256,asset=None,zip_sha256=None):
     n.require(isinstance(expected_sha256,str) and SHA256.fullmatch(expected_sha256),'independent producer SHA256 required')
     n.require(fingerprint(directory,kind,asset)==expected_sha256,kind+' artifact differs from its independent producer output')
     if kind=='packet':
-        n.require(isinstance(zip_sha256,str) and SHA256.fullmatch(zip_sha256),'original ZIP producer binding required')
-        # The ZIP fingerprint is the original build job's hash, not a packet claim.
-        _,digest=n.digest_file(directory,asset)
-        n.require(digest==zip_sha256,'packet ZIP differs from original build producer output')
+        names=asset_names(asset,kind)
+        hashes=zip_sha256.split(',') if isinstance(zip_sha256,str) else []
+        n.require(len(hashes)==len(names) and all(SHA256.fullmatch(value) for value in hashes),'original ZIP producer binding required')
+        # Each ZIP fingerprint is its original build job's hash, not a packet claim.
+        for name,expected in zip(names,hashes):
+            _,digest=n.digest_file(directory,name)
+            n.require(digest==expected,'packet ZIP differs from original build producer output')
     return True
 
 def verify_chain(identity_directory,packet_directory,identity_sha256,packet_sha256,zip_sha256,asset):

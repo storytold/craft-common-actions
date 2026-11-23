@@ -1,4 +1,4 @@
-name: Windows unsigned nightly producer
+name: Unsigned nightly producer (every listed platform, one run)
 # Reusable only. Main application code never runs with signing keys or OIDC.
 on:
   workflow_call:
@@ -15,6 +15,10 @@ on:
       craft-fonts-ref:
         type: string
         default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      platforms:
+        description: "Reviewed literal JSON list of platforms this caller builds; the release signer still requires every admitted platform"
+        type: string
+        default: '["windows-x86_64"]'
     outputs:
       unsigned-artifact-id:
         value: ${{ jobs.build.outputs.artifact-id }}
@@ -78,7 +82,7 @@ jobs:
 
   build:
     needs: git-sources
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(inputs.platforms), 'windows-x86_64')
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
@@ -113,7 +117,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if ((git -C .nightly-tools rev-parse HEAD) -cne $env:TOOLING_REVISION) { throw 'tooling checkout differs' }
-          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --output .unsigned-plan
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform windows-x86_64 --output .unsigned-plan
           if ($LASTEXITCODE -ne 0) { throw 'unsigned producer identity refused' }
       - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         with:
@@ -159,7 +163,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --directory dist --plan .unsigned-plan/plan.json --output .unsigned-handoff
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform windows-x86_64 --directory dist --plan .unsigned-plan/plan.json --output .unsigned-handoff
           if ($LASTEXITCODE -ne 0) { throw 'compiler handoff refused' }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
@@ -213,7 +217,318 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_COMPILER_SHA256: ${{ needs.build.outputs.unsigned-sha256 }}
         run: |
-          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --directory .unsigned
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform windows-x86_64 --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+  build-macos:
+    needs: git-sources
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(inputs.platforms), 'macos-aarch64')
+    # Same larger Arm runner as the stable macOS build; no secrets, environment, OIDC or cache.
+    runs-on: macos-15-xlarge
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform macos-aarch64 --output .unsigned-plan
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: aarch64-apple-darwin
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # No platform secrets, environment, OIDC permission, cache, or version mutation.
+      # The app-owned script builds the GUI-only nightly app; Developer ID comes later.
+      - name: Compile unsigned package only
+        shell: bash
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/macos-aarch64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: bash packaging/macos/nightly.sh --arch aarch64
+      - name: Smoke only in the credentialless compiler job
+        shell: bash
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          BUILT_ASSET: ${{ steps.plan.outputs.built-asset }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/nightly-dist/macos-aarch64/$BUILT_ASSET"
+          python3 -B .nightly-tools/scripts/nightly_unix.py inventory --pending .nightly-tools/nightly-unix-pending.json \
+            --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive"
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private --pending .nightly-tools/nightly-unix-pending.json \
+            --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive" \
+            --output "$RUNNER_TEMP/nightly-compiler-smoke"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft" \
+            --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform macos-aarch64 --directory "$RUNNER_TEMP/nightly-dist/macos-aarch64" --plan .unsigned-plan/plan.json --output .unsigned-handoff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  attest-macos:
+    needs: build-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.build-macos.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.build-macos.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-macos.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.build-macos.outputs.unsigned-sha256 }}
+        run: |
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform macos-aarch64 --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+  build-linux:
+    # Linux joins the same producer run as Windows (one release, every admitted platform).
+    # Off unless the caller lists linux-x86_64; no secrets, environment, OIDC, cache or version mutation.
+    needs: git-sources
+    if: contains(fromJSON(inputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = x86_64
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          deb-arch: amd64
+          nfpm-version: 2.47.0
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Compile unsigned package only
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/linux-x86_64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: bash packaging/linux/nightly.sh --arch x86_64
+      - name: Inventory and smoke only in the credentialless compiler job
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          EXACT_ASSET: ${{ steps.plan.outputs.asset }}
+        run: |
+          set -euo pipefail
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private \
+            --pending .nightly-tools/nightly-unix-pending.json --platform linux-x86_64 \
+            --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/linux-x86_64/$EXACT_ASSET" \
+            --output "$RUNNER_TEMP/nightly-compiler-smoke"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/photocraft" \
+            --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform linux-x86_64 --directory "$RUNNER_TEMP/nightly-dist/linux-x86_64" --plan .unsigned-plan/plan.json --output .unsigned-handoff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  attest-linux:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      unsigned-sha256: ${{ steps.subject.outputs.unsigned-sha256 }}
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.build-linux.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-linux.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform linux-x86_64 --directory .unsigned
       - name: Attest actual independently hashed unsigned payload, never a caller digest
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
         with:

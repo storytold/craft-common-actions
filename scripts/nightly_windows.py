@@ -22,12 +22,24 @@ CONTEXT_FIELDS = {"GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_REPOSITORY",
                   "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"}
 
 
+def reviewed_windows_target(record):
+    """The exact Windows row, alone or beside other reviewed platform rows (one release)."""
+    targets = record["targets"]
+    if targets == [PHOTO_TARGET]:
+        return type(targets[0]["isolation"]["profile_version"]) is int
+    import nightly_release_platforms as plat
+    try:
+        platforms = plat.registry_platforms({"schema": "craft-nightly-registry/v1", "apps": {"photocraft": record}})
+    except ValueError:
+        return False
+    rows = [item for item in targets if item == PHOTO_TARGET]
+    return "windows-x86_64" in platforms and len(rows) == 1 and type(rows[0]["isolation"]["profile_version"]) is int
+
+
 def validate_prepared(registry, app, prepared, cargo, version, environment, policy=None):
     n.require(app == "photocraft", "no Windows nightly adapter for this app")
     record = n.trusted_context(registry, app, environment)
-    n.require(record["targets"] == [PHOTO_TARGET] and
-              type(record["targets"][0]["isolation"]["profile_version"]) is int,
-              "unreviewed Windows target contract")
+    n.require(reviewed_windows_target(record), "unreviewed Windows target contract")
     n.fields(prepared, {"schema", "channel", "app", "repository", "tag", "source_commit",
                         "published_at", "version", "ready"}, "prepared identity")
     n.require(prepared["ready"] is True, "prepared capability unavailable")

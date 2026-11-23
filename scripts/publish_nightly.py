@@ -140,8 +140,8 @@ def verify_ref(ref, ident):
 def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, on_published=None, policy_marker=None):
     """Only mutates the draft returned from OUR create call in this invocation."""
     if policy_marker is not None:
-        n.require(policy_marker=="craft-nightly-release-publication/v1:" and isinstance(policy,dict) and
-            policy.get("schema")=="craft-nightly-release-publication/v1","unreviewed publication marker/schema")
+        n.require(policy_marker in ("craft-nightly-release-publication/v1:","craft-nightly-release-publication/v2:") and
+            isinstance(policy,dict) and policy.get("schema")==policy_marker[:-1],"unreviewed publication marker/schema")
     # Legacy no-policy calls exist only for frozen offline fixture generation.
     # The sole CLI always supplies the v6 live guard and bound policy below.
     n.require(guard is not None or not isinstance(api,HTTPTransport),"live transport requires a reviewed v6 publication guard")

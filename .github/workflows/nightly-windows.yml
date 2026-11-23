@@ -50,6 +50,10 @@ on:
         description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
         type: boolean
         default: false
+      windows-publisher-subject:
+        description: "Reviewed literal exact Authenticode publisher subject in caller source (public); empty refuses Windows signing"
+        type: string
+        default: ''
 
     outputs:
       artifact-id:
@@ -100,7 +104,7 @@ jobs:
           AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT != '' }}
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT != '' }}
           AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE != '' }}
-          PUBLISHER: ${{ vars.NIGHTLY_WINDOWS_PUBLISHER_SUBJECT }}
+          PUBLISHER: ${{ inputs.windows-publisher-subject }}
         run: |
           python3 -I -B - <<'PY'
           import os
@@ -353,7 +357,7 @@ jobs:
     permissions:
       contents: read
     env:
-      NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ vars.NIGHTLY_WINDOWS_PUBLISHER_SUBJECT }}
+      NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4

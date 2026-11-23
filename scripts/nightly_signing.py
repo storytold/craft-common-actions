@@ -33,16 +33,16 @@ FIELDS = {'schema', 'platform', 'method', 'identity_sha256', 'unsigned_sha256', 
           'source_commit', 'tooling_revision', 'run_id', 'run_attempt', 'asset', 'signer', 'verified', 'support'}
 
 
-def command(argv, *, stdin=None, env=None):
+def command(argv, *, stdin=None, env=None, timeout=3900):
     # Only fixed trusted system tools/app source scripts, never payload executables.
     tools = {'pwsh', '/bin/bash', '/usr/bin/ditto', '/usr/bin/lipo', '/usr/bin/codesign',
-             '/usr/bin/xcrun', '/usr/sbin/spctl', '/usr/bin/gpg', '/usr/bin/gpgv'}
+             '/usr/bin/xcrun', '/usr/sbin/spctl', '/usr/bin/gpg', '/usr/bin/gpgv', '/usr/bin/gpgconf'}
     arguments = [str(value.absolute()) if isinstance(value, Path) else str(value) for value in argv]
     n.require(arguments and arguments[0] in tools, 'unreviewed signing executable')
     n.require(all(not any(char in value for char in '\0\r\n') for value in arguments),
               'signing arguments contain control characters')
     result = subprocess.run(arguments, input=stdin, env=env, check=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3900)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     n.require(len(result.stdout) <= n.MAX_JSON_BYTES and len(result.stderr) <= n.MAX_JSON_BYTES,
               'signing tool output exceeds bound')
     return result.stdout.decode('utf-8-sig').strip()
@@ -188,7 +188,8 @@ def mac_verify(archive, version, pending, environment, output):
     # inventory has already forbidden links, traversal, extra roots and special files.
     output = n.owned_path(output)
     n.require(not output.exists(), 'Mac verification directory must be new')
-    command(['/usr/bin/ditto', '-x', '-k', archive, output])
+    # Unpack like the Launcher: no resource forks or extended attributes restored.
+    command(['/usr/bin/ditto', '-x', '-k', '--norsrc', '--noextattr', archive, output])
     app = Path(output)/'PhotoCraft Nightly.app'
     executable = app/'Contents/MacOS/PhotoCraft'
     n.require(command(['/usr/bin/lipo', '-archs', executable]) == 'arm64', 'Mac GUI must be thin aarch64')
@@ -197,13 +198,21 @@ def mac_verify(archive, version, pending, environment, output):
     details = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(app)],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=60).stdout.decode()
     n.require(len(details) <= n.MAX_JSON_BYTES and
+              '\nIdentifier='+u.ISOLATION['package_identity']+'\n' in '\n'+details+'\n' and
               '\nAuthority=Developer ID Application:' in '\n'+details and
               '\nTeamIdentifier='+team+'\n' in '\n'+details and
               re.search(r'^Timestamp=.+$', details, re.M) and
               hardened_runtime(details),
-              'Mac requires Developer ID, exact team, secure timestamp and hardened runtime')
+              'Mac requires nightly identifier, Developer ID, exact team, secure timestamp and hardened runtime')
     command(['/usr/bin/xcrun', 'stapler', 'validate', app])
-    assessment = command(['/usr/sbin/spctl', '--assess', '--type', 'execute', app])
+    # spctl reports its verdict on stderr; require Gatekeeper's notarized source, not just exit 0.
+    assessment = subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'execute', '-vv', str(app)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=120).stdout.decode()
+    lines = assessment.splitlines()
+    n.require(len(assessment) <= n.MAX_JSON_BYTES and lines and lines[0].endswith(': accepted') and
+              'source=Notarized Developer ID' in lines and
+              any(line.startswith('origin=Developer ID Application: ') and line.endswith('('+team+')') for line in lines),
+              'Gatekeeper must accept the app as notarized Developer ID from the reviewed team')
     return team
 
 
@@ -269,22 +278,76 @@ def verify_package(directory, receipt, source, environment, *, packet=False):
         n.require(path.stat().st_size == binding['size'] and sha(path) == binding['sha256'], 'signature support differs from signer receipt')
     if receipt['platform'] == 'linux-x86_64':
         adapter('linux-x86_64', source)
-        with tempfile.TemporaryDirectory(prefix='nightly-gpg-verify-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
-            keyring = Path(temporary)/'trusted.gpg'
-            public = n.owned_path(Path(source)/'.github/nightly-linux-signing-key.asc')
-            # No automatic key retrieval, no trust in downloaded release-signing-key.asc.
-            command(['/usr/bin/gpg', '--homedir', temporary, '--batch', '--import', public])
-            listing = command(['/usr/bin/gpg', '--homedir', temporary, '--batch', '--with-colons', '--list-keys'])
-            fingerprints = [line.split(':')[9] for line in listing.splitlines() if line.startswith('fpr:')]
-            n.require(sum(line.startswith('pub:') for line in listing.splitlines()) == 1 and fingerprints and
-                      fingerprints[0] == receipt['signer'] == environment.get('NIGHTLY_LINUX_SIGNING_FINGERPRINT'),
-                      'Linux signer differs from independently reviewed public key/fingerprint')
-            binary = subprocess.run(['/usr/bin/gpg', '--homedir', temporary, '--batch', '--export', fingerprints[0]],
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60).stdout
-            keyring.write_bytes(binary)
-            command(['/usr/bin/gpgv', '--homedir', temporary, '--keyring', keyring,
-                     directory/(receipt['asset']+'.asc'), directory/receipt['asset']])
+        n.require(receipt['signer'] == environment.get('NIGHTLY_LINUX_SIGNING_FINGERPRINT'),
+                  'Linux signer differs from independently reviewed public key/fingerprint')
+        # No automatic key retrieval, no trust in downloaded release-signing-key.asc.
+        verify_linux_signature(Path(source)/'.github/nightly-linux-signing-key.asc', directory/(receipt['asset']+'.asc'),
+                               directory/receipt['asset'], receipt['signer'], environment)
     return True
+
+
+LINUX_HASH_ALGORITHMS = {'8', '9', '10'}  # OpenPGP SHA-256, SHA-384, SHA-512 only.
+
+
+def stop_gpg_agent(homedir):
+    """Never leave an agent (possibly holding the signing key) behind a temporary homedir."""
+    try:
+        command(['/usr/bin/gpgconf', '--homedir', Path(homedir), '--kill', 'all'])
+    except (OSError, subprocess.SubprocessError, n.InvalidNightly):
+        pass  # Best effort: the homedir is removed next, which also ends a live agent.
+
+
+def linux_public_keyring(public_key, fingerprint, homedir):
+    """Import exactly one reviewed public primary into a fresh homedir; return a gpgv keyring.
+
+    Trust comes from reviewed source and the independently reviewed fingerprint,
+    never from a downloaded release-signing-key.asc. No automatic key retrieval.
+    """
+    public_key, homedir = n.owned_path(public_key), Path(homedir)
+    n.require(re.fullmatch(r'(?:[A-F0-9]{40}|[A-F0-9]{64})', fingerprint or ''),
+              'independently reviewed full Linux primary fingerprint required')
+    n.require(public_key.is_file() and not public_key.is_symlink() and
+              0 < public_key.stat().st_size <= n.MAX_JSON_BYTES, 'reviewed Linux public key missing or exceeds bound')
+    command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--import', public_key])
+    listing = command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--with-colons', '--list-keys'])
+    lines = listing.splitlines()
+    primaries = [lines[index+1].split(':')[9] for index, line in enumerate(lines)
+                 if line.startswith('pub:') and index+1 < len(lines) and lines[index+1].startswith('fpr:')]
+    n.require(sum(line.startswith('pub:') for line in lines) == 1 and primaries == [fingerprint],
+              'Linux signer differs from independently reviewed public key/fingerprint')
+    keyring = homedir/'trusted.gpg'
+    binary = subprocess.run(['/usr/bin/gpg', '--homedir', str(homedir), '--batch', '--export', fingerprint],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60).stdout
+    n.require(0 < len(binary) <= n.MAX_JSON_BYTES, 'reviewed Linux public key export missing or exceeds bound')
+    keyring.write_bytes(binary)
+    return keyring
+
+
+def verify_linux_signature(public_key, signature, payload, fingerprint, environment):
+    """gpgv over exact bytes with only the reviewed key; one good signature bound to the primary."""
+    signature = n.owned_path(signature)
+    n.require(signature.is_file() and not signature.is_symlink() and 0 < signature.stat().st_size <= 16384,
+              'Linux detached signature missing or exceeds 16KiB')
+    raw = signature.read_bytes()
+    n.require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
+              all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
+    with tempfile.TemporaryDirectory(prefix='nightly-gpgv-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
+        homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
+        try:
+            keyring = linux_public_keyring(public_key, fingerprint, homedir)
+            status = command(['/usr/bin/gpgv', '--homedir', homedir, '--status-fd', '1', '--keyring', keyring,
+                              signature, n.owned_path(payload)])
+        finally:
+            stop_gpg_agent(homedir)
+    records = [line.split()[1:] for line in status.splitlines() if line.startswith('[GNUPG:] ')]
+    kinds = [record[0] for record in records if record]
+    n.require(not {'BADSIG', 'ERRSIG', 'EXPSIG', 'EXPKEYSIG', 'REVKEYSIG', 'NO_PUBKEY'} & set(kinds) and
+              kinds.count('NEWSIG') <= 1 and kinds.count('GOODSIG') == 1 and kinds.count('VALIDSIG') == 1,
+              'exactly one good, unexpired, unrevoked Linux signature required')
+    valid = next(record for record in records if record and record[0] == 'VALIDSIG')
+    n.require(len(valid) == 11 and valid[10] == fingerprint and valid[8] in LINUX_HASH_ALGORITHMS and valid[9] == '00',
+              'Linux signature is not a binary-document signature by the reviewed primary with SHA-2')
+    return fingerprint
 
 
 def sign_windows(source, archive, output, environment, version):
@@ -306,32 +369,25 @@ def sign_linux(source, archive, output, environment):
     archive, output = n.owned_path(archive), n.owned_path(output)
     trusted_key = n.owned_path(Path(source)/'.github/nightly-linux-signing-key.asc')
     n.require(trusted_key.stat().st_size <= n.MAX_JSON_BYTES, 'reviewed Linux public key exceeds bound')
+    fingerprint = environment.get('NIGHTLY_LINUX_SIGNING_FINGERPRINT', '')
     with tempfile.TemporaryDirectory(prefix='nightly-gpg-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
         secret, public = Path(temporary)/'secret', Path(temporary)/'public'
         secret.mkdir(mode=0o700); public.mkdir(mode=0o700)
         env = {**environment, 'GNUPGHOME': str(secret)}
-        # Public trust is reviewed app source, NEVER downloaded from artifact/release.
-        command(['/usr/bin/gpg', '--homedir', public, '--batch', '--import', trusted_key])
-        listed = command(['/usr/bin/gpg', '--homedir', public, '--batch', '--with-colons', '--list-keys'])
-        primaries = [line.split(':')[9] for line in listed.splitlines() if line.startswith('fpr:')]
-        n.require(sum(line.startswith('pub:') for line in listed.splitlines()) == 1 and primaries,
-                  'exactly one reviewed Linux public primary key required')
-        fingerprint = primaries[0]
-        n.require(fingerprint == environment.get('NIGHTLY_LINUX_SIGNING_FINGERPRINT'),
-                  'Linux public key differs from independently reviewed full primary fingerprint')
-        command(['/usr/bin/gpg', '--batch', '--import'], stdin=environment['LINUX_SIGNING_KEY'].encode(), env=env)
-        shutil.copyfile(archive, output)
-        signature = Path(str(output)+'.asc')
-        command(['/usr/bin/gpg', '--batch', '--yes', '--pinentry-mode', 'error', '--local-user', fingerprint,
-                 '--armor', '--detach-sign', '-o', signature, output], env=env)
-        keyring = Path(temporary)/'release-signing-key.gpg'
-        # Binary export for gpgv; ASCII public export follows stable asset naming.
-        exported = subprocess.run(['/usr/bin/gpg', '--homedir', str(public), '--batch', '--export', fingerprint],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60).stdout
-        keyring.write_bytes(exported)
-        command(['/usr/bin/gpgv', '--homedir', public, '--keyring', keyring, signature, output])
-        armored = command(['/usr/bin/gpg', '--homedir', public, '--batch', '--armor', '--export', fingerprint])
-        (Path(output).parent/'release-signing-key.asc').write_text(armored+'\n')
+        try:
+            # Public trust is reviewed app source, NEVER downloaded from artifact/release.
+            linux_public_keyring(trusted_key, fingerprint, public)
+            command(['/usr/bin/gpg', '--batch', '--import'], stdin=environment['LINUX_SIGNING_KEY'].encode(), env=env)
+            shutil.copyfile(archive, output)
+            signature = Path(str(output)+'.asc')
+            command(['/usr/bin/gpg', '--batch', '--yes', '--pinentry-mode', 'error', '--local-user', fingerprint,
+                     '--armor', '--detach-sign', '-o', signature, output], env=env)
+            # Verification never uses the secret keyring: only the reviewed public key.
+            verify_linux_signature(trusted_key, signature, output, fingerprint, environment)
+            armored = command(['/usr/bin/gpg', '--homedir', public, '--batch', '--armor', '--export', fingerprint])
+            (Path(output).parent/'release-signing-key.asc').write_text(armored+'\n')
+        finally:
+            stop_gpg_agent(secret); stop_gpg_agent(public)
         return fingerprint
 
 
@@ -387,7 +443,8 @@ def main():
             # App owns reuse of import-cert.sh + release codesign/notarytool/stapler;
             # this never invokes stable package.sh (it executes bundled CLI code).
             command(['/bin/bash', str(Path(args.source).resolve()/'packaging/macos/nightly-sign.sh'),
-                     '--arch', 'aarch64', '--input', Path(args.archive).resolve(), '--output', output.resolve()], env=dict(os.environ))
+                     '--arch', 'aarch64', '--input', Path(args.archive).resolve(), '--output', output.resolve()], env=dict(os.environ),
+                    timeout=5400)
             with tempfile.TemporaryDirectory(prefix='nightly-mac-verify-', dir=n.owned_path(os.environ['RUNNER_TEMP'])) as temporary:
                 signer = mac_verify(output, args.version, n.bounded_json(args.pending), os.environ, Path(temporary)/'payload')
         n.require(sha(args.archive) == args.unsigned_sha256, 'original unsigned build bytes changed during signing')

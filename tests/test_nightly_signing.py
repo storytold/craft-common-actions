@@ -278,8 +278,9 @@ class SigningTests(unittest.TestCase):
         # The boundary confines the verification directory, not bundle contents: framework
         # links are produced by ditto and judged only by codesign/stapler/spctl (mocked here).
         output=self.root/'mac verify'/'payload'; output.parent.mkdir()
-        details=('Authority=Developer ID Application: Fixture (ABCDE12345)\nTeamIdentifier=ABCDE12345\n'
+        details=('Identifier=ai.storyteller.photocraft.nightly\nAuthority=Developer ID Application: Fixture (ABCDE12345)\nTeamIdentifier=ABCDE12345\n'
                  'Timestamp=Nov 22, 2026\nCodeDirectory v=20500 flags=0x10000(runtime) hashes=x\n')
+        gatekeeper='/x: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Fixture (ABCDE12345)\n'
         calls=[]
         def tool(argv,**kwargs):
             calls.append(Path(str(argv[0])).name)
@@ -289,12 +290,14 @@ class SigningTests(unittest.TestCase):
                 versions=app/'Contents/Frameworks/Fixture.framework/Versions'; (versions/'A').mkdir(parents=True)
                 (versions/'Current').symlink_to('A',target_is_directory=True)
             return 'arm64' if argv[0]=='/usr/bin/lipo' else ''
-        completed=s.subprocess.CompletedProcess([],0,details.encode(),b'')
+        def system(argv,**kwargs):
+            calls.append(Path(str(argv[0])).name)
+            return s.subprocess.CompletedProcess(argv,0,(gatekeeper if argv[0]=='/usr/sbin/spctl' else details).encode(),b'')
         with patch.object(s.u,'verify_archive',return_value={}),patch.object(s,'command',side_effect=tool),\
-             patch.object(s.subprocess,'run',return_value=completed):
+             patch.object(s.subprocess,'run',side_effect=system):
             self.assertEqual(s.mac_verify(self.archive,'v',{},{'NIGHTLY_APPLE_TEAM_ID':'ABCDE12345'},output),'ABCDE12345')
         self.assertTrue((output/'PhotoCraft Nightly.app/Contents/Frameworks/Fixture.framework/Versions/Current').is_symlink())
-        self.assertEqual(calls,['ditto','lipo','codesign','xcrun','spctl'])
+        self.assertEqual(calls,['ditto','lipo','codesign','codesign','xcrun','spctl'])
         link=self.root/'mac-link'; link.symlink_to(self.root,target_is_directory=True)
         with patch.object(s.u,'verify_archive',return_value={}),patch.object(s,'command',side_effect=AssertionError('no tool')),\
              self.assertRaises(ValueError):
@@ -327,7 +330,10 @@ class SigningTests(unittest.TestCase):
             calls.append([str(x) for x in argv])
             if '--list-keys' in argv: return 'pub:u:255:22:fixture:0:0:::::\nfpr:::::::::'+fingerprint+':\n'
             if '--detach-sign' in argv:
-                Path(argv[argv.index('-o')+1]).write_text('synthetic detached signature, not real signing')
+                Path(argv[argv.index('-o')+1]).write_text('-----BEGIN PGP SIGNATURE-----\nsynthetic, not real signing\n-----END PGP SIGNATURE-----\n')
+            if str(argv[0])=='/usr/bin/gpgv':
+                return ('[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 0123456789ABCDEF fixture\n'
+                        '[GNUPG:] VALIDSIG '+'B'*40+' 2026-11-23 1 0 4 0 22 10 00 '+fingerprint+'\n')
             if '--armor' in argv and '--export' in argv: return 'synthetic public key'
             return ''
         completed=s.subprocess.CompletedProcess(['mock'],0,b'binary public fixture',b'')
@@ -339,7 +345,9 @@ class SigningTests(unittest.TestCase):
         self.assertTrue((output.parent/'release-signing-key.asc').is_file())
         self.assertTrue(any(argv[0]=='/usr/bin/gpgv' for argv in calls))
         self.assertTrue(any('--pinentry-mode' in argv and '--armor' in argv and '--detach-sign' in argv for argv in calls))
-        self.assertTrue(all(argv[0] in ('/usr/bin/gpg','/usr/bin/gpgv') for argv in calls))
+        self.assertTrue(all(argv[0] in ('/usr/bin/gpg','/usr/bin/gpgv','/usr/bin/gpgconf') for argv in calls))
+        stopped=[argv[2] for argv in calls if argv[0]=='/usr/bin/gpgconf' and argv[3:]==['--kill','all']]
+        self.assertTrue(any(path.endswith('/secret') for path in stopped))  # The agent that held the key is stopped.
 
     def test_linux_signature_and_public_key_bytes_are_bound_and_rechecked(self):
         package=self.root/'signed'; package.mkdir(); asset='photocraft-fixture-linux-x86_64-nightly.tar.gz'
@@ -357,23 +365,35 @@ class SigningTests(unittest.TestCase):
 
     def test_mac_system_verification_requires_developer_id_team_runtime_timestamp_and_staple(self):
         archive=self.root/'mac.zip'; archive.write_bytes(b'synthetic zip')
-        details='Authority=Developer ID Application: Fixture\nTeamIdentifier=ABCDEFGHIJ\nTimestamp=Fixture\nCodeDirectory v=20500 flags=0x10000(runtime) hashes=fixture\n'
+        details=('Identifier=ai.storyteller.photocraft.nightly\nAuthority=Developer ID Application: Fixture\nTeamIdentifier=ABCDEFGHIJ\n'
+                 'Timestamp=Fixture\nCodeDirectory v=20500 flags=0x10000(runtime) hashes=fixture\n')
+        gatekeeper='/x/PhotoCraft Nightly.app: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Fixture (ABCDEFGHIJ)\n'
         def process(argv,**kw):
             return 'arm64' if str(argv[0])=='/usr/bin/lipo' else ''
+        def system(codesign,spctl):
+            def run(argv,**kw):
+                return s.subprocess.CompletedProcess(argv,0,(spctl if argv[0]=='/usr/sbin/spctl' else codesign).encode(),b'')
+            return run
         env={**self.env,'NIGHTLY_APPLE_TEAM_ID':'ABCDEFGHIJ'}
         for index,bad in enumerate((details.replace('Developer ID Application:','Ad Hoc:'),details.replace('ABCDEFGHIJ','OTHERTEAM1'),
-                                    details.replace('Timestamp=Fixture\n',''),details.replace('(runtime)','(adhoc)'))):
-            completed=s.subprocess.CompletedProcess(['mock'],0,bad.encode(),b'')
+                                    details.replace('Timestamp=Fixture\n',''),details.replace('(runtime)','(adhoc)'),
+                                    details.replace('photocraft.nightly','photocraft'),details.replace('Identifier=ai.storyteller.photocraft.nightly\n',''))):
             with self.subTest(index=index),patch.object(s.u,'verify_archive'),patch.object(s,'command',side_effect=process),\
-                 patch.object(s.subprocess,'run',return_value=completed),self.assertRaisesRegex(ValueError,'Developer ID'):
+                 patch.object(s.subprocess,'run',side_effect=system(bad,gatekeeper)),self.assertRaisesRegex(ValueError,'Developer ID'):
                 s.mac_verify(archive,self.case.prepared['version'],{},env,self.root/f'mac-payload{index}')
-        completed=s.subprocess.CompletedProcess(['mock'],0,details.encode(),b'')
+        # Exit 0 from spctl alone is not enough: Gatekeeper must say notarized, from the reviewed team.
+        for index,bad in enumerate((gatekeeper.replace('Notarized Developer ID','Developer ID'),gatekeeper.replace('(ABCDEFGHIJ)','(OTHERTEAM1)'),
+                                    gatekeeper.replace(': accepted',': rejected'),'')):
+            with self.subTest(gatekeeper=index),patch.object(s.u,'verify_archive'),patch.object(s,'command',side_effect=process),\
+                 patch.object(s.subprocess,'run',side_effect=system(details,bad)),self.assertRaisesRegex(ValueError,'Gatekeeper'):
+                s.mac_verify(archive,self.case.prepared['version'],{},env,self.root/f'mac-gatekeeper{index}')
         with patch.object(s.u,'verify_archive'),patch.object(s,'command',side_effect=process) as tools,\
-             patch.object(s.subprocess,'run',return_value=completed):
+             patch.object(s.subprocess,'run',side_effect=system(details,gatekeeper)) as system_tools:
             self.assertEqual(s.mac_verify(archive,self.case.prepared['version'],{},env,self.root/'mac-payload'),'ABCDEFGHIJ')
+        self.assertEqual([call.args[0][0] for call in system_tools.call_args_list],['/usr/bin/codesign','/usr/sbin/spctl'])
         commands=[call.args[0] for call in tools.call_args_list]
+        self.assertIn('--noextattr',commands[0]); self.assertIn('--norsrc',commands[0])
         self.assertTrue(any('stapler' in argv and 'validate' in argv for argv in commands))
-        self.assertTrue(any(argv[0]=='/usr/sbin/spctl' for argv in commands))
         self.assertFalse(any(Path(str(argv[0])).name=='PhotoCraft' for argv in commands))
 
 
@@ -420,7 +440,14 @@ class SigningWorkflowTests(unittest.TestCase):
                     self.assertTrue('id: sign' in step,'actual secrets outside isolated signing step')
 
     def test_final_signed_hash_and_receipt_rechecked_at_all_publish_boundaries(self):
-        self.assertEqual(self.main.count('nightly_signing.py verify-receipt'),3)
+        # Windows: stage, attest, publish. macOS: stage. Linux: stage receipt, then receipt plus
+        # gpgv package recheck against reviewed source (main-route attestation/publication stay off).
+        self.assertEqual(self.main.count('nightly_signing.py verify-receipt'),6)
+        self.assertEqual(self.main.count('verify-receipt --platform macos-aarch64'),1)
+        self.assertEqual(self.main.count('verify-receipt --platform linux-x86_64'),2)
+        self.assertEqual(self.main.count('--package-directory .nightly-build-linux-x86_64 --source .'),1)
+        self.assertEqual(self.main.count('artifact-ids: ${{ needs.build-linux.outputs.receipt-artifact-id }}'),1)
+        self.assertEqual(self.main.count('artifact-ids: ${{ needs.build-macos.outputs.receipt-artifact-id }}'),1)
         self.assertEqual(self.main.count('artifact-ids: ${{ needs.build-windows.outputs.receipt-artifact-id }}'),3)
         self.assertIn('ZIP_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}',self.main)
         self.assertIn('UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}',self.main)
@@ -429,12 +456,47 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertIn('path: .nightly-signed/',signer)
 
     def test_unix_native_guards_publish_and_attestation_remain_literal_off(self):
-        for job in ('build-linux','build-macos','attest-nightly','publish-nightly'):
+        for job in ('attest-nightly','publish-nightly'):
             self.assertIn('if: ${{ false }}',self.main.split('  '+job+':\n',1)[1].split('    needs:',1)[0])
-        for job in ('linux','macos'):
-            self.assertIn('if: ${{ false }}',self.unix.split('  '+job+':\n',1)[1].split('    needs:',1)[0])
+        # Linux and macOS run only when the app caller opts in to production signing.
+        for job in ('build-linux','build-macos'):
+            self.assertIn("if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true",
+                          self.main.split('  '+job+':\n',1)[1].split('    uses:',1)[0])
+        for job,platform in (('linux','linux-x86_64'),('linux-signing-config','linux-x86_64'),('sign-linux','linux-x86_64'),
+                             ('macos','macos-aarch64'),('macos-signing-config','macos-aarch64'),('sign-macos','macos-aarch64')):
+            block=self.unix.split('  '+job+':\n',1)[1].split('    steps:',1)[0].split('    uses:',1)[0]
+            self.assertNotIn('${{ false }}',block)
+            self.assertIn('inputs.production-signing == true',block)
+            self.assertIn("inputs.platform == '"+platform+"'",block)
         self.assertIn('nightly_signing.py adapter --platform macos-aarch64',self.unix)
         self.assertNotIn('schedule:',self.main)
+
+    def test_public_signer_identities_are_reviewed_caller_source_never_repository_variables(self):
+        for name in ('nightly.yml','nightly-windows.yml','nightly-unix.yml','nightly-signing-unix.yml','nightly-release.yml','nightly-unsigned.yml'):
+            source=(ROOT/'.github/workflows'/name).read_text()
+            self.assertNotIn('vars.NIGHTLY_APPLE_TEAM_ID',source)
+            self.assertNotIn('vars.NIGHTLY_WINDOWS_PUBLISHER_SUBJECT',source)
+            self.assertNotIn('vars.NIGHTLY_LINUX_SIGNING_FINGERPRINT',source)
+        # Linux: reviewed caller input threaded to the presence check, the signer and the stage recheck.
+        self.assertIn('linux-signing-fingerprint: ${{ inputs.linux-signing-fingerprint }}',self.main.split('  build-linux:\n',1)[1].split('  build-macos:\n',1)[0])
+        self.assertIn('NIGHTLY_LINUX_SIGNING_FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}',self.main.split('  stage-nightly:\n',1)[1])
+        self.assertIn('FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}',self.unix.split('  linux-signing-config:\n',1)[1].split('  macos-signing-config:\n',1)[0])
+        self.assertIn('linux-signing-fingerprint: ${{ inputs.linux-signing-fingerprint }}',self.unix.split('  sign-linux:\n',1)[1].split('  sign-macos:\n',1)[0])
+        self.assertIn('NIGHTLY_LINUX_SIGNING_FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}',self.sign_unix.split('  linux:\n',1)[1].split('  macos:\n',1)[0])
+        self.assertIn('linux-signing-fingerprint: 2B76741B414AAD6CD33E631213A005C0B9D7C3ED',(ROOT/'examples/photocraft-nightly.yml').read_text())
+        # Windows: caller input threaded to the signer, its presence check and every main-route recheck.
+        self.assertEqual(self.main.count('NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}'),3)
+        self.assertIn('windows-publisher-subject: ${{ inputs.windows-publisher-subject }}',self.main.split('  build-windows:\n',1)[1].split('  build-linux:\n',1)[0])
+        self.assertIn('PUBLISHER: ${{ inputs.windows-publisher-subject }}',self.windows)
+        self.assertIn('NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}',self.windows)
+        self.assertIn('NIGHTLY_APPLE_TEAM_ID: ${{ inputs.apple-team-id }}',self.main)
+        self.assertIn('apple-team-id: ${{ inputs.apple-team-id }}',self.main.split('  build-macos:\n',1)[1].split('  status:\n',1)[0])
+        self.assertIn('TEAM: ${{ inputs.apple-team-id }}',self.unix.split('  macos-signing-config:\n',1)[1])
+        self.assertIn('apple-team-id: ${{ inputs.apple-team-id }}',self.unix.split('  sign-macos:\n',1)[1])
+        self.assertIn('NIGHTLY_APPLE_TEAM_ID: ${{ inputs.apple-team-id }}',self.sign_unix.split('  macos:\n',1)[1])
+        caller=(ROOT/'examples/photocraft-nightly.yml').read_text()
+        self.assertIn('apple-team-id: REVIEWED_STABLE_APPLE_TEAM_ID_REQUIRED',caller)
+        self.assertIn('windows-publisher-subject: REVIEWED_STABLE_WINDOWS_PUBLISHER_SUBJECT_REQUIRED',caller)
 
     def test_required_app_signer_no_unsigned_fallback_and_no_leaf_pin(self):
         script=(ROOT/'scripts/nightly_signing_windows.ps1').read_text()
