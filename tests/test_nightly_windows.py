@@ -30,7 +30,9 @@ class WindowsCandidateTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         self.registry = json.loads((ROOT / "nightly-apps.json").read_text())
         self.context = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
                         "GITHUB_REPOSITORY": "storytold/photocraft", "GITHUB_SHA": "a" * 40,

@@ -91,13 +91,13 @@ def require_config(platform, environment):
 
 
 def adapter(platform, source):
-    source = Path(source).resolve()
+    source = n.owned_path(source)
     required = {'windows-x86_64': ('packaging/windows/sign.ps1',),
                 'macos-aarch64': ('packaging/macos/nightly.sh', 'packaging/macos/nightly-sign.sh',
                                   'packaging/macos/import-cert.sh'),
                 'linux-x86_64': ('.github/nightly-linux-signing-key.asc',)}[platform]
     for name in required:
-        path = source/name
+        path = n.owned_path(source/name)
         n.require(path.is_file() and not path.is_symlink() and source in path.resolve().parents,
                   'missing actual reviewed signing adapter/configuration: '+name)
     return True
@@ -105,7 +105,7 @@ def adapter(platform, source):
 
 def windows_unpack(archive, output):
     """Flat GUI-only archive, no scripts/DLLs/links, bounded before ZipFile allocation."""
-    archive, output = Path(archive), Path(output)
+    archive, output = n.owned_path(archive), n.owned_path(output)
     n.require(not output.exists() and not output.is_symlink(), 'unpack output must be new')
     stream, info = n.regular_file(archive.parent, archive.name)
     with stream:
@@ -153,11 +153,12 @@ def windows_verify(root, environment, version):
     publisher = environment.get('NIGHTLY_WINDOWS_PUBLISHER_SUBJECT', '')
     n.require(publisher and not any(c in publisher for c in '\r\n\0'), 'configured exact Windows publisher subject required')
     script = Path(__file__).with_name('nightly_signing_windows.ps1').resolve()
-    return command(['pwsh', '-NoProfile', '-File', script, '-Mode', 'verify', '-Root', Path(root).resolve(),
+    return command(['pwsh', '-NoProfile', '-File', script, '-Mode', 'verify', '-Root', n.owned_path(root),
                     '-ExpectedPublisher', publisher, '-ExpectedVersion', version])
 
 
 def repack_windows(root, archive):
+    root, archive = n.owned_path(root), n.owned_path(archive)
     with zipfile.ZipFile(archive, 'x', compression=zipfile.ZIP_DEFLATED) as container:
         for path in sorted(Path(root).iterdir()):
             n.require(path.is_file() and not path.is_symlink(), 'nonregular signed payload')
@@ -185,7 +186,8 @@ def mac_verify(archive, version, pending, environment, output):
     team = environment.get('NIGHTLY_APPLE_TEAM_ID', '')
     n.require(re.fullmatch('[A-Z0-9]{10}', team), 'configured reviewed Apple team required')
     # inventory has already forbidden links, traversal, extra roots and special files.
-    n.require(not Path(output).exists(), 'Mac verification directory must be new')
+    output = n.owned_path(output)
+    n.require(not output.exists(), 'Mac verification directory must be new')
     command(['/usr/bin/ditto', '-x', '-k', archive, output])
     app = Path(output)/'PhotoCraft Nightly.app'
     executable = app/'Contents/MacOS/PhotoCraft'
@@ -219,7 +221,7 @@ def receipt_data(platform, asset, identity_sha256, unsigned_sha256, final_sha256
 
 
 def verify_receipt(directory, expected_sha256, platform, asset, identity_sha256, unsigned_sha256, final_sha256, environment):
-    directory = Path(directory)
+    directory = n.owned_path(directory)
     n.require(directory.is_dir() and not directory.is_symlink(), 'unexpected signing receipt directory')
     names = set()
     for path in directory.iterdir():
@@ -251,7 +253,7 @@ def verify_receipt(directory, expected_sha256, platform, asset, identity_sha256,
 
 def verify_package(directory, receipt, source, environment, *, packet=False):
     """Recheck all final/support bytes; Linux public trust is checked-out policy."""
-    directory = Path(directory)
+    directory = n.owned_path(directory)
     n.require(directory.is_dir() and not directory.is_symlink(), 'signed package directory required')
     expected = {receipt['asset'], *receipt['support']}
     if packet:
@@ -267,9 +269,9 @@ def verify_package(directory, receipt, source, environment, *, packet=False):
         n.require(path.stat().st_size == binding['size'] and sha(path) == binding['sha256'], 'signature support differs from signer receipt')
     if receipt['platform'] == 'linux-x86_64':
         adapter('linux-x86_64', source)
-        with tempfile.TemporaryDirectory(prefix='nightly-gpg-verify-', dir=environment['RUNNER_TEMP']) as temporary:
+        with tempfile.TemporaryDirectory(prefix='nightly-gpg-verify-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
             keyring = Path(temporary)/'trusted.gpg'
-            public = Path(source).resolve()/'.github/nightly-linux-signing-key.asc'
+            public = n.owned_path(Path(source)/'.github/nightly-linux-signing-key.asc')
             # No automatic key retrieval, no trust in downloaded release-signing-key.asc.
             command(['/usr/bin/gpg', '--homedir', temporary, '--batch', '--import', public])
             listing = command(['/usr/bin/gpg', '--homedir', temporary, '--batch', '--with-colons', '--list-keys'])
@@ -286,7 +288,7 @@ def verify_package(directory, receipt, source, environment, *, packet=False):
 
 
 def sign_windows(source, archive, output, environment, version):
-    with tempfile.TemporaryDirectory(prefix='nightly-sign-', dir=environment['RUNNER_TEMP']) as temporary:
+    with tempfile.TemporaryDirectory(prefix='nightly-sign-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
         payload = windows_unpack(archive, Path(temporary)/'payload')
         command(['pwsh', '-NoProfile', '-File', Path(__file__).with_name('nightly_signing_windows.ps1').resolve(),
                  '-Mode', 'sign', '-Root', payload, '-Signer', Path(source).resolve()/'packaging/windows/sign.ps1',
@@ -301,9 +303,10 @@ def sign_windows(source, archive, output, environment, version):
 
 def sign_linux(source, archive, output, environment):
     """Existing stable route: .asc signature of literal tar.gz, not a new scheme."""
-    trusted_key = Path(source).resolve()/'.github/nightly-linux-signing-key.asc'
+    archive, output = n.owned_path(archive), n.owned_path(output)
+    trusted_key = n.owned_path(Path(source)/'.github/nightly-linux-signing-key.asc')
     n.require(trusted_key.stat().st_size <= n.MAX_JSON_BYTES, 'reviewed Linux public key exceeds bound')
-    with tempfile.TemporaryDirectory(prefix='nightly-gpg-', dir=environment['RUNNER_TEMP']) as temporary:
+    with tempfile.TemporaryDirectory(prefix='nightly-gpg-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
         secret, public = Path(temporary)/'secret', Path(temporary)/'public'
         secret.mkdir(mode=0o700); public.mkdir(mode=0o700)
         env = {**environment, 'GNUPGHOME': str(secret)}
@@ -374,7 +377,8 @@ def main():
                   'unsigned bytes differ from independent build output')
         if args.platform in ('linux-x86_64', 'macos-aarch64'):
             u.verify_archive(n.bounded_json(args.pending), args.platform, args.archive, args.version)
-        output = Path(args.output)
+        output = n.owned_path(args.output)
+        receipt_directory = n.owned_path(args.receipt_directory)
         n.require(not output.exists() and output.name == asset, 'final signed output must be new and exact-named')
         output.parent.mkdir(parents=True, exist_ok=False)
         if args.platform == 'windows-x86_64': signer = sign_windows(args.source, args.archive, output, dict(os.environ), args.version)
@@ -384,19 +388,20 @@ def main():
             # this never invokes stable package.sh (it executes bundled CLI code).
             command(['/bin/bash', str(Path(args.source).resolve()/'packaging/macos/nightly-sign.sh'),
                      '--arch', 'aarch64', '--input', Path(args.archive).resolve(), '--output', output.resolve()], env=dict(os.environ))
-            with tempfile.TemporaryDirectory(prefix='nightly-mac-verify-', dir=os.environ['RUNNER_TEMP']) as temporary:
+            with tempfile.TemporaryDirectory(prefix='nightly-mac-verify-', dir=n.owned_path(os.environ['RUNNER_TEMP'])) as temporary:
                 signer = mac_verify(output, args.version, n.bounded_json(args.pending), os.environ, Path(temporary)/'payload')
         n.require(sha(args.archive) == args.unsigned_sha256, 'original unsigned build bytes changed during signing')
         final = sha(output)
         if args.platform != 'linux-x86_64': n.require(final != args.unsigned_sha256, 'signing did not change package; unsigned fallback refused')
-        receipt_directory = Path(args.receipt_directory); receipt_directory.mkdir(parents=True, exist_ok=False)
+        receipt_directory = n.owned_path(receipt_directory)
+        receipt_directory.mkdir(parents=True, exist_ok=False)
         support = {}
         if args.platform == 'linux-x86_64':
             for name in (asset+'.asc', 'release-signing-key.asc'):
                 path = output.parent/name
                 support[name] = {'size': path.stat().st_size, 'sha256': sha(path)}
         data = receipt_data(args.platform, asset, args.identity_sha256, args.unsigned_sha256, final, signer, os.environ, support)
-        (receipt_directory/RECEIPT).write_text(json.dumps(data, sort_keys=True)+'\n')
+        n.owned_path(receipt_directory/RECEIPT).write_text(json.dumps(data, sort_keys=True)+'\n')
         verify_package(output.parent, data, args.source, os.environ)
         receipt_hash = sha(receipt_directory/RECEIPT)
         verify_receipt(receipt_directory, receipt_hash, args.platform, asset, args.identity_sha256,

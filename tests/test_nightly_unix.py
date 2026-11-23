@@ -31,7 +31,9 @@ class UnixProducerTests(unittest.TestCase):
         dependency=patch.object(u,"n",n); dependency.start(); self.addCleanup(dependency.stop)
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name)
+        self.root=Path(self.temp.name).resolve()
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         self.pending=json.loads((ROOT/'nightly-unix-pending.json').read_text())
         self.registry=json.loads((ROOT/'nightly-apps.json').read_text())
         self.env={'GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_REF':'refs/heads/main',
@@ -51,6 +53,16 @@ class UnixProducerTests(unittest.TestCase):
         self.macho=struct.pack('<8I',0xfeedfacf,0x0100000c,0,2,0,0,0,0)
         self.plist={'CFBundleIdentifier':'ai.storyteller.photocraft.nightly','CFBundleExecutable':'PhotoCraft',
                     'PhotoCraftVersion':self.version,'CFBundleVersion':'0.23.1','CFBundleShortVersionString':'0.23.1'}
+
+    def test_unpack_rejects_foreign_or_linked_output_before_archive_open(self):
+        with tempfile.TemporaryDirectory() as outside:
+            link=self.root/'linked';link.symlink_to(self.root,target_is_directory=True)
+            for output in (Path(outside)/'payload',link/'payload',self.root/'child/../payload'):
+                with self.subTest(output=output),patch.object(n,'regular_file',side_effect=AssertionError('archive must not open')):
+                    with self.assertRaises(ValueError):
+                        u.verify_archive(self.pending,'linux-x86_64',self.root/u.CONTRACTS['linux-x86_64']['asset_pattern'].replace('{version}',self.version),self.version,output)
+            self.assertFalse((Path(outside)/'payload').exists())
+            self.assertFalse((self.root/'payload').exists())
 
     def check(self,**changes):
         args=dict(registry=self.registry,pending=self.pending,platform='linux-x86_64',prepared=self.prepared,

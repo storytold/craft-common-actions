@@ -56,6 +56,7 @@ def check_prepared(registry, pending, platform, prepared, cargo, version, enviro
     n.require(prepared == fresh and version == fresh["version"] and prepared["ready"] is True, "source/run/version identity mismatch")
     target_base, dist = Path(target_base), Path(dist)
     n.require(target_base.is_absolute() and dist.is_absolute(), "target base and dist must be absolute")
+    target_base, dist = n.owned_path(target_base), n.owned_path(dist)
     n.require(not target_base.is_symlink() and not dist.is_symlink(), "output paths must not be symlinks")
     target_base, dist = target_base.resolve(), dist.resolve()
     n.require(target_base != dist and target_base not in dist.parents and dist not in target_base.parents, "dist and compiler target base must be disjoint")
@@ -122,9 +123,12 @@ def zip_metadata_bound(stream,size):
 def verify_archive(pending,platform,archive,version,output=None):
     row = pending_contract(pending,platform)
     canonical_version(version)
-    archive = Path(archive)
+    archive = n.owned_path(archive)
     n.require(archive.name == row['asset_pattern'].replace('{version}',version),"archive name differs from exact identity")
     out = Path(output) if output is not None else None
+    if out is not None:
+        n.require(out.is_absolute(), "unpack output must be a new absolute directory")
+        out = n.owned_path(out)
     # Refuse unavailable extraction before opening any archive or creating output.
     if out is not None: require_build_policy(platform)
     raw, info = n.regular_file(archive.parent,archive.name)
@@ -222,7 +226,7 @@ def verify_archive(pending,platform,archive,version,output=None):
         n.require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns),"archive changed during inspection")
         if staging is not None:
             n.require(not out.exists() and not out.is_symlink(),"unpack output must remain a new directory")
-            staging.rename(out)
+            staging.rename(n.owned_path(out))
             staging=None
         return {'members':len(names),'expanded_bytes':total,'entrypoint':row['entrypoint'],'inventory_only':True,'feed_admitted':False,'runtime_qualified':False,'signature_verified':False}
     finally:

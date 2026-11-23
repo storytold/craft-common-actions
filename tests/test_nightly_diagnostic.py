@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import sys
@@ -15,7 +16,8 @@ import nightly_diagnostic as d
 class DiagnosticTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name); self.cargo=self.root/'Cargo.toml'
+        ownership=patch.dict(os.environ,{'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(Path(self.temp.name).resolve())}); ownership.start(); self.addCleanup(ownership.stop)
+        self.root=Path(self.temp.name).resolve(); self.cargo=self.root/'Cargo.toml'
         self.cargo.write_text('[workspace.package]\nversion="99.2.3-beta+dev"\n')
         self.registry=json.loads((ROOT/'nightly-apps.json').read_text())
     def env(self,app):

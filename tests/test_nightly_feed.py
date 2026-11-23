@@ -17,7 +17,9 @@ class NightlyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         self.registry = {"schema": "craft-nightly-registry/v1", "apps": {"photocraft": {
             "repository": "storytold/photocraft", "default_branch": "main", "targets": [], "note": "synthetic test fixture only"}}}
         self.ident, self.version = n.identity(self.registry, "photocraft", "storytold/photocraft", "a" * 40, "1.2.3", 1234, 1, 1795190400)
@@ -30,6 +32,52 @@ class NightlyTests(unittest.TestCase):
                           "profile_version": 1, "associations": "none"}}
         self.env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": "storytold/photocraft",
                     "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1"}
+
+    def test_owned_metadata_paths_are_not_just_a_filename_allowlist(self):
+        metadata = self.root/'legacy-custom-metadata.txt'
+        metadata.write_bytes(b'owned metadata')
+        self.assertEqual(n.bounded_bytes(metadata, 64, 'legacy metadata'), b'owned metadata')
+        self.assertEqual(n.owned_path(ROOT/'nightly-apps.json'), (ROOT/'nightly-apps.json').resolve())
+
+    def test_owned_paths_keep_spaces_and_runner_temp_descendants(self):
+        spaced = self.root/'dir with spaces'/'meta data.json'; spaced.parent.mkdir()
+        spaced.write_text('{"ok": true}')
+        self.assertEqual(n.bounded_json(spaced), {'ok': True})
+        self.assertEqual(n.owned_path(spaced), spaced)
+
+    def test_traversal_and_foreign_absolute_inputs_refuse_before_open(self):
+        with tempfile.TemporaryDirectory() as outside:
+            foreign = Path(outside)/'NIGHTLY.json'; foreign.write_text('{}')
+            for path in (foreign, self.root/'child/../NIGHTLY.json', r'C:\foreign\NIGHTLY.json'):
+                with self.subTest(path=path), patch.object(n.os, 'open', side_effect=AssertionError('must not open')):
+                    with self.assertRaises(n.InvalidNightly): n.bounded_json(path)
+            self.assertEqual(foreign.read_text(), '{}')
+            with self.assertRaises(n.InvalidNightly): n.regular_file(outside, foreign.name)
+            output = self.root/'denied-stage'
+            with self.assertRaises(n.InvalidNightly): n.stage_feed({'artifacts':[]}, outside, output)
+            self.assertFalse(output.exists())
+
+    def test_parent_and_leaf_symlinks_refuse_even_with_owned_targets(self):
+        target = self.root/'actual'; target.mkdir()
+        (target/'metadata.json').write_text('{}')
+        parent = self.root/'parent-link'; parent.symlink_to(target, target_is_directory=True)
+        leaf = self.root/'leaf.json'; leaf.symlink_to(target/'metadata.json')
+        for path in (parent/'metadata.json', leaf):
+            with self.subTest(path=path), patch.object(n.os, 'open', side_effect=AssertionError('must not open')):
+                with self.assertRaises(n.InvalidNightly): n.bounded_json(path)
+        for output in (parent/'new', leaf):
+            with self.subTest(output=output),self.assertRaises(n.InvalidNightly):
+                n.stage_feed({'artifacts':[]}, self.root, output)
+        self.assertFalse((target/'new').exists())
+
+    def test_symlink_to_foreign_parent_and_broad_temp_roots_refuse(self):
+        with tempfile.TemporaryDirectory() as outside:
+            foreign = Path(outside)
+            link = self.root/'foreign-link'; link.symlink_to(foreign, target_is_directory=True)
+            with self.assertRaises(n.InvalidNightly): n.stage_feed({'artifacts':[]}, self.root, link/'stage')
+            self.assertFalse((foreign/'stage').exists())
+        with patch.dict(os.environ, {'RUNNER_TEMP':'/tmp'}):
+            with self.assertRaises(n.InvalidNightly): n.owned_path(self.root/'metadata')
 
     def ready(self):
         self.registry["apps"]["photocraft"]["targets"] = [copy.deepcopy(self.target)]

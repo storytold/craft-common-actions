@@ -27,10 +27,10 @@ def receipt(ident, release, environment):
 
 @contextmanager
 def reserve(directory):
-    output=Path(directory)
+    output=n.owned_path(directory)
     n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
     output.mkdir(parents=True,exist_ok=False)
-    with (output/'ownership.json').open('x',encoding='utf-8') as stream:
+    with n.owned_path(output/'ownership.json').open('x',encoding='utf-8') as stream:
         yield stream
 
 

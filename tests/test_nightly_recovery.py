@@ -19,7 +19,8 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.case.setUp();self.addCleanup(self.case.doCleanups)
         self.publisher=fixture.p;self.feed=fixture.n
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.output=Path(self.temp.name)/'ownership'
+        ownership=patch.dict(os.environ,{'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(Path(self.temp.name).resolve())}); ownership.start(); self.addCleanup(ownership.stop)
+        self.output=Path(self.temp.name).resolve()/'ownership'
 
     def run_cli(self, failure, *, before_publish=False, close_failure=False):
         import nightly_artifacts as bindings
