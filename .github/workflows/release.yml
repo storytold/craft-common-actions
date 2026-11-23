@@ -863,6 +863,19 @@ jobs:
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
+            # The final ThinLTO link of a large app (photocraft's bin, lto=thin, codegen-units=1) was
+            # SIGKILLed when the 12 GB guest ran out of memory: the image's root is ZFS with no ARC
+            # limit, so the ARC kept the target dir's pages. Cap it as freebsd.yml does. (No swap
+            # file: swap on a ZFS-backed file can hang FreeBSD under memory pressure; the image has a
+            # 1 GB swap partition.) Print disk, swap and memory so the next OOM is easy to diagnose.
+            if [ "$(uname -s)" = FreeBSD ]; then
+              if sysctl -n vfs.zfs.arc_max >/dev/null 2>&1; then
+                sysctl vfs.zfs.arc_max=2147483648 || echo "::warning::could not cap the ZFS ARC"
+              fi
+              df -h / /var/tmp || true
+              swapctl -l || true
+              sysctl -n hw.physmem || true
+            fi
             if [ "${{ matrix.arch }}" = aarch64 ]; then
               # The host compiler and the aarch64 standard library come from the amd64 and
               # aarch64 lang/rust packages, which must be the same build. "latest" can build
@@ -1090,6 +1103,33 @@ jobs:
           source-hash: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '**/build.rs', '.cargo/**', 'rust-toolchain*', 'packaging/**', '.github/workflows/release.yml') }}
           key: ${{ steps.cargo-cache.outputs.key }}
 
+      # Exit 137 alone does not distinguish host pressure from a guest OOM.
+      # Keep diagnostics bounded and separate so they cannot turn a failed build green.
+      - name: Report final host and guest resources
+        if: always() && !cancelled()
+        continue-on-error: true
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          echo "::group::Final host resources"
+          df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE" || true
+          df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE" || true
+          free -b || true
+          sudo -n dmesg --color=never | grep -Ei 'out of memory|oom-kill|killed process' | tail -n 30 || true
+          echo "::endgroup::"
+          # Only fixed read-only commands enter the guest, never caller-provided shell text.
+          diagnostics=$(mktemp "$RUNNER_TEMP/freebsd-resources.XXXXXX")
+          cat > "$diagnostics" <<'FREEBSD_RESOURCES'
+          df -k / /var/tmp
+          swapinfo -k
+          sysctl hw.physmem vm.stats.vm.v_free_count vm.stats.vm.v_inactive_count vm.stats.vm.v_wire_count
+          sysctl kstat.zfs.misc.arcstats.size
+          dmesg | grep -Ei 'out of swap|out of memory|killed|swap_pager' | tail -n 30 || true
+          FREEBSD_RESOURCES
+          # Use the established SSH alias directly: the freebsd wrapper would resync the worktree.
+          echo "::group::Final guest resources"
+          timeout --kill-after=5s 30s ssh -o BatchMode=yes -o ConnectTimeout=5 freebsd sh < "$diagnostics" || echo "::warning::Guest resource diagnostics unavailable or timed out"
+          echo "::endgroup::"
 
   web:
     timeout-minutes: 90
