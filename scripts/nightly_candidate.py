@@ -36,6 +36,8 @@ MAX_JSON = 2 * 1024 * 1024
 ISSUE_METRICS = {'BUG': 'bugs', 'VULNERABILITY': 'vulnerabilities', 'CODE_SMELL': 'code_smells'}
 ACCEPTED_METRICS = {'bugs': 'BUG', 'vulnerabilities': 'VULNERABILITY', 'code_smells': 'CODE_SMELL', 'security_rating': 'VULNERABILITY', 'new_security_rating': 'VULNERABILITY'}
 FINGERPRINT = {'key', 'rule', 'component', 'type', 'severity', 'hash'}
+# Revalidation's fixed Sonar snapshot, gate/latest rereads and ancestry reads.
+FIXED_READS = 17
 
 
 def digest(value):
@@ -66,6 +68,21 @@ def provider_time(value):
     text(value, 'provider timestamp', 40)
     n.require(re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:?\d{2})', value), 'invalid provider timestamp')
     return int(dt.datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp())
+
+
+def minimum_reads(workflows):
+    """Fewest reads revalidation can make: one page per list and no fixed debt.
+
+    Each workflow is selected twice and freshness-checked once (workflow, run
+    list, run and any manual blob), lists its jobs twice and reads each
+    required check twice. Admission needs two fewer reads. Pagination and fix
+    proofs only add reads, so a shape above MAX_READS can never be admitted.
+    """
+    total = FIXED_READS
+    for row in workflows:
+        manual = any(job['applicability'] == 'manual-input-only' for job in row['jobs'])
+        total += 3 * (3 + manual) + 2 + 2 * len(row['jobs'])
+    return total
 
 
 def contract(policy, producer):
@@ -101,6 +118,7 @@ def contract(policy, producer):
             names.add(job['name'])
         count += len(jobs)
     n.require(count <= 128, 'aggregate required-job bound reached')
+    n.require(minimum_reads(workflows) <= MAX_READS, 'required workflow shape exceeds the candidate read budget')
     s = policy['sonar']
     n.fields(s, {'organization', 'project', 'app_id', 'check_name', 'details_url', 'issue_types', 'accepted_conditions', 'required_conditions', 'debt'}, 'Sonar policy')
     for key in ('organization', 'project'): text(s[key], 'Sonar ' + key)
@@ -208,7 +226,7 @@ def _run(reads, policy, producer, wanted):
     n.require(rows, 'missing exact-candidate required workflow')
     for row in rows:
         for key in ('id', 'run_attempt', 'run_number', 'workflow_id'): n.positive(row.get(key), 'quality run ' + key)
-        n.require(row['workflow_id'] == wanted['workflow_id'] and row.get('path') == wanted['workflow_path'] and row.get('head_branch') == 'main' and row.get('head_sha') == producer['source_commit'] and row.get('event') in ('push', 'schedule', 'workflow_dispatch') and row.get('repository', {}).get('full_name') == policy['repository'] and row.get('head_repository', {}).get('full_name') == policy['repository'] and row['id'] != producer['run_id'], 'quality run identity/source differs')
+        n.require(row['workflow_id'] == wanted['workflow_id'] and legacy.run_workflow_path(row, 'main') == wanted['workflow_path'] and row.get('head_branch') == 'main' and row.get('head_sha') == producer['source_commit'] and row.get('event') in ('push', 'schedule', 'workflow_dispatch') and row.get('repository', {}).get('full_name') == policy['repository'] and row.get('head_repository', {}).get('full_name') == policy['repository'] and row['id'] != producer['run_id'], 'quality run identity/source differs')
     newest = max(r['run_number'] for r in rows)
     selected = [r for r in rows if r['run_number'] == newest]
     n.require(len(selected) == 1, 'ambiguous newest exact-C run')

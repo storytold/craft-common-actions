@@ -43,7 +43,9 @@ PhotoCraft's prepared callers remain literally disabled until reviewed promotion
   close or promotion supplies no canonical ownership or pruning authority.
   The workflow uploads only the canonical filename; a missing receipt warns.
   Only this finalized-ownership upload step tolerates artifact-service failures,
-  so bookkeeping cannot fail an otherwise verified publication. Verification and
+  so bookkeeping cannot fail an otherwise verified publication. Every publish
+  step has its own time bound and the job budget exceeds their sum, so a slow
+  upload times out as a tolerated step instead of cancelling the job. Verification and
   publication steps remain fatal. Final `GITHUB_OUTPUT`
   I/O is likewise bookkeeping only after that verified return. This lets the
   hosted execution finish successfully and the unchanged success-only historical
@@ -103,7 +105,11 @@ token/secret scope, release environment or schedule is changed by this split.
 workflows/jobs/check identities and fixed reviewed debt fingerprints. C may be
 behind current main M only with verified ancestry, and must strictly advance the
 previous authenticated publication P; equal P/C refuses as already up to date.
-The release execution's own SHA is never substituted with C.
+The release execution's own SHA is never substituted with C. A required-workflow
+shape whose fewest possible revalidation reads exceed the 640-read candidate
+budget refuses at contract time, before any provider read. Workflow-run `path`
+values may use GitHub's documented `path@branch` spelling only for the run's own
+branch; any other suffix refuses, and receipts and requests keep the bare path.
 
 Sonar admission requires coherent latest main-C revision/SCM at read boundaries,
 complete paginated scoped branch issues with counts and end reread, a same-analysis

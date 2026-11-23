@@ -294,4 +294,21 @@ class PolicyTests(unittest.TestCase):
             text=path.read_text(); self.assertNotIn('<script>',text); self.assertIn('&lt;script&gt;',text)
             self.assertLess(len(text),8400)
 
+    def test_run_workflow_path_accepts_only_bare_and_own_branch_forms(self):
+        # GitHub's workflow-run schema documents `.github/workflows/build.yml@main`.
+        for path in ('.github/workflows/nightly.yml','.github/workflows/nightly.yml@main'):
+            with self.subTest(path=path):
+                self.assertEqual(p.run_workflow_path({**self.run,'path':path},'main'),'.github/workflows/nightly.yml')
+        release={**self.run,'head_branch':'release','path':'.github/workflows/nightly-sign.yml@release'}
+        self.assertEqual(p.run_workflow_path(release,'release'),'.github/workflows/nightly-sign.yml')
+        for path in ('.github/workflows/nightly.yml@release','.github/workflows/nightly.yml@refs/heads/main',
+                     '.github/workflows/nightly.yml@main@main','.github/workflows/nightly.yml@','nightly.yml@main',
+                     'storytold/photocraft/.github/workflows/nightly.yml@main','dynamic/pages/pages-build-deployment',None,7):
+            with self.subTest(path=path),self.assertRaises(ValueError): p.run_workflow_path({**self.run,'path':path},'main')
+        # The suffix names the run's own branch; a matching suffix never overrides head_branch.
+        with self.assertRaises(ValueError): p.run_workflow_path(release,'main')
+        with self.assertRaises(ValueError): p.run_workflow_path({**self.run,'path':'.github/workflows/nightly.yml@release'},'release')
+        with self.assertRaises(ValueError): p.run_workflow_path(None,'main')
+
+
 if __name__=='__main__': unittest.main()

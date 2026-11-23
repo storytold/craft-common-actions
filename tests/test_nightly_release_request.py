@@ -513,5 +513,36 @@ class RequestTests(unittest.TestCase):
         for output in ('gh version 2.102.0 (2026-01-01)\nurl', 'gh version 2.103.1', 'gh version 3.0.0'):
             r.require_gh_version(output)
 
+    def test_ref_qualified_role_paths_are_canonical_only_for_their_own_branch(self):
+        # GitHub's workflow-run schema documents `path@branch`; the request keeps bare paths.
+        self.modify_run(100, 'path', self.policy['producer_workflow_path']+'@main')
+        self.modify_run(200, 'path', self.policy['signer_workflow_path']+'@release')
+        request = self.invoke()
+        self.assertEqual(request['producer']['workflow_path'], self.policy['producer_workflow_path'])
+        self.assertEqual(request['signer']['workflow_path'], self.policy['signer_workflow_path'])
+        r.request_contract(self.policy, request)
+        for which, path in ((100, self.policy['producer_workflow_path']+'@release'),
+                            (200, self.policy['signer_workflow_path']+'@main'),
+                            (100, self.policy['producer_workflow_path']+'@refs/heads/main'),
+                            (200, self.policy['producer_workflow_path']+'@release')):
+            with self.subTest(which=which, path=path):
+                saved = copy.deepcopy(self.api.rows); self.modify_run(which, 'path', path)
+                with self.assertRaises(ValueError): self.invoke()
+                self.api.rows = saved
+
+    def test_complete_artifact_inventory_on_the_last_allowed_full_page_is_accepted(self):
+        limit = r.p.MAX_PAGES*r.p.PAGE_SIZE
+        rows = [{**copy.deepcopy(self.item), 'id': 1000+index, 'name': 'other-'+str(index)} for index in range(limit-1)]
+        rows.insert(limit//2, copy.deepcopy(self.item))
+        for page in range(1, r.p.MAX_PAGES+1):
+            self.api.rows[f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={page}'] = {'total_count': limit,
+                'artifacts': rows[(page-1)*r.p.PAGE_SIZE:page*r.p.PAGE_SIZE]}
+        self.assertEqual(self.invoke()['artifact']['id'], 300)
+        self.assertFalse(any(path.endswith(f'&page={r.p.MAX_PAGES+1}') for _, path in self.api.calls))
+        # A full page that still leaves the reported total unread keeps refusing.
+        last = f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={r.p.MAX_PAGES}'
+        self.api.rows[last]['artifacts'] = self.api.rows[last]['artifacts'][:-1]
+        with self.assertRaisesRegex(ValueError, 'incomplete'): self.invoke()
+
 
 if __name__ == '__main__': unittest.main()

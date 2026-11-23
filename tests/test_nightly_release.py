@@ -559,5 +559,38 @@ class BridgeTests(unittest.TestCase):
         for raw in (b'{"x":1,"x":2}', b'{"x":NaN}'):
             with self.assertRaises(ValueError): b.loads(raw)
 
+    def test_previous_publication_accepts_own_branch_qualified_attempt_paths_only(self):
+        api, release = self.history()
+        api.rows["/actions/runs/100/attempts/1"]["path"] = self.policy["producer_workflow_path"]+"@main"
+        api.rows["/actions/runs/200/attempts/1"]["path"] = self.policy["signer_workflow_path"]+"@release"
+        previous = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        for run_id, path in ((100, self.policy["producer_workflow_path"]+"@release"),
+                             (200, self.policy["signer_workflow_path"]+"@main"),
+                             (200, self.policy["producer_workflow_path"]+"@release")):
+            with self.subTest(run_id=run_id, path=path):
+                api, release = self.history(); api.rows[f"/actions/runs/{run_id}/attempts/1"]["path"] = path
+                with self.assertRaises(ValueError):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
+
+    def test_unsigned_plan_canonicalizes_own_branch_run_path_against_the_real_workflow_ref(self):
+        env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": "storytold/photocraft",
+            "GITHUB_SHA": "a"*40, "GITHUB_RUN_ID": "100", "GITHUB_RUN_NUMBER": "10", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": "storytold/photocraft/.github/workflows/nightly.yml@refs/heads/main",
+            "TOOLING_REVISION": "b"*40}
+        def plan(path):
+            run = copy.deepcopy(self.fx.api.rows["/actions/runs/100"]); run["path"] = path
+            api = fixtures.API({"/actions/runs/100": run, "/releases?per_page=20&page=1": [{"id": 2, "tag_name": "v1.2.3",
+                "draft": False, "prerelease": False, "published_at": "2026-11-21T00:00:00Z"}]})
+            with patch("nightly_invocation.require_invocation"):
+                return b.unsigned_plan(api, self.registry, env)
+        bare_plan, bare_producer = plan(".github/workflows/nightly.yml")
+        qualified_plan, qualified_producer = plan(".github/workflows/nightly.yml@main")
+        self.assertEqual(qualified_producer["workflow_path"], ".github/workflows/nightly.yml")
+        self.assertEqual((qualified_plan, qualified_producer), (bare_plan, bare_producer))
+        for path in (".github/workflows/nightly.yml@release", ".github/workflows/other.yml@main",
+                     ".github/workflows/nightly.yml@refs/heads/main"):
+            with self.subTest(path=path), self.assertRaises(ValueError): plan(path)
+
 
 if __name__ == "__main__": unittest.main()

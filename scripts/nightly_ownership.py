@@ -206,6 +206,26 @@ class ActionsOwnership:
     def __init__(self, config):
         self.config = validate_config(config)
 
+    def run_removed(self, api, run_id):
+        """True only when this token demonstrably reads Actions here and the run is gone.
+
+        A 404 alone may hide missing access. Reading the reviewed producer workflow
+        with the same token proves access; then a 404 for the run means removal.
+        Any other error or a present run propagates, so the whole plan still aborts.
+        """
+        config = self.config
+        workflow = api.request("GET", f"/actions/workflows/{config['producer_workflow_id']}")
+        if not (isinstance(workflow, dict) and workflow.get("id") == config["producer_workflow_id"]
+                and workflow.get("path") == config["producer_workflow_path"]):
+            raise AmbiguousOwnership("ownership workflow identity differs; entire prune deferred")
+        try:
+            api.request("GET", f"/actions/runs/{run_id}")
+        except APIError as error:
+            if error.status == 404:
+                return True
+            raise
+        return False
+
     def verify(self, api, repository, release, bot_id):
         config = self.config
         expected = receipt_for(release)
@@ -213,7 +233,13 @@ class ActionsOwnership:
         n.require(expected["tooling_revision"] in config["allowed_tooling_revisions"], "unreviewed historical tooling revision")
         run_id, attempt = expected["run_id"], expected["run_attempt"]
         n.positive(run_id, "ownership run ID"); n.positive(attempt, "ownership attempt")
-        run = api.request("GET", f"/actions/runs/{run_id}/attempts/{attempt}")
+        try:
+            run = api.request("GET", f"/actions/runs/{run_id}/attempts/{attempt}")
+        except APIError as error:
+            if error.status != 404 or not self.run_removed(api, run_id):
+                raise
+            # Plan retains this release as unknown provenance and still evaluates the rest.
+            raise n.InvalidNightly("publishing run was removed; provenance unknown, release retained") from None
         n.require(isinstance(run, dict), "invalid ownership run")
         for key in ("id", "run_attempt", "workflow_id"):
             n.positive(run.get(key), "ownership run " + key)

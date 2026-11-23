@@ -99,7 +99,10 @@ def unsigned_plan(api, registry, environment):
     n.trusted_context(registry, "photocraft", environment)
     import nightly_invocation as invocation
     invocation.require_invocation(environment, environment.get("NIGHTLY_MANUAL_ACTORS", "[]"))
-    actual = p.verified_run(api.request("GET", "/actions/runs/"+environment["GITHUB_RUN_ID"]), environment)
+    row = api.request("GET", "/actions/runs/"+environment["GITHUB_RUN_ID"])
+    # verified_run still binds this canonical path to the real GITHUB_WORKFLOW_REF.
+    path = p.run_workflow_path(row, "main")
+    actual = p.verified_run({**row, "path": path}, environment)
     producer = {**actual, "run_id": actual["id"], "run_attempt": actual["attempt"],
         "tooling_revision": r.commit(environment.get("TOOLING_REVISION"))}
     return identity_plan(registry, producer, p.stable_base(p.releases(api))), producer
@@ -176,12 +179,12 @@ def previous_publication(api, registry, policy, current_request, rows):
     n.require(old_policy["repository"] == policy["repository"] and old_policy["repository_id"] == policy["repository_id"] and
         old_policy["signer_workflow_path"] == policy["signer_workflow_path"], "historical trust root differs")
     for name in ("producer", "signer"):
-        role = request[name]
+        role = request[name]; branch = "release" if name == "signer" else "main"
         run = api.request("GET", f"/actions/runs/{role['run_id']}/attempts/{role['run_attempt']}")
         r.repository(policy, run.get("repository")); r.repository(policy, run.get("head_repository"))
         n.require(run.get("id") == role["run_id"] and run.get("run_attempt") == role["run_attempt"] and
             run.get("head_sha") == role["source_commit"] and run.get("workflow_id") == role["workflow_id"] and
-            run.get("path") == role["workflow_path"] and run.get("head_branch") == ("release" if name == "signer" else "main") and
+            run.get("head_branch") == branch and p.run_workflow_path(run, branch) == role["workflow_path"] and
             run.get("event") == role["event"] and run.get("run_number") == role["run_number"] and
             run.get("created_at") == role["created_at"] and run.get("run_started_at") == role["run_started_at"] and
             run.get("triggering_actor", {}).get("login") == role["triggering_actor"] and run.get("status") == "completed" and

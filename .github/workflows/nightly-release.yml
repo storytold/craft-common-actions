@@ -185,7 +185,9 @@ jobs:
     needs: sign
     if: github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: windows-latest
-    timeout-minutes: 15
+    # Every step has its own bound and the job budget exceeds their sum, so a slow
+    # step fails as a step: the tolerant ownership upload can never time the job out.
+    timeout-minutes: 75
     # Fresh Windows verifier, but NO release environment or platform secrets.
     permissions:
       contents: write
@@ -195,12 +197,14 @@ jobs:
       id-token: write
     steps:
       - name: Check out only the actual release execution source
+        timeout-minutes: 5
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-source
           persist-credentials: false
       - name: Bind protected policy and actual immutable defining workflow
+        timeout-minutes: 5
         shell: pwsh
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
@@ -210,6 +214,7 @@ jobs:
           python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v2'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
+        timeout-minutes: 5
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -217,6 +222,7 @@ jobs:
           path: .nightly-tools
           persist-credentials: false
       - name: Download only exact signer-produced artifact ID
+        timeout-minutes: 10
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.sign.outputs.artifact-id }}
@@ -224,6 +230,7 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
       - name: Revalidate actual producer and independently verify final native signatures
+        timeout-minutes: 15
         id: final
         shell: pwsh
         env:
@@ -234,10 +241,12 @@ jobs:
           python -I -B .nightly-tools/scripts/nightly_release_entry.py final --source .release-source --directory .signed --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256"
           if ($LASTEXITCODE -ne 0) { throw 'fresh native signature or publication preflight refused' }
       - name: Attest actual final signed-output bytes from trusted publisher
+        timeout-minutes: 5
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
         with:
           subject-path: ${{ steps.final.outputs.subject-path }}
       - name: Publish the signed nightly and preserve ownership
+        timeout-minutes: 15
         id: publish
         shell: pwsh
         env:
@@ -248,6 +257,7 @@ jobs:
           python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --asset "$env:EXACT_ASSET" --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256" --packet .packet --ownership .ownership
           if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
       - name: Retain only finalized ownership evidence
+        timeout-minutes: 5
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

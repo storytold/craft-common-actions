@@ -133,5 +133,61 @@ class ReleaseWorkflowTests(unittest.TestCase):
             for value in re.findall(r"uses:\s*(\S+)", text):
                 self.assertRegex(value, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 
+    def test_lockfile_git_origins_are_checked_before_cargo_metadata_can_fetch(self):
+        # `cargo metadata --locked` still resolves and fetches git sources over the network.
+        for name in ("nightly-unsigned.yml",):  # windows/unix: their own test files
+            with self.subTest(workflow=name):
+                block = jobs(workflow(name))["git-sources"]
+                origin = block.index('not p["source"].startswith("git+https://github.com/storytold/")')
+                self.assertLess(block.index('for path in (".cargo/config", ".cargo/config.toml")'), origin)
+                self.assertLess(origin, block.index("cargo metadata --locked --format-version 1"))
+                self.assertEqual(block.count("cargo metadata --locked"), 1)
+
+    def test_only_the_sign_step_of_the_signer_references_secrets(self):
+        signer = jobs(self.release)["sign"]
+        steps = re.findall(r"(?ms)^      - (?:name: ([^\n]+)|uses: [^\n]+)\n(.*?)(?=^      - |\Z)", signer)
+        self.assertGreater(len(steps), 3)
+        with_secrets = [name for name, block in steps if "secrets." in block]
+        self.assertEqual(with_secrets, ["Sign data only through protected existing Windows adapter"])
+        self.assertNotIn("secrets.", signer.split("    steps:\n", 1)[0])
+        guard = signer.index("nightly_release_entry.py guard")
+        self.assertLess(guard, signer.index("- name: Sign data only"))
+
+    def test_publish_job_budget_leaves_the_tolerant_ownership_upload_its_own_bound(self):
+        # A job-level timeout cancels the job and fails success-only history, so every
+        # step is bounded and the job budget covers them all plus setup and cleanup.
+        publisher = jobs(self.release)["publish"]
+        job_limit = int(re.search(r"(?m)^    timeout-minutes: ([0-9]+)$", publisher)[1])
+        steps = re.split(r"(?m)^      - ", publisher.split("    steps:\n", 1)[1])[1:]
+        limits = [re.search(r"(?m)^        timeout-minutes: ([0-9]+)$", step) for step in steps]
+        self.assertTrue(all(limits), "every publish step needs its own timeout-minutes")
+        self.assertGreaterEqual(job_limit, sum(int(limit[1]) for limit in limits) + 5)
+        upload = steps[-1]
+        self.assertIn("continue-on-error: true", upload)
+        self.assertIn("path: .ownership/ownership.json", upload)
+
+    def test_outside_git_origin_refuses_without_running_cargo(self):
+        import os, subprocess, sys, tempfile, textwrap
+        for name in ("nightly-unsigned.yml",):  # windows/unix: their own test files
+            block = jobs(workflow(name))["git-sources"].split("      - name: Git dependencies come from storytold\n        run: |\n", 1)[1]
+            lines = []
+            for line in block.splitlines():
+                if line.strip() and not line.startswith(" "*10): break
+                lines.append(line)
+            script = textwrap.dedent("\n".join(lines))
+            self.assertIn("cargo metadata --locked", script)
+            for source, allowed in (("git+https://github.com/storytold/lib?rev=1#" + "a"*40, True),
+                                    ("git+https://example.invalid/lib?rev=1#" + "a"*40, False)):
+                with self.subTest(workflow=name, allowed=allowed), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory); (root/"bin").mkdir()
+                    (root/"Cargo.lock").write_text('version = 3\n\n[[package]]\nname = "lib"\nversion = "0.1.0"\nsource = "' + source + '"\n')
+                    cargo = root/"bin"/"cargo"
+                    cargo.write_text("#!/bin/sh\necho called >> \"$CARGO_LOG\"\n"); cargo.chmod(0o700)
+                    python = root/"bin"/"python3"; python.symlink_to(sys.executable)
+                    env = {**os.environ, "PATH": str(root/"bin") + os.pathsep + os.environ.get("PATH", ""), "CARGO_LOG": str(root/"cargo.log")}
+                    result = subprocess.run(["bash", "-c", script], cwd=root, env=env, capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                    self.assertEqual((root/"cargo.log").exists(), allowed)
+
 
 if __name__ == "__main__": unittest.main()

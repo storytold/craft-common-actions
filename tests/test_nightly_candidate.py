@@ -517,6 +517,42 @@ class CandidateTests(unittest.TestCase):
         self.admit()
         self.assertFalse(any('/actions/workflows/50' in path for _, path in self.f.calls))
 
+    def test_ref_qualified_quality_run_path_is_canonical_and_other_refs_refuse(self):
+        # GitHub's workflow-run schema documents the own-branch `path@main` form.
+        self.f.run['path'] = '.github/workflows/ci.yml@main'
+        receipt = self.admit()
+        self.assertEqual(receipt['workflows'][0]['workflow_path'], '.github/workflows/ci.yml')
+        self.assertEqual(self.revalidate(receipt), receipt)
+        for path in ('.github/workflows/ci.yml@release', '.github/workflows/ci.yml@refs/heads/main', '.github/workflows/other.yml@main'):
+            self.f.run['path'] = path
+            with self.subTest(path=path), self.assertRaises(ValueError): self.admit()
+
+    def test_policy_shape_that_cannot_fit_the_read_budget_refuses_before_provider_reads(self):
+        # 32 workflows x 4 jobs (one manual-input-only) passes the separate count
+        # bounds but needs more than MAX_READS fixed reads to admit or revalidate.
+        workflows = [{'workflow_id': 100+i, 'workflow_path': f'.github/workflows/ci-{i}.yml', 'workflow_blob': 'e'*40,
+            'jobs': [{'name': f'job-{k}', 'app_id': 15368, 'applicability': 'manual-input-only' if k == 0 else 'required'} for k in range(4)]}
+            for i in range(32)]
+        self.assertGreater(c.minimum_reads(workflows), c.MAX_READS)
+        self.f.policy['required_workflows'] = workflows
+        with self.assertRaisesRegex(ValueError, 'read budget'): self.admit()
+        with self.assertRaisesRegex(ValueError, 'read budget'): self.revalidate({})
+        self.assertEqual(self.f.calls, [])
+
+    def test_minimum_read_estimate_matches_unpaginated_admission_and_revalidation(self):
+        # The contract bound is a lower bound: it never refuses a shape that could fit.
+        for manual in (False, True):
+            with self.subTest(manual=manual):
+                self.f = Fixture(); wanted = self.f.policy['required_workflows'][0]
+                if manual:
+                    wanted['workflow_blob'] = 'e'*40; wanted['jobs'][0]['applicability'] = 'manual-input-only'
+                    self.f.job['conclusion'] = self.f.check['conclusion'] = 'skipped'
+                receipt = self.admit(); admitted = len(self.f.calls); self.f.calls.clear()
+                self.assertEqual(self.revalidate(receipt), receipt)
+                estimate = c.minimum_reads(self.f.policy['required_workflows'])
+                self.assertEqual(estimate, len(self.f.calls))
+                self.assertLessEqual(admitted, estimate)
+
 
 if __name__ == '__main__':
     unittest.main()

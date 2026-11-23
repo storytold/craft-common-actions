@@ -261,4 +261,52 @@ class OwnershipTests(unittest.TestCase):
                 self.assertEqual(connection.call_count, 1)
 
 
+class RemovedRunAPI(ReceiptAPI):
+    """Release 1's publishing run was deleted; release 2 is the current publication."""
+    def __init__(self):
+        super().__init__(run_id=1)
+        self.current = release(2)
+        FakeAPI.__init__(self, [self.current, self.row, {"id": 77, "tag_name": "v1.0.0"}])
+        self.attempt_status, self.workflow_status, self.run_present = 404, None, False
+        self.workflow = {"id": CONFIG["producer_workflow_id"], "path": CONFIG["producer_workflow_path"], "state": "active"}
+
+    def request(self, method, suffix, data=None):
+        if method == "GET" and suffix == "/actions/runs/1/attempts/1":
+            self.calls.append((method, suffix)); raise p.APIError(self.attempt_status)
+        if method == "GET" and suffix == f"/actions/workflows/{CONFIG['producer_workflow_id']}":
+            self.calls.append((method, suffix))
+            if self.workflow_status: raise p.APIError(self.workflow_status)
+            return copy.deepcopy(self.workflow)
+        if method == "GET" and suffix == "/actions/runs/1" and not self.run_present:
+            self.calls.append((method, suffix)); raise p.APIError(404)
+        return super().request(method, suffix, data)
+
+
+class RemovedRunPlanTests(unittest.TestCase):
+    def plan(self, api):
+        registry = json.loads((ROOT / "nightly-apps.json").read_text())
+        return p.plan(api, registry, "photocraft", 2, BOT, o.ActionsOwnership(copy.deepcopy(CONFIG)))
+
+    def test_removed_publishing_run_is_retained_and_plan_continues(self):
+        api = RemovedRunAPI()
+        result = self.plan(api)
+        self.assertEqual([row["release_id"] for row in result["retained"]], [1, 77])
+        self.assertIn("removed", result["retained"][0]["reason"])
+        self.assertEqual(result["candidates"], [])
+        self.assertEqual(api.deletes(), [])
+        self.assertEqual(api.downloads, [])
+
+    def test_unproven_access_or_present_run_still_aborts_the_plan(self):
+        cases = [("access unproven", lambda api: setattr(api, "workflow_status", 404), p.APIError),
+                 ("permission", lambda api: setattr(api, "workflow_status", 403), p.APIError),
+                 ("run still exists", lambda api: setattr(api, "run_present", True), p.APIError),
+                 ("attempt forbidden", lambda api: setattr(api, "attempt_status", 403), p.APIError),
+                 ("wrong workflow", lambda api: api.workflow.update(path=".github/workflows/other.yml"), o.AmbiguousOwnership)]
+        for label, mutate, error in cases:
+            api = RemovedRunAPI(); mutate(api)
+            with self.subTest(label), self.assertRaises(error):
+                self.plan(api)
+            self.assertEqual(api.deletes(), [])
+
+
 if __name__ == "__main__": unittest.main()

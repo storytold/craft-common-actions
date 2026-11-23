@@ -229,6 +229,32 @@ class WorkflowSourceTests(unittest.TestCase):
         self.assertIn('if: ${{ false }}',source.split('  publish-nightly:',1)[1])
         self.assertNotIn('GH_TOKEN',stage)
 
+    def test_lockfile_git_origins_are_checked_before_cargo_metadata_can_fetch(self):
+        # `cargo metadata --locked` still resolves and can fetch git sources over the network.
+        import subprocess, textwrap
+        source = (ROOT / ".github/workflows/nightly-windows.yml").read_text()
+        job = source.split("  git-sources:\n", 1)[1]
+        block = job.split("      - name: Git dependencies come from storytold\n        run: |\n", 1)[1]
+        lines = []
+        for line in block.splitlines():
+            if line.strip() and not line.startswith(" "*10): break
+            lines.append(line)
+        script = textwrap.dedent("\n".join(lines))
+        self.assertLess(script.index('git+https://github.com/storytold/'), script.index("cargo metadata --locked"))
+        self.assertEqual(script.count("cargo metadata --locked"), 1)
+        for origin, allowed in (("git+https://github.com/storytold/lib?rev=1#" + "a"*40, True),
+                                ("git+https://example.invalid/lib?rev=1#" + "a"*40, False)):
+            with self.subTest(allowed=allowed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); (root/"bin").mkdir()
+                (root/"Cargo.lock").write_text('version = 3\n\n[[package]]\nname = "lib"\nversion = "0.1.0"\nsource = "' + origin + '"\n')
+                cargo = root/"bin"/"cargo"
+                cargo.write_text("#!/bin/sh\necho called >> \"$CARGO_LOG\"\n"); cargo.chmod(0o700)
+                (root/"bin"/"python3").symlink_to(sys.executable)
+                env = {**os.environ, "PATH": str(root/"bin") + os.pathsep + os.environ.get("PATH", ""), "CARGO_LOG": str(root/"cargo.log")}
+                result = subprocess.run(["bash", "-c", script], cwd=root, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, allowed, result.stdout + result.stderr)
+                self.assertEqual((root/"cargo.log").exists(), allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

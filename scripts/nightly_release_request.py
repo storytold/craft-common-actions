@@ -133,7 +133,8 @@ def role(policy, row, run_id, attempt, *, signer=False, producer=None):
     repository(policy, row.get('repository')); repository(policy, row.get('head_repository'))
     branch = 'release' if signer else 'main'
     path = policy['signer_workflow_path' if signer else 'producer_workflow_path']
-    n.require(row.get('head_branch') == branch and row.get('path') == path, 'run branch/workflow differs')
+    # Accept only GitHub's documented bare or own-branch `path@branch` run spelling.
+    n.require(row.get('head_branch') == branch and p.run_workflow_path(row, branch) == path, 'run branch/workflow differs')
     event = row.get('event')
     n.require(event == 'workflow_dispatch' if signer else event in ('schedule', 'workflow_dispatch'),
         'run event differs')
@@ -257,7 +258,8 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
             n.positive(row.get('id'), 'artifact ID')
             n.require(row['id'] not in seen, 'duplicate artifact ID'); seen.add(row['id'])
             if row.get('name') == artifact_name(policy, producer): selected.append(artifact(policy, row, producer, now))
-        if len(rows) < p.PAGE_SIZE: break
+        # Stop once the reported total is read, including on the last allowed full page.
+        if len(rows) < p.PAGE_SIZE or len(seen) == total: break
     else: raise n.Unavailable('artifact pagination bound reached')
     n.require(len(seen) == total and len(selected) == 1, 'missing/ambiguous/incomplete unsigned artifact')
     chosen = selected[0]

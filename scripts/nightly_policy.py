@@ -69,6 +69,23 @@ def workflow_path(value):
     return isinstance(value,str) and re.fullmatch(r'\.github/workflows/[A-Za-z0-9._-]+\.ya?ml',value) is not None
 
 
+def run_workflow_path(run,branch):
+    """Canonical bare workflow path of one Actions workflow-run row.
+
+    GitHub's workflow-run REST schema documents `path` both bare and qualified
+    with the run's own branch (`.github/workflows/build.yml@main`). Only those
+    two spellings are equivalent: the run must be on `branch`, and any other
+    ref, repeated suffix or non-workflow path refuses. Callers still compare
+    the result with their reviewed path and keep their separate repository,
+    run, attempt, SHA and branch checks. The workflows endpoint stays bare-only.
+    """
+    n.require(isinstance(run,dict) and isinstance(branch,str) and branch!='' and run.get('head_branch')==branch,'workflow run branch differs')
+    path=run.get('path')
+    if isinstance(path,str) and path.endswith('@'+branch): path=path[:-len(branch)-1]
+    n.require(workflow_path(path),'workflow run path is not the bare or own-branch form')
+    return path
+
+
 def full_sha(value):
     return isinstance(value,str) and n.HEX40.fullmatch(value) and value!=ZERO
 
@@ -427,9 +444,20 @@ def historical_green_jobs(api,policy,sha,wanted,current,current_results):
     return greens
 
 
+def require_baseline_ancestry(api,policy,base):
+    """Runtime eligibility: the reviewed baseline is candidate main itself or its immediate first parent."""
+    source=policy['run']['source_commit']
+    commit=api.request('GET','/commits/'+source)
+    parents=commit.get('parents') if isinstance(commit,dict) else None
+    n.require(isinstance(commit,dict) and commit.get('sha')==source and isinstance(parents,list) and 0<len(parents)<=2 and all(isinstance(parent,dict) and full_sha(parent.get('sha')) for parent in parents),'missing canonical candidate ancestry')
+    n.require(base==source or parents[0]['sha']==base,'baseline must be reviewed current main or immediate first parent; arbitrary older baselines forbidden')
+
+
 def validate_refresh_history(api,previous,updated,policy):
     api=BaselineReads(api); require_main_head(api,policy)
     row=updated['apps']['photocraft']; baseline,pinned=baseline_contract(row,policy)
+    # Never approve a refresh that the runtime gate would then refuse.
+    require_baseline_ancestry(api,policy,baseline['source_commit'])
     old=previous['apps']['photocraft']['baseline']['source_commit']; current=baseline['source_commit']
     lineage=[current]
     while current!=old:
@@ -470,10 +498,7 @@ def baseline_checks(api,config,policy,required):
     baseline,pinned=baseline_contract(row,policy)
     api=BaselineReads(api); require_main_head(api,policy)
     source=policy['run']['source_commit']; base=baseline['source_commit']
-    commit=api.request('GET','/commits/'+source)
-    parents=commit.get('parents') if isinstance(commit,dict) else None
-    n.require(isinstance(commit,dict) and commit.get('sha')==source and isinstance(parents,list) and 0<len(parents)<=2 and all(isinstance(parent,dict) and full_sha(parent.get('sha')) for parent in parents),'missing canonical candidate ancestry')
-    n.require(base==source or parents[0]['sha']==base,'baseline must be reviewed current main or immediate first parent; arbitrary older baselines forbidden')
+    require_baseline_ancestry(api,policy,base)
     all_checks={sha:quality_check_inventory(api,sha) for sha in dict.fromkeys((base,source))}
     used={sha:set() for sha in all_checks}; selected=[]
     for workflow_id in pinned:

@@ -14,6 +14,9 @@ from pathlib import Path
 from urllib.parse import quote
 import nightly_feed as n
 
+# GitHub rejects longer release bodies with 422 ("maximum is 125000 characters").
+MAX_RELEASE_BODY_CHARACTERS = 125000
+
 class APIError(Exception):
     def __init__(self, status):
         self.status = status
@@ -148,7 +151,9 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, 
     if policy is not None:
         import nightly_policy as v6
         body+='\n'+(v6.MARKER if policy_marker is None else policy_marker)+json.dumps(policy,sort_keys=True,separators=(',',':'))
-        n.require(len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")
+    # Check the complete body before the exclusive tag reservation: a draft
+    # refused after the tag exists cannot be retried by this flow.
+    n.require(len(body)<=MAX_RELEASE_BODY_CHARACTERS and len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")
     tag = quote(ident["tag"], safe="")
     absent(api, "/releases/tags/" + tag)
     absent(api, "/git/ref/tags/" + tag)
