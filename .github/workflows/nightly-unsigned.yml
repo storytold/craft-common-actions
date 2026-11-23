@@ -80,9 +80,39 @@ jobs:
           cargo metadata --locked --format-version 1 > /dev/null
 
 
+  select-platforms:
+    # Validate the caller's list once. Build jobs then match exact array elements; a bare
+    # JSON string such as "not-linux-x86_64" can never substring-match a platform.
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      platforms: ${{ steps.select.outputs.platforms }}
+    steps:
+      - name: Require a JSON array of distinct supported platform IDs
+        id: select
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          supported = {'linux-x86_64', 'macos-aarch64', 'windows-x86_64'}
+          try:
+              value = json.loads(os.environ['PLATFORMS'])
+          except ValueError:
+              sys.exit('platforms must be a JSON array of supported platform IDs')
+          if not (isinstance(value, list) and value and all(isinstance(item, str) and item in supported for item in value)):
+              sys.exit('platforms must be a non-empty JSON array of supported platform IDs')
+          if len(set(value)) != len(value):
+              sys.exit('platforms must not repeat a platform')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('platforms='+json.dumps(sorted(value), separators=(',', ':'))+'\n')
+          PY
+
   build:
-    needs: git-sources
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(inputs.platforms), 'windows-x86_64')
+    needs: [git-sources, select-platforms]
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'windows-x86_64')
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
@@ -223,8 +253,8 @@ jobs:
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
   build-macos:
-    needs: git-sources
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(inputs.platforms), 'macos-aarch64')
+    needs: [git-sources, select-platforms]
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'macos-aarch64')
     # Same larger Arm runner as the stable macOS build; no secrets, environment, OIDC or cache.
     runs-on: macos-15-xlarge
     timeout-minutes: 90
@@ -382,8 +412,8 @@ jobs:
   build-linux:
     # Linux joins the same producer run as Windows (one release, every admitted platform).
     # Off unless the caller lists linux-x86_64; no secrets, environment, OIDC, cache or version mutation.
-    needs: git-sources
-    if: contains(fromJSON(inputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    needs: [git-sources, select-platforms]
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     permissions:

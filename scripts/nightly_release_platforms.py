@@ -181,6 +181,12 @@ def plugin(platform):
     return module
 
 
+def required_support(platform, asset):
+    """Exact published support files a platform's final asset needs (Linux: its detached .asc)."""
+    names = getattr(plugin(platform), "support_names", None)
+    return set(names(asset)) if names is not None else set()
+
+
 def expected_signer(platform, trust):
     """The protected trust value IS the identity native verification must report."""
     module = plugin(platform)

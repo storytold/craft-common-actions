@@ -63,14 +63,19 @@ def gpg(homedir, *arguments, stdin=None):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120).stdout
 
 
+def agent_lines():
+    """Full gpg-agent command lines: Linux procps needs -af; macOS/BSD pgrep needs -fl (-a means ancestors there)."""
+    flag = '-fl' if sys.platform == 'darwin' or 'bsd' in sys.platform else '-af'
+    return RUN(['pgrep', flag, 'gpg-agent'], capture_output=True, text=True).stdout
+
+
 def stop_agents(root):
     """Stop every test gpg-agent under root; QA cannot retire hosts with unknown agents running."""
     for home in Path(root).iterdir():
         RUN(['gpgconf', '--homedir', str(home), '--kill', 'all'], check=False, capture_output=True)
     import signal, time
     for _ in range(50):
-        listing = RUN(['pgrep', '-af', 'gpg-agent --homedir '+str(root)], capture_output=True, text=True).stdout
-        pids = [int(line.split()[0]) for line in listing.splitlines() if 'gpg-agent --homedir '+str(root) in line]
+        pids = [int(line.split()[0]) for line in agent_lines().splitlines() if str(root) in line]
         if not pids:
             return
         for pid in pids:
@@ -167,7 +172,7 @@ class LinuxReleasePluginTests(unittest.TestCase):
         self.assertFalse([path for path in self.root.iterdir() if path.name.startswith(('nightly-gpg', 'nightly-linux-stage'))])
         import time
         for _ in range(30):  # gpgconf --kill is asynchronous; allow up to 3 s, never kill here.
-            agents = RUN(['pgrep', '-af', 'gpg-agent'], capture_output=True, text=True).stdout
+            agents = agent_lines()
             if str(self.root) not in agents: break
             time.sleep(0.1)
         self.assertNotIn(str(self.root), agents)  # No agent (possibly holding the key) outlives signing.
@@ -184,6 +189,15 @@ class LinuxReleasePluginTests(unittest.TestCase):
         self.assertTrue(seen)
         for item in seen:
             self.assertFalse({'GH_TOKEN', 'WINDOWS_CERTIFICATE', 'APPLE_PASSWORD'} & set(item))
+
+    def test_agent_listing_includes_full_command_lines(self):
+        home = self.root/'listing-home'; home.mkdir(mode=0o700)
+        try:
+            gpg(home, '--list-keys')
+            RUN(['gpg-connect-agent', '--homedir', str(home), '/bye'], capture_output=True, check=False)
+            self.assertIn(str(home), agent_lines())  # Otherwise a surviving agent could never fail the check.
+        finally:
+            stop_agents(self.root)
 
     def test_verify_refuses_signing_credentials_in_its_environment(self):
         _, output, result = self.signed()
@@ -397,7 +411,7 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
     def test_linux_producer_is_opt_in_secretless_and_attested_separately(self):
         self.assertIn("default: '[\"windows-x86_64\"]'", self.unsigned)  # Windows-only callers stay unchanged.
         build = job_block(self.unsigned, 'build-linux')
-        self.assertIn("contains(fromJSON(inputs.platforms), 'linux-x86_64')", build.split('    runs-on:', 1)[0])
+        self.assertIn("contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64')", build.split('    runs-on:', 1)[0])
         self.assertIn("github.ref == 'refs/heads/main'", build.split('    runs-on:', 1)[0])
         for forbidden in ('secrets.', 'environment:', 'id-token', ': write', 'cache', 'cargo xtask version set', '--skip-build'):
             self.assertNotIn(forbidden, build)
@@ -427,6 +441,110 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
             self.assertEqual(publish.count(name), 2)  # final and publish steps
         self.assertNotIn('secrets.', publish); self.assertNotIn('environment:', publish)
 
+
+    def test_validator_downloads_every_supported_platform_artifact_exactly(self):
+        validate = job_block(self.release, 'validate')
+        downloads = [step for step in steps(validate) if 'actions/download-artifact@' in step]
+        platforms = ('linux-x86_64', 'macos-aarch64', 'windows-x86_64')
+        self.assertEqual(len(downloads), len(platforms))
+        for platform in platforms:
+            matching = [step for step in downloads if 'path: .unsigned/'+platform+'\n' in step]
+            with self.subTest(platform=platform):
+                self.assertEqual(len(matching), 1)
+                step = matching[0]
+                self.assertIn("if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), '"+platform+"')", step)
+                self.assertIn('artifact-ids: ${{ steps.admit.outputs.artifact-id-'+platform+' }}', step)
+                self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
+                self.assertIn('digest-mismatch: error', step)
+        self.assertLess(validate.index('path: .unsigned/linux-x86_64'), validate.index('nightly_release_entry.py validate'))
+
+    def test_publish_stops_when_the_run_is_cancelled(self):
+        condition = job_block(self.release, 'publish').split('    runs-on:', 1)[0]
+        self.assertNotIn('always()', condition)
+        self.assertIn("!cancelled() && needs.validate.result == 'success'", condition)
+
+    def test_producer_platform_selection_is_validated_once_as_an_exact_list(self):
+        select = job_block(self.unsigned, 'select-platforms')
+        self.assertNotIn('fromJSON(inputs.platforms)', self.unsigned.split('  select-platforms:\n', 1)[1].split('    steps:', 1)[0])
+        for name in ('build', 'attest', 'build-macos', 'attest-macos', 'build-linux', 'attest-linux'):
+            block = job_block(self.unsigned, name).split('    runs-on:', 1)[0]
+            with self.subTest(job=name):
+                self.assertNotIn('fromJSON(inputs.platforms)', block)
+        for name, platform in (('build', 'windows-x86_64'), ('build-macos', 'macos-aarch64'), ('build-linux', 'linux-x86_64')):
+            block = job_block(self.unsigned, name).split('    runs-on:', 1)[0]
+            self.assertIn("contains(fromJSON(needs.select-platforms.outputs.platforms), '"+platform+"')", block)
+            self.assertIn('select-platforms', block.split('needs:', 1)[1].split('\n', 1)[0])
+        script = select.split("python3 -I -B - <<'PY'\n", 1)[1].split('          PY\n', 1)[0]
+        script = '\n'.join(line[10:] for line in script.splitlines())
+        def run_select(value):
+            with tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary)/'out'
+                result = RUN([sys.executable, '-I', '-B', '-c', script], env={'PLATFORMS': value, 'GITHUB_OUTPUT': str(output),
+                             'PATH': os.environ.get('PATH', '')}, capture_output=True, text=True)
+                return result.returncode, output.read_text() if output.exists() else ''
+        self.assertEqual(run_select('["windows-x86_64","linux-x86_64"]'), (0, 'platforms=["linux-x86_64","windows-x86_64"]\n'))
+        self.assertEqual(run_select('["windows-x86_64"]'), (0, 'platforms=["windows-x86_64"]\n'))
+        for bad in ('"not-linux-x86_64"', '"linux-x86_64"', '[]', '["linux-x86_64","linux-x86_64"]', '["freebsd-x86_64"]',
+                    '[["linux-x86_64"]]', '{"linux-x86_64": true}', 'linux-x86_64', '["linux-x86_64 "]', '[1]'):
+            with self.subTest(value=bad):
+                code, out = run_select(bad)
+                self.assertNotEqual(code, 0); self.assertEqual(out, '')
+
+
+class VerificationEnvironmentTests(unittest.TestCase):
+    """Verification subprocesses get an explicit env with every signing secret and token removed."""
+    SECRETS = {'LINUX_SIGNING_KEY': 'k', 'WINDOWS_CERTIFICATE': 'c', 'WINDOWS_CERTIFICATE_PASSWORD': 'p', 'AZURE_CLIENT_SECRET': 'a',
+               'APPLE_CERTIFICATE': 'm', 'APPLE_PASSWORD': 'q', 'KEYCHAIN_PASSWORD': 'r', 'GH_TOKEN': 't', 'GITHUB_TOKEN': 'u',
+               'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'v', 'ACTIONS_RUNTIME_TOKEN': 'w'}
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        patch.dict(os.environ, {**self.SECRETS, 'GITHUB_WORKSPACE': str(self.root), 'RUNNER_TEMP': str(self.root)}).start()
+        self.addCleanup(patch.stopall)
+        self.calls = []
+
+    def fake(self, outputs):
+        def run(argv, **kwargs):
+            self.calls.append((list(map(str, argv)), kwargs.get('env', 'INHERITED')))
+            out = next((value for key, value in outputs.items() if key in ' '.join(map(str, argv))), '')
+            return subprocess.CompletedProcess(argv, 0, out.encode(), b'')
+        return run
+
+    def assert_clean(self):
+        self.assertTrue(self.calls)
+        for argv, env in self.calls:
+            with self.subTest(argv=argv[:2]):
+                self.assertIsInstance(env, dict)  # Never inherited from the signer process.
+                self.assertFalse(set(self.SECRETS) & set(env))
+                self.assertEqual(env.get('PATH'), os.environ.get('PATH'))
+
+    def test_windows_native_verification_never_inherits_signing_secrets(self):
+        env = {**os.environ, 'NIGHTLY_WINDOWS_PUBLISHER_SUBJECT': 'CN=Fixture'}
+        with patch.object(s.subprocess, 'run', side_effect=self.fake({'pwsh': 'CN=Fixture'})):
+            self.assertEqual(s.windows_verify(self.root, env, '1.2.3-nightly.20261120.1.1.gaaaaaaaaaaaa'), 'CN=Fixture')
+        self.assert_clean()
+
+    def test_mac_native_verification_never_inherits_signing_secrets(self):
+        details = ('Identifier=ai.storyteller.photocraft.nightly\nAuthority=Developer ID Application: Fixture\nTeamIdentifier=ABCDEFGHIJ\n'
+                   'Timestamp=Fixture\nCodeDirectory v=20500 flags=0x10000(runtime) hashes=x\n')
+        verdict = 'app: accepted\nsource=Notarized Developer ID\norigin=Developer ID Application: Fixture (ABCDEFGHIJ)'
+        env = {**os.environ, 'NIGHTLY_APPLE_TEAM_ID': 'ABCDEFGHIJ', 'DEVELOPER_DIR': '/Applications/Xcode.app'}
+        archive = self.root/'mac.zip'; archive.write_bytes(b'synthetic')
+        with patch.object(s.u, 'verify_archive'), patch.object(s.subprocess, 'run', side_effect=self.fake({'lipo': 'arm64', 'codesign -d': details, 'spctl': verdict})):
+            self.assertEqual(s.mac_verify(archive, '1.2.3-nightly.20261120.1.1.gaaaaaaaaaaaa', {}, env, self.root/'payload'), 'ABCDEFGHIJ')
+        self.assert_clean()
+        self.assertTrue(all(env.get('DEVELOPER_DIR') == '/Applications/Xcode.app' for _, env in self.calls))
+
+    def test_linux_signature_verification_never_inherits_signing_secrets(self):
+        fpr = 'C'*40
+        (self.root/'key.asc').write_text('reviewed public fixture'); (self.root/'a.tar.gz').write_bytes(b'payload')
+        (self.root/'a.tar.gz.asc').write_text('-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n')
+        status = '[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG D fixture\n[GNUPG:] VALIDSIG '+'D'*40+' 2026-11-23 1 0 4 0 22 10 00 '+fpr
+        listing = 'pub:-:255:22:X:0:::-:::cSC:\nfpr:::::::::'+fpr+':'
+        with patch.object(s.subprocess, 'run', side_effect=self.fake({'--list-keys': listing, 'gpgv': status, '--export': 'binary key'})):
+            self.assertEqual(s.verify_linux_signature(self.root/'key.asc', self.root/'a.tar.gz.asc', self.root/'a.tar.gz', fpr, dict(os.environ)), fpr)
+        self.assert_clean()
 
 if __name__ == '__main__':
     unittest.main()

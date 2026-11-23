@@ -323,17 +323,22 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError): b.source_policy(source, {**env, "GITHUB_SHA": "f"*40})
         with self.assertRaises(ValueError): b.git_read(source, ["push"])
 
-    def history(self, *, live=False):
+    def history(self, *, live=False, missing_signature=False):
         """Frozen v1 Windows-only publication (legacy v2 policy), or a v2 all-platform one."""
         if live:
             policy, request = self.policy, copy.deepcopy(self.request)
+            linux_asc = self.plan["platforms"][LINUX]["asset"]+".asc"
+            support = {LINUX: {linux_asc: {"size": len(SYNTHETIC_ASC), "sha256": hashlib.sha256(SYNTHETIC_ASC).hexdigest()}}}
+            if missing_signature: support = {}
             signing = {platform: b.r.release_receipt_v3(policy, request, platform, "1"*64, str(index+2)*64,
-                b.r.trusted_signer(policy, platform), {}) for index, platform in enumerate(sorted(self.plan["platforms"]))}
+                b.r.trusted_signer(policy, platform), support.get(platform, {})) for index, platform in enumerate(sorted(self.plan["platforms"]))}
             publication = {"schema": "craft-nightly-release-publication/v2", "request": request,
                 "plan": self.plan, "quality": self.state["quality"], "signing": signing}
             body = b.MARKER_V2+json.dumps(publication)
             assets = [{"name": self.plan["platforms"][platform]["asset"], "digest": "sha256:"+receipt["final_sha256"]}
                 for platform, receipt in signing.items()]
+            if not missing_signature:
+                assets.append({"name": linux_asc, "digest": "sha256:"+hashlib.sha256(SYNTHETIC_ASC).hexdigest()})
         else:
             policy = self.fx.legacy_policy(); request = self.fx.legacy_request(policy)
             receipt = b.r.release_receipt(policy, request, "1"*64, "2"*64, policy["windows_publisher_subject"])
@@ -827,6 +832,12 @@ class BridgeTests(unittest.TestCase):
             if asset["name"] == self.plan["platforms"][MAC]["asset"]: asset["digest"] = "sha256:"+"0"*64
         with self.assertRaisesRegex(ValueError, "final asset digest"):
             b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
+
+    def test_live_v2_history_requires_the_linux_detached_signature(self):
+        # A receipt that simply omits Linux support must not authenticate history (the feed requires the .asc).
+        api, release = self.history(live=True, missing_signature=True)
+        with self.assertRaisesRegex(ValueError, "support"):
+            b.previous_publication(api, self.registry, self.policy, self.request, [release])
 
     def test_live_v2_history_requires_v3_policy_and_exact_receipts(self):
         api, release = self.history(live=True)

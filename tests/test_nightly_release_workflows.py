@@ -31,14 +31,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_main_build_and_attester_are_separate_and_credential_bound(self):
         graph = jobs(self.unsigned)
-        self.assertEqual(set(graph), {"git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux"})
+        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux"})
+        self.assertEqual(graph["select-platforms"].count("secrets."), 0); self.assertIn("permissions: {}", graph["select-platforms"])
         self.assertIn("cargo metadata --locked", graph["git-sources"])
         self.assertIn("-Nightly -BuildOnly", graph["build"])
         self.assertIn("bash packaging/macos/nightly.sh --arch aarch64", graph["build-macos"])
         self.assertIn("default: '[\"windows-x86_64\"]'", self.unsigned)
         for build, attest, platform in (("build", "attest", "windows-x86_64"), ("build-macos", "attest-macos", "macos-aarch64")):
-            self.assertIn("needs: git-sources", graph[build])
-            self.assertIn("contains(fromJSON(inputs.platforms), '"+platform+"')", graph[build])
+            self.assertIn("needs: [git-sources, select-platforms]", graph[build])
+            self.assertIn("contains(fromJSON(needs.select-platforms.outputs.platforms), '"+platform+"')", graph[build])
+            self.assertNotIn("fromJSON(inputs.platforms)", graph[build])
             self.assertIn("nightly_smoke.py", graph[build])
             for mode in ("main-plan", "main-seal"):
                 self.assertIn("nightly_release_entry.py "+mode+" --platform "+platform, graph[build])
@@ -64,7 +66,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
             self.assertIn("--platform "+platform, graph[name])
-        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 4)
+        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 5)  # 3 downloads, validate, upload
         self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]", graph["publish"])
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
@@ -86,7 +88,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                          "artifact-ids: ${{ steps.admit.outputs.artifact-id-macos-aarch64 }}", "path: .unsigned/windows-x86_64",
                          "path: .unsigned/macos-aarch64", "digest-mismatch: error"):
             self.assertIn(required, validator)
-        self.assertEqual(validator.count("merge-multiple: true"), 2)
+        self.assertEqual(validator.count("merge-multiple: true"), 3)  # one exact download per supported platform
 
     def test_only_signer_has_release_environment_and_only_leaf_step_exports_keys(self):
         graph = jobs(self.release)
@@ -195,7 +197,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_publish_requires_every_admitted_platform_and_binds_each_digest(self):
         publisher = jobs(self.release)["publish"]
-        for required in ("always() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true'",
+        self.assertNotIn("always() &&", publisher.split("    runs-on:", 1)[0])  # a cancel must stop release writes
+        for required in ("!cancelled() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true'",
                          "(!contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') || needs.sign-windows.result == 'success')",
                          "(!contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' && needs.smoke-macos.result == 'success'))",
                          "SIGNED_BUNDLE_SHA256_WINDOWS_X86_64: ${{ needs.sign-windows.outputs.bundle-sha256 }}",

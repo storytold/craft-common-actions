@@ -3,9 +3,9 @@
 Nothing in this change configures GitHub, uses real signing credentials, runs a
 native build, publishes an attestation/release, or enables a schedule. Those
 remain publisher/user actions. Historical unsigned Windows proof is not proof of
-the final signed bytes. Linux and macOS build callers and native jobs stay
-literally disabled. Registry tuples, frozen fixtures and native truth gates are
-unchanged.
+the final signed bytes. The Linux and macOS build and signer jobs are opt-in: they
+run only when the app caller sets `production-signing: true`. Main-route
+attestation and publication remain hard-disabled (literal `false`).
 
 ## Signing boundary
 
@@ -114,8 +114,11 @@ macOS is now admitted to the registry with Windows (one release carries both).
 The macOS producer, presence preflight and signer jobs run only when the app caller
 sets `production-signing: true` and selects `macos-aarch64`; the producer also runs
 the ad-hoc `--version` smoke in its secret-free job. `nightly_unix.py` no longer
-refuses Mac builds. Main-route staging combines the Windows and macOS signed ZIPs;
-main-route attestation and publication remain literally off. Verification now
+refuses Mac builds. Main-route `stage-nightly` requires the Windows, Linux and macOS
+jobs to succeed and stages one packet: the signed Windows ZIP, the notarized macOS
+ZIP, the Linux tar.gz and its detached `.asc` (the bundled key export is never staged),
+plus `NIGHTLY.json` and `SHA256SUMS.txt`; the packet seal binds every asset and the
+`.asc`. Main-route attestation and publication remain literally off. Verification now
 also requires the exact nightly `Identifier` and Gatekeeper's
 `source=Notarized Developer ID` from the reviewed team. No native Mac run has
 happened from this repository.

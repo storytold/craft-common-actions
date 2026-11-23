@@ -29,6 +29,10 @@ AZURE_SECRETS = ('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
                  'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_CERT_PROFILE')
 APPLE_SECRETS = ('APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'KEYCHAIN_PASSWORD',
                  'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')
+# Never handed to verification tools; signing calls alone receive their own credentials.
+SECRET_NAMES = frozenset(WINDOWS_SECRETS + AZURE_SECRETS + APPLE_SECRETS +
+                         ('LINUX_SIGNING_KEY', 'GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN',
+                          'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_URL'))
 FIELDS = {'schema', 'platform', 'method', 'identity_sha256', 'unsigned_sha256', 'final_sha256',
           'source_commit', 'tooling_revision', 'run_id', 'run_attempt', 'asset', 'signer', 'verified', 'support'}
 
@@ -46,6 +50,16 @@ def command(argv, *, stdin=None, env=None, timeout=3900):
     n.require(len(result.stdout) <= n.MAX_JSON_BYTES and len(result.stderr) <= n.MAX_JSON_BYTES,
               'signing tool output exceeds bound')
     return result.stdout.decode('utf-8-sig').strip()
+
+
+def verification_env(environment=None):
+    """Explicit subprocess env for verification: the caller's environment minus every signing secret/token.
+
+    Passing env= always (never None) stops tools inheriting a signer process's ambient credentials.
+    """
+    source = os.environ if environment is None else environment
+    return {key: value for key, value in source.items() if isinstance(value, str) and key not in SECRET_NAMES and
+            not re.search(r'(TOKEN|SECRET|PASSWORD|PRIVATE_KEY|CERTIFICATE)', key.upper())}
 
 
 def sha(path):
@@ -154,7 +168,7 @@ def windows_verify(root, environment, version):
     n.require(publisher and not any(c in publisher for c in '\r\n\0'), 'configured exact Windows publisher subject required')
     script = Path(__file__).with_name('nightly_signing_windows.ps1').resolve()
     return command(['pwsh', '-NoProfile', '-File', script, '-Mode', 'verify', '-Root', n.owned_path(root),
-                    '-ExpectedPublisher', publisher, '-ExpectedVersion', version])
+                    '-ExpectedPublisher', publisher, '-ExpectedVersion', version], env=verification_env(environment))
 
 
 def repack_windows(root, archive):
@@ -188,15 +202,16 @@ def mac_verify(archive, version, pending, environment, output):
     # inventory has already forbidden links, traversal, extra roots and special files.
     output = n.owned_path(output)
     n.require(not output.exists(), 'Mac verification directory must be new')
+    clean = verification_env(environment)  # Keeps PATH/HOME/TMPDIR/LANG/DEVELOPER_DIR, never signing secrets.
     # Unpack like the Launcher: no resource forks or extended attributes restored.
-    command(['/usr/bin/ditto', '-x', '-k', '--norsrc', '--noextattr', archive, output])
+    command(['/usr/bin/ditto', '-x', '-k', '--norsrc', '--noextattr', archive, output], env=clean)
     app = Path(output)/'PhotoCraft Nightly.app'
     executable = app/'Contents/MacOS/PhotoCraft'
-    n.require(command(['/usr/bin/lipo', '-archs', executable]) == 'arm64', 'Mac GUI must be thin aarch64')
-    command(['/usr/bin/codesign', '--verify', '--strict', '--deep', app])
+    n.require(command(['/usr/bin/lipo', '-archs', executable], env=clean) == 'arm64', 'Mac GUI must be thin aarch64')
+    command(['/usr/bin/codesign', '--verify', '--strict', '--deep', app], env=clean)
     # codesign -d writes details to stderr, merged explicitly in this one tool.
     details = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(app)],
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=60).stdout.decode()
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=60, env=clean).stdout.decode()
     n.require(len(details) <= n.MAX_JSON_BYTES and
               '\nIdentifier='+u.ISOLATION['package_identity']+'\n' in '\n'+details+'\n' and
               '\nAuthority=Developer ID Application:' in '\n'+details and
@@ -204,10 +219,10 @@ def mac_verify(archive, version, pending, environment, output):
               re.search(r'^Timestamp=.+$', details, re.M) and
               hardened_runtime(details),
               'Mac requires nightly identifier, Developer ID, exact team, secure timestamp and hardened runtime')
-    command(['/usr/bin/xcrun', 'stapler', 'validate', app])
+    command(['/usr/bin/xcrun', 'stapler', 'validate', app], env=clean)
     # spctl reports its verdict on stderr; require Gatekeeper's notarized source, not just exit 0.
     assessment = subprocess.run(['/usr/sbin/spctl', '--assess', '--type', 'execute', '-vv', str(app)],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=120).stdout.decode()
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=120, env=clean).stdout.decode()
     lines = assessment.splitlines()
     n.require(len(assessment) <= n.MAX_JSON_BYTES and lines and lines[0].endswith(': accepted') and
               'source=Notarized Developer ID' in lines and
@@ -292,12 +307,12 @@ LINUX_HASH_ALGORITHMS = {'8', '9', '10'}  # OpenPGP SHA-256, SHA-384, SHA-512 on
 def stop_gpg_agent(homedir):
     """Never leave an agent (possibly holding the signing key) behind a temporary homedir."""
     try:
-        command(['/usr/bin/gpgconf', '--homedir', Path(homedir), '--kill', 'all'])
+        command(['/usr/bin/gpgconf', '--homedir', Path(homedir), '--kill', 'all'], env=verification_env())
     except (OSError, subprocess.SubprocessError, n.InvalidNightly):
         pass  # Best effort: the homedir is removed next, which also ends a live agent.
 
 
-def linux_public_keyring(public_key, fingerprint, homedir):
+def linux_public_keyring(public_key, fingerprint, homedir, environment=None):
     """Import exactly one reviewed public primary into a fresh homedir; return a gpgv keyring.
 
     Trust comes from reviewed source and the independently reviewed fingerprint,
@@ -308,8 +323,9 @@ def linux_public_keyring(public_key, fingerprint, homedir):
               'independently reviewed full Linux primary fingerprint required')
     n.require(public_key.is_file() and not public_key.is_symlink() and
               0 < public_key.stat().st_size <= n.MAX_JSON_BYTES, 'reviewed Linux public key missing or exceeds bound')
-    command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--import', public_key])
-    listing = command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--with-colons', '--list-keys'])
+    clean = verification_env(environment)
+    command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--import', public_key], env=clean)
+    listing = command(['/usr/bin/gpg', '--homedir', homedir, '--batch', '--with-colons', '--list-keys'], env=clean)
     lines = listing.splitlines()
     primaries = [lines[index+1].split(':')[9] for index, line in enumerate(lines)
                  if line.startswith('pub:') and index+1 < len(lines) and lines[index+1].startswith('fpr:')]
@@ -317,7 +333,7 @@ def linux_public_keyring(public_key, fingerprint, homedir):
               'Linux signer differs from independently reviewed public key/fingerprint')
     keyring = homedir/'trusted.gpg'
     binary = subprocess.run(['/usr/bin/gpg', '--homedir', str(homedir), '--batch', '--export', fingerprint],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60).stdout
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=60, env=clean).stdout
     n.require(0 < len(binary) <= n.MAX_JSON_BYTES, 'reviewed Linux public key export missing or exceeds bound')
     keyring.write_bytes(binary)
     return keyring
@@ -334,9 +350,9 @@ def verify_linux_signature(public_key, signature, payload, fingerprint, environm
     with tempfile.TemporaryDirectory(prefix='nightly-gpgv-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
         homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
         try:
-            keyring = linux_public_keyring(public_key, fingerprint, homedir)
+            keyring = linux_public_keyring(public_key, fingerprint, homedir, environment)
             status = command(['/usr/bin/gpgv', '--homedir', homedir, '--status-fd', '1', '--keyring', keyring,
-                              signature, n.owned_path(payload)])
+                              signature, n.owned_path(payload)], env=verification_env(environment))
         finally:
             stop_gpg_agent(homedir)
     records = [line.split()[1:] for line in status.splitlines() if line.startswith('[GNUPG:] ')]
@@ -376,7 +392,7 @@ def sign_linux(source, archive, output, environment):
         env = {**environment, 'GNUPGHOME': str(secret)}
         try:
             # Public trust is reviewed app source, NEVER downloaded from artifact/release.
-            linux_public_keyring(trusted_key, fingerprint, public)
+            linux_public_keyring(trusted_key, fingerprint, public, environment)
             command(['/usr/bin/gpg', '--batch', '--import'], stdin=environment['LINUX_SIGNING_KEY'].encode(), env=env)
             shutil.copyfile(archive, output)
             signature = Path(str(output)+'.asc')
@@ -384,7 +400,8 @@ def sign_linux(source, archive, output, environment):
                      '--armor', '--detach-sign', '-o', signature, output], env=env)
             # Verification never uses the secret keyring: only the reviewed public key.
             verify_linux_signature(trusted_key, signature, output, fingerprint, environment)
-            armored = command(['/usr/bin/gpg', '--homedir', public, '--batch', '--armor', '--export', fingerprint])
+            armored = command(['/usr/bin/gpg', '--homedir', public, '--batch', '--armor', '--export', fingerprint],
+                              env=verification_env(environment))
             (Path(output).parent/'release-signing-key.asc').write_text(armored+'\n')
         finally:
             stop_gpg_agent(secret); stop_gpg_agent(public)

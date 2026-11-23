@@ -1,4 +1,4 @@
-# Release-ref nightly signer source (Windows and macOS, one release)
+# Release-ref nightly signer source (Windows, Linux and macOS, one release)
 
 This is a separate source implementation, not activation or release qualification.
 The existing stable `release.yml`, legacy candidate v1/v2 policy parsers, signing adapter and public
@@ -16,9 +16,23 @@ which move into a per-platform map:
   "windows-x86_64": {"unsigned_artifact_name": "nightly-unsigned-windows-x86_64",
                      "trust": {"publisher_subject": "<exact Authenticode subject>"}},
   "macos-aarch64":  {"unsigned_artifact_name": "nightly-unsigned-macos-aarch64",
-                     "trust": {"apple_team_id": "<stable's ten-character team>"}}
+                     "trust": {"apple_team_id": "<stable's ten-character team>"}},
+  "linux-x86_64":   {"unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
+                     "trust": {"fingerprint": "2B76741B414AAD6CD33E631213A005C0B9D7C3ED"}}
 }
 ```
+
+The producer caller must request the same three platforms in the one run the signer
+admits, for example:
+
+```yaml
+uses: storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@<reviewed SHA>
+with:
+  platforms: '["windows-x86_64","linux-x86_64","macos-aarch64"]'
+```
+
+`platforms` is validated once (`select-platforms`): a non-empty JSON array of
+distinct supported IDs, never a bare string.
 
 The map's keys must equal the photocraft targets admitted in `nightly-apps.json`.
 A nightly release carries every admitted platform or nothing: one failed or skipped
@@ -51,7 +65,9 @@ Signer (`nightly-release.yml`, release branch):
 | sign-macos | macos-15 | `release`: the six stable `APPLE_*`/`KEYCHAIN_PASSWORD` names | app `packaging/macos/nightly-sign.sh` from the release checkout: stable `import-cert.sh`, `codesign --options runtime --timestamp`, `notarytool submit --apple-id --password --team-id --wait` (Accepted only), `stapler staple`; 5400 s budget |
 | verify-macos | macos-15 | none | keyless: thin arm64, `Identifier=ai.storyteller.photocraft.nightly`, Developer ID authority, exact team, hardened runtime, secure timestamp, `codesign --verify --strict --deep`, `stapler validate`, Gatekeeper `source=Notarized Developer ID` from the reviewed team |
 | smoke-macos | macos-15 | none, contents read only | after the digest equals verify-macos's output, runs the app's `nightly-verify.sh --expect signed` (`--version` of the shipped, hardened-runtime bytes) |
-| publish | windows-latest | none | requires every admitted platform's jobs to succeed, rechecks each per-platform bundle digest and receipt, verifies Windows natively, binds macOS to verify-macos's exact digest, attests every final asset and publishes one release |
+| sign-linux | ubuntu-22.04 | `release`: `LINUX_SIGNING_KEY` in the sign step only | stable OpenPGP detached `<asset>.asc`, tar bytes unchanged |
+| verify-linux | ubuntu-22.04 | none | keyless gpgv against the reviewed source key, bound to the policy fingerprint |
+| publish | windows-latest | none | runs unless the workflow is cancelled (`!cancelled()`); requires every admitted platform's jobs to succeed, rechecks each per-platform bundle digest and receipt, verifies Windows natively, binds macOS to verify-macos's exact digest, attests every final asset and publishes one release |
 
 The macOS route copies stable's: same `release` environment, same secret names,
 same Apple ID + app-specific password notarization (not an API key). The nightly

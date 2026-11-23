@@ -279,6 +279,8 @@ def previous_publication(api, registry, policy, current_request, rows):
             receipt = r.release_receipt_v3(old_policy, request, platform, old["unsigned_sha256"], old["final_sha256"],
                 r.trusted_signer(old_policy, platform), old["support"])
             n.require(old == receipt, "prior two-role receipt differs")
+            n.require(set(receipt["support"]) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
+                "prior platform support set differs from its required detached signature files")
             expected_assets[plan["platforms"][platform]["asset"]] = receipt["final_sha256"]
             for name, item in receipt["support"].items():
                 expected_assets[name] = item["sha256"]
@@ -455,17 +457,34 @@ def expected_platform_receipt(policy, state, platform, directory):
     expected = r.release_receipt_v3(policy, state["request"], platform, unsigned_sha256,
         n.digest_file(directory, plan["platforms"][platform]["asset"])[1], r.trusted_signer(policy, platform), support)
     n.require(receipt == expected, "final two-role receipt differs")
+    n.require(set(support) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
+        "platform support set differs from its required detached signature files")
     for name, item in support.items():
         n.require(n.digest_file(directory, name) == (item["size"], item["sha256"]), "signing support differs from receipt")
     return receipt
 
 
 def verify_platform(policy, state, platform, directory, source, environment):
-    """Fresh keyless verification of one platform's final bytes."""
+    """Fresh keyless verification of one platform's final bytes.
+
+    The signed bundle also carries its authenticated admission JSON. Plug-ins verify
+    an exact package-only copy (final asset plus recorded support), rechecked against
+    the receipt after copying, so strict plug-in inventories stay strict.
+    """
     receipt = expected_platform_receipt(policy, state, platform, directory)
     module = plat.plugin(platform)
-    signer = module.verify(policy["platforms"][platform]["trust"], Path(directory), state["plan"]["platforms"][platform]["asset"],
-        receipt["support"], Path(source).resolve(), plat.keyless(environment), state["plan"]["identity"]["version"])
+    asset = state["plan"]["platforms"][platform]["asset"]
+    expected = {asset: receipt["final_sha256"], **{name: item["sha256"] for name, item in receipt["support"].items()}}
+    with tempfile.TemporaryDirectory(prefix="nightly-verify-package-", dir=n.owned_path(environment["RUNNER_TEMP"])) as temporary:
+        package = Path(temporary)/"package"; package.mkdir()
+        for name, digest in sorted(expected.items()):
+            n.require(n.NAME.fullmatch(name), "unsafe package file name")
+            stream, _ = n.regular_file(directory, name)
+            with stream, (package/name).open("xb") as destination:
+                shutil.copyfileobj(stream, destination, 1024*1024)
+            n.require(n.digest_file(package, name)[1] == digest, "package copy differs from signer receipt")
+        signer = module.verify(policy["platforms"][platform]["trust"], package, asset,
+            receipt["support"], Path(source).resolve(), plat.keyless(environment), state["plan"]["identity"]["version"])
     n.require(signer == receipt["verified_signer"], "fresh native verification differs from signer receipt")
     return receipt["final_sha256"]
 
