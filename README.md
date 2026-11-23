@@ -1144,6 +1144,9 @@ cannot read (for example one cut short by a test process that crashed while
 writing it) fails its shard and is named in an error annotation, rather than
 reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
 Sharded runs skip doctests, because nextest does not run them.
+The instrumented archive build and the unsharded `cargo llvm-cov` path default to two
+parallel rustc jobs (`build-jobs`, 1–4). A cold llvm-cov workspace build can otherwise
+start enough jobs to exhaust a hosted runner and shut it down mid-compile (exit 143).
 Each shard links the build job's target directory to its extracted copy of the
 archive, so tests that run a workspace binary through
 `env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.
