@@ -82,6 +82,14 @@ on:
         type: string
         required: false
         default: ""
+      build-jobs:
+        description: >-
+          Parallel rustc jobs for the instrumented coverage build (1-4). Default 2 so a cold
+          llvm-cov workspace build stays within hosted-runner memory; too many jobs can shut
+          the runner down mid-archive (exit 143).
+        type: number
+        required: false
+        default: 2
     secrets:
       SONAR_TOKEN:
         description: "Legacy or repository-level SonarCloud analysis token"
@@ -185,6 +193,8 @@ jobs:
     if: needs.plan.outputs.matrix != '{"shard":[]}'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      CARGO_BUILD_JOBS: ${{ inputs.build-jobs }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -278,6 +288,13 @@ jobs:
         run: |
           python3 scripts/fetch-pdf-test-fonts.py "$RUNNER_TEMP/craft-pdf-test-fonts"
           echo "CRAFT_PDF_TEST_FONT_DIR=$RUNNER_TEMP/craft-pdf-test-fonts" >> "$GITHUB_ENV"
+      - name: Validate build concurrency
+        shell: bash
+        run: |
+          case "$CARGO_BUILD_JOBS" in
+            1|2|3|4) ;;
+            *) echo "::error::build-jobs must be an integer from 1 to 4, got '$CARGO_BUILD_JOBS'"; exit 1 ;;
+          esac
       - name: Build instrumented test archive
         env:
           CARGO_TERM_COLOR: always
@@ -527,6 +544,8 @@ jobs:
     if: ${{ !cancelled() && contains(fromJSON('["success","skipped"]'), needs.plan.result) && contains(fromJSON('["success","skipped"]'), needs.build.result) && contains(fromJSON('["success","skipped"]'), needs.coverage.result) }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      CARGO_BUILD_JOBS: ${{ inputs.build-jobs }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -675,6 +694,14 @@ jobs:
       - name: Fetch locked Rust dependencies
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
         run: cargo fetch --locked
+      - name: Validate build concurrency
+        if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
+        shell: bash
+        run: |
+          case "$CARGO_BUILD_JOBS" in
+            1|2|3|4) ;;
+            *) echo "::error::build-jobs must be an integer from 1 to 4, got '$CARGO_BUILD_JOBS'"; exit 1 ;;
+          esac
       - name: Generate Rust coverage
         id: coverage
         if: steps.token.outputs.available == 'true' && hashFiles('Cargo.toml') != '' && inputs.shards <= 1
