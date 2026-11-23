@@ -1,0 +1,220 @@
+name: Windows unsigned nightly producer
+# Reusable only. Main application code never runs with signing keys or OIDC.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        type: string
+        required: true
+      app-name:
+        type: string
+        default: photocraft
+      manual-actors:
+        type: string
+        default: '[]'
+      craft-fonts-ref:
+        type: string
+        default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+    outputs:
+      unsigned-artifact-id:
+        value: ${{ jobs.build.outputs.artifact-id }}
+      unsigned-sha256:
+        value: ${{ jobs.attest.outputs.unsigned-sha256 }}
+permissions:
+  contents: read
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+  NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+jobs:
+  git-sources:
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    name: Git dependencies come from storytold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Git dependencies come from storytold
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
+          # Source replacement, patches and path overrides in cargo config never show up
+          # in Cargo.lock. Parsed rather than grepped: TOML has many spellings of one key.
+          # Cargo still reads the legacy .cargo/config.
+          python3 - <<'PY'
+          import os, sys, tomllib
+          for path in (".cargo/config", ".cargo/config.toml"):
+              if not os.path.exists(path):
+                  continue
+              config = tomllib.load(open(path, "rb"))
+              replaced = [name for name, source in config.get("source", {}).items()
+                          if isinstance(source, dict) and "replace-with" in source]
+              if replaced or "patch" in config or "paths" in config:
+                  print(f"{path} replaces, patches or overrides a source")
+                  sys.exit(1)
+          PY
+          # Check locked git origins first: cargo metadata resolves and can fetch them.
+          python3 - <<'PY'
+          import sys, tomllib
+          lock = tomllib.load(open("Cargo.lock", "rb"))
+          bad = sorted({p["source"] for p in lock.get("package", [])
+                        if p.get("source", "").startswith("git+")
+                        and not p["source"].startswith("git+https://github.com/storytold/")})
+          if bad:
+              print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
+              sys.exit(1)
+          PY
+          # Fails when Cargo.lock is out of date with the manifests.
+          cargo metadata --locked --format-version 1 > /dev/null
+
+
+  build:
+    needs: git-sources
+    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'unreviewed defining workflow' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ((git -C .nightly-tools rev-parse HEAD) -cne $env:TOOLING_REVISION) { throw 'tooling checkout differs' }
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --output .unsigned-plan
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned producer identity refused' }
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # No platform secrets, environment, OIDC permission, cache, or version mutation.
+      - name: Compile unsigned package only
+        shell: pwsh
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+          DIST: dist
+        run: |
+          pwsh -NoProfile -File packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned compiler failed' }
+      - name: Smoke only in the credentialless compiler job
+        shell: pwsh
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          EXACT_ASSET: ${{ steps.plan.outputs.unsigned-asset }}
+        run: |
+          $unpack = Join-Path $env:RUNNER_TEMP 'nightly-compiler-smoke'
+          $profile = Join-Path $env:RUNNER_TEMP 'nightly-compiler-profile'
+          Expand-Archive -LiteralPath (Join-Path 'dist' $env:EXACT_ASSET) -DestinationPath $unpack
+          python -B .nightly-tools/scripts/nightly_smoke.py --executable (Join-Path $unpack 'photocraft.exe') --profile-root $profile --version $env:EXACT_VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned GUI smoke failed' }
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --directory dist --plan .unsigned-plan/plan.json --output .unsigned-handoff
+          if ($LASTEXITCODE -ne 0) { throw 'compiler handoff refused' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  attest:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      unsigned-sha256: ${{ steps.subject.outputs.unsigned-sha256 }}
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.build.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.build.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.build.outputs.unsigned-sha256 }}
+        run: |
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}

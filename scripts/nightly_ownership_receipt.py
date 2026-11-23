@@ -25,12 +25,28 @@ def receipt(ident, release, environment):
             'tag':ident['tag'],'source_commit':ident['source_commit'],'release_id':release['id'],
             'run_id':int(run),'run_attempt':int(attempt),'tooling_revision':tooling}
 
+def owned_output(path):
+    """New outputs use nightly_feed's single job-root boundary and must lie beneath a root.
+
+    CLI path strings are not authority; owned_path refuses traversal, foreign roots
+    and symlinks before any I/O. A job root itself is never an output directory.
+    """
+    output = n.owned_path(path)
+    roots = {Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()}
+    if os.environ.get("RUNNER_TEMP"):
+        roots.add(Path(os.environ["RUNNER_TEMP"]).resolve())
+    n.require(output not in roots, "output must be beneath the owned workspace or runner temp")
+    return output
+
+
+
 @contextmanager
-def reserve(directory):
-    output=n.owned_path(directory)
+def reserve(directory, *, filename="ownership.json"):
+    n.require(filename in ("ownership.json", "ownership.pending.json"), "unreviewed ownership filename")
+    output=owned_output(directory)
     n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
     output.mkdir(parents=True,exist_ok=False)
-    with n.owned_path(output/'ownership.json').open('x',encoding='utf-8') as stream:
+    with n.owned_path(output/filename).open('x',encoding='utf-8') as stream:
         yield stream
 
 

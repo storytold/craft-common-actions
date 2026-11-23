@@ -137,8 +137,11 @@ def verify_ref(ref, ident):
               ref["object"].get("sha") == ident["source_commit"], "tag ref is not exact prepared source")
 
 
-def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, on_published=None):
+def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, on_published=None, policy_marker=None):
     """Only mutates the draft returned from OUR create call in this invocation."""
+    if policy_marker is not None:
+        n.require(policy_marker=="craft-nightly-release-publication/v1:" and isinstance(policy,dict) and
+            policy.get("schema")=="craft-nightly-release-publication/v1","unreviewed publication marker/schema")
     # Legacy no-policy calls exist only for frozen offline fixture generation.
     # The sole CLI always supplies the v6 live guard and bound policy below.
     n.require(guard is not None or not isinstance(api,HTTPTransport),"live transport requires a reviewed v6 publication guard")
@@ -147,7 +150,7 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, 
     body="Nightly build identity (not stable). Source: " + ident["source_commit"] + "\nNIGHTLY.json SHA256: " + metadata["NIGHTLY.json"][1]
     if policy is not None:
         import nightly_policy as v6
-        body+='\n'+v6.MARKER+json.dumps(policy,sort_keys=True,separators=(',',':'))
+        body+='\n'+(v6.MARKER if policy_marker is None else policy_marker)+json.dumps(policy,sort_keys=True,separators=(',',':'))
     # Check the complete body before the exclusive tag reservation: a draft
     # refused after the tag exists cannot be retried by this flow.
     n.require(len(body)<=MAX_RELEASE_BODY_CHARACTERS and len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")

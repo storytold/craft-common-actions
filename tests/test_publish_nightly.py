@@ -3,6 +3,8 @@ import copy
 import importlib.util
 import io
 import json
+import os
+import tempfile
 from pathlib import Path
 import sys
 import types
@@ -68,6 +70,8 @@ def ref_body(api, wrong=False):
 
 class PublisherTests(unittest.TestCase):
     def setUp(self):
+        owned_temp = patch.dict(os.environ, {"RUNNER_TEMP": tempfile.gettempdir()})
+        owned_temp.start(); self.addCleanup(owned_temp.stop)
         self.registry = json.loads((ROOT / "nightly-apps.json").read_text())
         self.env = {"GITHUB_EVENT_NAME": "schedule", "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": "storytold/photocraft",
                     "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1"}
@@ -80,6 +84,22 @@ class PublisherTests(unittest.TestCase):
 
     def publish(self):
         return p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH")
+
+    def test_oversized_release_body_refuses_before_any_tag_release_or_asset_write(self):
+        with self.assertRaisesRegex(ValueError, "publication policy body exceeds bound"):
+            p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH",
+                guard=lambda: True, policy={"oversized": "x"*n.MAX_JSON_BYTES})
+        self.assertEqual(self.api.calls, [])
+        self.assertFalse(self.api.reserved)
+        self.assertFalse(self.api.published)
+
+    def test_bounded_release_body_preserves_the_existing_exclusive_publication_flow(self):
+        result = p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH",
+            guard=lambda: True, policy={"synthetic": "source-only fixture"})
+        self.assertEqual(result["id"], 7)
+        writes = [(method, target) for method, target, _ in self.api.calls if method != "GET"]
+        self.assertEqual(writes[:2], [("POST", "/git/refs"), ("POST", "/releases")])
+        self.assertTrue(self.api.published)
 
     def test_live_transport_cannot_use_legacy_unguarded_offline_helper(self):
         live=object.__new__(p.HTTPTransport) # no token, connection or constructor
@@ -238,7 +258,6 @@ class PublisherTests(unittest.TestCase):
         self.assertEqual(result["id"], 7)
         posted = next(data for method, target, data in self.api.calls if (method, target) == ("POST", "/releases"))
         self.assertEqual(len(posted["body"]), LIMIT)
-
 
 class V4ReservationCases(unittest.TestCase):
     def setUp(self):

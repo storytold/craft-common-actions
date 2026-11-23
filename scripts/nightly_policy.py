@@ -69,6 +69,23 @@ def workflow_path(value):
     return isinstance(value,str) and re.fullmatch(r'\.github/workflows/[A-Za-z0-9._-]+\.ya?ml',value) is not None
 
 
+def run_workflow_path(run,branch):
+    """Canonical bare workflow path of one Actions workflow-run row.
+
+    GitHub's workflow-run REST schema documents `path` both bare and qualified
+    with the run's own branch (`.github/workflows/build.yml@main`). Only those
+    two spellings are equivalent: the run must be on `branch`, and any other
+    ref, repeated suffix or non-workflow path refuses. Callers still compare
+    the result with their reviewed path and keep their separate repository,
+    run, attempt, SHA and branch checks. The workflows endpoint stays bare-only.
+    """
+    n.require(isinstance(run,dict) and isinstance(branch,str) and branch!='' and run.get('head_branch')==branch,'workflow run branch differs')
+    path=run.get('path')
+    if isinstance(path,str) and path.endswith('@'+branch): path=path[:-len(branch)-1]
+    n.require(workflow_path(path),'workflow run path is not the bare or own-branch form')
+    return path
+
+
 def full_sha(value):
     return isinstance(value,str) and n.HEX40.fullmatch(value) and value!=ZERO
 

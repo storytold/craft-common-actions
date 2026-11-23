@@ -25,6 +25,51 @@ class ReceiptTests(unittest.TestCase):
    self.assertEqual(set(data),r.FIELDS);self.assertEqual(json.loads((out/'ownership.json').read_text()),data)
    self.assertEqual(set(p.name for p in out.iterdir()),{'ownership.json'})
    with self.assertRaises(ValueError):r.emit(self.ident,self.release,self.env,out)
+ def test_pending_reservation_never_creates_the_canonical_receipt(self):
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+   out=Path(tmp)/'owned'
+   with r.reserve(out,filename='ownership.pending.json') as stream:
+    stream.write('{}\n')
+    self.assertEqual(Path(stream.name),out/'ownership.pending.json')
+    self.assertFalse((out/'ownership.json').exists())
+   self.assertEqual({path.name for path in out.iterdir()},{'ownership.pending.json'})
+ def test_unreviewed_reservation_names_refuse_before_creating_output(self):
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+   for index,name in enumerate(('', '../ownership.json', '/ownership.json', 'other.json', None, [], {})):
+    out=Path(tmp)/str(index)
+    with self.subTest(name=name),self.assertRaisesRegex(ValueError,'unreviewed ownership filename'):
+     with r.reserve(out,filename=name):
+      self.fail('unreviewed filename reached reservation')
+    self.assertFalse(out.exists())
+ def test_pending_stream_cannot_be_used_as_a_legacy_canonical_receipt(self):
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
+   out=Path(tmp)/'owned'
+   with r.reserve(out,filename='ownership.pending.json') as stream:
+    with self.assertRaisesRegex(ValueError,'ownership reservation differs'):
+     r.emit(self.ident,self.release,self.env,out,reserved_stream=stream)
+    self.assertEqual(stream.tell(),0)
+   self.assertFalse((out/'ownership.json').exists())
+ def test_reservation_confines_both_names_before_any_creation(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);workspace=root/'workspace';workspace.mkdir();runner=root/'runner';runner.mkdir()
+   outside=root/'external';outside.mkdir();(workspace/'link').symlink_to(outside,target_is_directory=True)
+   (workspace/'dangling').symlink_to(outside/'missing',target_is_directory=True)
+   paths=[outside/'receipt',root/'workspace-lookalike'/'receipt',workspace/'..'/'escape',str(workspace)+r'\..\escape',workspace/'link'/'receipt',workspace/'dangling',workspace]
+   with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
+    for filename in ('ownership.json','ownership.pending.json'):
+     for path in paths:
+      with self.subTest(filename=filename,path=str(path)),self.assertRaises(ValueError):
+       with r.reserve(path,filename=filename):self.fail('unowned path reached file reservation')
+   self.assertEqual(list(outside.iterdir()),[])
+   self.assertFalse((root/'escape').exists());self.assertFalse((root/'workspace-lookalike').exists())
+ def test_reservation_accepts_owned_workspace_and_runner_temp(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);workspace=root/'workspace';workspace.mkdir();runner=root/'runner';runner.mkdir()
+   with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
+    for index,(base,filename) in enumerate(((workspace,'ownership.json'),(runner,'ownership.pending.json'))):
+     out=base/'nested'/str(index)
+     with r.reserve(out,filename=filename) as stream:stream.write('{}\n')
+     self.assertEqual({path.name for path in out.iterdir()},{filename})
  def test_owned_reservation_rejects_foreign_traversal_and_parent_links(self):
   with tempfile.TemporaryDirectory() as outside:
    link=self.root/'linked';link.symlink_to(self.root,target_is_directory=True)
