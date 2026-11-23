@@ -31,9 +31,13 @@ APP = "PhotoCraft Nightly.app"
 REAL_COMMAND, REAL_RUN = s.command, subprocess.run
 
 
-def sh(argv, **kwargs):
-    """Driver-owned setup tools (openssl/security); output bounded and recorded."""
-    result = REAL_RUN([str(value) for value in argv], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600, **kwargs)
+def sh(argv, timeout=600, **kwargs):
+    """Driver-owned setup tools (openssl/security); output bounded and recorded, never hangs."""
+    try:
+        result = REAL_RUN([str(value) for value in argv], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          stdin=subprocess.DEVNULL, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired:
+        return 124, "timed out after "+str(timeout)+" s"
     return result.returncode, result.stdout.decode("utf-8", "replace")[-4000:]
 
 
@@ -151,11 +155,10 @@ def identity(work):
     must(["security", "list-keychains", "-d", "user", "-s", keychain, *[line.strip().strip('"') for line in listed.splitlines() if line.strip()]])
     must(["security", "default-keychain", "-d", "user", "-s", keychain])
     # Ephemeral hosted VM only: trust the throwaway root for code signing so codesign accepts it.
-    diag["trust_admin"] = sh(["sudo", "-n", "security", "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "codeSign",
-                              "-k", "/Library/Keychains/System.keychain", cert])
-    diag["trust_user"] = sh(["security", "add-trusted-cert", "-r", "trustRoot", "-p", "codeSign", "-k", keychain, cert])
-    diag["identities_all"] = sh(["security", "find-identity", "-p", "codesigning", keychain])[1]
-    diag["identities_valid"] = sh(["security", "find-identity", "-v", "-p", "codesigning", keychain])[1]
+    # No trust changes: codesign can sign with an untrusted identity; find-identity (without -v)
+    # lists it with CSSMERR_TP_NOT_TRUSTED, and that listed SHA-1 is what we sign with.
+    diag["identities_all"] = sh(["security", "find-identity", "-p", "codesigning", keychain], timeout=60)[1]
+    diag["identities_valid"] = sh(["security", "find-identity", "-v", "-p", "codesigning", keychain], timeout=60)[1]
     fingerprint = must([tool, "x509", "-noout", "-fingerprint", "-sha1", "-in", cert]).split("=", 1)[1].replace(":", "").strip().upper()
     found = re.findall(r"\b([0-9A-F]{40})\b", diag["identities_all"])
     return {"sha1": fingerprint, "name": name, "keychain": keychain, "listed": found, "diagnostics": diag}
@@ -172,7 +175,7 @@ def sign_and_package(unsigned, version, work, ident):
     for selector in dict.fromkeys(selectors):
         for timestamp in ("--timestamp", "--timestamp=none"):
             code, output = sh(["/usr/bin/codesign", "--force", "--sign", selector, "--keychain", ident["keychain"],
-                               timestamp, "--options", "runtime", app/"Contents/MacOS/PhotoCraft"])
+                               timestamp, "--options", "runtime", app/"Contents/MacOS/PhotoCraft"], timeout=180)
             attempts.append({"selector": selector, "timestamp": timestamp, "exit": code, "output": output[-300:]})
             if code == 0:
                 chosen = (selector, timestamp); break
@@ -227,12 +230,22 @@ def main():
         check(cases, "inventory accepts the real unsigned bundle", True, inventory=inventory)
     except Exception as error:  # noqa: BLE001 - recorded as a failed expectation
         check(cases, "inventory accepts the real unsigned bundle", False, refusal=refusal(error))
+    import time
+    import nightly_smoke as smoke
+    unpacked = work/"smoke-app"
     try:
-        import nightly_smoke as smoke
-        unpacked = work/"smoke-app"
         u.verify_archive(pending, "macos-aarch64", archive, args.version, unpacked)
-        result = smoke.smoke(unpacked/APP/"Contents/MacOS/PhotoCraft", work/"smoke-profile", args.version)
-        check(cases, "real unsigned app reports the exact nightly version", True, smoke=result)
+        # The producer smoke allows 15 s. A first launch of a fresh 280 MB binary may spend longer in
+        # macOS's first-run scan, so this measures the real duration under a 180 s bound and reports it.
+        started = time.monotonic()
+        with mock.patch.object(smoke, "TIMEOUT", 180):
+            result = smoke.smoke(unpacked/APP/"Contents/MacOS/PhotoCraft", work/"smoke-profile", args.version)
+        first = round(time.monotonic()-started, 1)
+        started = time.monotonic()
+        smoke.smoke(unpacked/APP/"Contents/MacOS/PhotoCraft", work/"smoke-profile-2", args.version)
+        second = round(time.monotonic()-started, 1)
+        check(cases, "real unsigned app reports the exact nightly version", True, smoke=result,
+              first_launch_seconds=first, second_launch_seconds=second, producer_bound_seconds=smoke.TIMEOUT)
     except Exception as error:  # noqa: BLE001
         check(cases, "real unsigned app reports the exact nightly version", False, refusal=refusal(error))
 
