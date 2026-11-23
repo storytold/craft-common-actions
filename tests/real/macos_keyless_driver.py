@@ -121,28 +121,44 @@ def verify(final, version, pending, team, out, trace):
             return {"result": "refused", "refusal": refusal(error)}
 
 
+def openssl():
+    """Prefer Homebrew OpenSSL 3 (with -legacy PKCS#12 that `security` can import); else system LibreSSL."""
+    for candidate in ("/opt/homebrew/opt/openssl@3/bin/openssl", "/usr/local/opt/openssl@3/bin/openssl"):
+        if Path(candidate).is_file():
+            return candidate, True
+    return "/usr/bin/openssl", False
+
+
 def identity(work):
     """Throwaway self-signed code-signing identity in a private keychain (no secrets)."""
     key, cert, p12, keychain = work/"key.pem", work/"cert.pem", work/"id.p12", work/"throwaway.keychain-db"
-    subject = "/CN=Developer ID Application: Throwaway Nightly Test ("+TEAM+")/OU="+TEAM+"/O=Throwaway Nightly Test"
-    must(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "1",
+    tool, legacy = openssl()
+    name = "Developer ID Application: Throwaway Nightly Test ("+TEAM+")"
+    subject = "/CN="+name+"/OU="+TEAM+"/O=Throwaway Nightly Test"
+    diag = {"openssl": tool+" "+must([tool, "version"]).strip()}
+    must([tool, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert, "-days", "2",
           "-subj", subject, "-addext", "basicConstraints=critical,CA:false",
           "-addext", "keyUsage=critical,digitalSignature", "-addext", "extendedKeyUsage=critical,codeSigning"])
-    code, output = sh(["openssl", "pkcs12", "-export", "-legacy", "-inkey", key, "-in", cert, "-out", p12, "-passout", "pass:throwaway"])
-    if code:  # LibreSSL has no -legacy and already writes the legacy format.
-        must(["openssl", "pkcs12", "-export", "-inkey", key, "-in", cert, "-out", p12, "-passout", "pass:throwaway"])
+    must([tool, "pkcs12", "-export", *(["-legacy"] if legacy else []), "-inkey", key, "-in", cert, "-name", name,
+          "-out", p12, "-passout", "pass:throwaway"])
     must(["security", "create-keychain", "-p", "throwaway", keychain])
     must(["security", "set-keychain-settings", "-lut", "3600", keychain])
     must(["security", "unlock-keychain", "-p", "throwaway", keychain])
-    must(["security", "import", p12, "-k", keychain, "-P", "throwaway", "-T", "/usr/bin/codesign", "-f", "pkcs12"])
+    diag["import"] = must(["security", "import", p12, "-k", keychain, "-P", "throwaway", "-T", "/usr/bin/codesign",
+                           "-T", "/usr/bin/security", "-f", "pkcs12"])
     must(["security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:", "-s", "-k", "throwaway", keychain])
     listed = must(["security", "list-keychains", "-d", "user"])
     must(["security", "list-keychains", "-d", "user", "-s", keychain, *[line.strip().strip('"') for line in listed.splitlines() if line.strip()]])
+    must(["security", "default-keychain", "-d", "user", "-s", keychain])
     # Ephemeral hosted VM only: trust the throwaway root for code signing so codesign accepts it.
-    trust_code, trust_output = sh(["sudo", "-n", "security", "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "codeSign",
-                                   "-k", "/Library/Keychains/System.keychain", cert])
-    fingerprint = must(["openssl", "x509", "-noout", "-fingerprint", "-sha1", "-in", cert]).split("=", 1)[1].replace(":", "").strip()
-    return {"sha1": fingerprint, "keychain": keychain, "trusted": trust_code == 0, "trust_output": trust_output[-500:]}
+    diag["trust_admin"] = sh(["sudo", "-n", "security", "add-trusted-cert", "-d", "-r", "trustRoot", "-p", "codeSign",
+                              "-k", "/Library/Keychains/System.keychain", cert])
+    diag["trust_user"] = sh(["security", "add-trusted-cert", "-r", "trustRoot", "-p", "codeSign", "-k", keychain, cert])
+    diag["identities_all"] = sh(["security", "find-identity", "-p", "codesigning", keychain])[1]
+    diag["identities_valid"] = sh(["security", "find-identity", "-v", "-p", "codesigning", keychain])[1]
+    fingerprint = must([tool, "x509", "-noout", "-fingerprint", "-sha1", "-in", cert]).split("=", 1)[1].replace(":", "").strip().upper()
+    found = re.findall(r"\b([0-9A-F]{40})\b", diag["identities_all"])
+    return {"sha1": fingerprint, "name": name, "keychain": keychain, "listed": found, "diagnostics": diag}
 
 
 def sign_and_package(unsigned, version, work, ident):
@@ -150,22 +166,27 @@ def sign_and_package(unsigned, version, work, ident):
     stage = work/"stage"; stage.mkdir()
     must(["/usr/bin/ditto", "-x", "-k", "--norsrc", "--noextattr", unsigned, stage])
     app = stage/APP
-    timestamp = "--timestamp"
-    for target in (app/"Contents/MacOS/PhotoCraft", app):
-        code, output = sh(["/usr/bin/codesign", "--force", "--sign", ident["sha1"], "--keychain", ident["keychain"],
-                           timestamp, "--options", "runtime", target])
-        if code and timestamp == "--timestamp":   # Apple's TSA may refuse a non-Apple identity.
-            timestamp = "--timestamp=none"
-            must(["/usr/bin/codesign", "--force", "--sign", ident["sha1"], "--keychain", ident["keychain"],
-                  timestamp, "--options", "runtime", target])
-        elif code:
-            raise RuntimeError("throwaway codesign failed: "+output)
+    # Selector order: the SHA-1 that `security` lists for the identity, our certificate hash, then the name.
+    selectors = [*ident["listed"], ident["sha1"], ident["name"]]
+    attempts, chosen = [], None
+    for selector in dict.fromkeys(selectors):
+        for timestamp in ("--timestamp", "--timestamp=none"):
+            code, output = sh(["/usr/bin/codesign", "--force", "--sign", selector, "--keychain", ident["keychain"],
+                               timestamp, "--options", "runtime", app/"Contents/MacOS/PhotoCraft"])
+            attempts.append({"selector": selector, "timestamp": timestamp, "exit": code, "output": output[-300:]})
+            if code == 0:
+                chosen = (selector, timestamp); break
+        if chosen: break
+    if not chosen:
+        raise RuntimeError("throwaway codesign could not use the identity: "+json.dumps(attempts)[-3000:])
+    selector, timestamp = chosen
+    must(["/usr/bin/codesign", "--force", "--sign", selector, "--keychain", ident["keychain"], timestamp, "--options", "runtime", app])
     integrity = sh(["/usr/bin/codesign", "--verify", "--strict", "--deep", "--verbose=2", app])
     final_dir = work/"final"; final_dir.mkdir()
     final = final_dir/("photocraft-"+version+"-macos-aarch64-nightly.zip")
     must(["/usr/bin/ditto", "-c", "-k", "--norsrc", "--noextattr", "--noacl", "--keepParent", app, final])
     details = sh(["/usr/bin/codesign", "-d", "--verbose=4", app])[1]
-    return final, {"timestamp_flag": timestamp, "integrity_exit": integrity[0], "integrity_output": integrity[1][-800:],
+    return final, {"timestamp_flag": timestamp, "selector": selector, "attempts": attempts, "integrity_exit": integrity[0], "integrity_output": integrity[1][-800:],
                    "codesign_details": "\n".join(line for line in details.splitlines()
                        if line.split("=", 1)[0] in ("Identifier", "Authority", "TeamIdentifier", "Timestamp", "CodeDirectory v"))}
 
@@ -216,10 +237,15 @@ def main():
         check(cases, "real unsigned app reports the exact nightly version", False, refusal=refusal(error))
 
     # 2. Throwaway signing and Launcher-style packaging must keep the seal.
-    ident = identity(work)
-    final, signed = sign_and_package(archive, args.version, work, ident)
+    ident = {}
+    try:
+        ident = identity(work)
+        final, signed = sign_and_package(archive, args.version, work, ident)
+    except Exception as error:  # noqa: BLE001 - setup failure still produces a report
+        check(cases, "throwaway signing setup", False, error=str(error)[-4000:], identity=ident)
+        return finish(args, archive, cases)
     check(cases, "throwaway-signed app passes codesign --verify --strict --deep", signed["integrity_exit"] == 0,
-          signing=signed, trusted_root=ident["trusted"])
+          signing=signed, identity_diagnostics=ident["diagnostics"])
     try:
         check(cases, "inventory accepts the signed, re-zipped package", True,
               inventory=u.verify_archive(pending, "macos-aarch64", final, args.version))
@@ -264,19 +290,22 @@ def main():
           outcome["result"] == "refused" and outcome["refusal"].get("tool", [])[:2] == ["/usr/bin/codesign", "--verify"],
           outcome=outcome, tools=trace.calls, changed=victim)
 
+    return finish(args, archive, cases)
+
+
+def finish(args, archive, cases):
     report = {"schema": "craft-nightly-macos-keyless-test/v1", "version": args.version, "archive": archive.name,
               "archive_sha256": s.sha(archive), "tooling": os.environ.get("GITHUB_SHA"),
-              "all_expectations_met": all(case["ok"] for case in cases), "cases": cases,
+              "all_expectations_met": bool(cases) and all(case["ok"] for case in cases), "cases": cases,
               "caveat": "Throwaway self-signed identity; no Apple credentials, notarization or Developer ID. "
                         "Precondition substitutions are listed per case."}
-    Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True)+"\n")
+    Path(args.report).write_text(json.dumps(report, indent=2, sort_keys=True, default=str)+"\n")
     if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(summary, "a", encoding="utf-8") as stream:
             stream.write("## Keyless macOS verification against the real nightly app\n\n")
             for case in cases:
                 stream.write(("- ✅ " if case["ok"] else "- ❌ ")+case["case"]+"\n")
-    print(json.dumps({"all_expectations_met": report["all_expectations_met"],
-                      "cases": [(case["case"], case["ok"]) for case in cases]}, indent=2))
+    print(json.dumps(report, indent=2, sort_keys=True, default=str)[-20000:])
     return 0 if report["all_expectations_met"] else 1
 
 
