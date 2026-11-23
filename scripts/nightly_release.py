@@ -28,6 +28,7 @@ import publish_nightly as pub
 
 MARKER = "craft-nightly-release-publication/v1:"
 MARKER_V2 = "craft-nightly-release-publication/v2:"
+METADATA_SUFFIX = ".json"  # Bundle metadata is always JSON; payload archives (.zip/.tar.gz/.asc) are not.
 BUNDLE_FILES = {"request.json", "quality.json", "plan.json", "unsigned.json", "unsigned-claims.json"}
 PUBLISH_STEP = "Publish the signed nightly and preserve ownership"
 
@@ -142,7 +143,9 @@ def finite_files(directory, names):
     n.require(actual == names, "missing bundle file")
     total, result = 0, {}
     for name in sorted(names):
-        if not name.endswith(".zip"):
+        # Only explicit JSON metadata gets the 256 KiB bound. Payloads (Windows/macOS .zip, the
+        # Linux .tar.gz and its .asc) keep the per-asset bound in regular_file plus the aggregate bound.
+        if name.endswith(METADATA_SUFFIX):
             stream, info = n.regular_file(directory, name)
             stream.close()
             n.require(info.st_size <= n.MAX_JSON_BYTES, "oversized bundle metadata")

@@ -24,6 +24,7 @@ import test_nightly_release_linux as gnupg
 b = bridge.b
 WINDOWS, MAC, LINUX = bridge.WINDOWS, bridge.MAC, bridge.LINUX
 SUBJECT, TEAM = "CN=Synthetic fixture only", "SYNTH12345"
+LARGE = 3*b.n.MAX_JSON_BYTES  # Comfortably above the metadata bound.
 
 
 @unittest.skipUnless(Path(gnupg.GPG).exists(), 'GnuPG is required for the real Linux route')
@@ -61,7 +62,10 @@ class ThreePlatformRunTests(unittest.TestCase):
             directory = root/platform; directory.mkdir()
             if platform == LINUX:
                 with tarfile.open(directory/names['unsigned_asset'], 'w:gz') as out:
-                    for name, data in (('photocraft', gnupg.ELF), ('LICENSE', b'synthetic notice')):
+                    # Real nightlies are megabytes: an incompressible member keeps the archive well above
+                    # the 256 KiB metadata bound, generated here and never committed.
+                    for name, data in (('photocraft', gnupg.ELF), ('LICENSE', b'synthetic notice'),
+                                       ('resources/payload.bin', os.urandom(LARGE))):
                         member = tarfile.TarInfo(name); member.mode = 0o755; member.size = len(data)
                         out.addfile(member, io.BytesIO(data))
             else:
@@ -76,6 +80,8 @@ class ThreePlatformRunTests(unittest.TestCase):
         self.assertEqual(platforms, [LINUX, MAC, WINDOWS])
         # validate: every admitted platform was downloaded into its own directory.
         directories = b.platform_directories(self.downloaded(), platforms)
+        linux_unsigned = directories[LINUX]/bt.plan['platforms'][LINUX]['unsigned_asset']
+        self.assertGreater(linux_unsigned.stat().st_size, b.n.MAX_JSON_BYTES)
         manifests, claims = {}, {}
         for platform, directory in directories.items():
             (manifests[platform], claims[platform]), _ = bt.verified(directory, platform=platform)
@@ -125,6 +131,40 @@ class ThreePlatformRunTests(unittest.TestCase):
         api.assets[:] = [asset for asset in api.assets if asset['name'] != linux_asset+'.asc']
         with self.assertRaises(ValueError):
             b.previous_publication(api, bt.registry, policy, bt.request, [api.release])
+
+
+
+class BundleBoundTests(unittest.TestCase):
+    """Payload archives keep the asset/aggregate bounds; only explicit metadata gets the JSON bound."""
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        patch.dict(os.environ, {'GITHUB_WORKSPACE': str(self.root), 'RUNNER_TEMP': str(self.root)}).start()
+        self.addCleanup(patch.stopall)
+
+    def test_large_linux_and_macos_payloads_pass_but_large_metadata_refuses(self):
+        names = {'photocraft-1.2.3-nightly.20261122.100.1.gaaaaaaaaaaaa-linux-x86_64-nightly.unsigned.tar.gz',
+                 'photocraft-1.2.3-nightly.20261122.100.1.gaaaaaaaaaaaa-macos-aarch64-nightly.unsigned.zip', 'unsigned.json'}
+        for name in names:
+            (self.root/name).write_bytes(os.urandom(LARGE) if not name.endswith('.json') else b'{}')
+        listed = b.finite_files(self.root, names)
+        self.assertTrue(all(listed[name]['size'] == LARGE for name in names if not name.endswith('.json')))
+        (self.root/'unsigned.json').write_bytes(b' '*(b.n.MAX_JSON_BYTES+1))
+        with self.assertRaisesRegex(ValueError, 'oversized bundle metadata'):
+            b.finite_files(self.root, names)
+        (self.root/'unsigned.json').write_bytes(b'{}'); (self.root/'extra.bin').write_bytes(b'x')
+        with self.assertRaisesRegex(ValueError, 'unexpected bundle file'):
+            b.finite_files(self.root, names)
+        (self.root/'extra.bin').unlink()
+        with patch.object(b.n, 'MAX_TOTAL_BYTES', 2*LARGE), self.assertRaisesRegex(ValueError, 'aggregate bundle bound'):
+            b.finite_files(self.root, names)
+
+    def test_signed_linux_bundle_with_large_tarball_hashes(self):
+        asset = 'photocraft-1.2.3-nightly.20261122.100.1.gaaaaaaaaaaaa-linux-x86_64-nightly.tar.gz'
+        (self.root/asset).write_bytes(os.urandom(LARGE)); (self.root/(asset+'.asc')).write_bytes(bridge.SYNTHETIC_ASC)
+        for name in b.BUNDLE_FILES | {'signing.json'}:
+            (self.root/name).write_bytes(b'{}')
+        self.assertRegex(b.bundle_hash(self.root, {asset, asset+'.asc'}, signed=True), '^[0-9a-f]{64}$')
 
 
 if __name__ == '__main__':
