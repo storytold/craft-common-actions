@@ -1,6 +1,6 @@
 {
-  "photocraft_run_id": 45258943946,
+  "photocraft_run_id": 45278025342,
   "artifact_name": "photocraft-nightly-macos-aarch64-unsigned",
-  "version": "0.23.1-nightly.20261123.5.1.g27d57e160075",
+  "version": "0.23.1-nightly.20261123.8.1.g3706500dea4b",
   "note": "Set photocraft_run_id and version to the PhotoCraft #16559 run that uploaded the unsigned macOS nightly zip; pushing this file runs the keyless test."
 }
