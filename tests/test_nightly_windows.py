@@ -17,6 +17,7 @@ from unittest.mock import patch
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/nightly_feed.py")
 n = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(n)
@@ -33,7 +34,11 @@ class WindowsCandidateTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
         ownership.start(); self.addCleanup(ownership.stop)
-        self.registry = json.loads((ROOT / "nightly-apps.json").read_text())
+        # Frozen Windows-only E3/E4 local packet path; the live registry also admits macOS.
+        self.live_registry = json.loads((ROOT / "nightly-apps.json").read_text())
+        self.registry = copy.deepcopy(self.live_registry)
+        self.registry["apps"]["photocraft"]["targets"] = [row for row in self.registry["apps"]["photocraft"]["targets"]
+                                                          if row["target"]["os"] == "windows"]
         self.context = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/main",
                         "GITHUB_REPOSITORY": "storytold/photocraft", "GITHUB_SHA": "a" * 40,
                         "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "1"}
@@ -67,9 +72,20 @@ class WindowsCandidateTests(unittest.TestCase):
         golden = json.loads((ROOT / "tests/fixtures/photocraft-windows-x86_64-target.json").read_text())
         self.assertEqual(golden, expected)
         self.assertEqual(w.PHOTO_TARGET, golden)
-        self.assertEqual(self.registry["apps"]["photocraft"]["targets"], [golden])
-        self.assertEqual(len(self.registry["apps"]), 19)
-        self.assertTrue(all(not row["targets"] for app, row in self.registry["apps"].items() if app != "photocraft"))
+        live = self.live_registry["apps"]["photocraft"]["targets"]
+        self.assertEqual([row for row in live if row["target"]["os"] == "windows"], [golden])
+        self.assertEqual(sorted(row["target"]["os"] for row in live), ["linux", "macos", "windows"])
+        self.assertEqual(len(self.live_registry["apps"]), 19)
+        self.assertTrue(all(not row["targets"] for app, row in self.live_registry["apps"].items() if app != "photocraft"))
+        # The Windows adapter accepts its exact row beside reviewed platform rows, never a changed one.
+        self.check(registry=self.live_registry)
+        changed = copy.deepcopy(self.live_registry)
+        for row in changed["apps"]["photocraft"]["targets"]:
+            if row["target"]["os"] == "macos": row["isolation"]["associations"] = "stable"
+        with self.assertRaises(n.InvalidNightly): self.check(registry=changed)
+        changed = copy.deepcopy(self.live_registry)
+        changed["apps"]["photocraft"]["targets"].append(copy.deepcopy(golden))
+        with self.assertRaises(n.InvalidNightly): self.check(registry=changed)
 
     def test_preflight_returns_only_fixed_build_metadata_without_source_mutation(self):
         before = self.cargo.read_bytes()

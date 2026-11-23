@@ -36,19 +36,38 @@ CONTRACTS = {
         "asset_pattern":"photocraft-{version}-macos-aarch64-nightly.zip"},
 }
 
+# Admitted rows ship with Windows (one release, every admitted platform); admission is not runtime qualification.
+ADMISSION = {
+    "linux-x86_64": {"status":"feed-admitted", "feed_admitted":True, "runtime_qualified":False},
+    "macos-aarch64": {"status":"feed-admitted", "feed_admitted":True, "runtime_qualified":False},
+}
+
 def pending_contract(pending, platform):
     n.fields(pending, {"schema","app","capabilities"}, "pending producer registry")
     n.require(pending["schema"] == "craft-nightly-pending-producers/v1" and pending["app"] == "photocraft", "unreviewed pending registry")
     n.require(isinstance(pending["capabilities"],dict) and set(pending["capabilities"]) == set(CONTRACTS), "unreviewed pending target set")
     n.require(platform in CONTRACTS, "unsupported private Unix target")
     row = pending["capabilities"][platform]
-    expected = {**CONTRACTS[platform], "isolation":ISOLATION, "status":"private-source-pending", "feed_admitted":False, "runtime_qualified":False}
-    n.require(row == expected and type(row["isolation"]["profile_version"]) is int and row["feed_admitted"] is False and row["runtime_qualified"] is False, "pending row differs from owner contract or attempts admission")
+    expected = {**CONTRACTS[platform], "isolation":ISOLATION, **ADMISSION[platform]}
+    n.require(row == expected and type(row["isolation"]["profile_version"]) is int and row["feed_admitted"] is ADMISSION[platform]["feed_admitted"] and row["runtime_qualified"] is False, "pending row differs from owner contract or attempts admission")
     return row
+
+def registry_target(row):
+    return {"asset_pattern":row["asset_pattern"],"isolation":row["isolation"],"target":row["target"]}
+
+def require_registry_admission(registry, platform, row):
+    """Admitted rows must appear exactly once in the active registry; pending rows never."""
+    targets = n.app_record(registry,"photocraft")["targets"]
+    matches = [item for item in targets if isinstance(item,dict) and item.get("target") == row["target"]]
+    if row["feed_admitted"]:
+        n.require(matches == [registry_target(row)], "admitted Unix target missing from or differing in the feed registry")
+    else:
+        n.require(not matches, "pending Unix target must not appear in the feed registry")
 
 def check_prepared(registry, pending, platform, prepared, cargo, version, environment, target_base, dist, policy):
     row = pending_contract(pending,platform)
     n.trusted_context(registry,"photocraft",environment)
+    require_registry_admission(registry,platform,row)
     n.fields(prepared,{"schema","channel","app","repository","tag","source_commit","published_at","version","ready"},"prepared identity")
     manifest=n.bounded_bytes(cargo,MAX_METADATA,'manifest')
     tomllib.loads(manifest.decode('utf-8')) # source manifest is bounded/valid; not the identity base
@@ -66,12 +85,12 @@ def check_prepared(registry, pending, platform, prepared, cargo, version, enviro
         "build_date":dt.datetime.fromtimestamp(prepared["published_at"],dt.timezone.utc).strftime("%Y-%m-%d"),
         "rust_target":row["rust_target"],"entrypoint":row["entrypoint"],
         "target_leaf":str(target_base/"nightly-v1"/platform),"dist":str(dist),
-        "private_only":True,"feed_admitted":False,"runtime_qualified":False}
+        "private_only":not row["feed_admitted"],"feed_admitted":row["feed_admitted"],"runtime_qualified":False}
 
 def require_build_policy(platform):
+    # macOS compiles and smokes its ad-hoc (linker) signed GUI in the secret-free
+    # producer job only; Developer ID/notarization is the separate release signer's job.
     n.require(platform in CONTRACTS,"unsupported private Unix target")
-    if platform == "macos-aarch64":
-        raise n.Unavailable("Mac production signing/team-ID/notarization policy is pending; no ad-hoc or unsigned execution fallback")
 
 def canonical_version(version):
     n.require(isinstance(version,str) and len(version)<=128 and re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-nightly\.([0-9]{8})\.[1-9][0-9]*\.[1-9][0-9]*\.g[0-9a-f]{12}',version), "noncanonical immutable nightly version")

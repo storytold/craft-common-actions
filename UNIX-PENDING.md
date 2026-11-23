@@ -1,12 +1,12 @@
 # Private Unix producer source (v6)
 
-Linux/x86_64 comes first; macOS/aarch64 follows only after Windows proof and Linux qualification. No native run, signing action, workflow activation, publication, schedule or admission is authorized by this source packet.
+Update (nightly launch): macOS/aarch64 is admitted with Windows behind production signing; see docs/nightly-release-ref-signing.md. The historical text below describes the earlier pending state. No native run, signing action, workflow activation, publication, schedule or admission is authorized by this source packet.
 
 ## Owner agreement
 
 Photo and Launcher agreed the two rows in `nightly-unix-pending.json`. This is a separate strict **pending-capability** schema: `nightly_feed.py`, the active registry, staging and publisher never consume it. Existing Photo Windows feed admission and E4 inputs/wrapper remain unchanged. The initial Unix-only scope was expanded by the adversarial disposition: new policy, Windows packaged-version smoke and shared provenance/permission wiring are also present. Stable release bytes and actual frozen E4 inputs remain untouched. See `../../V6-PRIVATE.md`.
 
-* Linux: `linux/x86_64/tar_gz`, Rust `x86_64-unknown-linux-gnu`, root `photocraft`, `photocraft-{version}-linux-x86_64-nightly.tar.gz`.
+* Linux (feed-admitted with Windows, production signing still caller opt-in; not runtime-qualified): `linux/x86_64/tar_gz`, Rust `x86_64-unknown-linux-gnu`, root `photocraft`, `photocraft-{version}-linux-x86_64-nightly.tar.gz`.
 * Mac: `macos/aarch64/portable_zip`, Rust `aarch64-apple-darwin`, one `PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft`, `photocraft-{version}-macos-aarch64-nightly.zip`.
 * Both: package `ai.storyteller.photocraft.nightly`, profile contract `nightly` version 1, no associations. Launcher alone constructs literal `--launch-profile nightly-v1 --profile-root <persistent nightly data>/profiles/photocraft -- <files>`. The root is persistent, not an installation/rollback directory. App-specific stable XDG config/data/cache/state and Library subtrees/installations are the boundaries, **not whole shared OS bases**. The producer does not access profiles or construct a launcher command from feed text.
 
@@ -20,7 +20,7 @@ Photo and Launcher agreed the two rows in `nightly-unix-pending.json`. This is a
 
 Archive processing streams 1 MiB blocks, at most 10,000 members, path depth 32, 8 GiB per compressed asset/member and 16 GiB expanded payload. JSON/plist is 256 KiB. ZIP central-directory allocation is bounded at 8 MiB before ZipFile construction; ZIP64/split archives are refused. TAR metadata is limited to 256 KiB per read and 8 MiB cumulative, including chained PAX/long-name records; oversized reads/seeks are refused before library allocation. Complexity is O(payload bytes + member count * bounded path depth), with bounded metadata and no retained whole payload. Private unpack requires a new explicit absolute scratch directory; failed scratch is never a feed or eligible artifact, and must not be executed after a failed check.
 
-## Mac signing remains closed
+## Mac signing (superseded)
 
 The default `check` and all Mac extraction/build paths refuse while production signing/team-ID/notarization policy is pending. There is no secret input, environment switch, unsigned/ad-hoc fallback, fake team or self-asserted signature proof. `inventory` can inspect synthetic Mac fixture bytes but always returns `signature_verified: false`, `runtime_qualified: false`, `feed_admitted: false`. It is not the signed-plist verification step. A possible future explicitly authorized private-local ad-hoc mode would need separate app/operator agreement, local-only outputs and refusal by production/admission; this packet does not implement or grant that execution mode.
 

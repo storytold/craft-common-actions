@@ -86,7 +86,7 @@
     },
     "photocraft": {
       "default_branch": "main",
-      "note": "Private E1-E5 candidate only: Photo nightly-v1 Windows x86_64 GUI ZIP. Publication hard-disabled; native isolation qualification is still required.",
+      "note": "Photo nightly-v1 Windows x86_64 GUI ZIP, Linux x86_64 GUI tar.gz (OpenPGP detached .asc, stable key) and macOS aarch64 notarized app ZIP, published together in one release. Production signing and publication stay off until the app caller opts in.",
       "repository": "storytold/photocraft",
       "targets": [
         {
@@ -101,6 +101,34 @@
             "arch": "x86_64",
             "format": "portable_zip",
             "os": "windows"
+          }
+        },
+        {
+          "asset_pattern": "photocraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.photocraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        },
+        {
+          "asset_pattern": "photocraft-{version}-macos-aarch64-nightly.zip",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.photocraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "aarch64",
+            "format": "portable_zip",
+            "os": "macos"
           }
         }
       ]

@@ -215,7 +215,11 @@ class NightlyTests(unittest.TestCase):
         self.assertGreaterEqual(len(production["apps"]), 18)
         self.assertEqual(len(production["apps"]), 19)
         self.assertEqual([name for name, row in production["apps"].items() if row["targets"]], ["photocraft"])
-        self.assertEqual(len(production["apps"]["photocraft"]["targets"]), 1)
+        # One release carries every admitted platform: Windows, Linux and the notarized macOS app.
+        self.assertEqual([row["target"] for row in production["apps"]["photocraft"]["targets"]],
+                         [{"os": "windows", "arch": "x86_64", "format": "portable_zip"},
+                          {"os": "linux", "arch": "x86_64", "format": "tar_gz"},
+                          {"os": "macos", "arch": "aarch64", "format": "portable_zip"}])
 
     def test_positive_synthetic_descriptor_hash_size_url_and_units(self):
         self.ready()

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Windows release-ref bridge. Artifacts are data; execution context stays real.
+"""Release-ref bridge for every admitted platform. Artifacts are data; execution context stays real.
 
 The reusable workflows, not caller JSON, establish the executable/gh verifier
 and independent job-output hash trust roots. v1/v2 main-only CLIs stay unchanged.
@@ -20,12 +20,15 @@ from urllib.parse import quote
 import nightly_feed as n
 import nightly_ownership_receipt as ownership
 import nightly_policy as p
+import nightly_release_platforms as plat
 import nightly_release_request as r
 import nightly_candidate as c
 import nightly_signing as signing
 import publish_nightly as pub
 
 MARKER = "craft-nightly-release-publication/v1:"
+MARKER_V2 = "craft-nightly-release-publication/v2:"
+METADATA_SUFFIX = ".json"  # Bundle metadata is always JSON; payload archives (.zip/.tar.gz/.asc) are not.
 BUNDLE_FILES = {"request.json", "quality.json", "plan.json", "unsigned.json", "unsigned-claims.json"}
 PUBLISH_STEP = "Publish the signed nightly and preserve ownership"
 
@@ -76,20 +79,42 @@ class SonarTransport:
             connection.close()
 
 
-def identity_plan(registry, producer, stable):
+def identity_plan_v1(registry, producer, stable):
+    """Frozen Windows-only plan of craft-nightly-release-publication/v1 history."""
     ident, version = n.identity(registry, "photocraft", producer["repository"],
         producer["source_commit"], stable["version"], producer["run_id"],
         producer["run_attempt"], p.timestamp(producer["created_at"]))
-    n.require(n.app_record(registry, "photocraft")["targets"] == [
-        __import__("nightly_windows").PHOTO_TARGET], "reviewed Windows target required")
     asset = "photocraft-"+version+"-windows-x86_64-nightly.zip"
     return {"schema": "craft-nightly-unsigned-plan/v1", "identity": {**ident, "version": version, "ready": True},
         "stable_base": copy.deepcopy(stable), "asset": asset, "unsigned_asset": asset[:-4]+".unsigned.zip"}
 
 
-def unsigned_manifest(plan, producer, payload_sha256):
+def identity_plan(registry, producer, stable, platforms=None):
+    """One release for every admitted platform; history may pass its recorded set."""
+    ident, version = n.identity(registry, "photocraft", producer["repository"],
+        producer["source_commit"], stable["version"], producer["run_id"],
+        producer["run_attempt"], p.timestamp(producer["created_at"]))
+    if platforms is None:
+        platforms = plat.registry_platforms(registry)
+    n.require(isinstance(platforms, list) and platforms == sorted(set(platforms)) and platforms, "invalid platform set")
+    rows = {}
+    for platform in platforms:
+        names = plat.plugin(platform).assets(version)
+        n.fields(names, {"asset", "unsigned_asset", "built_asset"}, "platform asset names")
+        n.require(all(isinstance(value, str) and n.NAME.fullmatch(value) and "nightly" in value for value in names.values()) and
+            names["asset"] != names["unsigned_asset"] and names["built_asset"] in (names["asset"], names["unsigned_asset"]),
+            "unsafe platform asset names")
+        rows[platform] = names
+    every = [name for row in rows.values() for name in (row["asset"], row["unsigned_asset"])]
+    n.require(len(every) == len(set(every)), "platform asset names collide")
+    return {"schema": "craft-nightly-unsigned-plan/v2", "identity": {**ident, "version": version, "ready": True},
+        "stable_base": copy.deepcopy(stable), "platforms": rows}
+
+
+def unsigned_manifest(plan, producer, platform, payload_sha256):
     r.hash_value(payload_sha256)
-    return {"schema": "craft-nightly-unsigned/v1", "plan": copy.deepcopy(plan),
+    n.require(platform in plan["platforms"], "platform absent from plan")
+    return {"schema": "craft-nightly-unsigned/v2", "platform": platform, "plan": copy.deepcopy(plan),
         "producer": {key: producer[key] for key in ("repository", "source_commit", "run_id", "run_attempt", "tooling_revision")},
         "unsigned_sha256": payload_sha256}
 
@@ -118,7 +143,9 @@ def finite_files(directory, names):
     n.require(actual == names, "missing bundle file")
     total, result = 0, {}
     for name in sorted(names):
-        if not name.endswith(".zip"):
+        # Only explicit JSON metadata gets the 256 KiB bound. Payloads (Windows/macOS .zip, the
+        # Linux .tar.gz and its .asc) keep the per-asset bound in regular_file plus the aggregate bound.
+        if name.endswith(METADATA_SUFFIX):
             stream, info = n.regular_file(directory, name)
             stream.close()
             n.require(info.st_size <= n.MAX_JSON_BYTES, "oversized bundle metadata")
@@ -129,55 +156,56 @@ def finite_files(directory, names):
     return result
 
 
-def bundle_hash(directory, asset, *, signed=False):
-    n.require(isinstance(asset, str) and n.NAME.fullmatch(asset) and "nightly" in asset and asset.endswith(".zip"), "exact ZIP asset required")
-    names = BUNDLE_FILES | {asset} | ({"signing.json"} if signed else set())
-    return r.digest({"schema": "craft-nightly-release-bundle/v1", "signed": signed,
-        "files": finite_files(directory, names)})
+def bundle_names(extra, *, signed=False):
+    extra = set(extra)
+    n.require(extra and all(isinstance(name, str) and n.NAME.fullmatch(name) and name not in BUNDLE_FILES | {"signing.json"}
+        for name in extra), "exact bundle payload names required")
+    return BUNDLE_FILES | extra | ({"signing.json"} if signed else set())
 
 
-def verify_bundle(directory, expected_sha256, asset, *, signed=False):
+def bundle_hash(directory, extra, *, signed=False):
+    """Finite JSON + exact payload/support inventory; extra is every non-JSON file."""
+    if isinstance(extra, str):
+        extra = {extra}
+    names = bundle_names(extra, signed=signed)
+    return r.digest({"schema": "craft-nightly-release-bundle/v1",
+        "signed": signed, "files": finite_files(directory, names)})
+
+
+def verify_bundle(directory, expected_sha256, extra, *, signed=False):
     r.hash_value(expected_sha256)
-    n.require(bundle_hash(directory, asset, signed=signed) == expected_sha256, "independent trusted-job bundle digest differs")
+    n.require(bundle_hash(directory, extra, signed=signed) == expected_sha256, "independent trusted-job bundle digest differs")
     return {name[:-5]: n.bounded_json(Path(directory)/name) for name in BUNDLE_FILES | ({"signing.json"} if signed else set())}
+
+
+def validated_names(plan):
+    return {row["unsigned_asset"] for row in plan["platforms"].values()}
+
+
+def signed_names(receipt, plan):
+    """Names of one platform's signed bundle, read from its yet-unauthenticated receipt."""
+    n.require(isinstance(receipt, dict) and receipt.get("platform") in plan["platforms"], "signed receipt platform unknown")
+    support = r.support_binding(receipt.get("support"))
+    return {plan["platforms"][receipt["platform"]]["asset"], *support}
+
+
+def verify_signed_bundle(directory, expected_sha256, platform):
+    """Hash the exact signed bundle first; only then trust any JSON inside it."""
+    directory = n.owned_path(directory)
+    unverified = {name: n.bounded_json(directory/(name+".json")) for name in ("plan", "signing")}
+    n.require(unverified["signing"].get("platform") == platform, "signed bundle platform differs")
+    extra = signed_names(unverified["signing"], unverified["plan"])
+    state = verify_bundle(directory, expected_sha256, extra, signed=True)
+    n.require(state["signing"]["platform"] == platform, "signed bundle platform differs")
+    return state
 
 
 def ordinal(producer):
     return {**producer, "id": producer["run_id"], "number": producer["run_number"], "attempt": producer["run_attempt"]}
 
 
-def previous_publication(api, registry, policy, current_request, rows):
-    """Authenticate historical protected-release evidence; never execute old code.
-
-    Like v1 ownership evidence, Actions metadata is source-owned evidence, not an
-    independent tag-creator signature. Immutable nightly tags/releases are an
-    activation prerequisite. Pruning remains off and has no path through here.
-    """
-    release = p.newest_nightly(rows)
-    if release is None:
-        return None  # Complete bounded release enumeration + stable base authenticates bootstrap.
-    body = release.get("body", "")
-    if MARKER not in body:
-        prior = p.verify_prior(api, registry, release)  # Frozen legacy historical parser, no process-env substitution.
-        return {"identity": prior["identity"], "run": prior["run"]}
-    n.require(isinstance(body, str) and body.count(MARKER) == 1, "ambiguous previous-publication marker")
-    prior = loads(body.split(MARKER, 1)[1].encode())
-    n.fields(prior, {"schema", "request", "plan", "quality", "signing"}, "published release policy")
-    n.require(prior["schema"] == "craft-nightly-release-publication/v1", "unknown prior publication")
-    request = prior["request"]; signer = request["signer"]; producer = request["producer"]
-    old_sha = r.commit(signer["source_commit"])
-    current_sha = current_request["signer"]["source_commit"]
-    lineage = api.request("GET", f"/compare/{old_sha}...{current_sha}")
-    n.require(lineage.get("status") in ("ahead", "identical") and lineage.get("behind_by") == 0 and
-        lineage.get("merge_base_commit", {}).get("sha") == old_sha, "prior signer is not in trusted release history")
-    blob = api.request("GET", "/contents/.github/nightly-signing-policy.json?ref="+old_sha)
-    n.require(blob.get("encoding") == "base64" and type(blob.get("size")) is int and
-        0 < blob["size"] <= n.MAX_JSON_BYTES and isinstance(blob.get("content"), str), "missing bounded prior protected policy")
-    raw = base64.b64decode(blob["content"].replace("\n", ""), validate=True)
-    n.require(len(raw) == blob["size"], "prior policy size differs")
-    old_policy = loads(raw); r.request_contract(old_policy, request)
-    n.require(old_policy["repository"] == policy["repository"] and old_policy["repository_id"] == policy["repository_id"] and
-        old_policy["signer_workflow_path"] == policy["signer_workflow_path"], "historical trust root differs")
+def verified_history_roles(api, policy, request):
+    signer = request["signer"]
     for name in ("producer", "signer"):
         role = request[name]; branch = "release" if name == "signer" else "main"
         run = api.request("GET", f"/actions/runs/{role['run_id']}/attempts/{role['run_attempt']}")
@@ -194,17 +222,94 @@ def previous_publication(api, registry, policy, current_request, rows):
     publishers = [job for job in jobs if job.get("status") == "completed" and job.get("conclusion") == "success" and
         any(step.get("name") == PUBLISH_STEP and step.get("conclusion") == "success" for step in job.get("steps", []))]
     n.require(len(publishers) == 1, "prior successful publication step absent/ambiguous")
-    plan = identity_plan(registry, producer, prior["plan"]["stable_base"])
+
+
+def prior_policy(api, policy, request, current_request):
+    old_sha = r.commit(request["signer"]["source_commit"])
+    current_sha = current_request["signer"]["source_commit"]
+    lineage = api.request("GET", f"/compare/{old_sha}...{current_sha}")
+    n.require(lineage.get("status") in ("ahead", "identical") and lineage.get("behind_by") == 0 and
+        lineage.get("merge_base_commit", {}).get("sha") == old_sha, "prior signer is not in trusted release history")
+    blob = api.request("GET", "/contents/.github/nightly-signing-policy.json?ref="+old_sha)
+    n.require(blob.get("encoding") == "base64" and type(blob.get("size")) is int and
+        0 < blob["size"] <= n.MAX_JSON_BYTES and isinstance(blob.get("content"), str), "missing bounded prior protected policy")
+    raw = base64.b64decode(blob["content"].replace("\n", ""), validate=True)
+    n.require(len(raw) == blob["size"], "prior policy size differs")
+    old_policy = loads(raw); r.request_contract(old_policy, request)
+    n.require(old_policy["repository"] == policy["repository"] and old_policy["repository_id"] == policy["repository_id"] and
+        old_policy["signer_workflow_path"] == policy["signer_workflow_path"], "historical trust root differs")
+    return old_policy
+
+
+def prior_assets(api, release, expected):
+    """Every recorded final/support file must be the exact public asset digest."""
+    assets = api.request("GET", f"/releases/{release['id']}/assets?per_page=100")
+    n.require(isinstance(assets, list) and 0 < len(assets) < 100 and all(isinstance(asset, dict) for asset in assets), "prior asset inventory missing/incomplete/bounded")
+    for name, digest in expected.items():
+        payloads = [asset for asset in assets if asset.get("name") == name]
+        n.require(len(payloads) == 1 and payloads[0].get("digest") == "sha256:"+digest, "prior final asset digest differs")
+
+
+def previous_publication(api, registry, policy, current_request, rows):
+    """Authenticate historical protected-release evidence; never execute old code.
+
+    Like v1 ownership evidence, Actions metadata is source-owned evidence, not an
+    independent tag-creator signature. Immutable nightly tags/releases are an
+    activation prerequisite. Pruning remains off and has no path through here.
+    """
+    release = p.newest_nightly(rows)
+    if release is None:
+        return None  # Complete bounded release enumeration + stable base authenticates bootstrap.
+    body = release.get("body", "")
+    n.require(isinstance(body, str), "invalid prior release body")
+    if MARKER_V2 in body:
+        n.require(body.count(MARKER_V2) == 1 and MARKER not in body, "ambiguous previous-publication marker")
+        prior = loads(body.split(MARKER_V2, 1)[1].encode())
+        n.fields(prior, {"schema", "request", "plan", "quality", "signing"}, "published release policy")
+        n.require(prior["schema"] == "craft-nightly-release-publication/v2", "unknown prior publication")
+        request = prior["request"]; producer = request["producer"]
+        old_policy = prior_policy(api, policy, request, current_request)
+        n.require(old_policy["schema"] == r.LIVE_POLICY, "v2 publication requires v3 policy")
+        verified_history_roles(api, old_policy, request)
+        platforms = r.policy_platforms(old_policy)
+        plan = identity_plan(registry, producer, prior["plan"]["stable_base"], platforms)
+        n.require(plan == prior["plan"] and plan["identity"]["tag"] == release["tag_name"], "prior source/version identity differs")
+        n.require(isinstance(prior["signing"], dict) and sorted(prior["signing"]) == platforms, "prior platform receipts differ")
+        expected_assets = {}
+        for platform in platforms:
+            old = prior["signing"][platform]
+            n.fields(old, r.RECEIPT_V3_FIELDS, "prior platform receipt")
+            receipt = r.release_receipt_v3(old_policy, request, platform, old["unsigned_sha256"], old["final_sha256"],
+                r.trusted_signer(old_policy, platform), old["support"])
+            n.require(old == receipt, "prior two-role receipt differs")
+            n.require(set(receipt["support"]) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
+                "prior platform support set differs from its required detached signature files")
+            expected_assets[plan["platforms"][platform]["asset"]] = receipt["final_sha256"]
+            for name, item in receipt["support"].items():
+                expected_assets[name] = item["sha256"]
+        ref = api.request("GET", "/git/ref/tags/"+quote(release["tag_name"], safe=""))
+        n.require(ref.get("object", {}).get("type") == "commit" and ref["object"].get("sha") == producer["source_commit"], "prior tag source differs")
+        prior_assets(api, release, expected_assets)
+        return {"identity": plan["identity"], "run": ordinal(producer)}
+    if MARKER not in body:
+        prior = p.verify_prior(api, registry, release)  # Frozen legacy historical parser, no process-env substitution.
+        return {"identity": prior["identity"], "run": prior["run"]}
+    n.require(body.count(MARKER) == 1, "ambiguous previous-publication marker")
+    prior = loads(body.split(MARKER, 1)[1].encode())
+    n.fields(prior, {"schema", "request", "plan", "quality", "signing"}, "published release policy")
+    n.require(prior["schema"] == "craft-nightly-release-publication/v1", "unknown prior publication")
+    request = prior["request"]; producer = request["producer"]
+    old_policy = prior_policy(api, policy, request, current_request)
+    n.require(old_policy["schema"] != r.LIVE_POLICY, "v1 publication requires v1/v2 policy")
+    verified_history_roles(api, old_policy, request)
+    plan = identity_plan_v1(registry, producer, prior["plan"]["stable_base"])
     n.require(plan == prior["plan"] and plan["identity"]["tag"] == release["tag_name"], "prior source/version identity differs")
     expected_receipt = r.release_receipt(old_policy, request, prior["signing"]["unsigned_sha256"],
         prior["signing"]["final_sha256"], old_policy["windows_publisher_subject"])
     n.require(prior["signing"] == expected_receipt, "prior two-role receipt differs")
     ref = api.request("GET", "/git/ref/tags/"+quote(release["tag_name"], safe=""))
     n.require(ref.get("object", {}).get("type") == "commit" and ref["object"].get("sha") == producer["source_commit"], "prior tag source differs")
-    assets = api.request("GET", f"/releases/{release['id']}/assets?per_page=100")
-    n.require(isinstance(assets, list) and 0 < len(assets) < 100 and all(isinstance(asset, dict) for asset in assets), "prior asset inventory missing/incomplete/bounded")
-    payloads = [asset for asset in assets if asset.get("name") == plan["asset"]]
-    n.require(len(payloads) == 1 and payloads[0].get("digest") == "sha256:"+expected_receipt["final_sha256"], "prior final asset digest differs")
+    prior_assets(api, release, {plan["asset"]: expected_receipt["final_sha256"]})
     return {"identity": plan["identity"], "run": ordinal(producer)}
 
 
@@ -212,6 +317,8 @@ def publication_state(api, registry, policy, request):
     rows = p.releases(api)
     stable = p.stable_base(rows)
     plan = identity_plan(registry, request["producer"], stable)
+    # All-or-nothing: the protected policy must sign exactly the admitted registry set.
+    n.require(sorted(plan["platforms"]) == r.policy_platforms(policy), "protected policy platforms differ from admitted registry targets")
     previous = previous_publication(api, registry, policy, request, rows)
     if previous is not None:
         if previous["run"]["source_commit"] == request["producer"]["source_commit"]:
@@ -242,12 +349,26 @@ def revalidate(policy, state, environment, api, sonar, registry, *, now):
     return True
 
 
-def verified_unsigned(policy, state, directory, *, runner=subprocess.run):
+def platform_directories(directory, platforms):
+    """Exactly one downloaded directory per admitted platform, nothing else."""
+    directory = n.owned_path(directory)
+    n.require(directory.is_dir() and not directory.is_symlink(), "regular platform directory required")
+    actual = set()
+    for path in directory.iterdir():
+        n.require(len(actual) < len(platforms) and path.name in platforms and path.is_dir() and not path.is_symlink(),
+            "unexpected platform directory")
+        actual.add(path.name)
+    n.require(actual == set(platforms), "missing platform directory")
+    return {platform: directory/platform for platform in sorted(platforms)}
+
+
+def verified_unsigned(policy, state, platform, directory, *, runner=subprocess.run):
     """Run trusted gh itself; downloaded JSON is never verification evidence."""
     plan, request = state["plan"], state["request"]
-    finite_files(directory, {plan["unsigned_asset"], "unsigned.json"})
-    _, digest = n.digest_file(directory, plan["unsigned_asset"])
-    manifest = unsigned_manifest(plan, request["producer"], digest)
+    names = plan["platforms"][platform]
+    finite_files(directory, {names["unsigned_asset"], "unsigned.json"})
+    _, digest = n.digest_file(directory, names["unsigned_asset"])
+    manifest = unsigned_manifest(plan, request["producer"], platform, digest)
     n.require(n.bounded_json(Path(directory)/"unsigned.json") == manifest, "unsigned source/version/hash differs")
     version = runner(["gh", "--version"], check=True, capture_output=True, timeout=30).stdout.decode()
     r.require_gh_version(version)
@@ -255,7 +376,7 @@ def verified_unsigned(policy, state, directory, *, runner=subprocess.run):
     with tempfile.TemporaryDirectory(prefix="nightly-gh-verify-", dir=os.environ["RUNNER_TEMP"]) as temporary:
         evidence = Path(temporary)/"verified.json"
         with evidence.open("xb") as stream:
-            runner(["gh", "attestation", "verify", str(Path(directory, plan["unsigned_asset"]).resolve()),
+            runner(["gh", "attestation", "verify", str(Path(directory, names["unsigned_asset"]).resolve()),
                 "--repo", policy["repository"], "--signer-workflow", workflow,
                 "--signer-digest", policy["producer_tooling_revision"], "--source-ref", "refs/heads/main",
                 "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"],
@@ -264,68 +385,182 @@ def verified_unsigned(policy, state, directory, *, runner=subprocess.run):
     return manifest, claims
 
 
-def stage_bundle(output, state, directory, manifest, claims):
+def stage_bundle(output, state, directories, manifests, claims):
+    """One validated bundle: shared admission JSON plus every platform's unsigned payload."""
     n.fields(state, {"request", "quality", "plan"}, "validator state")
-    asset = state["plan"]["unsigned_asset"]
-    n.require(isinstance(asset, str) and n.NAME.fullmatch(asset), "unsafe unsigned asset basename")
+    plan = state["plan"]
+    n.require(set(directories) == set(manifests) == set(claims) == set(plan["platforms"]), "platform validation incomplete")
+    # Every derived destination name is checked before the output directory exists.
+    n.require(all(isinstance(row["unsigned_asset"], str) and n.NAME.fullmatch(row["unsigned_asset"]) for row in plan["platforms"].values()),
+        "unsafe unsigned asset basename")
     output = owned_output(output); output.mkdir(parents=True, exist_ok=False)
-    for name, value in {**state, "unsigned": manifest, "unsigned-claims": claims}.items():
+    for name, value in {**state, "unsigned": manifests, "unsigned-claims": claims}.items():
         write_json(output/(name+".json"), value)
-    stream, _ = n.regular_file(directory, asset)
-    with stream, (output/asset).open("xb") as destination:
-        shutil.copyfileobj(stream, destination, 1024*1024)
-    n.require(n.digest_file(output, asset)[1] == claims["payload_sha256"], "staged payload changed")
-    return bundle_hash(output, asset)
+    for platform, directory in sorted(directories.items()):
+        asset = plan["platforms"][platform]["unsigned_asset"]
+        n.require(isinstance(asset, str) and n.NAME.fullmatch(asset), "unsafe unsigned asset basename")
+        stream, _ = n.regular_file(directory, asset)
+        with stream, (output/asset).open("xb") as destination:
+            shutil.copyfileobj(stream, destination, 1024*1024)
+        n.require(n.digest_file(output, asset)[1] == claims[platform]["payload_sha256"], "staged payload changed")
+    return bundle_hash(output, validated_names(plan))
 
 
-def native_sign(policy, state, directory, source, output, environment):
+def require_unsigned_binding(policy, state, platform, directory):
     plan, request = state["plan"], state["request"]
     r.request_contract(policy, request)
-    n.require(state["unsigned-claims"]["request_sha256"] == r.digest(request) and
-        state["unsigned-claims"]["payload_sha256"] == state["unsigned"]["unsigned_sha256"], "unsigned claims binding differs")
-    n.require(n.digest_file(directory, plan["unsigned_asset"])[1] == state["unsigned"]["unsigned_sha256"], "unsigned bytes changed")
+    n.require(platform in plan["platforms"] and sorted(state["unsigned"]) == sorted(state["unsigned-claims"]) == sorted(plan["platforms"]),
+        "platform absent from validated bundle")
+    manifest, claims = state["unsigned"][platform], state["unsigned-claims"][platform]
+    n.require(manifest == unsigned_manifest(plan, request["producer"], platform, manifest["unsigned_sha256"]) and
+        claims["request_sha256"] == r.digest(request) and claims["payload_sha256"] == manifest["unsigned_sha256"],
+        "unsigned claims binding differs")
+    if directory is not None:
+        n.require(n.digest_file(directory, plan["platforms"][platform]["unsigned_asset"])[1] == manifest["unsigned_sha256"], "unsigned bytes changed")
+    return manifest["unsigned_sha256"]
+
+
+def native_sign(policy, state, platform, directory, source, output, environment):
+    """Sign exactly one platform; the plug-in re-verifies keylessly before any receipt."""
+    plan = state["plan"]
+    unsigned_sha256 = require_unsigned_binding(policy, state, platform, directory)
+    names = plan["platforms"][platform]
     output = owned_output(output)
-    n.require(n.NAME.fullmatch(plan["asset"]) and n.NAME.fullmatch(plan["unsigned_asset"]), "unsafe native asset basename")
+    n.require(n.NAME.fullmatch(names["asset"]) and n.NAME.fullmatch(names["unsigned_asset"]), "unsafe native asset basename")
     output.mkdir(parents=True, exist_ok=False)
-    env = {**environment, "NIGHTLY_WINDOWS_PUBLISHER_SUBJECT": policy["windows_publisher_subject"]}
-    signing.adapter("windows-x86_64", source)
-    signing.require_config("windows-x86_64", env)
-    signer = signing.sign_windows(source, Path(directory)/plan["unsigned_asset"], output/plan["asset"], env, plan["identity"]["version"])
-    receipt = r.release_receipt(policy, request, state["unsigned"]["unsigned_sha256"], n.digest_file(output, plan["asset"])[1], signer)
+    trust = policy["platforms"][platform]["trust"]
+    module = plat.plugin(platform)
+    with tempfile.TemporaryDirectory(prefix="nightly-sign-out-", dir=n.owned_path(environment["RUNNER_TEMP"])) as temporary:
+        signed = Path(temporary)/"signed"; signed.mkdir()
+        result = module.sign(trust, Path(directory)/names["unsigned_asset"], signed, Path(source).resolve(), environment, plan["identity"]["version"])
+        n.fields(result, {"verified_signer", "support"}, "platform signing result")
+        support = r.support_binding(result["support"])
+        n.require(sorted(path.name for path in signed.iterdir()) == sorted({names["asset"], *support}), "platform signer output inventory differs")
+        for name, item in support.items():
+            n.require(n.digest_file(signed, name) == (item["size"], item["sha256"]), "signing support differs from plug-in binding")
+        n.require(require_unsigned_binding(policy, state, platform, directory) == unsigned_sha256, "unsigned bytes changed during signing")
+        for name in sorted({names["asset"], *support}):
+            stream, _ = n.regular_file(signed, name)
+            with stream, (output/name).open("xb") as destination:
+                shutil.copyfileobj(stream, destination, 1024*1024)
+    receipt = r.release_receipt_v3(policy, state["request"], platform, unsigned_sha256,
+        n.digest_file(output, names["asset"])[1], result["verified_signer"], support)
+    for name in support:
+        n.require(n.digest_file(output, name)[1] == support[name]["sha256"], "signing support changed while copying")
     for name in BUNDLE_FILES:
         write_json(output/name, state[name[:-5]])
     write_json(output/"signing.json", receipt)
-    return bundle_hash(output, plan["asset"], signed=True)
+    return bundle_hash(output, {names["asset"], *support}, signed=True)
 
 
-def verify_final(policy, state, directory, environment):
+def expected_platform_receipt(policy, state, platform, directory):
     plan, receipt = state["plan"], state["signing"]
-    n.require(receipt == r.release_receipt(policy, state["request"], state["unsigned"]["unsigned_sha256"],
-        n.digest_file(directory, plan["asset"])[1], policy["windows_publisher_subject"]), "final two-role receipt differs")
-    with tempfile.TemporaryDirectory(prefix="nightly-final-verify-", dir=environment["RUNNER_TEMP"]) as temporary:
-        root = signing.windows_unpack(Path(directory)/plan["asset"], Path(temporary)/"payload")
-        subject = signing.windows_verify(root, {**environment, "NIGHTLY_WINDOWS_PUBLISHER_SUBJECT": policy["windows_publisher_subject"]}, plan["identity"]["version"])
-        n.require(subject == policy["windows_publisher_subject"], "final native signer differs")
+    unsigned_sha256 = require_unsigned_binding(policy, state, platform, None)
+    support = r.support_binding(receipt.get("support"))
+    expected = r.release_receipt_v3(policy, state["request"], platform, unsigned_sha256,
+        n.digest_file(directory, plan["platforms"][platform]["asset"])[1], r.trusted_signer(policy, platform), support)
+    n.require(receipt == expected, "final two-role receipt differs")
+    n.require(set(support) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
+        "platform support set differs from its required detached signature files")
+    for name, item in support.items():
+        n.require(n.digest_file(directory, name) == (item["size"], item["sha256"]), "signing support differs from receipt")
+    return receipt
+
+
+def verify_platform(policy, state, platform, directory, source, environment):
+    """Fresh keyless verification of one platform's final bytes.
+
+    The signed bundle also carries its authenticated admission JSON. Plug-ins verify
+    an exact package-only copy (final asset plus recorded support), rechecked against
+    the receipt after copying, so strict plug-in inventories stay strict.
+    """
+    receipt = expected_platform_receipt(policy, state, platform, directory)
+    module = plat.plugin(platform)
+    asset = state["plan"]["platforms"][platform]["asset"]
+    expected = {asset: receipt["final_sha256"], **{name: item["sha256"] for name, item in receipt["support"].items()}}
+    with tempfile.TemporaryDirectory(prefix="nightly-verify-package-", dir=n.owned_path(environment["RUNNER_TEMP"])) as temporary:
+        package = Path(temporary)/"package"; package.mkdir()
+        for name, digest in sorted(expected.items()):
+            n.require(n.NAME.fullmatch(name), "unsafe package file name")
+            stream, _ = n.regular_file(directory, name)
+            with stream, (package/name).open("xb") as destination:
+                shutil.copyfileobj(stream, destination, 1024*1024)
+            n.require(n.digest_file(package, name)[1] == digest, "package copy differs from signer receipt")
+        signer = module.verify(policy["platforms"][platform]["trust"], package, asset,
+            receipt["support"], Path(source).resolve(), plat.keyless(environment), state["plan"]["identity"]["version"])
+    n.require(signer == receipt["verified_signer"], "fresh native verification differs from signer receipt")
+    return receipt["final_sha256"]
+
+
+SHARED_STATE = ("request", "quality", "plan", "unsigned", "unsigned-claims")
+
+
+def signed_states(policy, directory, environment):
+    """Every admitted platform's independently hashed signed bundle, sharing one admission."""
+    platforms = r.policy_platforms(policy)
+    directories = platform_directories(directory, platforms)
+    states = {}
+    for platform, path in directories.items():
+        expected = environment.get("SIGNED_BUNDLE_SHA256_"+plat.secret_key(platform), "")
+        states[platform] = verify_signed_bundle(path, expected, platform)
+    first = states[platforms[0]]
+    n.require(all({key: state[key] for key in SHARED_STATE} == {key: first[key] for key in SHARED_STATE}
+        for state in states.values()), "platform signers used different admissions")
+    shared = {key: first[key] for key in SHARED_STATE}
+    shared["signing"] = {platform: state["signing"] for platform, state in states.items()}
+    return shared, directories
+
+
+def verify_final(policy, state, directories, source, environment):
+    """Windows natively here; other platforms only by their fresh verifier's exact digest."""
+    for platform, directory in directories.items():
+        platform_state = {**state, "signing": state["signing"][platform]}
+        receipt = expected_platform_receipt(policy, platform_state, platform, directory)
+        if platform == "windows-x86_64":
+            n.require(verify_platform(policy, platform_state, platform, directory, source, environment) == receipt["final_sha256"], "Windows final verification differs")
+        else:
+            verified = environment.get("VERIFIED_FINAL_SHA256_"+plat.secret_key(platform), "")
+            n.require(r.SHA256.fullmatch(verified or "") and verified == receipt["final_sha256"],
+                "fresh platform verifier did not verify these exact final bytes")
     return True
 
 
-def publish(policy, state, directory, packet, ownership, api, guard, registry):
+def combine(state, directories, output):
+    """Flat final package directory: every platform's final asset and support files."""
+    output = owned_output(output); output.mkdir(parents=True, exist_ok=False)
+    for platform, directory in sorted(directories.items()):
+        receipt = state["signing"][platform]
+        for name in sorted({state["plan"]["platforms"][platform]["asset"], *receipt["support"]}):
+            n.require(not (output/name).exists(), "duplicate combined file")
+            stream, _ = n.regular_file(directory, name)
+            with stream, (output/name).open("xb") as destination:
+                shutil.copyfileobj(stream, destination, 1024*1024)
+            expected = receipt["final_sha256"] if name == state["plan"]["platforms"][platform]["asset"] else receipt["support"][name]["sha256"]
+            n.require(n.digest_file(output, name)[1] == expected, "combined file changed")
+    return output
+
+
+def publish(policy, state, combined, packet, ownership, api, guard, registry):
     """Only new immutable nightlies; public-but-unreconciled state is never retried."""
     packet = owned_output(packet)
     ownership = owned_output(ownership)
     plan = state["plan"]; prepared = plan["identity"]
     ident = {key: value for key, value in prepared.items() if key not in {"version", "ready"}}
-    feed = n.build_feed_v2(registry, ident, prepared["version"], directory)
-    n.stage_feed(feed, directory, packet)
+    feed = n.build_feed_v2(registry, ident, prepared["version"], combined)
+    n.stage_feed_v2(registry, ident, prepared["version"], feed, combined, packet)
+    # History later requires every recorded support file to be public; never publish less.
+    staged = {path.name for path in Path(packet).iterdir()}
+    n.require(all({plan["platforms"][platform]["asset"], *receipt["support"]} <= staged
+        for platform, receipt in state["signing"].items()), "signed support file would not be published")
     metadata = {path.name: n.digest_file(packet, path.name) for path in Path(packet).iterdir()}
-    publication = {"schema": "craft-nightly-release-publication/v1", "request": state["request"],
+    publication = {"schema": "craft-nightly-release-publication/v2", "request": state["request"],
         "plan": plan, "quality": state["quality"], "signing": state["signing"]}
     from nightly_ownership_receipt import reserve
     confirmed = []; result = None
     try:
         with reserve(ownership, filename="ownership.pending.json") as stream:
             result = pub.publish_packet(api, ident, metadata, packet, guard=guard, policy=publication,
-                policy_marker=MARKER, on_published=lambda release: confirmed.append(release))
+                policy_marker=MARKER_V2, on_published=lambda release: confirmed.append(release))
             receipt = {"schema": "craft-nightly-ownership/v2", "app": "photocraft", "repository": ident["repository"],
                 "tag": ident["tag"], "source_commit": ident["source_commit"], "release_id": result["id"],
                 "producer": state["request"]["producer"], "signer": state["request"]["signer"],
@@ -375,11 +610,16 @@ def outputs(values):
                 stream.write(key+"="+value+"\n")
 
 
-def plan_outputs(plan):
-    return {"asset": plan["asset"], "unsigned-asset": plan["unsigned_asset"],
-        "version": plan["identity"]["version"], "source-commit": plan["identity"]["source_commit"],
+def plan_outputs(plan, platform=None):
+    values = {"version": plan["identity"]["version"], "source-commit": plan["identity"]["source_commit"],
+        "platforms": ",".join(sorted(plan["platforms"])),
         "build-date": __import__("datetime").datetime.fromtimestamp(plan["identity"]["published_at"],
             __import__("datetime").timezone.utc).strftime("%Y-%m-%d")}
+    if platform is not None:
+        n.require(platform in plan["platforms"], "platform absent from plan")
+        names = plan["platforms"][platform]
+        values.update({"asset": names["asset"], "unsigned-asset": names["unsigned_asset"], "built-asset": names["built_asset"]})
+    return values
 
 
 def git_read(root, arguments):
@@ -413,16 +653,23 @@ def source_policy(source, environment):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "admit", "validate", "guard", "sign", "final", "publish"))
-    for name in ("source", "directory", "output", "plan", "state", "asset", "expected-sha256", "producer-run-id", "producer-run-attempt", "packet", "ownership"):
+    parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "admit", "validate", "guard", "sign",
+        "verify-platform", "final", "publish"))
+    for name in ("source", "directory", "output", "plan", "state", "platform", "expected-sha256", "producer-run-id",
+            "producer-run-attempt", "packet", "ownership", "combined"):
         parser.add_argument("--"+name)
     args = parser.parse_args()
     try:
         env = os.environ; registry = n.bounded_json(Path(__file__).resolve().parent.parent/"nightly-apps.json")
+        if args.platform is not None:
+            n.require(args.platform in plat.SUPPORTED, "unsupported release-ref platform")
         if args.mode.startswith("main-"):
+            n.require(args.platform, "exact producer platform required")
             repository = n.trusted_context(registry, "photocraft", env)["repository"]
             api = pub.HTTPTransport(repository, env.get("GH_TOKEN", ""))
             plan, producer = unsigned_plan(api, registry, env)
+            n.require(args.platform in plan["platforms"], "platform is not an admitted registry target")
+            names = plan["platforms"][args.platform]
             if args.mode == "main-plan":
                 n.require(args.output, "new plan output required")
                 output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
@@ -430,60 +677,81 @@ def main():
             elif args.mode == "main-seal":
                 n.require(args.plan and args.output and args.directory, "build handoff paths required")
                 n.require(n.bounded_json(args.plan) == plan, "producer/stable identity changed during compilation")
-                _, digest = n.digest_file(args.directory, plan["unsigned_asset"])
-                manifest = unsigned_manifest(plan, producer, digest)
+                _, digest = n.digest_file(args.directory, names["built_asset"])
+                manifest = unsigned_manifest(plan, producer, args.platform, digest)
                 output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
-                stream, _ = n.regular_file(args.directory, plan["unsigned_asset"])
-                with stream, (output/plan["unsigned_asset"]).open("xb") as destination:
+                stream, _ = n.regular_file(args.directory, names["built_asset"])
+                with stream, (output/names["unsigned_asset"]).open("xb") as destination:
                     shutil.copyfileobj(stream, destination, 1024*1024)
-                n.require(n.digest_file(output, plan["unsigned_asset"])[1] == digest, "producer ZIP changed while copying")
+                n.require(n.digest_file(output, names["unsigned_asset"])[1] == digest, "producer payload changed while copying")
                 write_json(output/"unsigned.json", manifest)
                 outputs({"unsigned-sha256": digest})
             else:
                 n.require(args.directory, "exact compiler artifact directory required")
-                finite_files(args.directory, {plan["unsigned_asset"], "unsigned.json"})
-                _, digest = n.digest_file(args.directory, plan["unsigned_asset"])
-                n.require(n.bounded_json(Path(args.directory)/"unsigned.json") == unsigned_manifest(plan, producer, digest), "compiler manifest differs from independent current-run identity")
+                finite_files(args.directory, {names["unsigned_asset"], "unsigned.json"})
+                _, digest = n.digest_file(args.directory, names["unsigned_asset"])
+                n.require(n.bounded_json(Path(args.directory)/"unsigned.json") == unsigned_manifest(plan, producer, args.platform, digest), "compiler manifest differs from independent current-run identity")
                 n.require(digest == env.get("EXPECTED_COMPILER_SHA256"), "payload differs from independent compiler-job digest")
-                outputs({"subject-path": str(Path(args.directory, plan["unsigned_asset"]).resolve()), "unsigned-sha256": digest})
-            outputs(plan_outputs(plan)); return
+                outputs({"subject-path": str(Path(args.directory, names["unsigned_asset"]).resolve()), "unsigned-sha256": digest})
+            outputs(plan_outputs(plan, args.platform)); return
         n.require(args.source, "actual protected release checkout required")
         policy = source_policy(args.source, env)
+        n.require(policy["schema"] == r.LIVE_POLICY, "live release-ref signing requires policy v3")
         api = pub.HTTPTransport(policy["repository"], env.get("GH_TOKEN", "")); sonar = SonarTransport()
         if args.mode == "admit":
             n.require(args.output and args.producer_run_id and args.producer_run_attempt, "producer inputs and new admission directory required")
             state = initial_admission(policy, env, args.producer_run_id, args.producer_run_attempt, api, sonar, registry, now=int(time.time()))
             output = owned_output(args.output); output.mkdir(parents=True, exist_ok=False)
             for key, value in state.items(): write_json(output/(key+".json"), value)
-            outputs({**plan_outputs(state["plan"]), "admitted": "true", "artifact-id": state["request"]["artifact"]["id"],
-                "wrapper-sha256": state["request"]["artifact"]["wrapper_sha256"]})
+            values = {**plan_outputs(state["plan"]), "admitted": "true",
+                "platforms": json.dumps(sorted(state["plan"]["platforms"]), separators=(",", ":"))}
+            for platform, item in state["request"]["artifacts"].items():
+                values["artifact-id-"+platform] = item["id"]
+            outputs(values)
             return
         if args.mode == "validate":
-            n.require(args.state and args.directory and args.output, "fixed admission, downloaded payload and new bundle paths required")
+            n.require(args.state and args.directory and args.output, "fixed admission, downloaded payloads and new bundle paths required")
             state = {key: n.bounded_json(Path(args.state)/(key+".json")) for key in ("request", "quality", "plan")}
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-            manifest, claims = verified_unsigned(policy, state, args.directory)
+            directories = platform_directories(args.directory, sorted(state["plan"]["platforms"]))
+            manifests, claims = {}, {}
+            for platform, directory in directories.items():
+                manifests[platform], claims[platform] = verified_unsigned(policy, state, platform, directory)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-            digest = stage_bundle(args.output, state, args.directory, manifest, claims)
-            outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest, "unsigned-sha256": manifest["unsigned_sha256"]})
+            digest = stage_bundle(args.output, state, directories, manifests, claims)
+            outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})
             return
-        n.require(args.directory and args.asset and args.expected_sha256, "independent exact trusted-job bundle binding required")
-        signed = args.mode in ("final", "publish")
-        state = verify_bundle(args.directory, args.expected_sha256, args.asset, signed=signed)
-        revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-        if args.mode == "guard": return
-        if args.mode == "sign":
+        if args.mode in ("guard", "sign"):
+            n.require(args.directory and args.platform and args.expected_sha256, "independent exact trusted-job bundle binding required")
+            unverified = n.bounded_json(Path(args.directory)/"plan.json")
+            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified))
+            n.require(args.platform in state["plan"]["platforms"], "platform absent from validated bundle")
+            require_unsigned_binding(policy, state, args.platform, args.directory)
+            revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
+            if args.mode == "guard": return
             n.require(args.output, "new signed output required")
-            digest = native_sign(policy, state, args.directory, args.source, args.output, env)
-            outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest,
-                "final-sha256": n.digest_file(args.output, state["plan"]["asset"])[1]})
+            digest = native_sign(policy, state, args.platform, args.directory, args.source, args.output, env)
+            outputs({**plan_outputs(state["plan"], args.platform), "bundle-sha256": digest,
+                "final-sha256": n.digest_file(args.output, state["plan"]["platforms"][args.platform]["asset"])[1]})
             return
-        verify_final(policy, state, args.directory, env)
+        if args.mode == "verify-platform":
+            n.require(args.directory and args.platform and args.expected_sha256, "independent exact signed bundle binding required")
+            state = verify_signed_bundle(args.directory, args.expected_sha256, args.platform)
+            revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
+            outputs({"final-sha256": verify_platform(policy, state, args.platform, args.directory, args.source, env),
+                "asset": state["plan"]["platforms"][args.platform]["asset"]})
+            return
+        n.require(args.directory, "signed platform directories required")
+        state, directories = signed_states(policy, args.directory, env)
+        revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
+        verify_final(policy, state, directories, args.source, env)
         if args.mode == "final":
-            outputs({"subject-path": str(Path(args.directory, state["plan"]["asset"]).resolve())}); return
-        n.require(args.packet and args.ownership, "new packet/ownership paths required")
+            outputs({"subject-path": ",".join(str(Path(directories[platform], state["plan"]["platforms"][platform]["asset"]).resolve())
+                for platform in sorted(directories))}); return
+        n.require(args.packet and args.ownership and args.combined, "new combined/packet/ownership paths required")
+        combined = combine(state, directories, args.combined)
         guard = lambda: revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-        result = publish(policy, state, args.directory, args.packet, args.ownership, api, guard, registry)
+        result = publish(policy, state, combined, args.packet, args.ownership, api, guard, registry)
         publication_outputs(result)
     except UpToDate as error:
         if args.mode != "admit":
@@ -494,7 +762,8 @@ def main():
         parser.exit(2, str(error)+"\n")
     except (n.InvalidNightly, pub.APIError, http.client.HTTPException, OSError, ValueError, KeyError, TypeError,
             subprocess.SubprocessError, RecursionError) as error:
-        parser.exit(1, "release-ref nightly refused: "+str(error)+"; never overwrite/delete/retry an existing tag or release\n")
+        message = "signing/verification process failed" if isinstance(error, subprocess.SubprocessError) else str(error)
+        parser.exit(1, "release-ref nightly refused: "+message+"; never overwrite/delete/retry an existing tag or release\n")
 
 
 if __name__ == "__main__":

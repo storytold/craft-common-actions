@@ -1,9 +1,24 @@
 name: Private pending Unix nightly artifacts
 
-# Source preparation only. Native build guards remain false; protected signing is authored, not native proof.
+# Each job runs only when the app caller opts in with production-signing and lists its platform.
 # Windows proof, then Linux server, then Skylar Mac is the actual-run order.
 on:
   workflow_call:
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      LINUX_SIGNING_KEY:
+        required: false
     inputs:
       manual-actors:
         description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
@@ -32,10 +47,35 @@ on:
         required: false
         type: string
         default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      linux-signing-fingerprint:
+        description: "Reviewed full uppercase primary fingerprint of the stable Linux key, committed in caller source; never a repository variable"
+        type: string
+        default: ''
       production-signing:
         description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
         type: boolean
         default: false
+      apple-team-id:
+        description: "Reviewed literal Apple Developer team ID from caller source (public); empty refuses macOS signing"
+        type: string
+        default: ''
+    outputs:
+      artifact-id:
+        description: Exact immutable upload ID of the final signed package and any signature support
+        value: ${{ jobs.sign-linux.outputs.artifact-id || jobs.sign-macos.outputs.artifact-id }}
+      sha256:
+        description: Final signed package SHA256
+        value: ${{ jobs.sign-linux.outputs.sha256 || jobs.sign-macos.outputs.sha256 }}
+      asset:
+        description: Exact producer-selected asset name
+        value: ${{ jobs.linux.outputs.asset || jobs.macos.outputs.asset }}
+      unsigned-sha256:
+        description: Original unsigned build producer hash
+        value: ${{ jobs.linux.outputs.sha256 || jobs.macos.outputs.sha256 }}
+      receipt-artifact-id:
+        value: ${{ jobs.sign-linux.outputs.receipt-artifact-id || jobs.sign-macos.outputs.receipt-artifact-id }}
+      receipt-sha256:
+        value: ${{ jobs.sign-linux.outputs.receipt-sha256 || jobs.sign-macos.outputs.receipt-sha256 }}
 
 permissions:
   contents: read
@@ -46,7 +86,12 @@ env:
 
 jobs:
   git-sources:
-    if: ${{ false }} # Pending source, not execution authority.
+    if: >-
+      inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     name: Git dependencies come from storytold
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -96,7 +141,12 @@ jobs:
 
 
   linux:
-    if: ${{ false }} # Pending app adapter/native proof; signing source is not admission.
+    if: >-
+      inputs.platform == 'linux-x86_64' && inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: [git-sources, linux-signing-config]
     runs-on: ubuntu-22.04
     timeout-minutes: 90
@@ -268,7 +318,12 @@ jobs:
           retention-days: 14
 
   macos:
-    if: ${{ false }} # Pending app adapter/native proof; signing source is not admission.
+    if: >-
+      inputs.platform == 'macos-aarch64' && inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     needs: [git-sources, macos-signing-config]
     runs-on: macos-15-xlarge
     timeout-minutes: 90
@@ -283,6 +338,10 @@ jobs:
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
     steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
         with:
@@ -403,17 +462,25 @@ jobs:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
         run: bash packaging/macos/nightly.sh --arch aarch64
-      # check refuses this path until the production signing/team/notarization
-      # policy is explicitly implemented. Inventory is never signature proof.
-      - name: Inspect the exact full-version Mac bundle inventory
+      # Inventory and the ad-hoc --version smoke are never signature proof; Developer ID,
+      # notarization and stapling happen only in the separate protected signing job.
+      - name: Inspect the exact full-version Mac bundle inventory and smoke without secrets
         shell: bash
         env:
           EXACT_VERSION: ${{ steps.contract.outputs.version }}
           EXACT_ASSET: ${{ steps.contract.outputs.asset }}
         run: |
+          set -euo pipefail
           python3 -B .nightly-tools/scripts/nightly_unix.py inventory \
             --pending .nightly-tools/nightly-unix-pending.json --platform macos-aarch64 \
             --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/macos-aarch64/$EXACT_ASSET"
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private \
+            --pending .nightly-tools/nightly-unix-pending.json --platform macos-aarch64 \
+            --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/macos-aarch64/$EXACT_ASSET" \
+            --output "$RUNNER_TEMP/private-nightly-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/private-nightly-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft" \
+            --profile-root "$RUNNER_TEMP/private-nightly-profile-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --version "$EXACT_VERSION"
       - name: Hash exact unsigned package before immutable upload
         id: seal
         shell: bash
@@ -430,7 +497,13 @@ jobs:
           retention-days: 14
 
   linux-signing-config:
-    if: ${{ false }} # Pending native adapters; presence preflight only.
+    # Presence preflight only, before secret-free compilation.
+    if: >-
+      inputs.platform == 'linux-x86_64' && inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: nightly-signing
@@ -440,7 +513,7 @@ jobs:
       - name: Require signing configuration before secret-free compilation
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY != '' }}
-          FINGERPRINT: ${{ vars.NIGHTLY_LINUX_SIGNING_FINGERPRINT }}
+          FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}
         run: |
           python3 -I -B - <<'PY'
           import os
@@ -450,7 +523,13 @@ jobs:
           PY
 
   macos-signing-config:
-    if: ${{ false }} # Pending native adapters; presence preflight only.
+    # Presence preflight only, before secret-free compilation.
+    if: >-
+      inputs.platform == 'macos-aarch64' && inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: nightly-signing
@@ -465,10 +544,13 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID != '' }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD != '' }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          TEAM: ${{ inputs.apple-team-id }}
         run: |
           python3 -I -B - <<'PY'
           import os
           assert all(os.environ[key]=='true' for key in ('APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'KEYCHAIN_PASSWORD', 'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')), 'all required signing configuration must exist; no unsigned fallback'
+          import re
+          assert re.fullmatch(r'[A-Z0-9]{10}', os.environ['TEAM']), 'independently reviewed ten-character Apple team required'
           PY
 
   sign-linux:
@@ -494,6 +576,9 @@ jobs:
       unsigned-artifact-id: ${{ needs.linux.outputs.artifact-id }}
       unsigned-sha256: ${{ needs.linux.outputs.sha256 }}
       asset: ${{ needs.linux.outputs.asset }}
+      linux-signing-fingerprint: ${{ inputs.linux-signing-fingerprint }}
+    secrets:
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
 
   sign-macos:
     if: >-
@@ -511,6 +596,7 @@ jobs:
       production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       platform: macos-aarch64
+      apple-team-id: ${{ inputs.apple-team-id }}
       app-name: ${{ inputs.app-name }}
       version: ${{ inputs.version }}
       identity-artifact-id: ${{ inputs.identity-artifact-id }}
@@ -518,3 +604,10 @@ jobs:
       unsigned-artifact-id: ${{ needs.macos.outputs.artifact-id }}
       unsigned-sha256: ${{ needs.macos.outputs.sha256 }}
       asset: ${{ needs.macos.outputs.asset }}
+    secrets:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

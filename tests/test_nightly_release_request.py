@@ -6,6 +6,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'scripts'))
 import nightly_release_request as r
+WINDOWS_KIND = 'nightly-unsigned-windows-x86_64'
+MAC_KIND = 'nightly-unsigned-macos-aarch64'
+LINUX_KIND = 'nightly-unsigned-linux-x86_64'
 
 
 class API:
@@ -28,7 +31,7 @@ class API:
 
 class RequestTests(unittest.TestCase):
     def setUp(self):
-        self.policy = {'schema': 'craft-nightly-release-policy/v2', 'repository': 'storytold/photocraft',
+        self.policy = {'schema': 'craft-nightly-release-policy/v3', 'repository': 'storytold/photocraft',
             'repository_id': 123, 'producer_workflow_id': 91,
             'producer_workflow_path': '.github/workflows/nightly.yml',
             'producer_tooling_revision': 'b'*40,
@@ -36,10 +39,17 @@ class RequestTests(unittest.TestCase):
             'signer_workflow_path': '.github/workflows/nightly-sign.yml', 'signer_tooling_revision': 'c'*40,
             # Synthetic dispatcher identity is explicitly reviewed, never implicitly trusted.
             'release_branch': 'release', 'manual_actors': [],
-            'automatic_signer_actors': ['github-actions[bot]'], 'platform': 'windows-x86_64',
-            'windows_publisher_subject': 'CN=Synthetic fixture only',
+            'automatic_signer_actors': ['github-actions[bot]'],
             'max_age_seconds': 86400, 'candidate_policy': {'schema': 'craft-nightly-candidate-policy/v3'},
-            'unsigned_artifact_name': 'nightly-unsigned-windows-x86_64', 'max_artifact_bytes': 1000000}
+            'max_artifact_bytes': 1000000,
+            # One release for every admitted platform; synthetic trust values only.
+            'platforms': {
+                'windows-x86_64': {'unsigned_artifact_name': 'nightly-unsigned-windows-x86_64',
+                    'trust': {'publisher_subject': 'CN=Synthetic fixture only'}},
+                'macos-aarch64': {'unsigned_artifact_name': 'nightly-unsigned-macos-aarch64',
+                    'trust': {'apple_team_id': 'SYNTH12345'}},
+                'linux-x86_64': {'unsigned_artifact_name': 'nightly-unsigned-linux-x86_64',
+                    'trust': {'fingerprint': '0123456789ABCDEF0123456789ABCDEF01234567'}}}}
         self.env = {'GITHUB_REPOSITORY': 'storytold/photocraft', 'GITHUB_REPOSITORY_ID': '123',
             'GITHUB_REF': 'refs/heads/release', 'GITHUB_REF_TYPE': 'branch',
             'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_RUN_ID': '200', 'GITHUB_RUN_ATTEMPT': '1',
@@ -56,23 +66,41 @@ class RequestTests(unittest.TestCase):
         signer = {**copy.deepcopy(producer), 'id': 200, 'run_number': 20, 'workflow_id': 92,
             'head_sha': 'd'*40, 'head_branch': 'release', 'path': self.policy['signer_workflow_path'],
             'event': 'workflow_dispatch', 'status': 'in_progress', 'conclusion': None}
-        self.item = {'id': 300, 'name': self.policy['unsigned_artifact_name']+'-100-1', 'expired': False,
+        self.item = {'id': 300, 'name': WINDOWS_KIND+'-100-1', 'expired': False,
             'size_in_bytes': 512, 'digest': 'sha256:'+'e'*64, 'created_at': '2026-11-22T00:01:00Z',
             'expires_at': '2026-11-29T00:00:00Z',
             'workflow_run': {'id': 100, 'repository_id': 123, 'head_repository_id': 123,
                 'head_sha': 'a'*40, 'head_branch': 'main'}}
+        self.mac_item = {**copy.deepcopy(self.item), 'id': 302, 'name': MAC_KIND+'-100-1', 'digest': 'sha256:'+'c'*64}
+        self.linux_item = {**copy.deepcopy(self.item), 'id': 304, 'name': LINUX_KIND+'-100-1', 'digest': 'sha256:'+'4'*64}
         rows = {'/actions/runs/100': producer, '/actions/runs/100/attempts/1': copy.deepcopy(producer),
             '/actions/runs/200': signer, '/actions/runs/200/attempts/1': copy.deepcopy(signer),
             '/actions/workflows/91': {'id': 91, 'path': producer['path'], 'state': 'active'},
             '/actions/workflows/92': {'id': 92, 'path': signer['path'], 'state': 'active'},
-            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 1, 'artifacts': [self.item]},
+            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 3, 'artifacts': [self.item, self.mac_item, self.linux_item]},
             '/actions/artifacts/300': copy.deepcopy(self.item),
+            '/actions/artifacts/302': copy.deepcopy(self.mac_item),
+            '/actions/artifacts/304': copy.deepcopy(self.linux_item),
             'newest': {'workflow_runs': [copy.deepcopy(producer)]}}
         self.api = API(rows)
         self.now = r.p.timestamp('2026-11-22T01:00:00Z')
 
     def invoke(self):
         return r.validate_request(self.policy, self.env, '100', '1', self.api, now=self.now)
+
+    def legacy_policy(self):
+        """Frozen v2 (Windows-only) shape: history only, never live admission."""
+        old = {key: copy.deepcopy(value) for key, value in self.policy.items() if key != 'platforms'}
+        old.update(schema='craft-nightly-release-policy/v2', platform='windows-x86_64',
+            windows_publisher_subject='CN=Synthetic fixture only', unsigned_artifact_name=WINDOWS_KIND)
+        return old
+
+    def legacy_request(self, policy=None):
+        """A v1 request bound to the legacy policy, built from a live v3 request."""
+        policy = policy or self.legacy_policy(); request = copy.deepcopy(self.invoke())
+        request['schema'] = 'craft-nightly-release-request/v1'; request['policy_sha256'] = r.digest(policy)
+        request['artifact'] = request.pop('artifacts')['windows-x86_64']
+        return request
 
     def modify_run(self, which, key, value):
         for suffix in (f'/actions/runs/{which}', f'/actions/runs/{which}/attempts/1'):
@@ -104,7 +132,11 @@ class RequestTests(unittest.TestCase):
         request = self.invoke()
         self.assertEqual(request['producer']['source_commit'], 'a'*40)
         self.assertEqual(request['signer']['source_commit'], 'd'*40)
-        self.assertEqual(request['artifact']['wrapper_sha256'], 'e'*64)
+        self.assertEqual(request['schema'], 'craft-nightly-release-request/v2')
+        self.assertEqual(request['artifacts']['windows-x86_64']['wrapper_sha256'], 'e'*64)
+        self.assertEqual(request['artifacts']['macos-aarch64']['wrapper_sha256'], 'c'*64)
+        self.assertEqual(request['artifacts']['linux-x86_64']['wrapper_sha256'], '4'*64)
+        self.assertEqual(sorted(request['artifacts']), ['linux-x86_64', 'macos-aarch64', 'windows-x86_64'])
         self.assertTrue(all(method == 'GET' and not suffix.endswith('/zip') for method,suffix in self.api.calls))
         self.assertEqual(self.env['GITHUB_SHA'], 'd'*40)
 
@@ -197,7 +229,8 @@ class RequestTests(unittest.TestCase):
                 with self.subTest(role=name,attempt=attempt):
                     retained=copy.deepcopy(original)
                     retained[name].update(event='workflow_dispatch',run_attempt=attempt)
-                    retained['artifact']['name']=r.artifact_name(self.policy,retained['producer'])
+                    for platform in retained['artifacts']:
+                        retained['artifacts'][platform]['name']=r.artifact_name(self.policy,retained['producer'],platform)
                     r.request_contract(self.policy,retained)  # Reviewed manual actor still passes.
                     retained[name]['triggering_actor']='unapproved'
                     with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
@@ -276,7 +309,8 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
             r.request_contract(self.policy,request)
         request['producer'].update(event='schedule',run_attempt=2)
-        request['artifact']['name']=r.artifact_name(self.policy,request['producer'])
+        for platform in request['artifacts']:
+            request['artifacts'][platform]['name']=r.artifact_name(self.policy,request['producer'],platform)
         with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
             r.request_contract(self.policy,request)
 
@@ -302,18 +336,18 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'actor not authorized'): self.invoke()
 
     def test_frozen_v1_historical_contract_is_explicit_and_never_a_live_fallback(self):
-        request=self.invoke()
-        old=copy.deepcopy(self.policy); old['schema']='craft-nightly-release-policy/v1'
+        old=self.legacy_policy(); old['schema']='craft-nightly-release-policy/v1'
         del old['automatic_signer_actors']; old['manual_actors']=['github-actions[bot]']
-        request['policy_sha256']=r.digest(old)
+        request=self.legacy_request(old)
         r.validate_policy(old); r.request_contract(old,request)
         receipt=r.release_receipt(old,request,'f'*64,'1'*64,old['windows_publisher_subject'])
         self.assertEqual(receipt['policy_sha256'],r.digest(old))
         request['producer']['event']='workflow_dispatch'
         r.request_contract(old,request)  # Explicit historical v1 broad manual grant stays broad.
         self.api.calls.clear()
-        with self.assertRaisesRegex(ValueError,'live admission requires.*v2'):
-            r.validate_request(old,self.env,100,1,self.api,now=self.now)
+        for history in (old, self.legacy_policy()):
+            with self.assertRaisesRegex(ValueError,'live admission requires.*v3'):
+                r.validate_request(history,self.env,100,1,self.api,now=self.now)
         self.assertEqual(self.api.calls,[])
         with self.assertRaises(ValueError): r.validate_policy({**old,'automatic_signer_actors':[]})
         old['manual_actors']=[]; request['policy_sha256']=r.digest(old)
@@ -322,8 +356,8 @@ class RequestTests(unittest.TestCase):
 
     def test_missing_expired_substituted_oversized_cross_attempt_artifacts(self):
         for key,value in [('expired',True), ('expires_at','2026-11-22T00:30:00Z'),
-            ('name','nightly-signed'), ('name',self.policy['unsigned_artifact_name']+'-100-2'),
-            ('name',self.policy['unsigned_artifact_name']+'-101-1'), ('size_in_bytes',1000001), ('size_in_bytes',0),
+            ('name','nightly-signed'), ('name',WINDOWS_KIND+'-100-2'),
+            ('name',WINDOWS_KIND+'-101-1'), ('name',MAC_KIND+'-100-1'), ('size_in_bytes',1000001), ('size_in_bytes',0),
             ('created_at','2026-11-21T00:00:00Z'), ('digest',None), ('digest','sha256:bad'),
             ('workflow_run',{'id':999})]:
             with self.subTest(key=key):
@@ -337,8 +371,8 @@ class RequestTests(unittest.TestCase):
 
     def test_artifact_list_ambiguity_duplicates_missing_and_incomplete_totals(self):
         key='/actions/runs/100/artifacts?per_page=20&page=1'
-        for rows,total in [([],0),([self.item,self.item],2),([self.item],2),
-            ([self.item,{**self.item,'id':301}],2),([self.item],401)]:
+        for rows,total in [([],0),([self.item,self.item],2),([self.item],2),([self.item],1),([self.mac_item],1),
+            ([self.item,self.mac_item,{**self.item,'id':301}],3),([self.item,self.mac_item],401)]:
             self.api.rows[key]={'artifacts':rows,'total_count':total}
             with self.assertRaises(ValueError): self.invoke()
 
@@ -412,7 +446,8 @@ class RequestTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(ValueError): self.verify(result)
 
     def test_receipt_has_two_roles_three_distinct_digest_boundaries_and_no_boolean_proof(self):
-        request=self.invoke(); receipt=r.release_receipt(self.policy,request,'f'*64,'1'*64,'CN=Synthetic fixture only')
+        legacy=self.legacy_policy(); request=self.legacy_request(legacy); self.policy=legacy
+        receipt=r.release_receipt(self.policy,request,'f'*64,'1'*64,'CN=Synthetic fixture only')
         self.assertEqual(receipt['schema'],'craft-nightly-signing/v2')
         self.assertEqual(receipt['producer']['source_commit'],'a'*40)
         self.assertEqual(receipt['signer']['source_commit'],'d'*40)
@@ -433,12 +468,18 @@ class RequestTests(unittest.TestCase):
             self.api.rows[f'/actions/runs/{which}/attempts/2']=copy.deepcopy(self.api.rows[f'/actions/runs/{which}'])
         self.env.update(GITHUB_RUN_ATTEMPT='2', GITHUB_TRIGGERING_ACTOR='approved')
         self.api.rows['newest']['workflow_runs']=[copy.deepcopy(self.api.rows['/actions/runs/100'])]
-        rerun_item={**copy.deepcopy(self.item),'id':301,'name':self.policy['unsigned_artifact_name']+'-100-2'}
+        rerun_item={**copy.deepcopy(self.item),'id':301,'name':WINDOWS_KIND+'-100-2'}
+        rerun_mac={**copy.deepcopy(self.mac_item),'id':303,'name':MAC_KIND+'-100-2'}
+        rerun_linux={**copy.deepcopy(self.linux_item),'id':305,'name':LINUX_KIND+'-100-2'}
         self.api.rows['/actions/artifacts/301']=rerun_item
-        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':2,'artifacts':[self.item,rerun_item]}
+        self.api.rows['/actions/artifacts/303']=rerun_mac
+        self.api.rows['/actions/artifacts/305']=rerun_linux
+        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':6,'artifacts':[self.item,rerun_item,self.mac_item,rerun_mac,self.linux_item,rerun_linux]}
         request=r.validate_request(self.policy,self.env,100,2,self.api,now=self.now)
-        self.assertEqual(request['artifact']['id'],301)
-        self.assertEqual(self.item['name'],self.policy['unsigned_artifact_name']+'-100-1')
+        self.assertEqual(request['artifacts']['windows-x86_64']['id'],301)
+        self.assertEqual(request['artifacts']['macos-aarch64']['id'],303)
+        self.assertEqual(request['artifacts']['linux-x86_64']['id'],305)
+        self.assertEqual(self.item['name'],WINDOWS_KIND+'-100-1')
         self.assertEqual(request['producer']['run_attempt'],2)
         self.assertEqual(request['signer']['run_attempt'],2)
         with self.assertRaisesRegex(ValueError,'exact invocation'):
@@ -499,8 +540,10 @@ class RequestTests(unittest.TestCase):
     def test_protected_publisher_subject_has_strict_nonempty_bounded_literal_shape(self):
         for subject in (None, True, '', 'x'*2049, 'CN=bad\rsubject', 'CN=bad\nsubject', 'CN=bad\0subject'):
             with self.subTest(subject=subject):
-                policy={**self.policy,'windows_publisher_subject':subject}
+                policy=copy.deepcopy(self.policy); policy['platforms']['windows-x86_64']['trust']['publisher_subject']=subject
                 with self.assertRaises(ValueError): r.validate_policy(policy)
+                legacy={**self.legacy_policy(),'windows_publisher_subject':subject}
+                with self.assertRaises(ValueError): r.validate_policy(legacy)
 
     def test_old_schemas_unknown_fields_and_unpatched_verifier_never_fall_back(self):
         extra={**self.policy,'unreviewed':True}
@@ -533,16 +576,82 @@ class RequestTests(unittest.TestCase):
     def test_complete_artifact_inventory_on_the_last_allowed_full_page_is_accepted(self):
         limit = r.p.MAX_PAGES*r.p.PAGE_SIZE
         rows = [{**copy.deepcopy(self.item), 'id': 1000+index, 'name': 'other-'+str(index)} for index in range(limit-1)]
-        rows.insert(limit//2, copy.deepcopy(self.item))
+        rows.insert(limit//2, copy.deepcopy(self.item)); rows[limit//3] = copy.deepcopy(self.linux_item); rows[-1] = copy.deepcopy(self.mac_item)
         for page in range(1, r.p.MAX_PAGES+1):
             self.api.rows[f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={page}'] = {'total_count': limit,
                 'artifacts': rows[(page-1)*r.p.PAGE_SIZE:page*r.p.PAGE_SIZE]}
-        self.assertEqual(self.invoke()['artifact']['id'], 300)
+        self.assertEqual(self.invoke()['artifacts']['windows-x86_64']['id'], 300)
         self.assertFalse(any(path.endswith(f'&page={r.p.MAX_PAGES+1}') for _, path in self.api.calls))
         # A full page that still leaves the reported total unread keeps refusing.
         last = f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={r.p.MAX_PAGES}'
         self.api.rows[last]['artifacts'] = self.api.rows[last]['artifacts'][:-1]
         with self.assertRaisesRegex(ValueError, 'incomplete'): self.invoke()
+
+
+    def test_v3_policy_requires_exact_platform_map_kinds_and_single_trust_values(self):
+        r.validate_policy(self.policy)
+        self.assertEqual(r.policy_platforms(self.policy), ['linux-x86_64', 'macos-aarch64', 'windows-x86_64'])
+        mutations = [
+            lambda pol: pol['platforms'].clear(),
+            lambda pol: pol['platforms'].update({'freebsd-x86_64': copy.deepcopy(pol['platforms']['windows-x86_64'])}),
+            lambda pol: pol['platforms']['macos-aarch64'].update(unsigned_artifact_name=WINDOWS_KIND),
+            lambda pol: pol['platforms']['macos-aarch64'].update(unsigned_artifact_name='nightly-unsigned'),
+            lambda pol: pol['platforms']['macos-aarch64'].update(extra=True),
+            lambda pol: pol['platforms']['macos-aarch64']['trust'].update(apple_team_id='short'),
+            lambda pol: pol['platforms']['macos-aarch64']['trust'].update(apple_team_id='synth12345'),
+            lambda pol: pol['platforms']['macos-aarch64']['trust'].update(apple_team_id='SYNTH12345\n'),
+            lambda pol: pol['platforms']['macos-aarch64']['trust'].update(publisher_subject='CN=x'),
+            lambda pol: pol['platforms']['macos-aarch64'].update(trust={'publisher_subject': 'CN=x'}),
+            lambda pol: pol['platforms']['windows-x86_64'].update(trust={'apple_team_id': 'SYNTH12345'}),
+            lambda pol: pol.update(platform='windows-x86_64'),
+            lambda pol: pol.update(windows_publisher_subject='CN=x'),
+            lambda pol: pol.update(unsigned_artifact_name=WINDOWS_KIND),
+            lambda pol: pol.pop('platforms'),
+        ]
+        for index, mutate in enumerate(mutations):
+            policy = copy.deepcopy(self.policy); mutate(policy)
+            with self.subTest(index=index), self.assertRaises(ValueError): r.validate_policy(policy)
+
+    def test_each_admitted_platform_needs_its_own_exact_artifact_and_live_reread(self):
+        key = '/actions/runs/100/artifacts?per_page=20&page=1'
+        self.api.rows[key] = {'total_count': 1, 'artifacts': [self.item]}
+        with self.assertRaisesRegex(ValueError, 'admitted platform'): self.invoke()
+        self.api.rows[key] = {'total_count': 2, 'artifacts': [self.item, self.mac_item]}
+        with self.assertRaisesRegex(ValueError, 'admitted platform'): self.invoke()  # Linux artifact missing.
+        self.api.rows[key] = {'total_count': 3, 'artifacts': [self.item, self.mac_item, self.linux_item]}
+        self.api.rows['/actions/artifacts/302']['digest'] = 'sha256:'+'9'*64
+        with self.assertRaisesRegex(ValueError, 'substituted'): self.invoke()
+        self.api.rows['/actions/artifacts/302'] = copy.deepcopy(self.mac_item)
+        request = self.invoke()
+        swapped = copy.deepcopy(request)
+        swapped['artifacts']['windows-x86_64'], swapped['artifacts']['macos-aarch64'] = (
+            swapped['artifacts']['macos-aarch64'], swapped['artifacts']['windows-x86_64'])
+        with self.assertRaisesRegex(ValueError, 'artifact request binding'): r.request_contract(self.policy, swapped)
+        missing = copy.deepcopy(request); del missing['artifacts']['macos-aarch64']
+        with self.assertRaisesRegex(ValueError, 'platform set'): r.request_contract(self.policy, missing)
+        legacy = copy.deepcopy(request); legacy['schema'] = 'craft-nightly-release-request/v1'
+        with self.assertRaises(ValueError): r.request_contract(self.policy, legacy)
+
+    def test_v3_receipt_binds_platform_trust_method_support_and_artifact(self):
+        request = self.invoke()
+        mac = r.release_receipt_v3(self.policy, request, 'macos-aarch64', 'f'*64, '1'*64, 'SYNTH12345', {})
+        self.assertEqual((mac['schema'], mac['platform'], mac['method']), ('craft-nightly-signing/v3', 'macos-aarch64', 'developer-id-notarized'))
+        self.assertEqual(mac['artifact'], request['artifacts']['macos-aarch64'])
+        win = r.release_receipt_v3(self.policy, request, 'windows-x86_64', 'f'*64, '1'*64, 'CN=Synthetic fixture only', {})
+        self.assertEqual(win['method'], 'authenticode')
+        for platform, signer in (('macos-aarch64', 'OTHER12345'), ('macos-aarch64', 'CN=Synthetic fixture only'),
+                                 ('windows-x86_64', 'SYNTH12345'), ('macos-aarch64', None), ('linux-x86_64', 'SYNTH12345')):
+            with self.subTest(platform=platform, signer=signer), self.assertRaises(ValueError):
+                r.release_receipt_v3(self.policy, request, platform, 'f'*64, '1'*64, signer, {})
+        # Windows and macOS signing must change bytes: no unsigned fallback.
+        with self.assertRaisesRegex(ValueError, 'unsigned fallback'):
+            r.release_receipt_v3(self.policy, request, 'macos-aarch64', 'f'*64, 'f'*64, 'SYNTH12345', {})
+        for support in ({'../x': {'size': 1, 'sha256': '1'*64}}, {'x.asc': {'size': 0, 'sha256': '1'*64}},
+                        {'x.asc': {'size': 1, 'sha256': 'bad'}}, {'x.asc': {'size': 1}}, []):
+            with self.subTest(support=support), self.assertRaises(ValueError):
+                r.release_receipt_v3(self.policy, request, 'macos-aarch64', 'f'*64, '1'*64, 'SYNTH12345', support)
+        with self.assertRaisesRegex(ValueError, 'policy v3'):
+            r.release_receipt_v3(self.legacy_policy(), self.legacy_request(), 'windows-x86_64', 'f'*64, '1'*64, 'CN=Synthetic fixture only', {})
 
 
 if __name__ == '__main__': unittest.main()

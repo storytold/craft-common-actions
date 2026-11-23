@@ -24,17 +24,22 @@ class WorkflowReviewTests(unittest.TestCase):
         common=(ROOT/'.github/workflows/nightly.yml').read_text()
         windows=(ROOT/'.github/workflows/nightly-windows.yml').read_text()
         caller=(ROOT/'examples/photocraft-nightly.yml').read_text()
-        for source in (common,windows):
+        apple={'APPLE_CERTIFICATE','APPLE_CERTIFICATE_PASSWORD','KEYCHAIN_PASSWORD','APPLE_ID','APPLE_PASSWORD','APPLE_TEAM_ID'}
+        for source,extra in ((common,apple|{'LINUX_SIGNING_KEY'}),(windows,set())):
             declarations=source.split('    secrets:\n',1)[1].split('    inputs:',1)[0]
-            self.assertEqual(set(re.findall(r'^      ([A-Z_]+):',declarations,re.M)),WINDOWS_NAMES)
-            self.assertEqual(declarations.count('required: false'),8)
-        for source in (job(common,'build-windows'),job(caller,'nightly')):
+            self.assertEqual(set(re.findall(r'^      ([A-Z_]+):',declarations,re.M)),WINDOWS_NAMES|extra)
+            self.assertEqual(declarations.count('required: false'),8+len(extra))
+        for source,extra in ((job(common,'build-windows'),set()),(job(caller,'nightly'),apple|{'LINUX_SIGNING_KEY'})):
             forwarded=re.findall(r'^      ([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}',source,re.M)
-            self.assertEqual(set(forwarded),{(name,name) for name in WINDOWS_NAMES})
+            self.assertEqual(set(forwarded),{(name,name) for name in WINDOWS_NAMES|extra})
         for source in (common,windows,caller):
             self.assertNotIn('secrets: inherit',source)
-        for name in ('build-linux','build-macos'):
-            self.assertNotIn('secrets:',job(common,name))
+        # macOS receives exactly the six stable Apple names; never the Windows set or inherit.
+        self.assertEqual(set(re.findall(r'^      ([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}',job(common,'build-macos'),re.M)),
+                         {(name,name) for name in apple})
+        # Linux receives exactly its one existing stable secret name; never the Windows set or inherit.
+        self.assertEqual(re.findall(r'^      ([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}',job(common,'build-linux'),re.M),
+                         [('LINUX_SIGNING_KEY','LINUX_SIGNING_KEY')])
         self.assertNotIn('secrets.',job(windows,'build'))
         self.assertNotIn('environment:',job(windows,'build'))
 
@@ -52,12 +57,11 @@ class WorkflowReviewTests(unittest.TestCase):
         for name in ('nightly-unix.yml','nightly-signing-unix.yml'):
             source=(ROOT/'.github/workflows'/name).read_text()
             linux=job(source,'linux')
-            if name=='nightly-unix.yml':
-                self.assertIn('if: ${{ false }}',linux)
-            else:
-                self.assertIn("github.repository == 'storytold/photocraft'",linux)
-                self.assertIn("github.ref == 'refs/heads/main'",linux)
-            self.assertIn('if: ${{ false }}',job((ROOT/'.github/workflows/nightly.yml').read_text(),'build-linux'))
+            self.assertNotIn('${{ false }}',linux.split('    steps:',1)[0])
+            self.assertIn("inputs.production-signing == true",linux)
+            self.assertIn("github.repository == 'storytold/photocraft'",linux)
+            self.assertIn("github.ref == 'refs/heads/main'",linux)
+            self.assertIn("inputs.production-signing == true",job((ROOT/'.github/workflows/nightly.yml').read_text(),'build-linux'))
             self.assertIn("python-version: '3.13'",linux)
             self.assertRegex(linux,r'actions/setup-python@[0-9a-f]{40}')
             self.assertLess(linux.index('actions/setup-python@'),linux.index('python3'))

@@ -3,9 +3,9 @@
 Nothing in this change configures GitHub, uses real signing credentials, runs a
 native build, publishes an attestation/release, or enables a schedule. Those
 remain publisher/user actions. Historical unsigned Windows proof is not proof of
-the final signed bytes. Linux and macOS build callers and native jobs stay
-literally disabled. Registry tuples, frozen fixtures and native truth gates are
-unchanged.
+the final signed bytes. The Linux and macOS build and signer jobs are opt-in: they
+run only when the app caller sets `production-signing: true`. Main-route
+attestation and publication remain hard-disabled (literal `false`).
 
 ## Signing boundary
 
@@ -70,18 +70,20 @@ or job env, checkout/build/smoke steps, or downstream publishing jobs.
 
 | Platform | Existing secret names (exact) | Required nonsecret trust policy |
 | --- | --- | --- |
-| Windows PFX | `WINDOWS_CERTIFICATE` (base64 PFX), `WINDOWS_CERTIFICATE_PASSWORD` | `NIGHTLY_WINDOWS_PUBLISHER_SUBJECT` repository variable, exact full subject accepted by Windows policy |
+| Windows PFX | `WINDOWS_CERTIFICATE` (base64 PFX), `WINDOWS_CERTIFICATE_PASSWORD` | reviewed `windows-publisher-subject` caller input (main route) or the v3 policy's `publisher_subject` (release route), committed source, no repository variable; exact full subject accepted by Windows policy |
 | Windows alternative | all of `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE` | same exact publisher subject; trust the valid chain, not one rotating leaf |
-| macOS | all of `APPLE_CERTIFICATE` (base64 Developer ID P12), `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` (app-specific), `APPLE_TEAM_ID` | `NIGHTLY_APPLE_TEAM_ID` repository variable; exact ten-character team must match signing configuration |
-| Linux | `LINUX_SIGNING_KEY` (existing ASCII-armored, unprotected OpenPGP signing key/subkey) | reviewed app-source `.github/nightly-linux-signing-key.asc`, exactly one primary public key, plus `NIGHTLY_LINUX_SIGNING_FINGERPRINT` repository variable with its independently reviewed full uppercase primary fingerprint |
+| macOS | all of `APPLE_CERTIFICATE` (base64 Developer ID P12), `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` (app-specific), `APPLE_TEAM_ID` | reviewed `apple-team-id` caller input (main route) or the v3 policy's `apple_team_id` (release route), both committed source, no repository variable; exact ten-character team must match `APPLE_TEAM_ID` |
+| Linux | `LINUX_SIGNING_KEY` (existing ASCII-armored, unprotected OpenPGP signing key/subkey) | reviewed app-source `.github/nightly-linux-signing-key.asc`, exactly one primary public key, plus the `linux-signing-fingerprint` caller input committed in reviewed caller source (never a repository variable) with its independently reviewed full uppercase primary fingerprint |
 
-Repository variables are needed for downstream receipt rechecks outside the
-protected environment. Changes require normal reviewed publisher policy. No
+The Windows subject and Apple team are public, so they come from committed,
+reviewed source (caller inputs on the main route, the v3 policy on the release
+route), not repository variables; downstream receipt rechecks read the same input.
+Changes require normal reviewed publisher policy. No
 actual subject, Apple team, public key, fingerprint, credentials, reviewers or
 GitHub settings are supplied by this source draft. Missing policy/configuration
 fails closed. A partially configured PFX must not silently select Azure instead.
 
-## macOS aarch64: authored path, not admission
+## macOS aarch64: admitted, behind production signing
 
 The pending Mac build job remains on the native Arm runner and validates the
 pending aarch64 bundle inventory. Before compilation it explicitly requires
@@ -108,10 +110,18 @@ team, hardened runtime, secure timestamp, signature integrity, stapled ticket
 and Gatekeeper assessment without executing payload. Ad-hoc, missing signatures
 or notarization never fall back to success.
 
-The actual Photo nightly Mac adapter and native proof are incomplete. The old
-`nightly_unix.py require_build_policy` Mac refusal deliberately remains too;
-removing it is a later source/native policy decision, not a result of authoring
-signer YAML. No macOS tuple is admitted or staged into the current feed.
+macOS is now admitted to the registry with Windows (one release carries both).
+The macOS producer, presence preflight and signer jobs run only when the app caller
+sets `production-signing: true` and selects `macos-aarch64`; the producer also runs
+the ad-hoc `--version` smoke in its secret-free job. `nightly_unix.py` no longer
+refuses Mac builds. Main-route `stage-nightly` requires the Windows, Linux and macOS
+jobs to succeed and stages one packet: the signed Windows ZIP, the notarized macOS
+ZIP, the Linux tar.gz and its detached `.asc` (the bundled key export is never staged),
+plus `NIGHTLY.json` and `SHA256SUMS.txt`; the packet seal binds every asset and the
+`.asc`. Main-route attestation and publication remain literally off. Verification now
+also requires the exact nightly `Identifier` and Gatekeeper's
+`source=Notarized Developer ID` from the reviewed team. No native Mac run has
+happened from this repository.
 
 ## Linux: use the stable OpenPGP scheme, not a new one
 
@@ -148,8 +158,16 @@ expired-policy signatures. Never bootstrap trust from `release-signing-key.asc`
 in the same release/feed, even if a manifest hash agrees. Signature asset name,
 size and hash must be bound by agreed `craft-nightly/v2` artifact.signature Download metadata (same release, exact `<archive>.asc`, 16 KiB cap), checksum lines and release asset digest, with verification before unpack/swap. No v1/debug fallback is permitted.
 Rotation needs a separately reviewed trust update, not a feed-supplied new key.
-The current feed schema and Launcher do not implement this contract; Linux
-remains unadmitted, with no claim of signed-install or native proof. A future
+Shared actions now admit `linux-x86_64` to the feed registry next to Windows (one
+release carries every admitted target; see the release-ref doc). The main-route
+Linux producer and signer jobs are gated by the caller's `production-signing`
+opt-in like Windows, and `LINUX_SIGNING_KEY` is declared and forwarded by name at
+`nightly.yml` → `nightly-unix.yml` → `nightly-signing-unix.yml`, never inherited.
+Verification uses gpgv with only the reviewed key and requires exactly one good,
+unexpired, unrevoked SHA-2 binary-document signature whose VALIDSIG primary is
+the reviewed fingerprint (the stable key signs with its subkey). The Launcher
+contract above is still separate work; admission here is no signed-install or
+native runtime proof. A future
 Linux publisher must carry/verify the signature support and any signed checksum
 metadata too, not just reuse the current Windows-only three-file packet.
 
