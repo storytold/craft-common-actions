@@ -369,7 +369,7 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(self.release.count('secrets.LINUX_SIGNING_KEY'), 2)
         sign = job_block(self.release, 'sign-linux')
         self.assertEqual(sign.count('secrets.LINUX_SIGNING_KEY'), 1)
-        self.assertEqual(job_block(self.release, 'publish-linux-packages').count('secrets.LINUX_SIGNING_KEY'), 1)
+        self.assertEqual(job_block(self.release, 'sign-linux-packages').count('secrets.LINUX_SIGNING_KEY'), 1)
         self.assertIn('    environment: release\n', sign)
         self.assertIn('runs-on: ubuntu-', sign)
         holders = [step for step in steps(sign) if 'secrets.' in step]
@@ -433,9 +433,9 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
     def test_publish_requires_both_linux_jobs_and_binds_their_digests(self):
         publish = job_block(self.release, 'publish')
         needs = re.search(r'    needs: \[([^\]]*)\]', publish).group(1).replace(' ', '').split(',')
-        self.assertIn('sign-linux', needs); self.assertIn('verify-linux', needs)
+        self.assertIn('sign-linux', needs); self.assertIn('verify-linux', needs); self.assertIn('sign-linux-packages', needs)
         self.assertIn("(!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || "
-                      "(needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success')) &&", publish)
+                      "(needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success' && needs.sign-linux-packages.result == 'success')) &&", publish)
         self.assertIn('artifact-ids: ${{ needs.sign-linux.outputs.artifact-id }}', publish)
         self.assertIn('path: .signed/linux-x86_64', publish)
         for name in ('SIGNED_BUNDLE_SHA256_LINUX_X86_64: ${{ needs.sign-linux.outputs.bundle-sha256 }}',

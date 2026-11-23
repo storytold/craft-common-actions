@@ -61,13 +61,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
         self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
-        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish", "publish-linux-packages", "notify-website"})
+        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "sign-linux-packages", "publish", "notify-website"})
         for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
             self.assertIn("--platform "+platform, graph[name])
         self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 5)  # 3 downloads, validate, upload
-        self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]", graph["publish"])
+        self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux, sign-linux-packages]", graph["publish"])
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
         for block in jobs(self.release).values():
@@ -228,7 +228,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertFalse(secrets["ARTCRAFT_SERVICES_DISPATCH_TOKEN"].get("required", True))
 
         notify = jobs(self.release)["notify-website"]
-        self.assertIn("needs: [validate, publish, publish-linux-packages]", notify)
+        self.assertIn("needs: [validate, publish]", notify)
         self.assertIn("needs.publish.result == 'success'", notify)
         self.assertIn("permissions: {}", notify)
         self.assertNotIn("environment:", notify)
@@ -236,11 +236,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, notify)
         self.assertIn("gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services", notify)
 
-        pkg = jobs(self.release)["publish-linux-packages"]
+        pkg = jobs(self.release)["sign-linux-packages"]
         self.assertIn("docker://$REGISTRY:$RELEASE_VERSION-$arch", pkg)
         self.assertIn("docker://$REGISTRY:nightly-$arch", pkg)
         self.assertNotIn("stable-$arch", pkg)
-        self.assertNotIn("publish-linux-packages", self.release.split("\njobs:\n", 1)[0])
+        self.assertNotIn("install-apt-packages", pkg)
+        self.assertIn("actions: read", pkg)
         self.assertIn("environment: release", pkg)
 
         unsigned_pkg = jobs(self.unsigned)["build-linux-packages"]

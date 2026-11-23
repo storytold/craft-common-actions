@@ -635,7 +635,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - id: rust
         uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         with:
@@ -672,9 +674,10 @@ jobs:
             exit 1
           fi
           packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
-          if [ -x packaging/linux/flatpak-oci.sh ]; then
-            packaging/linux/flatpak-oci.sh "${tarballs[0]}"
-          fi
+          test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
+          packaging/linux/flatpak-oci.sh "${tarballs[0]}"
+          base="$(basename "${tarballs[0]}" .tar.gz)"
+          test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
       - name: Find tarball for Arch package
         id: tarball
         env:
@@ -691,6 +694,21 @@ jobs:
         with:
           tarball: ${{ steps.tarball.outputs.path }}
           arch: ${{ matrix.arch }}
+      - name: Verify built Linux package versions match admitted nightly
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in dist/release/*; do
+            name="$(basename "$f")"
+            case "$name" in
+              *-"${VERSION}"-linux-"${ARCH}".*) ;;
+              *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
+              *) echo "::error::unexpected package or version mismatch in $name (expected *-${VERSION}-linux-${ARCH}.*)"; exit 1 ;;
+            esac
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-linux-packages-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
