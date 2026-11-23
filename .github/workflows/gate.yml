@@ -628,7 +628,7 @@ jobs:
 
       - name: Unreached Rust files
         if: ${{ runner.os == 'Linux' && inputs.unreached-rs-mode != 'off' }}
-        uses: storytold/craft-common-actions/actions/unreached-rs@c5a25e1fea37433cd49b0b883a00743d8b5cab3d
+        uses: storytold/craft-common-actions/actions/unreached-rs@8830c54c077af2c6bf20833eb46252d775f7b35e
         with:
           mode: ${{ inputs.unreached-rs-mode }}
           allow: ${{ inputs.unreached-rs-allow }}
