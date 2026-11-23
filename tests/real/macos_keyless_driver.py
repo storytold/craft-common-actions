@@ -208,6 +208,26 @@ def tampered(final, version, work):
     return out, str(victims[0].relative_to(root))
 
 
+def version_diagnosis(executable, work, version):
+    """Report-only: how the real binary answers each --version form within 60 s (bounded output)."""
+    forms = {"plain": [str(executable), "--version"],
+             "producer-smoke": [str(executable), "--launch-profile", "nightly-v1", "--profile-root", str(work/"diag-profile"), "--version"]}
+    result = {}
+    for name, argv in forms.items():
+        import time
+        started = time.monotonic()
+        try:
+            done = REAL_RUN(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, timeout=60,
+                            env={key: value for key, value in os.environ.items() if not key.startswith("PHOTOCRAFT_")})
+            result[name] = {"exit": done.returncode, "seconds": round(time.monotonic()-started, 1),
+                            "stdout": done.stdout.decode("utf-8", "replace")[:600], "stderr": done.stderr.decode("utf-8", "replace")[:1200],
+                            "exact": done.stdout.decode("utf-8", "replace").replace("\r\n", "\n") == "PhotoCraft "+version+" (nightly-v1)\n"}
+        except subprocess.TimeoutExpired as error:
+            result[name] = {"timed_out_after": 60, "stdout": (error.stdout or b"").decode("utf-8", "replace")[:600],
+                            "stderr": (error.stderr or b"").decode("utf-8", "replace")[:1200]}
+    return result
+
+
 def check(cases, name, ok, **data):
     cases.append({"case": name, "ok": bool(ok), **data})
 
@@ -247,7 +267,8 @@ def main():
         check(cases, "real unsigned app reports the exact nightly version", True, smoke=result,
               first_launch_seconds=first, second_launch_seconds=second, producer_bound_seconds=smoke.TIMEOUT)
     except Exception as error:  # noqa: BLE001
-        check(cases, "real unsigned app reports the exact nightly version", False, refusal=refusal(error))
+        check(cases, "real unsigned app reports the exact nightly version", False, refusal=refusal(error),
+              diagnosis=version_diagnosis(unpacked/APP/"Contents/MacOS/PhotoCraft", work, args.version))
 
     # 2. Throwaway signing and Launcher-style packaging must keep the seal.
     ident = {}
