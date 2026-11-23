@@ -118,8 +118,9 @@ def verify(trust, directory, asset, support, source, environment, version):
         if sig_name.endswith(".oci.sig"):
             target_name = sig_name[:-len(".oci.sig")] + ".oci-manifest.json"
             n.require(target_name in expected, f"missing manifest for {sig_name}")
-            sig_signer = signing.verify_linux_signature(
-                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment
+            expected_ref = f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"
+            sig_signer = signing.verify_oci_signature(
+                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, expected_ref, fingerprint, environment
             )
             n.require(sig_signer == fingerprint, f"verified OCI signer for {sig_name} differs from reviewed trust")
         elif sig_name.endswith(".pkg.tar.zst.sig"):

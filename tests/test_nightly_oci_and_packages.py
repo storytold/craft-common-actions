@@ -86,7 +86,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         def fake_run(cmd, check=True):
             calls.append(cmd)
 
-        with patch.object(oci.signing, "verify_linux_signature", return_value=self.fingerprint):
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             pushed = oci.verify_and_push_oci(
                 release=self.release,
                 repository=self.repo,
@@ -119,7 +119,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         import shutil
         calls = []
         shutil.rmtree(self.pkg_dir / f"{self.base_arm}-oci")
-        with patch.object(oci.signing, "verify_linux_signature", return_value=self.fingerprint):
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "expected exactly one OCI layout for aarch64"):
                 oci.verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
@@ -165,7 +165,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
     def test_signature_verification_failure_stops_before_push(self):
         calls = []
-        with patch.object(oci.signing, "verify_linux_signature", side_effect=n.InvalidNightly("bad signature")):
+        with patch.object(oci.signing, "verify_oci_signature", side_effect=n.InvalidNightly("bad signature")):
             with self.assertRaisesRegex(n.InvalidNightly, "bad signature"):
                 oci.verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
@@ -452,3 +452,36 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         (validated / deb_name).write_bytes(b"tampered-deb-bytes")
         with self.assertRaises(n.InvalidNightly):
             rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated))
+
+    def test_verify_oci_signature_checks_reference_and_manifest_digest(self):
+        import nightly_signing as signing
+
+        manifest = self.pkg_dir / f"{self.base}.oci-manifest.json"
+        sig = self.pkg_dir / f"{self.base}.oci.sig"
+        manifest_sha = hashlib.sha256(self.manifest_bytes).hexdigest()
+
+        def fake_cmd(argv, *, stdin=None, env=None, timeout=3900):
+            if argv[0] == "/usr/bin/gpgv":
+                out_idx = argv.index("--output") + 1
+                Path(argv[out_idx]).write_text(json.dumps({
+                    "critical": {
+                        "type": "atomic container signature",
+                        "identity": {"docker-reference": "ghcr.io/storytold/photocraft"},
+                        "image": {"docker-manifest-digest": f"sha256:{manifest_sha}"},
+                    }
+                }), encoding="utf-8")
+                return f"[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 1234 Test\n[GNUPG:] VALIDSIG {self.fingerprint} 2026-11-23 1795477446 0 4 0 22 10 00 {self.fingerprint}\n"
+            raise AssertionError(f"unexpected command: {argv}")
+
+        with patch.object(signing, "linux_public_keyring", return_value=self.root / "trusted.gpg"), \
+             patch.object(signing, "stop_gpg_agent"), \
+             patch.object(signing, "command", side_effect=fake_cmd):
+            self.assertEqual(
+                signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/photocraft", self.fingerprint, self.env),
+                self.fingerprint,
+            )
+            with self.assertRaisesRegex(n.InvalidNightly, "docker-reference mismatch"):
+                signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/other", self.fingerprint, self.env)
+            manifest.write_bytes(b'{"tampered":true}')
+            with self.assertRaisesRegex(n.InvalidNightly, "manifest digest mismatch"):
+                signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/photocraft", self.fingerprint, self.env)

@@ -106,8 +106,8 @@ def verify_and_push_oci(
         layout_digest = layout_manifest_digest(layout)
         n.require(layout_digest == manifest_digest, f"{layout.name} manifest digest differs from signed {manifest_name}")
 
-        signer = signing.verify_linux_signature(
-            public_key, pkg_root / sig_name, pkg_root / manifest_name, fingerprint, environment
+        signer = signing.verify_oci_signature(
+            public_key, pkg_root / sig_name, pkg_root / manifest_name, registry, fingerprint, environment
         )
         n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
         verified_layouts.append((arch, layout))
