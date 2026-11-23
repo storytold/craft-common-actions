@@ -18,7 +18,7 @@ class ResolveVersionTests(unittest.TestCase):
         self.data = yaml.safe_load(ACTION.read_text())
         self.step = self.data['runs']['steps'][0]
 
-    def _run_action(self, input_version="", version_env="", app_title="Test App", env_sh=None):
+    def _run_action(self, input_version="", version_env="", app_title="Test App", env_sh=None, nightly=False):
         with tempfile.TemporaryDirectory() as tmpdir:
             work = Path(tmpdir)
             if env_sh:
@@ -32,6 +32,7 @@ class ResolveVersionTests(unittest.TestCase):
                 'INPUT_VERSION': input_version,
                 'VERSION': version_env,
                 'APP_TITLE': app_title,
+                'NIGHTLY': 'true' if nightly else 'false',
                 'GITHUB_OUTPUT': str(output_file),
                 'GITHUB_STEP_SUMMARY': str(summary_file),
                 'GITHUB_SHA': 'abcdef1234567890',
@@ -123,6 +124,17 @@ class ResolveVersionTests(unittest.TestCase):
                 self.assertNotEqual(res.returncode, 0)
                 self.assertIn("is not a version like 1.2.3 or 1.2.3-rc.1", res.stdout + res.stderr)
                 self.assertEqual(outputs, {})
+
+    def test_nightly_appends_dated_prerelease(self):
+        res, outputs, _ = self._run_action(version_env="3.4.5", nightly=True)
+        self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+        expected_date = outputs["date"].replace("-", "")
+        self.assertEqual(outputs.get("version"), f"3.4.5-nightly.{expected_date}")
+        self.assertEqual(outputs.get("prerelease"), "true")
+
+        res, outputs, _ = self._run_action(input_version="9.9.9-rc.1", version_env="3.4.5", nightly=True)
+        self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+        self.assertEqual(outputs.get("version"), "9.9.9-rc.1")
 
 
 if __name__ == '__main__':
