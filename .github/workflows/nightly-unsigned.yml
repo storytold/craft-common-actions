@@ -19,10 +19,6 @@ on:
         description: "Reviewed literal JSON list of platforms this caller builds; the release signer still requires every admitted platform"
         type: string
         default: '["windows-x86_64"]'
-      publish-linux-packages:
-        description: "Opt in to building unsigned Linux distro packages (.deb, .rpm, .pkg.tar.zst, .AppImage, .flatpak, OCI layout) for the release-ref signer"
-        type: boolean
-        default: false
     outputs:
       unsigned-artifact-id:
         value: ${{ jobs.build.outputs.artifact-id }}
@@ -571,7 +567,7 @@ jobs:
   build-linux-packages:
     name: Linux packages ${{ matrix.arch }}
     needs: [git-sources, select-platforms]
-    if: inputs.publish-linux-packages && contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:

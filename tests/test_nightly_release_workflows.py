@@ -240,9 +240,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("docker://$REGISTRY:$RELEASE_VERSION-$arch", pkg)
         self.assertIn("docker://$REGISTRY:nightly-$arch", pkg)
         self.assertNotIn("stable-$arch", pkg)
+        self.assertNotIn("publish-linux-packages", self.release.split("\njobs:\n", 1)[0])
         self.assertIn("environment: release", pkg)
 
         unsigned_pkg = jobs(self.unsigned)["build-linux-packages"]
+        self.assertNotIn("publish-linux-packages", self.unsigned.split("\njobs:\n", 1)[0])
         for forbidden in ("secrets.", "id-token:", "attestations:", "environment:", "actions/cache"):
             self.assertNotIn(forbidden, unsigned_pkg)
 

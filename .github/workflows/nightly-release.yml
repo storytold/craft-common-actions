@@ -14,10 +14,6 @@ on:
       producer_run_attempt:
         type: string
         required: true
-      publish-linux-packages:
-        description: "Opt in to signing and publishing Linux distro packages (.deb, .rpm, .pkg.tar.zst, .AppImage, .flatpak) and Flatpak OCI tags"
-        type: boolean
-        default: false
     secrets:
       ARTCRAFT_SERVICES_DISPATCH_TOKEN:
         required: false
@@ -660,8 +656,9 @@ jobs:
     name: Sign and publish Linux packages
     needs: [validate, publish]
     if: >-
-      inputs.publish-linux-packages && !cancelled() &&
+      !cancelled() &&
       needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
+      contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
       needs.publish.result == 'success' &&
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/release' && github.ref_type == 'branch'
@@ -813,7 +810,7 @@ jobs:
     if: >-
       !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
       needs.publish.result == 'success' &&
-      (!inputs.publish-linux-packages || needs.publish-linux-packages.result == 'success') &&
+      (!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || needs.publish-linux-packages.result == 'success') &&
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: ubuntu-24.04
