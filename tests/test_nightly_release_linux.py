@@ -446,7 +446,12 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
         validate = job_block(self.release, 'validate')
         downloads = [step for step in steps(validate) if 'actions/download-artifact@' in step]
         platforms = ('linux-x86_64', 'macos-aarch64', 'windows-x86_64')
-        self.assertEqual(len(downloads), len(platforms))
+        pkg_names = (
+            'nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}',
+            'nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}',
+            'nightly-linux-arch-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}',
+        )
+        self.assertEqual(len(downloads), len(platforms) + len(pkg_names))
         for platform in platforms:
             matching = [step for step in downloads if 'path: .unsigned/'+platform+'\n' in step]
             with self.subTest(platform=platform):
@@ -456,7 +461,16 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn('artifact-ids: ${{ steps.admit.outputs.artifact-id-'+platform+' }}', step)
                 self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
                 self.assertIn('digest-mismatch: error', step)
+        for pkg_name in pkg_names:
+            matching = [step for step in downloads if 'name: '+pkg_name+'\n' in step]
+            with self.subTest(linux_packages=pkg_name):
+                self.assertEqual(len(matching), 1)
+                step = matching[0]
+                self.assertIn("if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')", step)
+                self.assertIn('path: .linux-packages', step)
+                self.assertIn('digest-mismatch: error', step)
         self.assertLess(validate.index('path: .unsigned/linux-x86_64'), validate.index('nightly_release_entry.py validate'))
+        self.assertLess(validate.index('path: .linux-packages'), validate.index('nightly_release_entry.py validate'))
 
     def test_publish_stops_when_the_run_is_cancelled(self):
         condition = job_block(self.release, 'publish').split('    runs-on:', 1)[0]

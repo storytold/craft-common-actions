@@ -457,13 +457,23 @@ def release_receipt(policy, request, unsigned_sha256, final_sha256, verified_sig
         'verified_signer': verified_signer}
 
 
+SIGNATURE_SUPPORT_SUFFIXES = ('.asc', '.sig')
+PACKAGE_SUPPORT_SUFFIXES = ('.deb', '.rpm', '.pkg.tar.zst', '.AppImage', '.AppImage.zsync', '.flatpak', '.oci-manifest.json')
+
+
 def support_binding(support):
-    """Finite signature support files (Linux .asc and public export); none for Windows/macOS."""
-    n.require(isinstance(support, dict) and len(support) <= 4, 'invalid signing support inventory')
+    """Finite signature and Linux package support files; none for Windows/macOS."""
+    n.require(isinstance(support, dict) and len(support) <= 64, 'invalid signing support inventory')
     for name, item in support.items():
         n.require(isinstance(name, str) and n.NAME.fullmatch(name), 'unsafe signing support name')
         n.fields(item, {'size', 'sha256'}, 'signing support binding')
-        n.require(type(item['size']) is int and 0 < item['size'] <= n.MAX_JSON_BYTES, 'invalid signing support size')
+        if name.endswith(SIGNATURE_SUPPORT_SUFFIXES):
+            limit = 16384
+        elif name.endswith(PACKAGE_SUPPORT_SUFFIXES):
+            limit = n.MAX_ASSET_BYTES
+        else:
+            raise n.InvalidNightly(f'unsupported signing support file {name}')
+        n.require(type(item['size']) is int and 0 < item['size'] <= limit, 'invalid signing support size')
         hash_value(item['sha256'])
     return support
 

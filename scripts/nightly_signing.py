@@ -339,14 +339,15 @@ def linux_public_keyring(public_key, fingerprint, homedir, environment=None):
     return keyring
 
 
-def verify_linux_signature(public_key, signature, payload, fingerprint, environment):
+def verify_linux_signature(public_key, signature, payload, fingerprint, environment, *, binary=False):
     """gpgv over exact bytes with only the reviewed key; one good signature bound to the primary."""
     signature = n.owned_path(signature)
     n.require(signature.is_file() and not signature.is_symlink() and 0 < signature.stat().st_size <= 16384,
               'Linux detached signature missing or exceeds 16KiB')
     raw = signature.read_bytes()
-    n.require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
-              all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
+    if not binary:
+        n.require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
+                  all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
     with tempfile.TemporaryDirectory(prefix='nightly-gpgv-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
         homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
         try:

@@ -26,7 +26,7 @@ PUBLIC_KEY = ".github/nightly-linux-signing-key.asc"
 PUBLIC_EXPORT = "release-signing-key.asc"
 MAX_SIGNATURE_BYTES = 16384
 SECRETS = ("LINUX_SIGNING_KEY",)
-CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE", "NIGHTLY_LINUX_PACKAGES_DIR")
+CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE", "GITHUB_REPOSITORY", "NIGHTLY_LINUX_PACKAGES_DIR")
 FINGERPRINT = re.compile(r"(?:[A-F0-9]{40}|[A-F0-9]{64})")
 
 
@@ -122,6 +122,13 @@ def verify(trust, directory, asset, support, source, environment, version):
                 Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment
             )
             n.require(sig_signer == fingerprint, f"verified OCI signer for {sig_name} differs from reviewed trust")
+        elif sig_name.endswith(".pkg.tar.zst.sig"):
+            target_name = sig_name[:-len(".sig")]
+            n.require(target_name in expected, f"missing payload for {sig_name}")
+            sig_signer = signing.verify_linux_signature(
+                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment, binary=True
+            )
+            n.require(sig_signer == fingerprint, f"verified Arch package signer for {sig_name} differs from reviewed trust")
         elif sig_name.endswith(".asc"):
             target_name = sig_name[:-len(".asc")]
             n.require(target_name in expected, f"missing payload for {sig_name}")
@@ -178,7 +185,7 @@ def sign(trust, unsigned, output, source, environment, version):
             sign_home = Path(temporary)/"pkg-gpg"; sign_home.mkdir(mode=0o700)
             try:
                 pkg_env = {**env, "GNUPGHOME": str(sign_home), "SIGNING_FPR": fingerprint,
-                           "OCI_REGISTRY": "ghcr.io/storytold/photocraft"}
+                           "OCI_REGISTRY": f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"}
                 subprocess.run(["gpg", "--batch", "--import"], input=env["LINUX_SIGNING_KEY"].encode("utf-8"),
                                env=pkg_env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["bash", str(sign_script), str(pkg_stage)], env=pkg_env, check=True)

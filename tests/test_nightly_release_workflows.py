@@ -66,7 +66,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
             self.assertIn("--platform "+platform, graph[name])
-        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 5)  # 3 downloads, validate, upload
+        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 8)  # 3 platform + 3 linux-package downloads, validate, upload
         self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]", graph["publish"])
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
@@ -88,7 +88,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                          "artifact-ids: ${{ steps.admit.outputs.artifact-id-macos-aarch64 }}", "path: .unsigned/windows-x86_64",
                          "path: .unsigned/macos-aarch64", "digest-mismatch: error"):
             self.assertIn(required, validator)
-        self.assertEqual(validator.count("merge-multiple: true"), 3)  # one exact download per supported platform
+        self.assertEqual(validator.count("merge-multiple: true"), 6)  # 3 platform + 3 linux-package downloads
 
     def test_only_signer_has_release_environment_and_only_leaf_step_exports_keys(self):
         graph = jobs(self.release)

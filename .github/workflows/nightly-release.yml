@@ -104,6 +104,39 @@ jobs:
           path: .unsigned/linux-x86_64
           merge-multiple: true
           digest-mismatch: error
+      - name: Download Linux x86_64 packages from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download Linux aarch64 packages from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download Linux aarch64 Arch package from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-arch-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
       - name: Verify every unsigned payload with trusted patched gh, then revalidate admission
         if: steps.admit.outputs.admitted == 'true'
         id: validate
@@ -111,7 +144,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python -I -B .nightly-tools/scripts/nightly_release_entry.py validate --source .release-source --state .admission --directory .unsigned --output .validated
+          $validateArgs = @('--source', '.release-source', '--state', '.admission', '--directory', '.unsigned', '--output', '.validated')
+          if (Test-Path .linux-packages) { $validateArgs += @('--linux-packages', '.linux-packages') }
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py validate @validateArgs
           if ($LASTEXITCODE -ne 0) { throw 'cryptographic unsigned provenance or retained quality refused' }
       - name: Upload only trusted validator handoff
         if: steps.admit.outputs.admitted == 'true'
@@ -446,30 +481,6 @@ jobs:
           path: .validated
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
-          path: .linux-packages
-          merge-multiple: true
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
-          path: .linux-packages
-          merge-multiple: true
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-arch-arm-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
-          path: .linux-packages
-          merge-multiple: true
       - name: Install Linux package signing tools
         run: |
           sudo apt-get update
@@ -485,7 +496,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_BUNDLE_SHA256: ${{ needs.validate.outputs.bundle-sha256 }}
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
-          NIGHTLY_LINUX_PACKAGES_DIR: .linux-packages
         run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py sign --platform linux-x86_64 --source .release-source --directory .validated --expected-sha256 "$EXPECTED_BUNDLE_SHA256" --output .signed
       - name: Upload only finite signed bytes, detached signature support and receipts
         id: upload

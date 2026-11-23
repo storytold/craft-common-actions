@@ -701,12 +701,23 @@ jobs:
           for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
             case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
           done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
           echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
       - uses: storytold/craft-common-actions/actions/arch-package@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         if: matrix.arch == 'x86_64'
         with:
           tarball: ${{ steps.tarball.outputs.path }}
           arch: ${{ matrix.arch }}
+      - name: Remove duplicate unsigned tarballs after packaging
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          shopt -s nullglob
+          rm -f dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz
       - name: Verify built Linux package versions match admitted nightly
         env:
           VERSION: ${{ steps.plan.outputs.version }}

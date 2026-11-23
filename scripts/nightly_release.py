@@ -178,8 +178,21 @@ def verify_bundle(directory, expected_sha256, extra, *, signed=False):
     return {name[:-5]: n.bounded_json(Path(directory)/name) for name in BUNDLE_FILES | ({"signing.json"} if signed else set())}
 
 
-def validated_names(plan):
-    return {row["unsigned_asset"] for row in plan["platforms"].values()}
+def linux_package_names(directory, plan):
+    """Extra validated Linux package filenames present alongside the unsigned bundle."""
+    if directory is None or "linux-x86_64" not in plan.get("platforms", {}):
+        return set()
+    version = plan["identity"]["version"]
+    known = BUNDLE_FILES | {row["unsigned_asset"] for row in plan["platforms"].values()}
+    names = set()
+    for path in Path(directory).iterdir():
+        if path.name not in known and path.is_file() and not path.is_symlink() and f"-{version}-linux-" in path.name and path.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES):
+            names.add(path.name)
+    return names
+
+
+def validated_names(plan, directory=None):
+    return {row["unsigned_asset"] for row in plan["platforms"].values()} | linux_package_names(directory, plan)
 
 
 def signed_names(receipt, plan):
@@ -282,8 +295,19 @@ def previous_publication(api, registry, policy, current_request, rows):
             receipt = r.release_receipt_v3(old_policy, request, platform, old["unsigned_sha256"], old["final_sha256"],
                 r.trusted_signer(old_policy, platform), old["support"])
             n.require(old == receipt, "prior two-role receipt differs")
-            n.require(set(receipt["support"]) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
-                "prior platform support set differs from its required detached signature files")
+            required = plat.required_support(platform, plan["platforms"][platform]["asset"])
+            support_names = set(receipt["support"])
+            if platform == "linux-x86_64":
+                n.require(required <= support_names,
+                    "prior platform support set differs from its required detached signature files")
+                version = plan["identity"]["version"]
+                for extra_name in support_names - required:
+                    n.require(f"-{version}-linux-" in extra_name and
+                        extra_name.endswith(r.SIGNATURE_SUPPORT_SUFFIXES + r.PACKAGE_SUPPORT_SUFFIXES),
+                        "invalid prior Linux package support name")
+            else:
+                n.require(support_names == required,
+                    "prior platform support set differs from its required detached signature files")
             expected_assets[plan["platforms"][platform]["asset"]] = receipt["final_sha256"]
             for name, item in receipt["support"].items():
                 expected_assets[name] = item["sha256"]
@@ -385,7 +409,7 @@ def verified_unsigned(policy, state, platform, directory, *, runner=subprocess.r
     return manifest, claims
 
 
-def stage_bundle(output, state, directories, manifests, claims):
+def stage_bundle(output, state, directories, manifests, claims, linux_packages=None):
     """One validated bundle: shared admission JSON plus every platform's unsigned payload."""
     n.fields(state, {"request", "quality", "plan"}, "validator state")
     plan = state["plan"]
@@ -403,7 +427,20 @@ def stage_bundle(output, state, directories, manifests, claims):
         with stream, (output/asset).open("xb") as destination:
             shutil.copyfileobj(stream, destination, 1024*1024)
         n.require(n.digest_file(output, asset)[1] == claims[platform]["payload_sha256"], "staged payload changed")
-    return bundle_hash(output, validated_names(plan))
+    if linux_packages is not None:
+        pkg_dir = n.owned_path(linux_packages)
+        n.require(pkg_dir.is_dir() and not pkg_dir.is_symlink(), "Linux packages directory required")
+        n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
+        version = plan["identity"]["version"]
+        for entry in sorted(pkg_dir.iterdir()):
+            if entry.is_dir() and not entry.is_symlink():
+                continue
+            n.require(n.NAME.fullmatch(entry.name) and f"-{version}-linux-" in entry.name and
+                entry.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES), f"invalid Linux package {entry.name}")
+            stream, _ = n.regular_file(pkg_dir, entry.name)
+            with stream, (output/entry.name).open("xb") as destination:
+                shutil.copyfileobj(stream, destination, 1024*1024)
+    return bundle_hash(output, validated_names(plan, output))
 
 
 def require_unsigned_binding(policy, state, platform, directory):
@@ -432,7 +469,17 @@ def native_sign(policy, state, platform, directory, source, output, environment)
     module = plat.plugin(platform)
     with tempfile.TemporaryDirectory(prefix="nightly-sign-out-", dir=n.owned_path(environment["RUNNER_TEMP"])) as temporary:
         signed = Path(temporary)/"signed"; signed.mkdir()
-        result = module.sign(trust, Path(directory)/names["unsigned_asset"], signed, Path(source).resolve(), environment, plan["identity"]["version"])
+        sign_env = environment
+        if platform == "linux-x86_64":
+            pkg_names = sorted(linux_package_names(directory, plan))
+            if pkg_names:
+                pkg_stage = Path(temporary)/"validated-linux-packages"; pkg_stage.mkdir()
+                for name in pkg_names:
+                    stream, _ = n.regular_file(directory, name)
+                    with stream, (pkg_stage/name).open("xb") as destination:
+                        shutil.copyfileobj(stream, destination, 1024*1024)
+                sign_env = {**environment, "NIGHTLY_LINUX_PACKAGES_DIR": str(pkg_stage)}
+        result = module.sign(trust, Path(directory)/names["unsigned_asset"], signed, Path(source).resolve(), sign_env, plan["identity"]["version"])
         n.fields(result, {"verified_signer", "support"}, "platform signing result")
         support = r.support_binding(result["support"])
         n.require(sorted(path.name for path in signed.iterdir()) == sorted({names["asset"], *support}), "platform signer output inventory differs")
@@ -665,7 +712,7 @@ def main():
     parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "admit", "validate", "guard", "sign",
         "verify-platform", "final", "publish"))
     for name in ("source", "directory", "output", "plan", "state", "platform", "expected-sha256", "producer-run-id",
-            "producer-run-attempt", "packet", "ownership", "combined"):
+            "producer-run-attempt", "packet", "ownership", "combined", "linux-packages"):
         parser.add_argument("--"+name)
     args = parser.parse_args()
     try:
@@ -727,13 +774,13 @@ def main():
             for platform, directory in directories.items():
                 manifests[platform], claims[platform] = verified_unsigned(policy, state, platform, directory)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-            digest = stage_bundle(args.output, state, directories, manifests, claims)
+            digest = stage_bundle(args.output, state, directories, manifests, claims, linux_packages=args.linux_packages)
             outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})
             return
         if args.mode in ("guard", "sign"):
             n.require(args.directory and args.platform and args.expected_sha256, "independent exact trusted-job bundle binding required")
             unverified = n.bounded_json(Path(args.directory)/"plan.json")
-            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified))
+            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified, args.directory))
             n.require(args.platform in state["plan"]["platforms"], "platform absent from validated bundle")
             require_unsigned_binding(policy, state, args.platform, args.directory)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
