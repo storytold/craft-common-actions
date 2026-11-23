@@ -146,9 +146,25 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(c.require_candidate_ancestry(self.f.github, C, P)['previous'], P)
 
     def test_divergence_rewind_wrong_merge_base_refuse(self):
-        for data in ({'status': 'diverged', 'ahead_by': 1, 'behind_by': 1}, {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C}, 'merge_base_commit': {'sha': B}}):
+        # Every override is a complete bounded lineage page (the fixture's C...main reply), so
+        # compare_page accepts it and the refusal can only come from the ancestry rule itself.
+        valid = {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C},
+                 'merge_base_commit': {'sha': C}, 'commits': []}
+        self.f.compare_override = copy.deepcopy(valid)
+        receipt = self.admit()  # Passing control: the same complete page with nothing changed is admitted.
+        self.assertEqual(self.revalidate(receipt), receipt)
+        diverged = 'candidate ancestry diverged/rewound or is not strictly advancing'
+        for change, message in (({'status': 'diverged'}, diverged),  # status alone
+                                ({'status': 'diverged', 'behind_by': 1}, diverged),
+                                ({'status': 'behind', 'ahead_by': 0, 'behind_by': 1}, diverged),
+                                ({'behind_by': 1}, diverged),
+                                ({'merge_base_commit': {'sha': B}}, diverged),
+                                ({'base_commit': {'sha': B}}, diverged),
+                                ({'status': 'identical', 'ahead_by': 0}, 'inconsistent compare metadata')):
+            data = {**copy.deepcopy(valid), **change}
+            self.assertIs(c.legacy.compare_page(data), data)  # Reaches _ancestry: the bounded-page shape is valid.
             self.f.compare_override = data
-            with self.subTest(data=data), self.assertRaises(ValueError): self.admit()
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, message): self.admit()
 
     def test_latest_C_race_refuses(self):
         count = [0]
