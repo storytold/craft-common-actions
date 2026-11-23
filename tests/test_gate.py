@@ -22,9 +22,11 @@ SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
 # The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
 # gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = 'ab35cb2622a77d004a8344095888bfcfbef10323'
+OWN_ACTION_REV = '315eb1972c857c839c3abb3d9288bfd40d21b7da'
+# The commit that uses system Python 3.11+; the action is not in OWN_ACTION_REV.
+UNREACHED_RS_REV = '8830c54c077af2c6bf20833eb46252d775f7b35e'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@bf191401c5b42eb6ac209e953880ae948a41570a'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
@@ -332,7 +334,7 @@ class GateWorkflowTests(unittest.TestCase):
                 self.assertFalse([s for s in later if 'gate-run' in s.get('uses', '')])
 
     def test_first_party_actions_share_reviewed_revision(self):
-        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes', 'cache-trim'}
+        expected = {'select-platforms', 'gate-setup', 'gate-run', 'restore-mtimes', 'cache-trim', 'unreached-rs'}
         actual = set()
         prefix = 'storytold/craft-common-actions/actions/'
         for _, job in JOBS.items():
@@ -341,7 +343,7 @@ class GateWorkflowTests(unittest.TestCase):
                 if not uses.startswith(prefix):
                     continue
                 name, revision = uses[len(prefix):].split('@')
-                self.assertEqual(revision, OWN_ACTION_REV, name)
+                self.assertEqual(revision, UNREACHED_RS_REV if name == 'unreached-rs' else OWN_ACTION_REV, name)
                 actual.add(name)
         self.assertEqual(actual, expected)
 

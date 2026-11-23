@@ -141,6 +141,9 @@ on:
       DOCKERHUB_TOKEN:
         description: "Personal access token for publishing Flatpak OCI layouts to Docker Hub"
         required: false
+      ARTCRAFT_SERVICES_DISPATCH_TOKEN:
+        description: "Token with Actions: write on storytold/artcraft-services to trigger update-craft-release-versions.yml after publishing"
+        required: false
 
     outputs:
       version:
@@ -896,19 +899,22 @@ jobs:
           cp -R "$X/usr/local/lib/rustlib/$target" /usr/local/lib/rustlib/
           base=https://download.freebsd.org/releases/arm64/aarch64/$release
           # Bound transient network retries; never extract an unverified partial file.
+          # 15.1-RELEASE base.txz is ~148 MB. A 180s cap is shorter than a typical
+          # download from the FreeBSD guest, and deleting the partial on each retry
+          # starts the 148 MB transfer over. Resume the .part file and allow 600s.
           fetch_release_file() {
             url=$1
             destination=$2
             attempt=1
             while [ "$attempt" -le 3 ]; do
-              if curl -fL --proto =https --proto-redir =https --connect-timeout 20 --max-time 180 \
-                -o "$destination.part" "$url"; then
+              if curl -fL --proto =https --proto-redir =https --connect-timeout 20 --max-time 600 \
+                -C - -o "$destination.part" "$url"; then
                 mv "$destination.part" "$destination"
                 return 0
               fi
-              rm -f "$destination.part"
               if [ "$attempt" -eq 3 ]; then
                 echo "error: could not fetch $url after $attempt attempts" >&2
+                rm -f "$destination.part"
                 return 1
               fi
               sleep "$((attempt * 5))"
@@ -1388,3 +1394,16 @@ jobs:
           fi
           gh release edit "$TAG" --draft=false
           echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"
+      - name: Trigger website repo version bump
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        env:
+          GH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set; skipping storytold/artcraft-services update-craft-release-versions.yml dispatch."
+            exit 0
+          fi
+          if ! gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services; then
+            echo "::warning::Failed to dispatch update-craft-release-versions.yml on storytold/artcraft-services."
+          fi

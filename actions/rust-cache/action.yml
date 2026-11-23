@@ -39,7 +39,8 @@ inputs:
       Drop CARGO_HOME from the cache key so it matches a leg that never had one. A toolchain action
       exports CARGO_HOME=$HOME/.cargo, which rust-cache hashes; the value changes nothing about the
       build, and the action's cached registry paths are that same directory, so it is only noise in
-      the key. Refuses to run when CARGO_HOME points somewhere else.
+      the key. Refuses to run when CARGO_HOME points somewhere else, unless it is the runner's own
+      cache that CRAFT_RUNNER_CARGO_HOME names.
     required: false
     default: "false"
   cache-workspace-crates:
@@ -182,10 +183,24 @@ runs:
 
     # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable it can see
     # (src/config.ts). A toolchain action's CARGO_HOME export therefore splits a key that should be
-    # shared; the two steps below differ only in that variable.
+    # shared; the plain and the aligned cache steps below differ only in that variable.
+    #
+    # rust-cache also caches, and at save prunes, the registry, git and bin directories under
+    # CARGO_HOME, and it has no input to leave them out. A self-hosted runner whose CARGO_HOME is a
+    # cache of its own (a node-wide crate cache that other jobs read and write at the same time)
+    # names that directory in CRAFT_RUNNER_CARGO_HOME. When the job's CARGO_HOME is that directory,
+    # rust-cache gets an unused, job-private directory as CARGO_HOME instead, so it never restores
+    # into, prunes or saves the runner's cache, and its entries hold only the target directory. That path
+    # differs from a GitHub-hosted leg's, so the two never restore each other's entries. A job that
+    # sets a CARGO_HOME of its own is not the runner's and is aligned or refused as before.
+    # Outputs: `mode` (empty for the plain steps, `aligned`, or `runner`) and the `cargo-home` the
+    # aligned steps give rust-cache.
     - name: Align the cache environment
-      if: inputs.align-environment == 'true'
+      id: cargo-home
+      if: inputs.align-environment == 'true' || runner.environment != 'github-hosted'
       shell: bash
+      env:
+        ALIGN: ${{ inputs.align-environment }}
       run: |
         set -euo pipefail
         # Compare the directories, not their spelling. On a Windows runner git-bash reports
@@ -217,9 +232,18 @@ runs:
           fi
           [ "$left" = "$right" ]
         }
-        if [ -n "${CARGO_HOME:-}" ] && ! same_directory "$CARGO_HOME" "$HOME/.cargo"; then
-          echo "::error::align-environment matches a leg with no CARGO_HOME, but this job sets $CARGO_HOME; drop the input, or stop overriding CARGO_HOME, so the cache never restores another registry directory"
-          exit 1
+        if [ -n "${CRAFT_RUNNER_CARGO_HOME:-}" ] && [ -n "${CARGO_HOME:-}" ] \
+          && same_directory "$CARGO_HOME" "$CRAFT_RUNNER_CARGO_HOME"; then
+          echo "CARGO_HOME is the runner's own cache, so rust-cache leaves it alone"
+          echo "mode=runner" >>"$GITHUB_OUTPUT"
+          echo "cargo-home=$RUNNER_TEMP/rust-cache-cargo-home" >>"$GITHUB_OUTPUT"
+        elif [ "$ALIGN" = true ]; then
+          if [ -n "${CARGO_HOME:-}" ] && ! same_directory "$CARGO_HOME" "$HOME/.cargo"; then
+            echo "::error::align-environment matches a leg with no CARGO_HOME, but this job sets $CARGO_HOME; drop the input, or stop overriding CARGO_HOME, so the cache never restores another registry directory"
+            exit 1
+          fi
+          echo "mode=aligned" >>"$GITHUB_OUTPUT"
+          echo "cargo-home=" >>"$GITHUB_OUTPUT"
         fi
 
     # v2.9.3 is the first release with both fixes the suite needs:
@@ -232,7 +256,7 @@ runs:
     #   which uses the top-level @actions/glob instead).
     # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
     - name: Rust cache
-      if: inputs.cache-workspace-crates != 'true' && inputs.align-environment != 'true'
+      if: inputs.cache-workspace-crates != 'true' && steps.cargo-home.outputs.mode == ''
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
@@ -241,14 +265,15 @@ runs:
         save-if: ${{ steps.save.outputs.save }}
         cache-on-failure: ${{ inputs.cache-on-failure }}
 
-    # An empty CARGO_HOME is falsy to rust-cache, so it leaves the variable out of the environment
-    # hash and falls back to $HOME/.cargo for the paths it caches (src/config.ts: `value &&` in the
-    # hash loop, `process.env.CARGO_HOME || path.join(HOME, ".cargo")` for the paths).
+    # An empty CARGO_HOME (align-environment) is falsy to rust-cache, so it leaves the variable out
+    # of the environment hash and falls back to $HOME/.cargo for the paths it caches
+    # (src/config.ts: `value &&` in the hash loop, `process.env.CARGO_HOME || path.join(HOME,
+    # ".cargo")` for the paths). On a runner-provided cargo home it is the job-private directory.
     - name: Rust cache (aligned environment)
-      if: inputs.cache-workspace-crates != 'true' && inputs.align-environment == 'true'
+      if: inputs.cache-workspace-crates != 'true' && steps.cargo-home.outputs.mode != ''
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       env:
-        CARGO_HOME: ""
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.key }}
@@ -265,7 +290,7 @@ runs:
     # steps cache the same paths, so the saved entries match the restore's version. Toolchain and
     # lockfile changes still restore the newest entry; Cargo rebuilds what they touch.
     - name: Rust cache (newest workspace entry)
-      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && inputs.align-environment != 'true'
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && steps.cargo-home.outputs.mode == ''
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
@@ -276,10 +301,10 @@ runs:
         save-if: "false"
 
     - name: Rust cache (newest workspace entry, aligned environment)
-      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && inputs.align-environment == 'true'
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && steps.cargo-home.outputs.mode != ''
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       env:
-        CARGO_HOME: ""
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.entry.outputs.crates }}
@@ -333,8 +358,24 @@ runs:
     # directory first. Either way the build stays correct. The post step trims the target directory
     # to dependencies and workspace crates and saves.
     - name: Rust cache (this run's workspace entry)
-      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true'
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true' && steps.cargo-home.outputs.mode != 'runner'
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.run-entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        cache-workspace-crates: "true"
+        save-if: "true"
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # The same save with the runner-provided cargo home's job-private stand-in, so the entry's paths
+    # match the restore's above and the runner's own cache is never pruned.
+    - name: Rust cache (this run's workspace entry, runner cargo home)
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true' && steps.cargo-home.outputs.mode == 'runner'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      env:
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
       with:
         prefix-key: ${{ inputs.cache-version }}-rust
         shared-key: ${{ steps.run-entry.outputs.key }}

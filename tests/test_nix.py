@@ -13,7 +13,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = yaml.load((ROOT / ".github/workflows/nix.yml").read_text(), Loader=yaml.BaseLoader)
-STEP = next(step for step in DATA["jobs"]["eval"]["steps"] if "run" in step)
+STEP = next(step for step in DATA["jobs"]["eval"]["steps"] if step.get("name") == "Check flake evaluation")
 DEFAULT = DATA["on"]["workflow_call"]["inputs"]["extra-args"]["default"]
 
 
