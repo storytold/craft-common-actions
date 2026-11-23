@@ -544,5 +544,23 @@ class RequestTests(unittest.TestCase):
         self.api.rows[last]['artifacts'] = self.api.rows[last]['artifacts'][:-1]
         with self.assertRaisesRegex(ValueError, 'incomplete'): self.invoke()
 
+    def test_publisher_subject_bound_matches_the_native_signer(self):
+        import nightly_signing as signing
+        azure = {key: 'synthetic' for key in signing.AZURE_SECRETS}
+        for length, accepted in ((1024, True), (1025, False)):
+            subject = 'CN=' + 'x'*(length-3)
+            with self.subTest(length=length):
+                native = {**azure, 'NIGHTLY_WINDOWS_PUBLISHER_SUBJECT': subject}
+                policy = {**self.policy, 'windows_publisher_subject': subject}
+                if accepted:
+                    signing.require_config('windows-x86_64', native); r.validate_policy(policy)
+                else:
+                    with self.assertRaises(ValueError): signing.require_config('windows-x86_64', native)
+                    # Refused at policy validation, before any provider read or artifact work.
+                    with self.assertRaisesRegex(ValueError, 'publisher subject'): r.validate_policy(policy)
+                    self.api.calls.clear()
+                    with self.assertRaises(ValueError): r.validate_request(policy, self.env, '100', '1', self.api, now=self.now)
+                    self.assertEqual(self.api.calls, [])
+
 
 if __name__ == '__main__': unittest.main()

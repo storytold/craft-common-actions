@@ -27,6 +27,9 @@ PLATFORMS = {'windows-x86_64': 'authenticode', 'macos-aarch64': 'developer-id-no
 WINDOWS_SECRETS = ('WINDOWS_CERTIFICATE', 'WINDOWS_CERTIFICATE_PASSWORD')
 AZURE_SECRETS = ('AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
                  'AZURE_SIGNING_ENDPOINT', 'AZURE_SIGNING_ACCOUNT', 'AZURE_CERT_PROFILE')
+# Longest exact Windows publisher subject the native signer accepts; release
+# policy validation uses the same bound so a bad subject refuses before artifact work.
+WINDOWS_PUBLISHER_SUBJECT_MAX = 1024
 APPLE_SECRETS = ('APPLE_CERTIFICATE', 'APPLE_CERTIFICATE_PASSWORD', 'KEYCHAIN_PASSWORD',
                  'APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID')
 FIELDS = {'schema', 'platform', 'method', 'identity_sha256', 'unsigned_sha256', 'final_sha256',
@@ -76,7 +79,7 @@ def require_config(platform, environment):
         else:
             n.require(all(environment.get(key) for key in AZURE_SECRETS), 'complete Windows PFX pair or six Azure values required')
         publisher = environment.get('NIGHTLY_WINDOWS_PUBLISHER_SUBJECT', '')
-        n.require(isinstance(publisher, str) and 0 < len(publisher) <= 1024 and
+        n.require(isinstance(publisher, str) and 0 < len(publisher) <= WINDOWS_PUBLISHER_SUBJECT_MAX and
                   not any(c in publisher for c in '\r\n\0'), 'configured exact Windows publisher subject required')
     elif platform == 'macos-aarch64':
         n.require(all(environment.get(key) for key in APPLE_SECRETS), 'all six Apple signing/notarization secrets required')

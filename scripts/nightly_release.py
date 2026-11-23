@@ -167,9 +167,12 @@ def previous_publication(api, registry, policy, current_request, rows):
     request = prior["request"]; signer = request["signer"]; producer = request["producer"]
     old_sha = r.commit(signer["source_commit"])
     current_sha = current_request["signer"]["source_commit"]
-    lineage = api.request("GET", f"/compare/{old_sha}...{current_sha}")
-    n.require(lineage.get("status") in ("ahead", "identical") and lineage.get("behind_by") == 0 and
-        lineage.get("merge_base_commit", {}).get("sha") == old_sha, "prior signer is not in trusted release history")
+    # Bounded file-free compare page: a long gap between syncs stays within the reply limit.
+    lineage = p.compare_page(api.request("GET", p.compare_path(old_sha, r.commit(current_sha))))
+    n.require(lineage.get("status") in ("ahead", "identical") and type(lineage.get("behind_by")) is int and
+        lineage["behind_by"] == 0 and lineage.get("merge_base_commit", {}).get("sha") == old_sha and
+        lineage.get("base_commit", {}).get("sha") == old_sha and
+        (lineage["status"] == "identical") == (old_sha == current_sha), "prior signer is not in trusted release history")
     blob = api.request("GET", "/contents/.github/nightly-signing-policy.json?ref="+old_sha)
     n.require(blob.get("encoding") == "base64" and type(blob.get("size")) is int and
         0 < blob["size"] <= n.MAX_JSON_BYTES and isinstance(blob.get("content"), str), "missing bounded prior protected policy")
@@ -359,13 +362,6 @@ def bookkeeping_warning(result, detail, error):
         pass  # A broken diagnostic stream is also post-verification bookkeeping.
 
 
-def publication_outputs(result):
-    try:
-        outputs({"release-id": result["id"]})
-    except OSError as error:
-        bookkeeping_warning(result, "GITHUB_OUTPUT could not be recorded", error)
-
-
 def outputs(values):
     if target := os.environ.get("GITHUB_OUTPUT"):
         with open(target, "a", encoding="utf-8") as stream:
@@ -483,8 +479,9 @@ def main():
             outputs({"subject-path": str(Path(args.directory, state["plan"]["asset"]).resolve())}); return
         n.require(args.packet and args.ownership, "new packet/ownership paths required")
         guard = lambda: revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-        result = publish(policy, state, args.directory, args.packet, args.ownership, api, guard, registry)
-        publication_outputs(result)
+        # No output after the release is public: nothing reads one, and a partial
+        # GITHUB_OUTPUT line would fail an otherwise verified publication step.
+        publish(policy, state, args.directory, args.packet, args.ownership, api, guard, registry)
     except UpToDate as error:
         if args.mode != "admit":
             parser.exit(1, str(error)+"; no further signing/publication permitted\n")

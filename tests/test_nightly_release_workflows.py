@@ -125,7 +125,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         uses = re.findall(r"uses:\s*(\S+)", self.safe)
         self.assertEqual(len(uses), 1)
         self.assertTrue(uses[0].startswith("actions/checkout@"))
-        self.assertIn("branches: [nightly/release-ref-signer]", self.safe)
+        # The release-ref branch is merged; pull requests and manual dispatch remain.
+        self.assertNotRegex(self.safe, r"(?m)^  push:")
         self.assertIn("python3 -m unittest discover", self.safe)
 
     def test_all_external_actions_use_immutable_full_commit_pins(self):
