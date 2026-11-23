@@ -101,6 +101,14 @@ on:
         type: boolean
         required: false
         default: false
+      nightly:
+        description: >-
+          Nightly prerelease build: resolves version as <base>-nightly.YYYYMMDD when `version` is
+          empty, runs without the `release` environment when triggered off the release branch,
+          publishes the prerelease, and pushes both dated and non-dated Flatpak OCI nightly tags.
+        type: boolean
+        required: false
+        default: false
 
     secrets:
       APPLE_CERTIFICATE:
@@ -230,6 +238,7 @@ jobs:
         with:
           input-version: ${{ inputs.version }}
           app-title: ${{ inputs.app-title }}
+          nightly: ${{ inputs.nightly }}
 
   macos:
     timeout-minutes: 90
@@ -237,7 +246,7 @@ jobs:
     if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -245,7 +254,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -314,7 +323,7 @@ jobs:
           # otherwise fill the repository's 10 GB cache budget with release entries.
           save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         run: cargo xtask version set "$VERSION"
       - name: Import signing certificate
         env:
@@ -367,7 +376,7 @@ jobs:
     # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
     # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
     runs-on: ${{ matrix.runner }}
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -381,7 +390,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -452,7 +461,7 @@ jobs:
           # otherwise fill the repository's 10 GB cache budget with release entries.
           save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         shell: bash
         run: cargo xtask version set "$VERSION"
       - name: Install WiX
@@ -485,7 +494,7 @@ jobs:
     needs: [version]
     # The signing key lives in the release environment, as it does for the macOS, Windows and
     # flatpak jobs; without this the Linux packages are built unsigned.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -500,7 +509,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -549,7 +558,7 @@ jobs:
           # otherwise fill the repository's 10 GB cache budget with release entries.
           save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         run: cargo xtask version set "$VERSION"
       - name: Build and package (AppImage, deb, rpm, tar.gz)
         env:
@@ -589,7 +598,7 @@ jobs:
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: read
       packages: write
@@ -805,7 +814,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -1104,7 +1113,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -1154,7 +1163,7 @@ jobs:
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         run: cargo xtask version set "$VERSION"
       - name: Build and zip
         if: ${{ !(inputs.web-craft-fonts && inputs.craft-fonts-ref != '') }}
@@ -1176,7 +1185,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1190,7 +1199,7 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       BUILD_DATE: ${{ needs.version.outputs.date }}
       BUILD_SHA: ${{ github.sha }}
-      INPUT_VERSION: ${{ inputs.version }}
+      INPUT_VERSION: ${{ inputs.version || (inputs.nightly && needs.version.outputs.version) || '' }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -1237,7 +1246,7 @@ jobs:
           # otherwise fill the repository's 10 GB cache budget with release entries.
           save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         run: cargo xtask version set "$VERSION"
       - uses: storytold/craft-common-actions/actions/install-riscv64-cross@main
       - name: Install nfpm (SHA256-verified)
@@ -1338,7 +1347,7 @@ jobs:
           # otherwise fill the repository's 10 GB cache budget with release entries.
           save-if: ${{ !inputs.dry-run }}
       - name: Apply version override
-        if: inputs.version != ''
+        if: inputs.version != '' || inputs.nightly
         run: cargo xtask version set "$VERSION" || cargo run --locked -q -p xtask -- version set "$VERSION" || true
       - name: Build and package (tar.gz)
         run: packaging/server/package.sh
@@ -1360,7 +1369,7 @@ jobs:
     if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: write
     steps:
@@ -1376,11 +1385,12 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ github.ref == 'refs/heads/release' && secrets.LINUX_SIGNING_KEY || '' }}
       - name: Publish the release
-        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        if: (inputs.publish || inputs.nightly) && !inputs.dry-run && (github.ref == 'refs/heads/release' || (inputs.nightly && github.ref == 'refs/heads/main'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: v${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
           CANCELLED: ${{ contains(needs.*.result, 'cancelled') }}
         run: |
           set -euo pipefail
@@ -1394,17 +1404,21 @@ jobs:
           fi
           now="$(gh release view "$TAG" --json assets --jq '.assets | length')"
           # The most recently published release; gh lists by creation, not publication.
-          last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | last | .tagName // ""')"
-          if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
-            before="$(gh release view "$last" --json assets --jq '.assets | length')"
-            if [ "$now" -lt "$before" ]; then
-              refuse "$TAG has $now assets where $last had $before: it stays a draft"
+          # Only enforce asset count parity against stable releases on the release branch;
+          # unsigned nightly builds on main omit .sig/.asc signature assets.
+          if [ "${PRERELEASE:-false}" != "true" ]; then
+            last="$(gh release list --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt --jq 'sort_by(.publishedAt) | last | .tagName // ""')"
+            if [ -n "$last" ] && [ "$last" != "$TAG" ]; then
+              before="$(gh release view "$last" --json assets --jq '.assets | length')"
+              if [ "$now" -lt "$before" ]; then
+                refuse "$TAG has $now assets where $last had $before: it stays a draft"
+              fi
             fi
           fi
           gh release edit "$TAG" --draft=false
           echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"
       - name: Trigger website repo version bump
-        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        if: (inputs.publish || inputs.nightly) && !inputs.dry-run && (github.ref == 'refs/heads/release' || (inputs.nightly && github.ref == 'refs/heads/main'))
         env:
           GH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
         run: |
