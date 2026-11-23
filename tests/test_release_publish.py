@@ -45,10 +45,7 @@ class PublishTests(unittest.TestCase):
             return out + (summary.read_text() if summary.exists() else '',) if with_summary else out
 
     def test_only_on_the_release_branch_when_asked_and_not_in_a_dry_run(self):
-        self.assertEqual(
-            STEP['if'],
-            "(inputs.publish || inputs.nightly) && !inputs.dry-run && (github.ref == 'refs/heads/release' || (inputs.nightly && github.ref == 'refs/heads/main'))",
-        )
+        self.assertEqual(STEP['if'], "inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'")
         spec = DATA['on']['workflow_call']['inputs']['publish']
         self.assertEqual((spec['type'], spec['default']), ('boolean', 'false'))
 
@@ -78,10 +75,7 @@ class PublishTests(unittest.TestCase):
         self.assertIn('--draft=false', edited)
 
     def test_website_bump_step_is_gated_and_warns_without_token(self):
-        self.assertEqual(
-            BUMP_STEP['if'],
-            "(inputs.publish || inputs.nightly) && !inputs.dry-run && (github.ref == 'refs/heads/release' || (inputs.nightly && github.ref == 'refs/heads/main'))",
-        )
+        self.assertEqual(BUMP_STEP['if'], "inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'")
         self.assertIn('ARTCRAFT_SERVICES_DISPATCH_TOKEN', DATA['on']['workflow_call']['secrets'])
         self.assertIn('gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services', BUMP_STEP['run'])
         r = subprocess.run(['bash', '-c', BUMP_STEP['run']], env=dict(os.environ, GH_TOKEN=''), capture_output=True, text=True)
