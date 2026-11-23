@@ -91,19 +91,45 @@ class UnixProducerTests(unittest.TestCase):
         return destination
 
     def test_exact_owner_rows_do_not_change_windows_admission(self):
-        for platform in u.CONTRACTS:
-            result=u.pending_contract(self.pending,platform)
-            self.assertFalse(result['feed_admitted']); self.assertFalse(result['runtime_qualified'])
-        self.assertEqual(self.registry['apps']['photocraft']['targets'][0]['target'],{'os':'windows','arch':'x86_64','format':'portable_zip'})
-        self.assertEqual(len(self.registry['apps']['photocraft']['targets']),1)
+        mac=u.pending_contract(self.pending,'macos-aarch64')
+        self.assertTrue(mac['feed_admitted']); self.assertEqual(mac['status'],'feed-admitted')
+        self.assertFalse(mac['runtime_qualified']) # Admission is not runtime qualification.
+        linux=u.pending_contract(self.pending,'linux-x86_64')
+        self.assertTrue(linux['feed_admitted']); self.assertEqual(linux['status'],'feed-admitted')
+        self.assertFalse(linux['runtime_qualified'])
+        targets=self.registry['apps']['photocraft']['targets']
+        self.assertEqual(targets[0]['target'],{'os':'windows','arch':'x86_64','format':'portable_zip'})
+        self.assertEqual([row for row in targets if row['target']['os']=='macos'],[u.registry_target(mac)])
+        self.assertEqual([row for row in targets if row['target']['os']=='linux'],[u.registry_target(linux)])
         self.assertTrue(all(not row['targets'] for name,row in self.registry['apps'].items() if name!='photocraft'))
 
+    def test_admitted_linux_row_must_match_the_feed_registry_exactly(self):
+        self.assertTrue(self.check()['feed_admitted'])
+        def linux_index(rows): return [row['target']['os'] for row in rows].index('linux')
+        for mutate in (lambda rows:rows.pop(linux_index(rows)),
+                       lambda rows:rows[linux_index(rows)].update(asset_pattern='photocraft-{version}-linux-x86_64.tar.gz'),
+                       lambda rows:rows[linux_index(rows)]['isolation'].update(associations='stable'),
+                       lambda rows:rows.append(copy.deepcopy(rows[linux_index(rows)]))):
+            registry=copy.deepcopy(self.registry); mutate(registry['apps']['photocraft']['targets'])
+            with self.subTest(registry=registry['apps']['photocraft']['targets']),self.assertRaisesRegex(n.InvalidNightly,'feed registry|duplicate|target'):
+                u.require_registry_admission(registry,'linux-x86_64',u.pending_contract(self.pending,'linux-x86_64'))
+
+    def test_a_pending_row_must_stay_out_of_the_feed_registry(self):
+        pending=copy.deepcopy(self.pending); pending['capabilities']['linux-x86_64'].update(status='private-source-pending',feed_admitted=False)
+        with patch.dict(u.ADMISSION,{'linux-x86_64':{'status':'private-source-pending','feed_admitted':False,'runtime_qualified':False}}):
+            row=u.pending_contract(pending,'linux-x86_64')
+            with self.assertRaisesRegex(n.InvalidNightly,'pending Unix target'):
+                u.require_registry_admission(self.registry,'linux-x86_64',row)
+
     def test_pending_admission_or_contract_mutations_are_refused(self):
-        for section,key,value in [('', 'feed_admitted',True),('', 'runtime_qualified',True),('', 'status','ready'),
+        for section,key,value in [('', 'feed_admitted',False),('', 'feed_admitted',1),('', 'runtime_qualified',True),('', 'status','ready'),('', 'status','private-source-pending'),
                                   ('target','arch','aarch64'),('isolation','profile_version',True),('isolation','associations','stable')]:
             pending=copy.deepcopy(self.pending); row=pending['capabilities']['linux-x86_64']
             (row[section] if section else row)[key]=value
-            with self.subTest(key=key),self.assertRaises(n.InvalidNightly): u.pending_contract(pending,'linux-x86_64')
+            with self.subTest(key=key,value=value),self.assertRaises(n.InvalidNightly): u.pending_contract(pending,'linux-x86_64')
+        for key,value in [('feed_admitted',False),('status','private-source-pending'),('runtime_qualified',True)]:
+            pending=copy.deepcopy(self.pending); pending['capabilities']['macos-aarch64'][key]=value
+            with self.subTest(mac=key),self.assertRaises(n.InvalidNightly): u.pending_contract(pending,'macos-aarch64')
 
     def test_exact_source_identity_and_disjoint_nightly_leaf_without_writes(self):
         before=self.cargo.read_bytes(); original=copy.deepcopy(self.prepared)
@@ -111,7 +137,7 @@ class UnixProducerTests(unittest.TestCase):
             result=self.check()
         self.assertEqual(result['target_leaf'],str(self.root/'targets/nightly-v1/linux-x86_64'))
         self.assertEqual(result['asset'],u.CONTRACTS['linux-x86_64']['asset_pattern'].replace('{version}',self.version))
-        self.assertFalse(result['feed_admitted']); self.assertTrue(result['private_only'])
+        self.assertTrue(result['feed_admitted']); self.assertFalse(result['private_only']); self.assertFalse(result['runtime_qualified'])
         self.assertEqual(self.cargo.read_bytes(),before); self.assertEqual(self.prepared,original)
         self.assertFalse((self.root/'targets').exists()); self.assertFalse((self.root/'dist').exists())
 
@@ -129,14 +155,26 @@ class UnixProducerTests(unittest.TestCase):
         (self.root/'link').symlink_to(self.root,target_is_directory=True)
         with self.assertRaises(n.InvalidNightly): self.check(target_base=self.root/'link')
 
-    def test_mac_planning_is_not_permission_to_build_or_extract(self):
+    def test_admitted_mac_builds_and_extracts_privately_but_is_never_signature_proof(self):
         result=self.check(platform='macos-aarch64')
-        self.assertFalse(result['feed_admitted'])
-        with self.assertRaises(n.Unavailable): u.require_build_policy('macos-aarch64')
-        archive=self.mac(); output=self.root/'no-mac-extraction'
-        with patch.object(n,'regular_file',side_effect=AssertionError('unavailable Mac extraction must not open an archive')):
-            with self.assertRaises(n.Unavailable): u.verify_archive(self.pending,'macos-aarch64',archive,self.version,output)
-        self.assertFalse(output.exists())
+        self.assertTrue(result['feed_admitted']); self.assertFalse(result['runtime_qualified']); self.assertFalse(result['private_only'])
+        self.assertIsNone(u.require_build_policy('macos-aarch64'))
+        with self.assertRaises(n.InvalidNightly): u.require_build_policy('freebsd-x86_64')
+        archive=self.mac(); output=self.root/'mac-extraction'
+        unpacked=u.verify_archive(self.pending,'macos-aarch64',archive,self.version,output)
+        self.assertFalse(unpacked['signature_verified']); self.assertFalse(unpacked['runtime_qualified'])
+        self.assertTrue((output/'PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft').is_file())
+
+    def test_admitted_mac_row_must_match_the_feed_registry_exactly(self):
+        for mutate in (lambda rows:[rows.remove(row) for row in list(rows) if row['target']['os']=='macos'],
+                       lambda rows:[row.update(asset_pattern='photocraft-{version}-macos-aarch64.zip') for row in rows if row['target']['os']=='macos'],
+                       lambda rows:rows.append(copy.deepcopy(rows[-1]))):
+            registry=copy.deepcopy(self.registry); mutate(registry['apps']['photocraft']['targets'])
+            with self.subTest(mutate=mutate),self.assertRaises(n.InvalidNightly):
+                u.require_registry_admission(registry,'macos-aarch64',u.pending_contract(self.pending,'macos-aarch64'))
+        for key,value in [('feed_admitted',False),('status','private-source-pending'),('runtime_qualified',True),('feed_admitted',1)]:
+            pending=copy.deepcopy(self.pending); pending['capabilities']['macos-aarch64'][key]=value
+            with self.subTest(mac=key),self.assertRaises(n.InvalidNightly): u.pending_contract(pending,'macos-aarch64')
 
     def test_literal_version_output_only_normalizes_line_endings(self):
         for end in ('\n','\r\n','\r'): u.verify_version_output(f'PhotoCraft {self.version} (nightly-v1)'+end,self.version)
@@ -260,12 +298,28 @@ class UnixWorkflowTests(unittest.TestCase):
 
     def test_native_workflows_are_explicitly_disabled_and_do_not_publish_or_sign(self):
         source=(ROOT/'.github/workflows/nightly-unix.yml').read_text()
-        for job in ('git-sources', 'linux', 'macos', 'linux-signing-config', 'macos-signing-config'):
+        for job in ('git-sources', 'linux', 'linux-signing-config', 'macos', 'macos-signing-config'):
             block=source.split('  '+job+':\n',1)[1].split('    steps:',1)[0]
-            self.assertIn('if: ${{ false }}',block)
+            self.assertNotIn('${{ false }}',block)
+            self.assertIn("inputs.production-signing == true && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&",block)
+            self.assertIn("github.ref == 'refs/heads/main'",block)
+            if job!='git-sources': self.assertIn("inputs.platform == '"+('linux-x86_64' if job.startswith('linux') else 'macos-aarch64')+"' && ",block)
         for job in ('linux', 'macos'):
             self.assert_unprivileged_build(source,job)
-        for forbidden in ('secrets:','contents: write','packages: write','schedule:','workflow_dispatch:','cargo xtask version set','--skip-build','--ad-hoc','import-cert.sh','publish_nightly.py'):
+        # The only secrets are the six stable Apple names and LINUX_SIGNING_KEY: declared, presence-checked
+        # in the environment job, and forwarded explicitly to the isolated signer; never to the build.
+        apple=['APPLE_CERTIFICATE','APPLE_CERTIFICATE_PASSWORD','KEYCHAIN_PASSWORD','APPLE_ID','APPLE_PASSWORD','APPLE_TEAM_ID']
+        self.assertEqual(sorted(set(re.findall(r'secrets\.([A-Z_]+)',source))-{'LINUX_SIGNING_KEY'}),sorted(apple))
+        self.assertNotIn('secrets.',source.split('  macos:\n',1)[1].split('  linux-signing-config:\n',1)[0])
+        forwarded=source.split('  sign-macos:\n',1)[1]
+        self.assertEqual(re.findall(r'^      ([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}',forwarded,re.M),[(name,name) for name in apple])
+        names=[name for name in re.findall(r'secrets\.[A-Z_]+',source) if not name.startswith(('secrets.APPLE_','secrets.KEYCHAIN_'))]
+        self.assertEqual(names,['secrets.LINUX_SIGNING_KEY','secrets.LINUX_SIGNING_KEY'])
+        self.assertIn('secrets.LINUX_SIGNING_KEY',source.split('  linux-signing-config:\n',1)[1].split('  macos-signing-config:\n',1)[0])
+        self.assertIn('secrets.LINUX_SIGNING_KEY',source.split('  sign-linux:\n',1)[1].split('  sign-macos:\n',1)[0])
+        self.assertIn("LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY != '' }}",source)
+        self.assertNotIn('secrets: inherit',source)
+        for forbidden in ('contents: write','packages: write','schedule:','workflow_dispatch:','cargo xtask version set','--skip-build','--ad-hoc','import-cert.sh','publish_nightly.py'):
             self.assertNotIn(forbidden,source)
         self.assertIn('uses: $/.github/workflows/nightly-signing-unix.yml', source)
         self.assertIn('ref: ${{ github.sha }}',source)
@@ -279,14 +333,33 @@ class UnixWorkflowTests(unittest.TestCase):
         self.assertIn('--version',source)
         self.assertIn('private-nightly-smoke-',source)
 
+    def test_linux_secret_is_explicitly_forwarded_at_every_boundary_and_used_only_to_sign(self):
+        main=(ROOT/'.github/workflows/nightly.yml').read_text()
+        unix=(ROOT/'.github/workflows/nightly-unix.yml').read_text()
+        signer=(ROOT/'.github/workflows/nightly-signing-unix.yml').read_text()
+        for source in (main,unix,signer):
+            declarations=source.split('  workflow_call:\n',1)[1].split('    inputs:',1)[0]
+            self.assertIn('      LINUX_SIGNING_KEY:\n        required: false\n',declarations)
+            self.assertNotIn('secrets: inherit',source)
+        linux=signer.split('  linux:\n',1)[1].split('  macos:\n',1)[0]
+        holders=[step for step in re.split(r'(?=^      - )',linux,flags=re.M) if 'secrets.' in step]
+        self.assertEqual(len(holders),1)
+        self.assertIn('LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}',holders[0])
+        self.assertIn('nightly_signing.py sign --platform linux-x86_64',holders[0])
+        self.assertIn('    environment: nightly-signing\n',linux)
+
     def test_existing_dry_run_mac_exclusion_is_not_new_coverage_or_target_admission(self):
         release=(ROOT/'.github/workflows/release.yml').read_text()
         mac=release.split('  macos:\n',1)[1].split('  windows:\n',1)[0]
         self.assertIn('if: ${{ !inputs.dry-run }}',mac)
         source=(ROOT/'.github/workflows/nightly.yml').read_text()
-        for platform,next_job in [('linux','macos'),('macos','status')]:
-            section=source.split('  build-'+platform+':\n',1)[1].split('  '+('build-'+next_job if next_job!='status' else 'status')+':\n',1)[0]
-            self.assertIn('if: ${{ false }}',section)
+        linux=source.split('  build-linux:\n',1)[1].split('  build-macos:\n',1)[0]
+        self.assertIn("if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true",linux)
+        self.assertIn('LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}',linux)
+        self.assertNotIn('APPLE_',linux); self.assertNotIn('WINDOWS_',linux)
+        section=source.split('  build-macos:\n',1)[1].split('  status:\n',1)[0]
+        self.assertIn("if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true",section)
+        self.assertNotIn('WINDOWS_',section); self.assertNotIn('LINUX_',section)
         self.assertIn('skipped native jobs are not platform coverage',source)
         self.assertIn('if: ${{ false }}',source.split('  publish-nightly:\n',1)[1])
         stage=source.split('  stage-nightly:\n',1)[1].split('  publish-nightly:\n',1)[0]

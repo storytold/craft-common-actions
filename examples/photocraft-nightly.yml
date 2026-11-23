@@ -28,6 +28,13 @@ jobs:
       AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
       AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
       AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
     with:
       tooling-revision: REVIEWED_PUBLISHED_TOOLING_SHA_REQUIRED
       app-name: photocraft
@@ -35,3 +42,6 @@ jobs:
       force: false
       manual-actors: '[]' # Manual runs and all re-runs stay denied until separately reviewed.
       production-signing: false # Nothing is signed or staged until explicit signing/publication approval sets true.
+      windows-publisher-subject: REVIEWED_STABLE_WINDOWS_PUBLISHER_SUBJECT_REQUIRED # Exact public Authenticode subject; reviewed here, not a repo variable.
+      apple-team-id: REVIEWED_STABLE_APPLE_TEAM_ID_REQUIRED # Public ten-character team that signs stable; reviewed here, not a repo variable.
+      linux-signing-fingerprint: 2B76741B414AAD6CD33E631213A005C0B9D7C3ED # Public stable Linux primary key; must match .github/nightly-linux-signing-key.asc.

@@ -24,11 +24,18 @@ POLICY_V1_FIELDS = {'schema', 'repository', 'repository_id', 'producer_workflow_
     'manual_actors', 'platform', 'max_age_seconds', 'candidate_policy',
     'unsigned_artifact_name', 'max_artifact_bytes', 'windows_publisher_subject'}
 POLICY_FIELDS = POLICY_V1_FIELDS | {'automatic_signer_actors'}
+# v3: one release for every admitted platform; per-platform artifact kind and trust.
+POLICY_V3_FIELDS = (POLICY_FIELDS - {'platform', 'unsigned_artifact_name', 'windows_publisher_subject'}) | {'platforms'}
+PLATFORM_POLICY_FIELDS = {'unsigned_artifact_name', 'trust'}
+LIVE_POLICY = 'craft-nightly-release-policy/v3'
 ROLE_FIELDS = {'repository', 'source_commit', 'run_id', 'run_attempt', 'run_number',
     'workflow_id', 'workflow_path', 'created_at', 'tooling_revision', 'event',
     'triggering_actor', 'run_started_at'}
 ARTIFACT_FIELDS = {'id', 'name', 'size_in_bytes', 'wrapper_sha256', 'created_at', 'expires_at'}
 REQUEST_FIELDS = {'schema', 'repository', 'policy_sha256', 'producer', 'signer', 'artifact'}
+REQUEST_V2_FIELDS = (REQUEST_FIELDS - {'artifact'}) | {'artifacts'}
+RECEIPT_V3_FIELDS = {'schema', 'platform', 'method', 'repository', 'policy_sha256', 'request_sha256',
+    'producer', 'signer', 'artifact', 'unsigned_sha256', 'final_sha256', 'verified_signer', 'support'}
 
 
 def digest(value):
@@ -62,11 +69,14 @@ def identifier(value):
 
 def validate_policy(policy):
     n.require(isinstance(policy, dict) and policy.get('schema') in
-        ('craft-nightly-release-policy/v1', 'craft-nightly-release-policy/v2'), 'unknown release policy schema')
-    n.fields(policy, POLICY_V1_FIELDS if policy['schema'] == 'craft-nightly-release-policy/v1' else POLICY_FIELDS,
-        'release policy')
-    n.require(policy['release_branch'] == 'release' and policy['platform'] == 'windows-x86_64',
-        'unreviewed release policy')
+        ('craft-nightly-release-policy/v1', 'craft-nightly-release-policy/v2', LIVE_POLICY), 'unknown release policy schema')
+    n.fields(policy, {'craft-nightly-release-policy/v1': POLICY_V1_FIELDS, 'craft-nightly-release-policy/v2': POLICY_FIELDS,
+        LIVE_POLICY: POLICY_V3_FIELDS}[policy['schema']], 'release policy')
+    n.require(policy['release_branch'] == 'release', 'unreviewed release policy')
+    if policy['schema'] == LIVE_POLICY:
+        validate_platforms(policy['platforms'])
+    else:
+        n.require(policy['platform'] == 'windows-x86_64', 'unreviewed release policy')
     n.require(isinstance(policy['repository'], str) and
         re.fullmatch(r'storytold/[A-Za-z0-9][A-Za-z0-9._-]{0,127}', policy['repository']),
         'unreviewed repository')
@@ -78,20 +88,49 @@ def validate_policy(policy):
     n.require(isinstance(ref, str) and re.fullmatch(
         r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-]+\.ya?ml@[0-9a-f]{40}', ref)
         and ref.rsplit('@', 1)[1] == policy['producer_tooling_revision'], 'unpinned reusable producer')
-    subject = policy['windows_publisher_subject']
-    n.require(isinstance(subject, str) and 0 < len(subject) <= signing.WINDOWS_PUBLISHER_SUBJECT_MAX and
-        not any(c in subject for c in '\r\n\0'), 'invalid protected Windows publisher subject')
+    if policy['schema'] != LIVE_POLICY:
+        subject = policy['windows_publisher_subject']
+        n.require(isinstance(subject, str) and 0 < len(subject) <= signing.WINDOWS_PUBLISHER_SUBJECT_MAX and
+            not any(c in subject for c in '\r\n\0'), 'invalid protected Windows publisher subject')
+        n.require(isinstance(policy['unsigned_artifact_name'], str) and
+            n.NAME.fullmatch(policy['unsigned_artifact_name']), 'invalid unsigned artifact kind')
     actor_sets(policy)
     n.require(type(policy['max_age_seconds']) is int and 0 < policy['max_age_seconds'] <= 604800,
         'invalid producer age bound')
     n.require(type(policy['max_artifact_bytes']) is int and
         0 < policy['max_artifact_bytes'] <= n.MAX_TOTAL_BYTES, 'invalid artifact size bound')
-    n.require(isinstance(policy['unsigned_artifact_name'], str) and
-        n.NAME.fullmatch(policy['unsigned_artifact_name']), 'invalid unsigned artifact kind')
     n.require(isinstance(policy['candidate_policy'], dict) and
         policy['candidate_policy'].get('schema') == 'craft-nightly-candidate-policy/v3',
         'explicit candidate v3 policy required; no fallback')
     return policy
+
+
+def validate_platforms(platforms):
+    """Exact per-platform artifact kind and one protected trust value each."""
+    import nightly_release_platforms as plat
+    n.require(isinstance(platforms, dict) and 0 < len(platforms) <= len(plat.SUPPORTED), 'invalid platform map')
+    for platform, entry in platforms.items():
+        n.require(platform in plat.SUPPORTED, 'unreviewed release-ref platform')
+        n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
+        n.require(entry['unsigned_artifact_name'] == 'nightly-unsigned-'+platform, 'unsigned artifact kind must be nightly-unsigned-<platform>')
+        plat.expected_signer(platform, entry['trust'])
+    return sorted(platforms)
+
+
+def policy_platforms(policy):
+    """Platforms one signer run must sign; v1/v2 history is Windows-only."""
+    if policy['schema'] == LIVE_POLICY:
+        return sorted(policy['platforms'])
+    return ['windows-x86_64']
+
+
+def trusted_signer(policy, platform):
+    if policy['schema'] == LIVE_POLICY:
+        import nightly_release_platforms as plat
+        n.require(platform in policy['platforms'], 'platform absent from protected policy')
+        return plat.expected_signer(platform, policy['platforms'][platform]['trust'])
+    n.require(platform == 'windows-x86_64', 'history policy is Windows-only')
+    return policy['windows_publisher_subject']
 
 
 def repository(policy, value):
@@ -104,7 +143,7 @@ def actor_sets(policy):
     manual = invocation.manual_actors(json.dumps(policy['manual_actors']))
     if policy['schema'] == 'craft-nightly-release-policy/v1':
         return manual, set()
-    n.require(policy['schema'] == 'craft-nightly-release-policy/v2', 'unknown actor policy schema')
+    n.require(policy['schema'] in ('craft-nightly-release-policy/v2', LIVE_POLICY), 'unknown actor policy schema')
     automatic = invocation.manual_actors(json.dumps(policy['automatic_signer_actors']))
     n.require(not manual & automatic, 'manual and automatic signer actor lists overlap')
     return manual, automatic
@@ -181,16 +220,21 @@ def active(api, role_data):
         row.get('state') == 'active', 'workflow paused/deleted/identity changed')
 
 
-def artifact_name(policy, producer):
+def artifact_name(policy, producer, platform='windows-x86_64'):
     """Fixed reviewed kind plus authenticated run/attempt, never a caller pattern."""
-    prefix = policy['unsigned_artifact_name']
+    if policy['schema'] == LIVE_POLICY:
+        n.require(platform in policy['platforms'], 'platform absent from protected policy')
+        prefix = policy['platforms'][platform]['unsigned_artifact_name']
+    else:
+        n.require(platform == 'windows-x86_64', 'history policy is Windows-only')
+        prefix = policy['unsigned_artifact_name']
     n.require(isinstance(prefix, str) and n.NAME.fullmatch(prefix), 'invalid unsigned artifact kind')
     for key in ('run_id', 'run_attempt'): n.positive(producer[key], key)
     return prefix+'-'+str(producer['run_id'])+'-'+str(producer['run_attempt'])
 
 
-def artifact(policy, row, producer, now):
-    n.require(isinstance(row, dict) and row.get('name') == artifact_name(policy, producer) and
+def artifact(policy, row, producer, now, platform='windows-x86_64'):
+    n.require(isinstance(row, dict) and row.get('name') == artifact_name(policy, producer, platform) and
         row.get('expired') is False, 'unsigned artifact missing/expired/wrong kind')
     n.positive(row.get('id'), 'artifact ID'); n.positive(row.get('size_in_bytes'), 'artifact bytes')
     n.require(row['size_in_bytes'] <= policy['max_artifact_bytes'], 'artifact exceeds bound')
@@ -218,7 +262,8 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     early snapshot before it downloads anything, then checks both boundaries.
     """
     validate_policy(policy)
-    n.require(policy['schema'] == 'craft-nightly-release-policy/v2', 'live admission requires role-scoped release policy v2')
+    n.require(policy['schema'] == LIVE_POLICY, 'live admission requires per-platform release policy v3; v1/v2 are history only')
+    platforms = policy_platforms(policy)
     n.positive(now, 'current UTC epoch')
     producer_id, producer_attempt = identifier(producer_run_id), identifier(producer_run_attempt)
     n.require(environment.get('GITHUB_REPOSITORY') == policy['repository'] and
@@ -245,7 +290,8 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
         before_artifacts(copy.deepcopy(producer))  # Failure prevents all artifact reads.
     # Run artifact API has no attempt selector. Creation bounds are supplementary;
     # the signed invocationId below supplies the indispensable attempt proof.
-    selected = []; seen = set(); total = None
+    selected = {platform: [] for platform in platforms}; seen = set(); total = None
+    names = {artifact_name(policy, producer, platform): platform for platform in platforms}
     for page in range(1, p.MAX_PAGES+1):
         reply = api.request('GET', f'/actions/runs/{producer_id}/artifacts?per_page={p.PAGE_SIZE}&page={page}')
         rows = reply.get('artifacts') if isinstance(reply, dict) else None
@@ -258,26 +304,32 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
             n.require(isinstance(row, dict), 'invalid artifact row')
             n.positive(row.get('id'), 'artifact ID')
             n.require(row['id'] not in seen, 'duplicate artifact ID'); seen.add(row['id'])
-            if row.get('name') == artifact_name(policy, producer): selected.append(artifact(policy, row, producer, now))
+            if row.get('name') in names:
+                platform = names[row['name']]
+                selected[platform].append(artifact(policy, row, producer, now, platform))
         # Stop once the reported total is read, including on the last allowed full page.
         if len(rows) < p.PAGE_SIZE or len(seen) == total: break
     else: raise n.Unavailable('artifact pagination bound reached')
-    n.require(len(seen) == total and len(selected) == 1, 'missing/ambiguous/incomplete unsigned artifact')
-    chosen = selected[0]
-    n.require(artifact(policy, api.request('GET', f"/actions/artifacts/{chosen['id']}"), producer, now) == chosen,
-        'live artifact substituted')
+    n.require(len(seen) == total and all(len(rows) == 1 for rows in selected.values()),
+        'missing/ambiguous/incomplete unsigned artifact for an admitted platform')
+    chosen = {platform: rows[0] for platform, rows in selected.items()}
+    for platform, item in chosen.items():
+        n.require(artifact(policy, api.request('GET', f"/actions/artifacts/{item['id']}"), producer, now, platform) == item,
+            'live artifact substituted')
     n.require(read_role(api, policy, producer_id, producer_attempt) == producer and
         read_role(api, policy, signer_id, signer_attempt, signer=True, producer=producer) == signer, 'admission changed during reads')
     active(api, producer); active(api, signer)
     p.require_newest_run(api, {'run': {**producer, 'id': producer_id,
         'attempt': producer_attempt, 'number': producer['run_number']}})
-    return {'schema': 'craft-nightly-release-request/v1', 'repository': policy['repository'],
-        'policy_sha256': digest(policy), 'producer': producer, 'signer': signer, 'artifact': chosen}
+    return {'schema': 'craft-nightly-release-request/v2', 'repository': policy['repository'],
+        'policy_sha256': digest(policy), 'producer': producer, 'signer': signer, 'artifacts': chosen}
 
 
 def request_contract(policy, request):
-    validate_policy(policy); n.fields(request, REQUEST_FIELDS, 'release request')
-    n.require(request['schema'] == 'craft-nightly-release-request/v1' and
+    validate_policy(policy)
+    live = policy['schema'] == LIVE_POLICY
+    n.fields(request, REQUEST_V2_FIELDS if live else REQUEST_FIELDS, 'release request')
+    n.require(request['schema'] == ('craft-nightly-release-request/v2' if live else 'craft-nightly-release-request/v1') and
         request['repository'] == policy['repository'] and request['policy_sha256'] == digest(policy),
         'request policy binding differs')
     for name in ('producer', 'signer'):
@@ -298,13 +350,27 @@ def request_contract(policy, request):
         n.require(p.timestamp(row['created_at']) <= p.timestamp(row['run_started_at']), 'role timestamps differ')
         require_actor(policy, row['event'], row['run_attempt'], row['triggering_actor'],
             signer=name == 'signer', producer=producer, reason='role current actor not authorized')
-    item = request['artifact']; n.fields(item, ARTIFACT_FIELDS, 'artifact binding')
-    n.positive(item['id'], 'artifact ID'); n.positive(item['size_in_bytes'], 'artifact bytes')
-    n.require(item['name'] == artifact_name(policy, producer) and
-        item['size_in_bytes'] <= policy['max_artifact_bytes'] and
-        p.timestamp(producer['run_started_at']) <= p.timestamp(item['created_at']) < p.timestamp(item['expires_at']),
-        'artifact request binding differs')
-    hash_value(item['wrapper_sha256'])
+    items = request['artifacts'] if live else {'windows-x86_64': request['artifact']}
+    n.require(isinstance(items, dict) and sorted(items) == policy_platforms(policy), 'artifact platform set differs')
+    ids = set()
+    for platform, item in items.items():
+        n.fields(item, ARTIFACT_FIELDS, 'artifact binding')
+        n.positive(item['id'], 'artifact ID'); n.positive(item['size_in_bytes'], 'artifact bytes')
+        n.require(item['id'] not in ids, 'duplicate artifact binding'); ids.add(item['id'])
+        n.require(item['name'] == artifact_name(policy, producer, platform) and
+            item['size_in_bytes'] <= policy['max_artifact_bytes'] and
+            p.timestamp(producer['run_started_at']) <= p.timestamp(item['created_at']) < p.timestamp(item['expires_at']),
+            'artifact request binding differs')
+        hash_value(item['wrapper_sha256'])
+
+
+def request_artifact(policy, request, platform):
+    request_contract(policy, request)
+    if policy['schema'] == LIVE_POLICY:
+        n.require(platform in request['artifacts'], 'platform absent from request')
+        return request['artifacts'][platform]
+    n.require(platform == 'windows-x86_64', 'history request is Windows-only')
+    return request['artifact']
 
 
 def require_gh_version(version_output):
@@ -390,3 +456,36 @@ def release_receipt(policy, request, unsigned_sha256, final_sha256, verified_sig
         'signer': copy.deepcopy(request['signer']), 'artifact': copy.deepcopy(request['artifact']),
         'unsigned_sha256': unsigned_sha256, 'final_sha256': final_sha256,
         'verified_signer': verified_signer}
+
+
+def support_binding(support):
+    """Finite signature support files (Linux .asc and public export); none for Windows/macOS."""
+    n.require(isinstance(support, dict) and len(support) <= 4, 'invalid signing support inventory')
+    for name, item in support.items():
+        n.require(isinstance(name, str) and n.NAME.fullmatch(name), 'unsafe signing support name')
+        n.fields(item, {'size', 'sha256'}, 'signing support binding')
+        n.require(type(item['size']) is int and 0 < item['size'] <= n.MAX_JSON_BYTES, 'invalid signing support size')
+        hash_value(item['sha256'])
+    return support
+
+
+def release_receipt_v3(policy, request, platform, unsigned_sha256, final_sha256, verified_signer, support):
+    """One platform's two-role receipt, formatted only after native/keyless verification.
+
+    Like v2 it authenticates nothing by itself; every consumer rebuilds it from the
+    protected policy, revalidated request and independently hashed bytes.
+    """
+    import nightly_release_platforms as plat
+    n.require(policy['schema'] == LIVE_POLICY, 'v3 receipts require policy v3')
+    item = request_artifact(policy, request, platform)
+    hash_value(unsigned_sha256); hash_value(final_sha256); support_binding(support)
+    module = plat.plugin(platform)
+    n.require(module.BYTES_MAY_BE_UNCHANGED or unsigned_sha256 != final_sha256,
+        'signing did not change the package; unsigned fallback refused')
+    n.require(isinstance(verified_signer, str) and verified_signer == trusted_signer(policy, platform),
+        'native verified signer differs from protected platform trust')
+    return {'schema': 'craft-nightly-signing/v3', 'platform': platform, 'method': module.METHOD,
+        'repository': policy['repository'], 'policy_sha256': digest(policy), 'request_sha256': digest(request),
+        'producer': copy.deepcopy(request['producer']), 'signer': copy.deepcopy(request['signer']),
+        'artifact': copy.deepcopy(item), 'unsigned_sha256': unsigned_sha256, 'final_sha256': final_sha256,
+        'verified_signer': verified_signer, 'support': copy.deepcopy(support)}

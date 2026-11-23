@@ -17,14 +17,27 @@ import nightly_artifacts as bindings
 import test_nightly_policy as fixture
 
 
+def windows_only_registry(registry=None):
+    """Frozen single-target registry for the Windows-only main-route attestation and
+    local E3/E4 packet paths. The live registry admits macOS as well; those multi-platform
+    releases go through the release-ref signer, and main-route attestation refuses them."""
+    import copy as _copy, json as _json
+    registry = _copy.deepcopy(registry) if registry is not None else _json.loads((ROOT/'nightly-apps.json').read_text())
+    photo = registry['apps']['photocraft']
+    photo['targets'] = [row for row in photo['targets'] if row['target']['os'] == 'windows']
+    return registry
+
+
 class AttestationTests(unittest.TestCase):
     def setUp(self):
         self.case=fixture.PolicyTests('test_green_gate_is_read_only_and_exact_source'); self.case.setUp()
+        self.case.registry=windows_only_registry(self.case.registry)
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name).resolve()
         self.ownership={'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(self.root)}
         ownership=patch.dict(os.environ,self.ownership); ownership.start(); self.addCleanup(ownership.stop)
         self.assets=self.root/'assets'; self.assets.mkdir(); self.packet=self.root/'packet'
+        self.registry_path=self.root/'nightly-apps.json'; self.registry_path.write_text(json.dumps(self.case.registry))
         self.filename=self.case.registry['apps']['photocraft']['targets'][0]['asset_pattern'].replace('{version}',self.case.prepared['version'])
         self.data=b'SYNTHETIC PACKAGE BYTES, NOT A ZIP OR EXECUTABLE'
         (self.assets/self.filename).write_bytes(self.data)
@@ -74,7 +87,7 @@ class AttestationTests(unittest.TestCase):
         receipt_dir=self.root/'signer';receipt_dir.mkdir(exist_ok=True)
         data=signing.receipt_data('windows-x86_64',self.filename,self.binding['identity_sha256'],'b'*64,self.binding['zip_sha256'],env['NIGHTLY_WINDOWS_PUBLISHER_SUBJECT'],env)
         receipt_path=receipt_dir/'nightly-signing.json';receipt_path.write_text(json.dumps(data))
-        argv=['fixture','--registry',str(ROOT/'nightly-apps.json'),'--identity',str(self.identity/'nightly-identity.json'),
+        argv=['fixture','--registry',str(self.registry_path),'--identity',str(self.identity/'nightly-identity.json'),
             '--policy',str(self.identity/'nightly-producer-policy.json'),'--directory',str(self.packet),'--config',str(self.config),
             '--identity-sha256',self.binding['identity_sha256'],'--packet-sha256',self.binding['packet_sha256'],
             '--zip-sha256',self.binding['zip_sha256'],'--asset',self.filename,

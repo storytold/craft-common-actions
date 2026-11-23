@@ -1,7 +1,22 @@
 name: Isolated pending Unix nightly signing
-# No native/registry admission. Called only after separately qualified builds.
+# Called only by nightly-unix.yml after the secret-free build, and only with production-signing.
 on:
   workflow_call:
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      LINUX_SIGNING_KEY:
+        required: false
     inputs:
       manual-actors:
         description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
@@ -34,10 +49,18 @@ on:
       asset:
         type: string
         required: true
+      linux-signing-fingerprint:
+        description: "Reviewed full uppercase primary fingerprint of the stable Linux key, committed in caller source; never a repository variable"
+        type: string
+        default: ''
       production-signing:
         description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
         type: boolean
         default: false
+      apple-team-id:
+        description: "Reviewed literal Apple Developer team ID from caller source (public); empty refuses macOS signing"
+        type: string
+        default: ''
     outputs:
       artifact-id:
         value: ${{ jobs.linux.outputs.artifact-id || jobs.macos.outputs.artifact-id }}
@@ -66,7 +89,7 @@ jobs:
     permissions:
       contents: read
     env:
-      NIGHTLY_LINUX_SIGNING_FINGERPRINT: ${{ vars.NIGHTLY_LINUX_SIGNING_FINGERPRINT }}
+      NIGHTLY_LINUX_SIGNING_FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       sha256: ${{ steps.sign.outputs.sha256 }}
@@ -202,18 +225,22 @@ jobs:
        ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
         contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 120
     environment: nightly-signing
     permissions:
       contents: read
     env:
-      NIGHTLY_APPLE_TEAM_ID: ${{ vars.NIGHTLY_APPLE_TEAM_ID }}
+      NIGHTLY_APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
       sha256: ${{ steps.sign.outputs.sha256 }}
       receipt-artifact-id: ${{ steps.receipt.outputs.artifact-id }}
       receipt-sha256: ${{ steps.sign.outputs.receipt-sha256 }}
     steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:

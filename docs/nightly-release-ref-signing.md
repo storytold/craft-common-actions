@@ -1,9 +1,85 @@
-# Windows release-ref nightly signer source
+# Release-ref nightly signer source (Windows, Linux and macOS, one release)
 
 This is a separate source implementation, not activation or release qualification.
 The existing stable `release.yml`, legacy candidate v1/v2 policy parsers, signing adapter and public
 pruning behavior are unchanged. No production policy is installed by this repository.
 PhotoCraft's prepared callers remain literally disabled until reviewed promotion.
+
+## Policy v3: one release for every admitted platform
+
+Live admission now requires `craft-nightly-release-policy/v3`. It keeps every v2
+field except `platform`, `unsigned_artifact_name` and `windows_publisher_subject`,
+which move into a per-platform map:
+
+```json
+"platforms": {
+  "windows-x86_64": {"unsigned_artifact_name": "nightly-unsigned-windows-x86_64",
+                     "trust": {"publisher_subject": "<exact Authenticode subject>"}},
+  "macos-aarch64":  {"unsigned_artifact_name": "nightly-unsigned-macos-aarch64",
+                     "trust": {"apple_team_id": "<stable's ten-character team>"}},
+  "linux-x86_64":   {"unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
+                     "trust": {"fingerprint": "2B76741B414AAD6CD33E631213A005C0B9D7C3ED"}}
+}
+```
+
+The producer caller must request the same three platforms in the one run the signer
+admits, for example:
+
+```yaml
+uses: storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@<reviewed SHA>
+with:
+  platforms: '["windows-x86_64","linux-x86_64","macos-aarch64"]'
+```
+
+`platforms` is validated once (`select-platforms`): a non-empty JSON array of
+distinct supported IDs, never a bare string.
+
+The map's keys must equal the photocraft targets admitted in `nightly-apps.json`.
+A nightly release carries every admitted platform or nothing: one failed or skipped
+platform job stops publication for that night, Windows included. v1 and v2 stay
+valid for authenticated history only (`craft-nightly-release-publication/v1`);
+new releases record `craft-nightly-release-publication/v2` with one
+`craft-nightly-signing/v3` receipt per platform. Requests become
+`craft-nightly-release-request/v2` with an exact `artifacts` map, one producer
+artifact per platform, each re-read live and bound to its platform's kind.
+
+Platform plug-ins live in `scripts/nightly_release_platforms.py` (Windows, macOS)
+and `scripts/nightly_release_linux.py` (Linux). Each signs one validated payload
+in its own protected job, receives only its own secrets, and is re-verified
+keylessly before a receipt exists. The trust value is the identity native
+verification must report; a plug-in's claim alone is never accepted.
+
+Producer (`nightly-unsigned.yml`, main): the caller lists `platforms`
+(default `["windows-x86_64"]`). macOS builds on `macos-15-xlarge` with
+`bash packaging/macos/nightly.sh --arch aarch64`, no secrets or environment, runs
+the inventory and the ad-hoc `--version` smoke there, then hands off the ZIP as
+`<asset>.unsigned.zip` to a fresh Ubuntu attester. The release signer requires every
+admitted platform's artifact from the one producer run.
+
+Signer (`nightly-release.yml`, release branch):
+
+| Job | Runner | Environment / secrets | Role |
+| --- | --- | --- | --- |
+| validate | windows-latest | none | admits once, downloads each platform's exact artifact ID into `.unsigned/<platform>`, runs trusted `gh attestation verify` per payload |
+| sign-windows | windows-latest | `release`: PFX/Azure names | unchanged Authenticode route |
+| sign-macos | macos-15 | `release`: the six stable `APPLE_*`/`KEYCHAIN_PASSWORD` names | app `packaging/macos/nightly-sign.sh` from the release checkout: stable `import-cert.sh`, `codesign --options runtime --timestamp`, `notarytool submit --apple-id --password --team-id --wait` (Accepted only), `stapler staple`; 5400 s budget |
+| verify-macos | macos-15 | none | keyless: thin arm64, `Identifier=ai.storyteller.photocraft.nightly`, Developer ID authority, exact team, hardened runtime, secure timestamp, `codesign --verify --strict --deep`, `stapler validate`, Gatekeeper `source=Notarized Developer ID` from the reviewed team |
+| smoke-macos | macos-15 | none, contents read only | after the digest equals verify-macos's output, runs the app's `nightly-verify.sh --expect signed` (`--version` of the shipped, hardened-runtime bytes) |
+| sign-linux | ubuntu-22.04 | `release`: `LINUX_SIGNING_KEY` in the sign step only | stable OpenPGP detached `<asset>.asc`, tar bytes unchanged |
+| verify-linux | ubuntu-22.04 | none | keyless gpgv against the reviewed source key, bound to the policy fingerprint |
+| publish | windows-latest | none | runs unless the workflow is cancelled (`!cancelled()`); requires every admitted platform's jobs to succeed, rechecks each per-platform bundle digest and receipt, verifies Windows natively, binds macOS to verify-macos's exact digest, attests every final asset and publishes one release |
+
+The macOS route copies stable's: same `release` environment, same secret names,
+same Apple ID + app-specific password notarization (not an API key). The nightly
+bundle ID differs (`ai.storyteller.photocraft.nightly`) but the team must be
+stable's. Final ZIPs are created without resource forks or extended attributes so
+a Launcher extractor cannot break the seal.
+
+Activation prerequisites added by macOS: Photo's `packaging/macos/nightly.sh`,
+`nightly-sign.sh`, `nightly-verify.sh` and `import-cert.sh` must exist in both the
+main producer source and the protected release checkout; the reviewed v3 policy
+must carry the real Apple team; the caller must list `macos-aarch64`. None of this
+has run on a Mac or against Apple's services from this repository.
 
 ## Trust boundaries
 
@@ -162,3 +238,37 @@ Pausing must work through existing workflow controls without a release push. Thi
 source change authorizes no release push/build/dispatch/signing/activation/settings
 or secrets changes. Shared signing identity incidents can affect stable trust too;
 reconcile the shared identity/credentials and affected outputs, not just one nightly.
+
+## Linux x86_64 plug-in
+
+`scripts/nightly_release_linux.py` plugs Linux into the multi-platform v3 signer
+with the stable OpenPGP route, not a new scheme. Policy trust is
+`{"fingerprint": "<full uppercase primary>"}`; for PhotoCraft that is the stable
+ArtCraft Linux Release Signing Key, primary
+`2B76741B414AAD6CD33E631213A005C0B9D7C3ED` (signing subkey
+`568DC1F68F8FAECC797F3C7B006DAF6BB0EF334E`). The protected release checkout
+must contain exactly that one public key at `.github/nightly-linux-signing-key.asc`.
+
+- Producer: `nightly-unsigned.yml` `build-linux` (ubuntu-22.04, no secrets,
+  environment or OIDC) runs only when the caller's `platforms` list includes
+  `linux-x86_64`. It builds `bash packaging/linux/nightly.sh --arch x86_64`,
+  inventories and smokes the GUI in the compiler job, and hands off
+  `photocraft-<v>-linux-x86_64-nightly.unsigned.tar.gz`; `attest-linux` attests
+  it on a fresh runner.
+- `sign-linux` (ubuntu, `release` environment): guard first, then the single sign
+  step receives `LINUX_SIGNING_KEY`. The plug-in inventories the tarball as data
+  before importing the key (links, CLI, install hooks or a non-x86_64 GUI refuse),
+  signs a detached ASCII-armored `<asset>.asc` in a private temporary keyring,
+  and re-verifies keylessly. Tar bytes never change (`BYTES_MAY_BE_UNCHANGED`).
+  The only published support file is `<asset>.asc` (it is the feed v2
+  `signature` row). No in-release key export is shipped: trust is the reviewed
+  key, and every recorded support file must be a public asset for later
+  history checks.
+- `verify-linux` (fresh, keyless): exact two-file inventory and size/SHA-256
+  bindings, data-only tar inventory, and gpgv against the reviewed source key with
+  one good SHA-2 binary signature bound to the primary fingerprint. Verification
+  refuses to run with `LINUX_SIGNING_KEY` present.
+
+Tests (`tests/test_nightly_release_linux.py`) use real GnuPG with throwaway keys
+of the stable shape and the published stable key/signature as fixtures. They are
+not a hosted run, a production-key signature or Launcher install proof.
