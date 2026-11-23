@@ -61,6 +61,14 @@ staging-only and live-publication checks as described in section 5 below.
 Automatic nightlies are opt-in, not a suite-wide switch. Measure the app's
 whole-CI duration first and leave enough time between scheduled runs.
 
+Production signing is a second, separate opt-in. The shared workflows take a
+boolean `production-signing` input that defaults to `false`; while it is off a
+scheduled run still does the identity and quality preflight, but no job that
+uses the `nightly-signing` environment runs, nothing is signed and nothing is
+staged for publication. A caller existing, or gaining a schedule, is therefore
+not consent to sign. Set `production-signing: true` in the caller only with the
+explicit signing and publication approval described below.
+
 The intended signing/publication owners are the existing release-managers group
 and additional people Brandon authorizes. The proposed `nightly-signing`
 environment has **no per-run reviewers**, so an admitted scheduled first attempt

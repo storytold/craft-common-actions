@@ -294,4 +294,99 @@ class PolicyTests(unittest.TestCase):
             text=path.read_text(); self.assertNotIn('<script>',text); self.assertIn('&lt;script&gt;',text)
             self.assertLess(len(text),8400)
 
+
+class LongHistoryAPI(FixtureAPI):
+    """Newest-first pages over a long history; exact release reads by ID."""
+    def __init__(self,case,history):
+        super().__init__(case); self.history=history; self.exact={}
+    def request(self,method,path,data=None):
+        if method=='GET' and path.startswith('/releases?'):
+            self.calls.append((method,path))
+            page=int(path.split('page=')[-1]); size=int(path.split('per_page=')[1].split('&')[0])
+            return copy.deepcopy(self.history[(page-1)*size:page*size])
+        if method=='GET' and path.startswith('/releases/'):
+            self.calls.append((method,path))
+            rid=int(path.rsplit('/',1)[1])
+            if rid in self.exact: return copy.deepcopy(self.exact[rid])
+            found=[row for row in self.history if row['id']==rid]
+            if not found:
+                from publish_nightly import APIError
+                raise APIError(404)
+            return copy.deepcopy(found[0])
+        if method=='GET' and path=='/actions/runs/1200': self.calls.append((method,path)); return copy.deepcopy(self.case.prior_run)
+        return super().request(method,path,data)
+
+
+class LongReleaseHistoryTests(unittest.TestCase):
+    """Publishing on and pruning off: the history grows well past 400 rows."""
+    TOTAL=1000
+    def setUp(self):
+        PolicyTests.setUp(self)
+        self.prior_run=dict(self.run,id=1200,run_number=16,created_at='2026-11-19T00:00:00Z',event='schedule')
+        prior_env=dict(self.env,GITHUB_RUN_ID='1200',GITHUB_RUN_NUMBER='16',GITHUB_EVENT_NAME='schedule')
+        self.prior=p.make_policy(self.registry,self.config,prior_env,self.prior_run,[self.stable])
+        tag=self.prior['identity']['tag']
+        newest={'id':5000,'tag_name':tag,'draft':False,'prerelease':True,'published_at':'2026-11-19T01:00:00Z','body':p.MARKER+json.dumps(self.prior)}
+        filler=[{'id':4000-i,'tag_name':f'v0.23.1-nightly.20261101.{999-i}.1.g{"a"*12}','draft':False,'prerelease':True,
+                 'published_at':'2026-11-01T00:00:00Z','body':p.MARKER+'{}'} for i in range(self.TOTAL-2)]
+        # The stable base is the oldest release, far outside the newest window.
+        self.history=[newest]+filler+[self.stable]
+        self.assertGreater(len(self.history),p.MAX_PAGES*p.PAGE_SIZE*2)
+        self.api=LongHistoryAPI(self,self.history)
+    def gate(self): return p.publication_gate(self.api,self.registry,self.config,self.prepared,self.policy,self.env)
+    def exact_reads(self): return [path for method,path in self.api.calls if path.startswith('/releases/')]
+    def list_reads(self): return [path for method,path in self.api.calls if path.startswith('/releases?')]
+
+    def test_prepare_reads_a_bounded_window_and_anchors_the_stable_base(self):
+        rows=p.releases(self.api)
+        self.assertEqual(len(self.list_reads()),p.MAX_PAGES)
+        self.assertEqual(self.exact_reads(),['/releases/33'])
+        self.assertEqual(p.stable_base(rows),{'release_id':33,'tag':'v0.23.1','version':'0.23.1'})
+        self.assertEqual(p.newest_nightly(rows)['id'],5000)
+        policy=p.make_policy(self.registry,self.config,self.env,self.run,rows)
+        self.assertEqual(policy['stable_base'],self.policy['stable_base'])
+        self.assertEqual(p.verify_prior(self.api,self.registry,p.newest_nightly(rows)),self.prior)
+
+    def test_publication_gate_passes_with_history_well_past_400(self):
+        self.assertTrue(self.gate())
+        self.assertTrue(all(method=='GET' for method,path in self.api.calls))
+        self.assertEqual(self.exact_reads(),['/releases/33'])
+        self.assertLessEqual(len(self.list_reads()),p.MAX_PAGES)
+
+    def test_newer_stable_inside_the_window_still_wins_over_the_anchor(self):
+        self.history.insert(1,dict(self.stable,id=44,tag_name='v0.24.0'))
+        self.assertEqual(p.stable_base(p.releases(self.api))['version'],'0.24.0')
+        with self.assertRaisesRegex(ValueError,'stable base changed'): self.gate()
+
+    def test_short_history_needs_no_anchor_read(self):
+        self.api.history=self.history[:5]+[self.stable]
+        rows=p.releases(self.api)
+        self.assertEqual(self.exact_reads(),[]); self.assertEqual(len(self.list_reads()),1)
+        self.assertEqual(p.stable_base(rows)['release_id'],33)
+
+    def test_missing_or_changed_anchor_fails_closed(self):
+        from publish_nightly import APIError
+        changes=({'prerelease':True},{'draft':True},{'tag_name':'v0.23.2'},{'id':34},{'published_at':None},None)
+        for change in changes:
+            with self.subTest(change=change):
+                self.api.calls.clear()
+                self.api.exact={33:None if change is None else dict(self.stable,**change)}
+                with self.assertRaises((ValueError,APIError)): p.releases(self.api)
+        self.api.exact={}; self.history.pop()  # Anchor deleted: exact read is 404.
+        with self.assertRaises(APIError) as caught: p.releases(self.api)
+        self.assertEqual(caught.exception.status,404)
+
+    def test_malformed_newest_nightly_cannot_anchor(self):
+        for body in (p.MARKER+'{}',p.MARKER+'{',p.MARKER+json.dumps({**self.prior,'stable_base':{'release_id':33}}),'no marker',
+                     p.MARKER+json.dumps({**self.prior,'stable_base':{'release_id':-1,'tag':'v0.23.1','version':'0.23.1'}})):
+            with self.subTest(body=body[:60]):
+                self.history[0]['body']=body
+                with self.assertRaises(ValueError): p.releases(self.api)
+                self.assertEqual(self.exact_reads(),[])
+
+    def test_full_window_without_any_nightly_still_refuses(self):
+        self.api.history=[dict(self.stable,id=i+1) for i in range(self.TOTAL)]
+        with self.assertRaisesRegex(ValueError,'pagination bound reached'): p.releases(self.api)
+        self.assertEqual(self.exact_reads(),[])
+
 if __name__=='__main__': unittest.main()

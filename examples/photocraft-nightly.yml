@@ -34,3 +34,4 @@ jobs:
       app-title: PhotoCraft
       force: false
       manual-actors: '[]' # Manual runs and all re-runs stay denied until separately reviewed.
+      production-signing: false # Nothing is signed or staged until explicit signing/publication approval sets true.

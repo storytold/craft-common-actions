@@ -64,14 +64,20 @@ not commands executed by this private source task.
 
 ## Finite bounds and explicit reconciliation
 
-The complete release scan remains 20 pages x20 releases with bounded page bodies.
-At 400 full records it refuses; it does not call an incomplete catalog complete,
-select a lower stable, blindly grow memory/page sizes, or prune to pass. The step
-summary names catalog-bound, unavailable prior run, lineage or version-regression
-refusals. Diagnostics remain independent even if any producer condition refuses.
+The release scan reads at most 20 pages x20 releases with bounded page bodies.
+A shorter history is read completely, as before. A longer one (GitHub serves only
+a bounded prefix of the list, with no documented order) is not treated as a
+complete catalog: the newest nightly in the window names the stable release it
+was built on, and that release is re-read by exact ID and must still be the same
+published stable tag. A newer stable inside the window still wins, and the
+newest nightly still goes through the full prior/freshness checks. A full window
+with no nightly, or an anchor that is gone, changed or malformed, refuses. It
+never grows memory/page sizes or prunes to pass. The step summary names
+catalog-bound, unavailable prior run, lineage or version-regression refusals.
+Diagnostics remain independent even if any producer condition refuses.
 
 For a deleted prior Actions run, renamed/recreated caller workflow, withdrawn
-stable base or exhausted complete catalog, the nightly lead/QA/publisher must own
+stable base or unanchored long catalog, the nightly lead/QA/publisher must own
 a separately reviewed migration: preserve prior tag/source/digest/policy evidence,
 choose the explicit new trusted lineage and valid monotonic base/identity, review
 compatibility and the exact validation/rollback boundary, then authorize only that

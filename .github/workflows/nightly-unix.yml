@@ -32,6 +32,10 @@ on:
         required: false
         type: string
         default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      production-signing:
+        description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -469,7 +473,7 @@ jobs:
 
   sign-linux:
     if: >-
-      inputs.platform == 'linux-x86_64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      inputs.production-signing == true && inputs.platform == 'linux-x86_64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
       ((github.event_name == 'schedule' && github.run_attempt == '1') ||
        ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
@@ -480,6 +484,7 @@ jobs:
     uses: $/.github/workflows/nightly-signing-unix.yml
     with:
       manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       platform: linux-x86_64
       app-name: ${{ inputs.app-name }}
@@ -492,7 +497,7 @@ jobs:
 
   sign-macos:
     if: >-
-      inputs.platform == 'macos-aarch64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      inputs.production-signing == true && inputs.platform == 'macos-aarch64' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
       github.ref == 'refs/heads/main' &&
       ((github.event_name == 'schedule' && github.run_attempt == '1') ||
        ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
@@ -503,6 +508,7 @@ jobs:
     uses: $/.github/workflows/nightly-signing-unix.yml
     with:
       manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
       tooling-revision: ${{ inputs.tooling-revision }}
       platform: macos-aarch64
       app-name: ${{ inputs.app-name }}
