@@ -1,0 +1,139 @@
+name: Push verified nightly Flatpak OCI tags
+# Separate from nightly-release.yml so nightly-release.yml needs no packages: write permission
+# and an OCI registry failure cannot affect release history or future nightly admissions.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        type: string
+        required: true
+      release_id:
+        type: string
+        required: true
+      release_tag:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      source_commit:
+        type: string
+        required: true
+      producer_run_id:
+        type: string
+        required: true
+      producer_run_attempt:
+        type: string
+        required: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+permissions:
+  contents: read
+  packages: write
+  actions: read
+jobs:
+  push-oci:
+    if: >-
+      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Bind immutable defining workflow
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - name: Install skopeo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+      - name: Verify release target, SHA256SUMS.txt, and .oci.sig before pushing OCI tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json id,tagName,targetCommitish,isDraft,isPrerelease,url > .release.json
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --output .linux-packages/SHA256SUMS.txt
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci-manifest.json" --dir .linux-packages --clobber
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci.sig" --dir .linux-packages --clobber
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, ".nightly-tools/scripts")
+          import nightly_oci as oci
+          import nightly_feed as n
+          policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+          fingerprint = policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"]
+          raw_rel = n.bounded_json(".release.json")
+          release = {
+              "id": raw_rel["id"],
+              "tag_name": raw_rel["tagName"],
+              "target_commitish": raw_rel["targetCommitish"],
+              "draft": raw_rel["isDraft"],
+              "prerelease": raw_rel["isPrerelease"],
+              "html_url": raw_rel.get("url", ""),
+          }
+          oci.verify_and_push_oci(
+              release=release,
+              repository=os.environ["GITHUB_REPOSITORY"],
+              tag=os.environ["RELEASE_TAG"],
+              version=os.environ["RELEASE_VERSION"],
+              source_commit=os.environ["SOURCE_COMMIT"],
+              release_id=int(os.environ["RELEASE_ID"]),
+              sums_bytes=open(".linux-packages/SHA256SUMS.txt", "rb").read(),
+              package_dir=".linux-packages",
+              public_key=".release-source/.github/nightly-linux-signing-key.asc",
+              fingerprint=fingerprint,
+              environment=os.environ,
+          )
+          PY

@@ -17,12 +17,6 @@ on:
     secrets:
       ARTCRAFT_SERVICES_DISPATCH_TOKEN:
         required: false
-      LINUX_SIGNING_KEY:
-        required: false
-      DOCKERHUB_USERNAME:
-        required: false
-      DOCKERHUB_TOKEN:
-        required: false
 permissions:
   contents: read
 concurrency:
@@ -532,156 +526,9 @@ jobs:
           EXPECTED_BUNDLE_SHA256: ${{ needs.sign-linux.outputs.bundle-sha256 }}
         run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py verify-platform --platform linux-x86_64 --source .release-source --directory .signed/linux-x86_64 --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
 
-  sign-linux-packages:
-    name: Sign Linux packages and push Flatpak OCI
-    needs: validate
-    if: >-
-      needs.validate.outputs.admitted == 'true' &&
-      contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
-      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/release' && github.ref_type == 'branch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 25
-    environment: release
-    permissions:
-      contents: read
-      actions: read
-      packages: write
-    steps:
-      - name: Check out only the actual release execution source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: .release-source
-          persist-credentials: false
-      - name: Bind protected policy and actual immutable defining workflow
-        shell: bash
-        env:
-          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
-          DEFINING_SHA: ${{ job.workflow_sha }}
-        run: |
-          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -I -B - <<'PY'
-          import json, os, re
-          p = os.environ['TOOLING_REVISION']
-          assert re.fullmatch('[0-9a-f]{40}', p) and p != '0'*40
-          assert os.environ['DEFINING_REPOSITORY'] == 'storytold/craft-common-actions'
-          assert os.environ['DEFINING_SHA'] == p
-          config = json.load(open('.release-source/.github/nightly-signing-policy.json'))
-          assert config['schema']=='craft-nightly-release-policy/v3'
-          assert config['signer_tooling_revision'] == p
-          PY
-      - name: Check out only the defining shared workflow revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .nightly-tools
-          persist-credentials: false
-      - name: Download only the exact validated admission artifact
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ needs.validate.outputs.artifact-id }}
-          path: .validated
-          merge-multiple: true
-          digest-mismatch: error
-      - name: Read admitted nightly version
-        id: admitted
-        run: |
-          version="$(python3 -I -B -c "import json; print(json.load(open('.validated/plan.json'))['identity']['version'])")"
-          test -n "$version"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
-          path: .linux-packages
-          merge-multiple: true
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
-          path: .linux-packages
-          merge-multiple: true
-      - name: Verify downloaded Linux packages match admitted nightly version
-        env:
-          RELEASE_VERSION: ${{ steps.admitted.outputs.version }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          files=(.linux-packages/*)
-          test "${#files[@]}" -gt 0 || { echo "::error::no Linux package artifacts found"; exit 1; }
-          for f in "${files[@]}"; do
-            name="$(basename "$f")"
-            case "$name" in
-              *-"${RELEASE_VERSION}"-linux-*) ;;
-              *) echo "::error::Linux package $name does not match admitted version $RELEASE_VERSION"; exit 1 ;;
-            esac
-          done
-      - name: Install signing and OCI tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends rpm debsigs skopeo binutils
-      - name: Push Flatpak OCI layouts to GHCR and Docker Hub (dated and nightly tags)
-        env:
-          RELEASE_VERSION: ${{ steps.admitted.outputs.version }}
-          REGISTRY: ghcr.io/${{ github.repository }}
-          GITHUB_TOKEN: ${{ github.token }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          REGISTRY="${REGISTRY,,}"
-          creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
-          for arch in x86_64 aarch64; do
-            layouts=(.linux-packages/*-linux-"${arch}"-oci)
-            for layout in "${layouts[@]}"; do
-              [ -d "$layout" ] || continue
-              base="$(basename "$layout" -oci)"
-              echo "==> Pushing to $REGISTRY:$RELEASE_VERSION-$arch"
-              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:$RELEASE_VERSION-$arch"
-              echo "==> Pushing to $REGISTRY:nightly-$arch"
-              skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:nightly-$arch"
-              skopeo inspect --raw --creds "$creds" "docker://$REGISTRY:$RELEASE_VERSION-$arch" >".linux-packages/$base.oci-manifest.json"
-              if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-                dh_registry="docker.io/storytold/${REGISTRY##*/}"
-                dh_creds="$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN"
-                echo "==> Pushing to $dh_registry:$RELEASE_VERSION-$arch"
-                skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:$RELEASE_VERSION-$arch"
-                echo "==> Pushing to $dh_registry:nightly-$arch"
-                skopeo copy --format oci --dest-creds "$dh_creds" "oci:$layout" "docker://$dh_registry:nightly-$arch"
-              fi
-              rm -rf "$layout"
-            done
-          done
-      - name: Import the Linux signing key
-        id: key
-        uses: storytold/craft-common-actions/actions/import-signing-key@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-        with:
-          key: ${{ secrets.LINUX_SIGNING_KEY }}
-      - name: Sign Linux packages
-        env:
-          SIGNING_ENABLED: ${{ steps.key.outputs.enabled }}
-        run: |
-          set -euo pipefail
-          cd .linux-packages
-          if [ "$SIGNING_ENABLED" = "true" ]; then
-            OCI_REGISTRY="ghcr.io/${GITHUB_REPOSITORY,,}" ../.nightly-tools/actions/draft-release/sign-linux.sh .
-          fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: nightly-signed-linux-packages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .linux-packages/*
-          if-no-files-found: error
-
   publish:
     name: Publish signed nightly
-    needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux, sign-linux-packages]
+    needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]
     # !cancelled() (not always()) so a skipped NON-admitted platform cannot block while a cancel
     # still stops release writes; every admitted
     # platform's jobs must have succeeded, and the bridge refuses a missing digest too.
@@ -689,12 +536,12 @@ jobs:
       !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') || needs.sign-windows.result == 'success') &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' && needs.smoke-macos.result == 'success')) &&
-      (!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || (needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success' && needs.sign-linux-packages.result == 'success')) &&
+      (!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || (needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success')) &&
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: windows-latest
     # Every step has its own bound and the job budget exceeds their sum, so a slow
     # step fails as a step: the tolerant ownership upload can never time the job out.
-    timeout-minutes: 110
+    timeout-minutes: 95
     # Fresh Windows verifier, but NO release environment or platform secrets.
     permissions:
       contents: write
@@ -788,47 +635,6 @@ jobs:
         run: |
           python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --combined .combined --packet .packet --ownership .ownership
           if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
-      - name: Download signed Linux packages for the published release
-        if: contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64')
-        timeout-minutes: 5
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: nightly-signed-linux-packages-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .linux-packages
-          if-no-files-found: error
-      - name: Merge SHA256SUMS.txt and upload signed Linux packages to the nightly release
-        if: contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64')
-        timeout-minutes: 10
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          tag="$(python3 -I -B -c "import json; print(json.load(open('.combined/NIGHTLY.json'))['tag'])")"
-          test -n "$tag"
-          cd .linux-packages
-          rm -f SHA256SUMS.txt SHA256SUMS.txt.asc existing-sums.txt new-sums.txt
-          gh release download "$tag" --pattern SHA256SUMS.txt --output existing-sums.txt
-          sha256sum -- * | grep -vE '^(.*  )?(existing-sums\.txt|new-sums\.txt|SHA256SUMS\.txt(\.asc)?)$' > new-sums.txt
-          python3 -I -B - <<'PY'
-          def parse_sums(path):
-              rows = []
-              for line in open(path, encoding="utf-8"):
-                  line = line.rstrip("\n")
-                  if not line:
-                      continue
-                  digest, name = line.split("  ", 1)
-                  rows.append((name, line))
-              return rows
-          new_rows = parse_sums("new-sums.txt")
-          replaced = {name for name, _ in new_rows}
-          merged = [line for name, line in parse_sums("existing-sums.txt") if name not in replaced]
-          merged.extend(line for _, line in new_rows)
-          open("SHA256SUMS.txt", "w", encoding="utf-8").write("\n".join(merged) + "\n")
-          PY
-          rm -f existing-sums.txt new-sums.txt
-          gh release upload "$tag" --clobber *
       - name: Retain only finalized ownership evidence
         timeout-minutes: 5
         if: always()
