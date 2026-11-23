@@ -187,9 +187,11 @@ budget refuses at contract time, before any provider read. That estimate is
 `FIXED_READS` (20: the Sonar snapshot, gate and latest rereads, ancestry reads and
 the two closing Sonar reread pairs) plus the per-workflow reads, so the workflows
 may use at most 620 reads; a shape whose workflow reads alone total 640 refuses.
-The closing Sonar rereads bracket the final workflow freshness pass, so a
-workflow rerun during the first Sonar rereads and a Sonar change during the
-freshness reads are both refused. Workflow-run `path`
+Sonar rereads bracket the final workflow freshness pass, so a workflow rerun
+during the first Sonar rereads and a Sonar change during the freshness reads are
+both refused. Any resource can still change after its own last read (for example
+a workflow rerun during the closing Sonar rereads); publication-time revalidation
+narrows that window but does not remove it. Workflow-run `path`
 values may use GitHub's documented `path@branch` spelling only for the run's own
 branch; any other suffix refuses, and receipts and requests keep the bare path.
 

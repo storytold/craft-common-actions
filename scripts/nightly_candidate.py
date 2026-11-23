@@ -458,9 +458,12 @@ def _snapshot(reads, s, producer, now):
 def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
     """Sonar rereads bracket the final workflow freshness pass.
 
-    A workflow rerun during the first Sonar rereads is caught by the freshness pass, and a
-    Sonar change (new analysis, severity or resolution) during the freshness reads is caught
-    by the closing Sonar rereads. Only a change after the very last read can go unseen.
+    This covers two cases: a workflow rerun during the first Sonar rereads is caught by the
+    freshness pass, and a Sonar change (new analysis, severity or resolution) during the
+    freshness reads is caught by the closing Sonar rereads. It does not close the race: each
+    resource can still change after its own last read, for example a workflow rerun during the
+    closing Sonar rereads, which read no workflow state. Publication-time revalidation narrows
+    that window but does not remove it.
     """
     for final in (False, True):
         n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'],
