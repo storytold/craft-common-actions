@@ -141,6 +141,9 @@ on:
       DOCKERHUB_TOKEN:
         description: "Personal access token for publishing Flatpak OCI layouts to Docker Hub"
         required: false
+      ARTCRAFT_SERVICES_DISPATCH_TOKEN:
+        description: "Token with Actions: write on storytold/artcraft-services to trigger update-craft-release-versions.yml after publishing"
+        required: false
 
     outputs:
       version:
@@ -1391,3 +1394,16 @@ jobs:
           fi
           gh release edit "$TAG" --draft=false
           echo "Published $TAG ($now assets)." >> "$GITHUB_STEP_SUMMARY"
+      - name: Trigger website repo version bump
+        if: inputs.publish && !inputs.dry-run && github.ref == 'refs/heads/release'
+        env:
+          GH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set; skipping storytold/artcraft-services update-craft-release-versions.yml dispatch."
+            exit 0
+          fi
+          if ! gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services; then
+            echo "::warning::Failed to dispatch update-craft-release-versions.yml on storytold/artcraft-services."
+          fi
