@@ -61,7 +61,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
         self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
-        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish"})
+        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish", "notify-website"})
         for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
@@ -219,6 +219,27 @@ class ReleaseWorkflowTests(unittest.TestCase):
         upload = steps[-1]
         self.assertIn("continue-on-error: true", upload)
         self.assertIn("path: .ownership/ownership.json", upload)
+
+    def test_notify_website_dispatches_artcraft_services_without_signing_secrets(self):
+        import os, subprocess, yaml
+        data = yaml.safe_load(self.release)
+        secrets = data[True]["workflow_call"]["secrets"] if True in data else data["on"]["workflow_call"]["secrets"]
+        self.assertIn("ARTCRAFT_SERVICES_DISPATCH_TOKEN", secrets)
+        self.assertFalse(secrets["ARTCRAFT_SERVICES_DISPATCH_TOKEN"].get("required", True))
+
+        notify = jobs(self.release)["notify-website"]
+        self.assertIn("needs: [validate, publish]", notify)
+        self.assertIn("needs.publish.result == 'success'", notify)
+        self.assertIn("permissions: {}", notify)
+        self.assertNotIn("environment:", notify)
+        for forbidden in ("WINDOWS_", "APPLE_", "AZURE_", "LINUX_SIGNING_KEY"):
+            self.assertNotIn(forbidden, notify)
+        self.assertIn("gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services", notify)
+
+        step = next(s for s in data["jobs"]["notify-website"]["steps"] if s.get("name") == "Trigger website repo version bump")
+        r = subprocess.run(["bash", "-c", step["run"]], env=dict(os.environ, GH_TOKEN=""), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set", r.stdout)
 
     def test_outside_git_origin_refuses_without_running_cargo(self):
         import os, subprocess, sys, tempfile, textwrap
