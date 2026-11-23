@@ -79,7 +79,7 @@ class RepositoryBindingTests(unittest.TestCase):
     def test_photo_prepare_keeps_real_validation_and_uses_its_validated_repository(self):
         argv=['fixture','prepare','--registry',str(ROOT/'nightly-apps.json'),'--config',str(self.local.config),'--app','photocraft',
             '--identity',str(self.local.root/'prepared.json'),'--policy',str(self.local.root/'policy.json')]
-        with patch.object(sys,'argv',argv),patch.dict(p.os.environ,{**self.case.env,'GH_TOKEN':'synthetic-photo-token'},clear=True),patch.object(publisher,'HTTPTransport',return_value=self.case.api) as factory,contextlib.redirect_stdout(io.StringIO()): p.main()
+        with patch.object(sys,'argv',argv),patch.dict(p.os.environ,{**self.case.env,**self.local.ownership,'GH_TOKEN':'synthetic-photo-token'},clear=True),patch.object(publisher,'HTTPTransport',return_value=self.case.api) as factory,contextlib.redirect_stdout(io.StringIO()): p.main()
         factory.assert_called_once_with(self.registry['apps']['photocraft']['repository'],'synthetic-photo-token')
         self.assertEqual(json.loads((self.local.root/'prepared.json').read_text()),self.case.prepared)
     def test_photo_attestation_keeps_real_validation_and_uses_its_validated_repository(self):

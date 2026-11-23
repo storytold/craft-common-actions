@@ -23,7 +23,9 @@ import test_nightly_policy as fixture
 class SigningTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         case = fixture.PolicyTests('test_green_gate_is_read_only_and_exact_source'); case.setUp()
         self.case = case
         self.env = {**case.env, 'RUNNER_TEMP': str(self.root),
@@ -43,6 +45,16 @@ class SigningTests(unittest.TestCase):
         self.ih = s.a.fingerprint(self.identity,'identity')
         self.receipt_dir = self.root/'receipt'; self.receipt_dir.mkdir()
         self.final = 'f'*64
+
+    def test_signing_paths_reject_foreign_and_symlinked_locations_before_io(self):
+        with tempfile.TemporaryDirectory() as outside:
+            link=self.root/'linked';link.symlink_to(self.root,target_is_directory=True)
+            for output in (Path(outside)/'payload',link/'payload',self.root/'child/../payload'):
+                with self.subTest(output=output),patch.object(s.n,'regular_file',side_effect=AssertionError('archive must not open')):
+                    with self.assertRaises(ValueError):s.windows_unpack(self.archive,output)
+                with self.assertRaises(ValueError):self.verify(self.unsigned,directory=output)
+            self.assertFalse((Path(outside)/'payload').exists())
+            self.assertFalse((self.root/'payload').exists())
 
     def receipt(self):
         data = s.receipt_data('windows-x86_64',self.asset,self.ih,self.unsigned,self.final,
@@ -242,6 +254,51 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(data['unsigned_sha256'],self.unsigned)
         self.assertIn('sha256='+s.sha(final),output.read_text())
         self.assertEqual(s.sha(self.archive),self.unsigned)
+
+    def test_real_sign_cli_refuses_foreign_or_linked_receipt_directory_before_signing(self):
+        source=self.root/'source'; (source/'packaging/windows').mkdir(parents=True)
+        (source/'packaging/windows/sign.ps1').write_text('# never executed mock')
+        (source/'Cargo.toml').write_text('[package]\nname="fixture"\nversion="0.0.0"\n')
+        with tempfile.TemporaryDirectory() as outside:
+            link=self.root/'receipt-link'; link.symlink_to(Path(outside),target_is_directory=True)
+            for index,receipts in enumerate((Path(outside)/'receipt',link/'receipt',self.root/'x/../receipt')):
+                final=self.root/('signed-'+str(index))/self.asset
+                args=['fixture','sign','--platform','windows-x86_64','--source',str(source),
+                      '--registry',str(ROOT/'nightly-apps.json'),'--version',self.case.prepared['version'],
+                      '--identity-directory',str(self.identity),'--identity-sha256',self.ih,
+                      '--archive',str(self.archive),'--unsigned-sha256',self.unsigned,'--asset',self.asset,
+                      '--output',str(final),'--receipt-directory',str(receipts)]
+                with self.subTest(receipts=receipts),patch.object(sys,'argv',args),patch.dict(os.environ,self.env,clear=True),\
+                     patch.object(s,'sign_windows',side_effect=AssertionError('signing must not start')),\
+                     contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit) as error: s.main()
+                self.assertEqual(error.exception.code,1); self.assertFalse(final.parent.exists())
+            self.assertEqual(list(Path(outside).iterdir()),[]); self.assertEqual(list(self.receipt_dir.iterdir()),[])
+
+    def test_mac_verify_accepts_owned_output_with_links_inside_the_extracted_bundle(self):
+        # The boundary confines the verification directory, not bundle contents: framework
+        # links are produced by ditto and judged only by codesign/stapler/spctl (mocked here).
+        output=self.root/'mac verify'/'payload'; output.parent.mkdir()
+        details=('Authority=Developer ID Application: Fixture (ABCDE12345)\nTeamIdentifier=ABCDE12345\n'
+                 'Timestamp=Nov 22, 2026\nCodeDirectory v=20500 flags=0x10000(runtime) hashes=x\n')
+        calls=[]
+        def tool(argv,**kwargs):
+            calls.append(Path(str(argv[0])).name)
+            if argv[0]=='/usr/bin/ditto':
+                app=Path(argv[-1])/'PhotoCraft Nightly.app'; (app/'Contents/MacOS').mkdir(parents=True)
+                (app/'Contents/MacOS/PhotoCraft').write_bytes(b'synthetic')
+                versions=app/'Contents/Frameworks/Fixture.framework/Versions'; (versions/'A').mkdir(parents=True)
+                (versions/'Current').symlink_to('A',target_is_directory=True)
+            return 'arm64' if argv[0]=='/usr/bin/lipo' else ''
+        completed=s.subprocess.CompletedProcess([],0,details.encode(),b'')
+        with patch.object(s.u,'verify_archive',return_value={}),patch.object(s,'command',side_effect=tool),\
+             patch.object(s.subprocess,'run',return_value=completed):
+            self.assertEqual(s.mac_verify(self.archive,'v',{},{'NIGHTLY_APPLE_TEAM_ID':'ABCDE12345'},output),'ABCDE12345')
+        self.assertTrue((output/'PhotoCraft Nightly.app/Contents/Frameworks/Fixture.framework/Versions/Current').is_symlink())
+        self.assertEqual(calls,['ditto','lipo','codesign','xcrun','spctl'])
+        link=self.root/'mac-link'; link.symlink_to(self.root,target_is_directory=True)
+        with patch.object(s.u,'verify_archive',return_value={}),patch.object(s,'command',side_effect=AssertionError('no tool')),\
+             self.assertRaises(ValueError):
+            s.mac_verify(self.archive,'v',{},{'NIGHTLY_APPLE_TEAM_ID':'ABCDE12345'},link/'payload')
 
     def test_real_sign_cli_refuses_backend_unsigned_noop(self):
         # Final-byte change is mandatory even if a mocked backend claims success.

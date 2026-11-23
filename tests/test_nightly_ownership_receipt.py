@@ -12,18 +12,21 @@ import nightly_ownership_receipt as r
 import nightly_feed as n
 class ReceiptTests(unittest.TestCase):
  def setUp(self):
-  owned_temp=patch.dict(os.environ,{"RUNNER_TEMP":tempfile.gettempdir()});owned_temp.start();self.addCleanup(owned_temp.stop)
+  self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+  self.root=Path(self.temp.name).resolve()
+  ownership=patch.dict(os.environ,{'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(self.root)})
+  ownership.start();self.addCleanup(ownership.stop)
   self.env={'GITHUB_REPOSITORY':'storytold/photocraft','GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'workflow_dispatch','GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'1','TOOLING_REVISION':'b'*40}
   reg=json.loads((ROOT/'nightly-apps.json').read_text());self.ident,_=n.identity(reg,'photocraft','storytold/photocraft','a'*40,'1.2.3',123,1,1795190400)
   self.release={'id':7,'tag_name':self.ident['tag'],'target_commitish':'a'*40,'prerelease':True,'draft':False}
  def test_exact_receipt_and_new_directory_only(self):
-  with tempfile.TemporaryDirectory() as tmp:
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
    out=Path(tmp)/'owned';data=r.emit(self.ident,self.release,self.env,out)
    self.assertEqual(set(data),r.FIELDS);self.assertEqual(json.loads((out/'ownership.json').read_text()),data)
    self.assertEqual(set(p.name for p in out.iterdir()),{'ownership.json'})
    with self.assertRaises(ValueError):r.emit(self.ident,self.release,self.env,out)
  def test_pending_reservation_never_creates_the_canonical_receipt(self):
-  with tempfile.TemporaryDirectory() as tmp:
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
    out=Path(tmp)/'owned'
    with r.reserve(out,filename='ownership.pending.json') as stream:
     stream.write('{}\n')
@@ -31,7 +34,7 @@ class ReceiptTests(unittest.TestCase):
     self.assertFalse((out/'ownership.json').exists())
    self.assertEqual({path.name for path in out.iterdir()},{'ownership.pending.json'})
  def test_unreviewed_reservation_names_refuse_before_creating_output(self):
-  with tempfile.TemporaryDirectory() as tmp:
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
    for index,name in enumerate(('', '../ownership.json', '/ownership.json', 'other.json', None, [], {})):
     out=Path(tmp)/str(index)
     with self.subTest(name=name),self.assertRaisesRegex(ValueError,'unreviewed ownership filename'):
@@ -39,7 +42,7 @@ class ReceiptTests(unittest.TestCase):
       self.fail('unreviewed filename reached reservation')
     self.assertFalse(out.exists())
  def test_pending_stream_cannot_be_used_as_a_legacy_canonical_receipt(self):
-  with tempfile.TemporaryDirectory() as tmp:
+  with tempfile.TemporaryDirectory(dir=self.root) as tmp:
    out=Path(tmp)/'owned'
    with r.reserve(out,filename='ownership.pending.json') as stream:
     with self.assertRaisesRegex(ValueError,'ownership reservation differs'):
@@ -67,6 +70,14 @@ class ReceiptTests(unittest.TestCase):
      out=base/'nested'/str(index)
      with r.reserve(out,filename=filename) as stream:stream.write('{}\n')
      self.assertEqual({path.name for path in out.iterdir()},{filename})
+ def test_owned_reservation_rejects_foreign_traversal_and_parent_links(self):
+  with tempfile.TemporaryDirectory() as outside:
+   link=self.root/'linked';link.symlink_to(self.root,target_is_directory=True)
+   for destination in (Path(outside)/'receipt',self.root/'child/../receipt',link/'receipt'):
+    with self.subTest(destination=destination),self.assertRaises(ValueError):
+     with r.reserve(destination):self.fail('unsafe reservation yielded')
+   self.assertFalse((Path(outside)/'receipt').exists())
+   self.assertFalse((self.root/'receipt').exists())
  def test_context_and_run_drift_refuse(self):
   for changes in [{'GITHUB_SHA':'c'*40},{'GITHUB_RUN_ID':'124'},{'GITHUB_RUN_ATTEMPT':'2'},{'GITHUB_REF':'refs/pull/1/head'},{'GITHUB_REPOSITORY':'attacker/photocraft'},{'GITHUB_EVENT_NAME':'pull_request'},{'TOOLING_REVISION':'0'*40}]:
    with self.subTest(changes=changes),self.assertRaises(ValueError):r.receipt(self.ident,self.release,{**self.env,**changes})

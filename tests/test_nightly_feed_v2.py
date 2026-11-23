@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('feed_v2_test', ROOT/'scripts/nightly_feed.py')
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
@@ -12,7 +13,9 @@ n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 class SignedFeedTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name); self.assets = self.root/'assets'; self.assets.mkdir()
+        self.root = Path(self.tmp.name).resolve(); self.assets = self.root/'assets'; self.assets.mkdir()
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         self.registry = json.loads((ROOT/'nightly-apps.json').read_text())
         self.registry['apps']['photocraft']['targets'] = [{'target':{'os':'linux','arch':'x86_64','format':'tar_gz'},'asset_pattern':'photocraft-{version}-linux-x86_64-nightly.tar.gz','isolation':{'package_identity':'photocraft.nightly','profile_contract':'fixture','profile_version':1,'associations':'none'}}]
         self.ident,self.version = n.identity(self.registry,'photocraft','storytold/photocraft','a'*40,'1.2.3',123,1,1795190400)
@@ -29,6 +32,24 @@ class SignedFeedTests(unittest.TestCase):
         sums=(out/'SHA256SUMS.txt').read_text()
         for name in [self.name,self.name+'.asc','NIGHTLY.json']:
             self.assertIn(n.digest_file(out,name)[1]+'  '+name+'\n',sums)
+    def test_v2_output_and_rewritten_leaves_stay_inside_owned_roots(self):
+        feed=self.feed()
+        with tempfile.TemporaryDirectory() as outside:
+            foreign=Path(outside)/'victim'; foreign.write_bytes(b'unchanged')
+            link=self.root/'linked'; link.symlink_to(Path(outside),target_is_directory=True)
+            for output in (Path(outside)/'stage',link/'stage',self.root/'x/../stage'):
+                with self.subTest(output=output),self.assertRaises(n.InvalidNightly):
+                    n.stage_feed_v2(self.registry,self.ident,self.version,feed,self.assets,output)
+            self.assertFalse((Path(outside)/'stage').exists()); self.assertFalse((self.root/'stage').exists())
+            # A descriptor leaf swapped for a link after v1 staging is refused before the v2 rewrite.
+            original=n.stage_feed
+            def planted(copy_feed,artifacts,output):
+                original(copy_feed,artifacts,output)
+                (Path(output)/'NIGHTLY.json').unlink(); (Path(output)/'NIGHTLY.json').symlink_to(foreign)
+            with patch.object(n,'stage_feed',side_effect=planted),self.assertRaises(n.InvalidNightly):
+                n.stage_feed_v2(self.registry,self.ident,self.version,feed,self.assets,self.root/'planted')
+            self.assertEqual(foreign.read_bytes(),b'unchanged')
+            self.assertTrue((self.root/'planted'/'NIGHTLY.json').is_symlink())
     def test_v1_fixture_shape_unchanged(self):
         feed=n.build_feed(self.registry,self.ident,self.version,self.assets)
         self.assertEqual(feed['schema'],'craft-nightly/v1'); self.assertNotIn('signature',feed['artifacts'][0])

@@ -2,7 +2,7 @@
 import json
 from contextlib import contextmanager
 import os
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 import re
 import nightly_feed as n
 
@@ -26,28 +26,17 @@ def receipt(ident, release, environment):
             'run_id':int(run),'run_attempt':int(attempt),'tooling_revision':tooling}
 
 def owned_output(path):
-    """New files may only be created beneath this job's workspace or runner temp.
+    """New outputs use nightly_feed's single job-root boundary and must lie beneath a root.
 
-    CLI path strings are not authority. Fresh trusted jobs run no concurrent
-    untrusted code; reject internal symlinks as well as traversal before IO.
+    CLI path strings are not authority; owned_path refuses traversal, foreign roots
+    and symlinks before any I/O. A job root itself is never an output directory.
     """
-    n.require(isinstance(path, (str, Path)) and str(path) and
-        not any(char in str(path) for char in ("\0", "\r", "\n")), "invalid output path")
-    path = Path(path)
-    n.require(".." not in path.parts and ".." not in PureWindowsPath(str(path)).parts, "output traversal refused")
-    path = path.absolute()
-    roots = [Path(os.environ.get("GITHUB_WORKSPACE", str(Path.cwd()))).resolve()]
+    output = n.owned_path(path)
+    roots = {Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd()).resolve()}
     if os.environ.get("RUNNER_TEMP"):
-        roots.append(Path(os.environ["RUNNER_TEMP"]).resolve())
-    for root in roots:
-        if path != root and path.is_relative_to(root):
-            current = root
-            for part in path.relative_to(root).parts:
-                current = current/part
-                n.require(not current.is_symlink(), "symlink output path refused")
-            n.require(path.resolve().is_relative_to(root), "output escaped owned job directory")
-            return path
-    raise n.InvalidNightly("output must be beneath the owned workspace or runner temp")
+        roots.add(Path(os.environ["RUNNER_TEMP"]).resolve())
+    n.require(output not in roots, "output must be beneath the owned workspace or runner temp")
+    return output
 
 
 
@@ -57,7 +46,7 @@ def reserve(directory, *, filename="ownership.json"):
     output=owned_output(directory)
     n.require(not output.exists() and not output.is_symlink(),'ownership output must be new')
     output.mkdir(parents=True,exist_ok=False)
-    with (output/filename).open('x',encoding='utf-8') as stream:
+    with n.owned_path(output/filename).open('x',encoding='utf-8') as stream:
         yield stream
 
 

@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -15,7 +16,9 @@ import nightly_artifacts as a
 class ArtifactBindingTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name); self.asset='photocraft-1.2.3-nightly.fixture-windows-x86_64-nightly.zip'
+        self.root=Path(self.temp.name).resolve(); self.asset='photocraft-1.2.3-nightly.fixture-windows-x86_64-nightly.zip'
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(ROOT.resolve()), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
         self.identity=self.root/'identity'; self.zip=self.root/'zip'; self.packet=self.root/'packet'
         for directory in (self.identity,self.zip,self.packet): directory.mkdir()
         for name in a.IDENTITY_FILES: (self.identity/name).write_text('{}')

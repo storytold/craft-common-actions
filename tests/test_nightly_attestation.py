@@ -21,7 +21,10 @@ class AttestationTests(unittest.TestCase):
     def setUp(self):
         self.case=fixture.PolicyTests('test_green_gate_is_read_only_and_exact_source'); self.case.setUp()
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
-        self.root=Path(self.temp.name); self.assets=self.root/'assets'; self.assets.mkdir(); self.packet=self.root/'packet'
+        self.root=Path(self.temp.name).resolve()
+        self.ownership={'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(self.root)}
+        ownership=patch.dict(os.environ,self.ownership); ownership.start(); self.addCleanup(ownership.stop)
+        self.assets=self.root/'assets'; self.assets.mkdir(); self.packet=self.root/'packet'
         self.filename=self.case.registry['apps']['photocraft']['targets'][0]['asset_pattern'].replace('{version}',self.case.prepared['version'])
         self.data=b'SYNTHETIC PACKAGE BYTES, NOT A ZIP OR EXECUTABLE'
         (self.assets/self.filename).write_bytes(self.data)
@@ -78,7 +81,7 @@ class AttestationTests(unittest.TestCase):
             '--signing-receipt-directory',str(receipt_dir),'--signing-receipt-sha256',hashlib.sha256(receipt_path.read_bytes()).hexdigest(),'--unsigned-sha256','b'*64]
         output=self.root/'github-output'
         try:
-            with patch.object(sys,'argv',argv),patch.dict(os.environ,{**env,'GH_TOKEN':'synthetic-read-token','GITHUB_OUTPUT':str(output)},clear=True),patch.object(a.publisher,'HTTPTransport',return_value=self.case.api):
+            with patch.object(sys,'argv',argv),patch.dict(os.environ,{**env,**self.ownership,'GH_TOKEN':'synthetic-read-token','GITHUB_OUTPUT':str(output)},clear=True),patch.object(a.publisher,'HTTPTransport',return_value=self.case.api):
                 a.main()
         finally:
             (self.packet/'NIGHTLY.json').write_bytes(saved_descriptor);(self.packet/'SHA256SUMS.txt').write_bytes(saved_sums)

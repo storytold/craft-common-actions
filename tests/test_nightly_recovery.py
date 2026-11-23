@@ -19,7 +19,8 @@ class PublicationRecoveryTests(unittest.TestCase):
         self.case.setUp();self.addCleanup(self.case.doCleanups)
         self.publisher=fixture.p;self.feed=fixture.n
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.output=Path(self.temp.name)/'ownership'
+        ownership=patch.dict(os.environ,{'GITHUB_WORKSPACE':str(ROOT.resolve()),'RUNNER_TEMP':str(Path(self.temp.name).resolve())}); ownership.start(); self.addCleanup(ownership.stop)
+        self.output=Path(self.temp.name).resolve()/'ownership'
 
     def run_cli(self, failure, *, before_publish=False, close_failure=False):
         import nightly_artifacts as bindings
@@ -65,7 +66,7 @@ class PublicationRecoveryTests(unittest.TestCase):
         with patch.dict(os.environ,{'GITHUB_WORKSPACE':str(workspace),'RUNNER_TEMP':str(runner)}):
             code,message=self.run_cli(OSError('not reached'))
         self.assertEqual(code,1)
-        self.assertIn('owned workspace or runner temp',message)
+        self.assertIn('path outside owned job roots',message)
         self.assertFalse(self.case.api.published)
         self.assertFalse(self.output.exists())
         self.assertFalse(any(call[0] in ('POST','PATCH','DELETE') for call in self.case.api.calls))

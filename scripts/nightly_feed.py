@@ -10,7 +10,7 @@ import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import stat
 import sys
@@ -45,9 +45,36 @@ def fields(value, expected, where):
 def positive(value, where):
     require(type(value) is int and 0 < value < 2**63, f"invalid {where}")
 
+def owned_path(path):
+    """Confine CLI-derived I/O to this job's workspace or private runner temp."""
+    raw = os.fspath(path)
+    require(isinstance(raw, str) and raw and "\0" not in raw, "invalid owned path")
+    candidate = Path(raw)
+    require(".." not in candidate.parts and ".." not in PureWindowsPath(raw).parts,
+            "owned path traversal forbidden")
+    require(os.name == "nt" or not PureWindowsPath(raw).drive, "foreign path drive forbidden")
+    absolute = candidate.absolute()
+    roots = [Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd())]
+    if temporary := os.environ.get("RUNNER_TEMP"):
+        roots.append(Path(temporary))
+    for root in roots:
+        require(root.is_absolute() and root.parent != root and
+                root.as_posix().lower() not in ("/tmp", "/var/tmp") and ".." not in root.parts,
+                "job root must be an absolute private directory")
+        for component in (root, *root.parents):
+            require(not component.is_symlink(), "job root has a symlink ancestor")
+        require(root.is_dir() and root.resolve() == root, "job root must be a real directory")
+    require(any(absolute.is_relative_to(root) for root in roots), "path outside owned job roots")
+    for component in (absolute, *absolute.parents):
+        require(not component.is_symlink(), "owned path has a symlink ancestor or leaf")
+    resolved = absolute.resolve()
+    require(any(resolved.is_relative_to(root) for root in roots), "resolved path outside owned job roots")
+    return resolved
+
+
 def bounded_bytes(path, limit, kind):
     """Read a stable regular input without following a leaf link or waiting on a FIFO."""
-    path = Path(path)
+    path = owned_path(path)
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode), f"{kind} must be a regular non-symlink file")
     require(before.st_size <= limit, f"{kind} exceeds bound")
@@ -114,7 +141,7 @@ def trusted_context(registry, app, environment):
 
 def regular_file(directory, name):
     require(isinstance(name, str) and NAME.fullmatch(name), "invalid asset basename")
-    path = Path(directory) / name
+    path = owned_path(Path(directory) / name)
     require(not path.is_symlink(), "asset must not be a symlink")
     require(path.resolve().parent == Path(directory).resolve(), "asset escapes artifact directory")
     descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
@@ -178,13 +205,19 @@ def build_feed(registry, ident, version, artifacts):
 
 def stage_feed(feed, artifacts, output):
     """Stage only vetted payloads; never pass ordinary stable installers to publication."""
-    output = Path(output)
+    output = owned_path(output)
+    artifacts = owned_path(artifacts)
+    # Validate every derived destination before creating the output directory.
+    for entry in feed["artifacts"]:
+        name = entry["asset"]["name"]
+        require(isinstance(name, str) and NAME.fullmatch(name), "invalid staged asset basename")
+        owned_path(output / name)
     output.mkdir(parents=True, exist_ok=False)
     for entry in feed["artifacts"]:
         name = entry["asset"]["name"]
         # Reopen with no-follow, then hash the staged copy; old metadata is not a copy proof.
         stream, _ = regular_file(artifacts, name)
-        with stream, open(output / name, "xb") as destination:
+        with stream, open(owned_path(output / name), "xb") as destination:
             remaining = entry["asset"]["size"]
             while remaining:
                 block = stream.read(min(1024 * 1024, remaining))
@@ -196,13 +229,13 @@ def stage_feed(feed, artifacts, output):
         require((size, digest) == (entry["asset"]["size"], entry["asset"]["sha256"]), "staged payload differs")
     descriptor = (json.dumps(feed, sort_keys=True, separators=(",", ":")) + "\n").encode()
     require(len(descriptor) <= MAX_JSON_BYTES, "descriptor exceeds size limit")
-    with open(output / "NIGHTLY.json", "xb") as destination:
+    with open(owned_path(output / "NIGHTLY.json"), "xb") as destination:
         destination.write(descriptor)
     sums = []
     for path in sorted(output.iterdir()):
         size, digest = digest_file(output, path.name)
         sums.append(f"{digest}  {path.name}\n")
-    with open(output / "SHA256SUMS.txt", "x", encoding="utf-8") as destination:
+    with open(owned_path(output / "SHA256SUMS.txt"), "x", encoding="utf-8") as destination:
         destination.writelines(sums)
 
 
@@ -273,6 +306,7 @@ def validate_feed_v2(registry, ident, version, feed):
 
 
 def stage_feed_v2(registry, ident, version, feed, artifacts, output):
+    output = owned_path(output)
     validate_feed_v2(registry, ident, version, feed)
     require(feed == build_feed_v2(registry, ident, version, artifacts), 'signed descriptor differs from final package bytes')
     # Reuse the bounded copy-and-rehash boundary for signatures too; the serialized
@@ -284,13 +318,13 @@ def stage_feed_v2(registry, ident, version, feed, artifacts, output):
     stage_feed(copy_feed, artifacts, output)
     descriptor = (json.dumps(feed, sort_keys=True, separators=(',', ':'))+'\n').encode()
     require(len(descriptor) <= MAX_JSON_BYTES, 'signed descriptor exceeds limit')
-    with open(Path(output)/'NIGHTLY.json','wb') as stream:
+    with open(owned_path(output/'NIGHTLY.json'),'wb') as stream:
         stream.write(descriptor)
     sums = []
     for path in sorted(Path(output).iterdir()):
         if path.name != 'SHA256SUMS.txt':
             _, digest = digest_file(output, path.name); sums.append(f'{digest}  {path.name}\n')
-    with open(Path(output)/'SHA256SUMS.txt','w',encoding='utf-8') as stream:
+    with open(owned_path(output/'SHA256SUMS.txt'),'w',encoding='utf-8') as stream:
         stream.writelines(sums)
 
 def prepare(registry, app, cargo, timestamp, environment):
