@@ -366,8 +366,10 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
         self.unsigned = (ROOT/'.github/workflows/nightly-unsigned.yml').read_text()
 
     def test_linux_secret_reaches_only_the_single_protected_sign_step(self):
-        self.assertEqual(self.release.count('secrets.LINUX_SIGNING_KEY'), 1)
+        self.assertEqual(self.release.count('secrets.LINUX_SIGNING_KEY'), 2)
         sign = job_block(self.release, 'sign-linux')
+        self.assertEqual(sign.count('secrets.LINUX_SIGNING_KEY'), 1)
+        self.assertEqual(job_block(self.release, 'publish-linux-packages').count('secrets.LINUX_SIGNING_KEY'), 1)
         self.assertIn('    environment: release\n', sign)
         self.assertIn('runs-on: ubuntu-', sign)
         holders = [step for step in steps(sign) if 'secrets.' in step]
