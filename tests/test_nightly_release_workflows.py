@@ -61,7 +61,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
         self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
-        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish", "notify-website"})
+        self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish"})
         for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
@@ -220,17 +220,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", upload)
         self.assertIn("path: .ownership/ownership.json", upload)
 
-    def test_notify_website_dispatches_artcraft_services_without_signing_secrets(self):
+    def test_notify_website_dispatches_artcraft_services_outside_signer(self):
         import os, subprocess, yaml
-        data = yaml.safe_load(self.release)
+        self.assertNotIn("notify-website", jobs(self.release))
+        self.assertNotIn("ARTCRAFT_SERVICES_DISPATCH_TOKEN", self.release)
+        notify_wf = workflow("nightly-notify-website.yml")
+        data = yaml.safe_load(notify_wf)
         secrets = data[True]["workflow_call"]["secrets"] if True in data else data["on"]["workflow_call"]["secrets"]
         self.assertIn("ARTCRAFT_SERVICES_DISPATCH_TOKEN", secrets)
         self.assertFalse(secrets["ARTCRAFT_SERVICES_DISPATCH_TOKEN"].get("required", True))
 
-        notify = jobs(self.release)["notify-website"]
-        self.assertIn("needs: [validate, publish]", notify)
-        self.assertIn("needs.publish.result == 'success'", notify)
+        notify = jobs(notify_wf)["notify-website"]
         self.assertIn("permissions: {}", notify)
+        self.assertIn("continue-on-error: true", notify)
         self.assertNotIn("environment:", notify)
         for forbidden in ("WINDOWS_", "APPLE_", "AZURE_", "LINUX_SIGNING_KEY"):
             self.assertNotIn(forbidden, notify)

@@ -14,9 +14,6 @@ on:
       producer_run_attempt:
         type: string
         required: true
-    secrets:
-      ARTCRAFT_SERVICES_DISPATCH_TOKEN:
-        required: false
 permissions:
   contents: read
 concurrency:
@@ -645,51 +642,3 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 90
-
-  notify-website:
-    name: Trigger website repo version bump
-    needs: [validate, publish]
-    if: >-
-      !cancelled() && needs.validate.result == 'success' && needs.validate.outputs.admitted == 'true' &&
-      needs.publish.result == 'success' &&
-      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/release' && github.ref_type == 'branch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions: {}
-    steps:
-      - name: Check out only the actual release execution source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: .release-source
-          persist-credentials: false
-      - name: Bind protected policy and actual immutable defining workflow
-        shell: bash
-        env:
-          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
-          DEFINING_SHA: ${{ job.workflow_sha }}
-        run: |
-          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -I -B - <<'PY'
-          import json, os, re
-          p = os.environ['TOOLING_REVISION']
-          assert re.fullmatch('[0-9a-f]{40}', p) and p != '0'*40
-          assert os.environ['DEFINING_REPOSITORY'] == 'storytold/craft-common-actions'
-          assert os.environ['DEFINING_SHA'] == p
-          config = json.load(open('.release-source/.github/nightly-signing-policy.json'))
-          assert config['schema']=='craft-nightly-release-policy/v3'
-          assert config['signer_tooling_revision'] == p
-          PY
-      - name: Trigger website repo version bump
-        env:
-          GH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set; skipping storytold/artcraft-services update-craft-release-versions.yml dispatch."
-            exit 0
-          fi
-          if ! gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services; then
-            echo "::warning::Failed to dispatch update-craft-release-versions.yml on storytold/artcraft-services."
-          fi
