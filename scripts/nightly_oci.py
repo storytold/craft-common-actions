@@ -90,39 +90,43 @@ def verify_and_push_oci(
     dh_user = environment.get("DOCKERHUB_USERNAME", "")
     dh_token = environment.get("DOCKERHUB_TOKEN", "")
 
+    verified_layouts = []
     for arch in ALLOWED_ARCHES:
         layouts = sorted(pkg_root.glob(f"*-{version}-linux-{arch}-oci"))
-        for layout in layouts:
-            base = layout.name[:-len("-oci")]
-            manifest_name = f"{base}.oci-manifest.json"
-            sig_name = f"{base}.oci.sig"
-            n.require(manifest_name in sums and sig_name in sums, f"missing {manifest_name} or {sig_name} in SHA256SUMS.txt")
-            _, manifest_digest = n.digest_file(pkg_root, manifest_name)
-            _, sig_digest = n.digest_file(pkg_root, sig_name)
-            n.require(manifest_digest == sums[manifest_name], f"{manifest_name} checksum mismatch against SHA256SUMS.txt")
-            n.require(sig_digest == sums[sig_name], f"{sig_name} checksum mismatch against SHA256SUMS.txt")
-            layout_digest = layout_manifest_digest(layout)
-            n.require(layout_digest == manifest_digest, f"{layout.name} manifest digest differs from signed {manifest_name}")
+        n.require(len(layouts) == 1, f"expected exactly one OCI layout for {arch}, found {len(layouts)}")
+        layout = layouts[0]
+        base = layout.name[:-len("-oci")]
+        manifest_name = f"{base}.oci-manifest.json"
+        sig_name = f"{base}.oci.sig"
+        n.require(manifest_name in sums and sig_name in sums, f"missing {manifest_name} or {sig_name} in SHA256SUMS.txt")
+        _, manifest_digest = n.digest_file(pkg_root, manifest_name)
+        _, sig_digest = n.digest_file(pkg_root, sig_name)
+        n.require(manifest_digest == sums[manifest_name], f"{manifest_name} checksum mismatch against SHA256SUMS.txt")
+        n.require(sig_digest == sums[sig_name], f"{sig_name} checksum mismatch against SHA256SUMS.txt")
+        layout_digest = layout_manifest_digest(layout)
+        n.require(layout_digest == manifest_digest, f"{layout.name} manifest digest differs from signed {manifest_name}")
 
-            signer = signing.verify_linux_signature(
-                public_key, pkg_root / sig_name, pkg_root / manifest_name, fingerprint, environment
+        signer = signing.verify_linux_signature(
+            public_key, pkg_root / sig_name, pkg_root / manifest_name, fingerprint, environment
+        )
+        n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
+        verified_layouts.append((arch, layout))
+
+    for arch, layout in verified_layouts:
+        for oci_tag in (f"{version}-{arch}", f"nightly-{arch}"):
+            target = f"docker://{registry}:{oci_tag}"
+            runner(
+                ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{gh_user}:{gh_token}", f"oci:{layout}", target],
+                check=True,
             )
-            n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
-
-            for oci_tag in (f"{version}-{arch}", f"nightly-{arch}"):
-                target = f"docker://{registry}:{oci_tag}"
+            pushed.append(target)
+            if dh_user and dh_token:
+                dh_repo = repository.split("/", 1)[1].lower()
+                dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
                 runner(
-                    ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{gh_user}:{gh_token}", f"oci:{layout}", target],
+                    ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{dh_user}:{dh_token}", f"oci:{layout}", dh_target],
                     check=True,
                 )
-                pushed.append(target)
-                if dh_user and dh_token:
-                    dh_repo = repository.split("/", 1)[1].lower()
-                    dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
-                    runner(
-                        ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{dh_user}:{dh_token}", f"oci:{layout}", dh_target],
-                        check=True,
-                    )
-                    pushed.append(dh_target)
+                pushed.append(dh_target)
 
     return pushed

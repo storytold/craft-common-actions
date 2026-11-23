@@ -103,7 +103,7 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json id,tagName,targetCommitish,isDraft,isPrerelease,url > .release.json
+          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,url > .release.json
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --output .linux-packages/SHA256SUMS.txt
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci-manifest.json" --dir .linux-packages --clobber
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci.sig" --dir .linux-packages --clobber
@@ -116,7 +116,7 @@ jobs:
           fingerprint = policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"]
           raw_rel = n.bounded_json(".release.json")
           release = {
-              "id": raw_rel["id"],
+              "id": raw_rel["databaseId"],
               "tag_name": raw_rel["tagName"],
               "target_commitish": raw_rel["targetCommitish"],
               "draft": raw_rel["isDraft"],

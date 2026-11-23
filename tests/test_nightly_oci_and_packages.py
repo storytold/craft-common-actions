@@ -47,15 +47,19 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         self.pubkey.write_text("-----BEGIN PGP PUBLIC KEY BLOCK-----\ntest\n-----END PGP PUBLIC KEY BLOCK-----\n")
 
         self.base = f"photocraft-{self.version}-linux-x86_64"
+        self.base_arm = f"photocraft-{self.version}-linux-aarch64"
         self.manifest_bytes = b'{"schemaVersion":2,"config":{"digest":"sha256:' + b"b" * 64 + b'"}}\n'
-        _write_oci_layout(self.pkg_dir, self.base, self.manifest_bytes)
-        (self.pkg_dir / f"{self.base}.oci-manifest.json").write_bytes(self.manifest_bytes)
-        (self.pkg_dir / f"{self.base}.oci.sig").write_bytes(
-            b"-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n"
-        )
-        m_hex = hashlib.sha256(self.manifest_bytes).hexdigest()
-        s_hex = hashlib.sha256((self.pkg_dir / f"{self.base}.oci.sig").read_bytes()).hexdigest()
-        self.sums_bytes = f"{m_hex}  {self.base}.oci-manifest.json\n{s_hex}  {self.base}.oci.sig\n".encode("utf-8")
+        self.manifest_bytes_arm = b'{"schemaVersion":2,"config":{"digest":"sha256:' + b"c" * 64 + b'"}}\n'
+        sums_lines = []
+        for base, mbytes in ((self.base, self.manifest_bytes), (self.base_arm, self.manifest_bytes_arm)):
+            _write_oci_layout(self.pkg_dir, base, mbytes)
+            (self.pkg_dir / f"{base}.oci-manifest.json").write_bytes(mbytes)
+            sig_bytes = b"-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n"
+            (self.pkg_dir / f"{base}.oci.sig").write_bytes(sig_bytes)
+            m_hex = hashlib.sha256(mbytes).hexdigest()
+            s_hex = hashlib.sha256(sig_bytes).hexdigest()
+            sums_lines.append(f"{m_hex}  {base}.oci-manifest.json\n{s_hex}  {base}.oci.sig\n")
+        self.sums_bytes = "".join(sums_lines).encode("utf-8")
 
         self.release = {
             "id": 42,
@@ -103,9 +107,27 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             f"docker://docker.io/storytold/photocraft:{self.version}-x86_64",
             "docker://ghcr.io/storytold/photocraft:nightly-x86_64",
             "docker://docker.io/storytold/photocraft:nightly-x86_64",
+            f"docker://ghcr.io/storytold/photocraft:{self.version}-aarch64",
+            f"docker://docker.io/storytold/photocraft:{self.version}-aarch64",
+            "docker://ghcr.io/storytold/photocraft:nightly-aarch64",
+            "docker://docker.io/storytold/photocraft:nightly-aarch64",
         ])
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 8)
         self.assertFalse(any("stable-" in t for t in pushed))
+
+    def test_missing_aarch64_layout_stops_before_push(self):
+        import shutil
+        calls = []
+        shutil.rmtree(self.pkg_dir / f"{self.base_arm}-oci")
+        with patch.object(oci.signing, "verify_linux_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "expected exactly one OCI layout for aarch64"):
+                oci.verify_and_push_oci(
+                    release=self.release, repository=self.repo, tag=self.tag, version=self.version,
+                    source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
+                    package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
+                    environment=self.env, runner=lambda c, check=True: calls.append(c),
+                )
+        self.assertEqual(calls, [])
 
     def test_mismatched_release_target_stops_before_push(self):
         calls = []

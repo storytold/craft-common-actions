@@ -678,6 +678,18 @@ jobs:
           packaging/linux/flatpak-oci.sh "${tarballs[0]}"
           base="$(basename "${tarballs[0]}" .tar.gz)"
           test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
+          python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
+          import hashlib, json, pathlib, shutil, sys
+          layout, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
+          manifests = index.get("manifests", [])
+          assert len(manifests) == 1, f"expected 1 OCI manifest, got {len(manifests)}"
+          digest = manifests[0]["digest"]
+          assert digest.startswith("sha256:") and len(digest) == 71
+          blob = layout / "blobs" / "sha256" / digest.split(":", 1)[1]
+          shutil.copyfile(blob, out)
+          assert hashlib.sha256(out.read_bytes()).hexdigest() == digest.split(":", 1)[1]
+          PY
       - name: Find tarball for Arch package
         id: tarball
         env:
