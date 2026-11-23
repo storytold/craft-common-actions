@@ -36,9 +36,12 @@ MAX_JSON = 2 * 1024 * 1024
 ISSUE_METRICS = {'BUG': 'bugs', 'VULNERABILITY': 'vulnerabilities', 'CODE_SMELL': 'code_smells'}
 ACCEPTED_METRICS = {'bugs': 'BUG', 'vulnerabilities': 'VULNERABILITY', 'code_smells': 'CODE_SMELL', 'security_rating': 'VULNERABILITY', 'new_security_rating': 'VULNERABILITY'}
 FINGERPRINT = {'key', 'rule', 'component', 'type', 'severity', 'hash'}
-# Revalidation's fixed Sonar snapshot, gate/latest rereads, ancestry reads and the
-# post-collection unresolved-issue reread.
-FIXED_READS = 18
+# Revalidation's fixed Sonar snapshot, gate/latest rereads, ancestry reads and the two
+# post-collection Sonar reread pairs (latest analysis plus one issue page) that bracket the
+# final workflow freshness pass. minimum_reads() = FIXED_READS + per-workflow reads, and the
+# contract admits a shape only when that total is <= MAX_READS: per-workflow reads may total
+# at most MAX_READS - FIXED_READS, so a shape whose workflow reads alone total 640 refuses.
+FIXED_READS = 20
 
 
 def digest(value):
@@ -274,8 +277,8 @@ def _workflows(reads, policy, producer, now):
 
 
 def _fresh_workflows(reads, policy, producer, facts):
-    # Collection-wide final pass, after all workflows and Sonar reads. Earlier
-    # workflows can be rerun while later evidence is being collected.
+    # Collection-wide final pass, after all workflows and the first Sonar rereads (and
+    # before the closing ones). Earlier workflows can be rerun while later evidence is collected.
     for wanted, selected in zip(policy['required_workflows'], facts):
         run = _run(reads, policy, producer, wanted)
         n.require((run['id'], run['run_attempt'], run['run_number']) == (selected['run_id'], selected['run_attempt'], selected['run_number']), 'newer quality run supersedes selection before collection completed')
@@ -452,6 +455,21 @@ def _snapshot(reads, s, producer, now):
     return {'analysis': analysis, 'ce': task, 'ce_sha256': digest(task), 'check_id': check_id, 'gate': gate, 'remaining': remaining, 'fixes': fixes, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(remaining), 'proofs_sha256': digest(fixes)}
 
 
+def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
+    """Sonar rereads bracket the final workflow freshness pass.
+
+    A workflow rerun during the first Sonar rereads is caught by the freshness pass, and a
+    Sonar change (new analysis, severity or resolution) during the freshness reads is caught
+    by the closing Sonar rereads. Only a change after the very last read can go unseen.
+    """
+    for final in (False, True):
+        n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'],
+                  'latest Sonar analysis changed before ' + stage + ' completed')
+        _same_unresolved(reads, s, snapshot)
+        if not final:
+            _fresh_workflows(reads, policy, producer, workflows)
+
+
 def admit_candidate(policy, producer, github, sonar, *, now):
     """Read candidate quality first; caller must separately admit P/bootstrap."""
     s = contract(policy, producer)
@@ -462,9 +480,7 @@ def admit_candidate(policy, producer, github, sonar, *, now):
     workflows = _workflows(reads, policy, producer, now)
     # Main may advance beyond C, but may not drop C during collection.
     _ancestry(reads, producer['source_commit'], None)
-    n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before admission completed')
-    _same_unresolved(reads, s, snapshot)
-    _fresh_workflows(reads, policy, producer, workflows)
+    _final_rereads(reads, s, policy, producer, snapshot, workflows, now, 'admission')
     return {'schema': 'craft-nightly-candidate-receipt/v3', 'policy_sha256': digest(policy), 'producer_sha256': digest(producer), 'source_commit': producer['source_commit'], 'sonar': snapshot, 'workflows': workflows, 'main_at_admission': ancestry['main']}
 
 
@@ -493,7 +509,5 @@ def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
     _ancestry(reads, producer['source_commit'], None)
     n.require(_workflows(reads, policy, producer, now) == receipt['workflows'], 'selected exact-C quality runs changed/superseded')
     _ancestry(reads, producer['source_commit'], None)
-    n.require(_latest(reads, s, producer['source_commit'], now) == snapshot['analysis'], 'latest Sonar analysis changed before revalidation completed')
-    _same_unresolved(reads, s, snapshot)
-    _fresh_workflows(reads, policy, producer, receipt['workflows'])
+    _final_rereads(reads, s, policy, producer, snapshot, receipt['workflows'], now, 'revalidation')
     return receipt
