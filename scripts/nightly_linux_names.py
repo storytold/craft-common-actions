@@ -6,8 +6,11 @@ has one, else ai.storyteller.<app>.nightly (the stable bundle ID plus .nightly, 
 actions/arch-package derives it). deb and rpm packages are <app>-nightly; the tarball, the
 binary and the Arch alias are <app>.
 
-  names --app-name APP [--registry nightly-apps.json]   print KEY=VALUE lines (for $GITHUB_OUTPUT)
-  check --app-name APP --kind deb|rpm|arch|flatpak --value VALUE [--registry ...]
+  names --app-name APP                                    print KEY=VALUE lines (for $GITHUB_OUTPUT)
+  check --app-name APP --kind deb|rpm|arch|flatpak --value VALUE
+
+The registry is always this checkout's own nightly-apps.json, beside scripts/; no path is taken
+from the command line.
 """
 import argparse
 import json
@@ -15,6 +18,7 @@ from pathlib import Path
 import re
 import sys
 
+REGISTRY = Path(__file__).resolve().parents[1] / "nightly-apps.json"
 APP = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 IDENTITY = re.compile(r"[A-Za-z0-9_.-]{1,255}")
 
@@ -60,11 +64,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("mode", choices=("names", "check"))
     parser.add_argument("--app-name", required=True)
-    parser.add_argument("--registry")
     parser.add_argument("--kind", choices=("deb", "rpm", "arch", "flatpak"))
     parser.add_argument("--value")
     args = parser.parse_args(argv)
-    registry = json.loads(Path(args.registry).read_text(encoding="utf-8")) if args.registry else None
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
     try:
         if args.mode == "names":
             for key, value in names(args.app_name, registry).items():

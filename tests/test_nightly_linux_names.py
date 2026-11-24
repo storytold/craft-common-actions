@@ -22,8 +22,7 @@ LINUX_PACKAGE_JOBS = ('build-linux-packages', 'build-linux-arch-arm')
 def check(app, kind, value):
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
-        code = names_tool.main(['check', '--app-name', app, '--registry', str(ROOT / 'nightly-apps.json'),
-                                '--kind', kind, '--value', value])
+        code = names_tool.main(['check', '--app-name', app, '--kind', kind, '--value', value])
     return code, stderr.getvalue()
 
 
@@ -62,6 +61,14 @@ class NamesScriptTests(unittest.TestCase):
         for app in ('PhotoCraft', '../x', '', 'a' * 64):
             with self.subTest(app=app), self.assertRaises(ValueError):
                 names_tool.names(app)
+
+    def test_registry_is_the_fixed_checkout_file_and_no_path_argument_is_accepted(self):
+        self.assertEqual(names_tool.REGISTRY, ROOT / 'nightly-apps.json')
+        for argv in (['names', '--app-name', 'photocraft', '--registry', '/etc/passwd'],
+                     ['check', '--app-name', 'photocraft', '--kind', 'deb', '--value', 'x', '--registry', '../../x.json']):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                names_tool.main(argv)
+            self.assertEqual(raised.exception.code, 2)  # argparse refuses the unknown option
 
     def test_names_mode_prints_github_outputs(self):
         out = io.StringIO()
@@ -108,7 +115,7 @@ class WorkflowTextTests(unittest.TestCase):
         job = data['jobs']['build-linux-packages']
         step = next(s for s in job['steps'] if s.get('id') == 'names')
         self.assertEqual(step['env']['APP_NAME'], '${{ inputs.app-name }}')
-        self.assertIn('--registry .nightly-tools/nightly-apps.json', step['run'])
+        self.assertNotIn('--registry', text)  # The script reads its own checkout's registry.
 
 
 if __name__ == '__main__':

@@ -647,7 +647,7 @@ jobs:
         id: names
         env:
           APP_NAME: ${{ inputs.app-name }}
-        run: python3 -I -B .nightly-tools/scripts/nightly_linux_names.py names --app-name "$APP_NAME" --registry .nightly-tools/nightly-apps.json >> "$GITHUB_OUTPUT"
+        run: python3 -I -B .nightly-tools/scripts/nightly_linux_names.py names --app-name "$APP_NAME" >> "$GITHUB_OUTPUT"
       - name: Export the app's build variables
         uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         with:
@@ -742,7 +742,7 @@ jobs:
           PY
             )"
             # The nightly Flatpak app ID comes from the app name, never a hard-coded app.
-            python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" --registry .nightly-tools/nightly-apps.json --kind flatpak --value "$ref_label"
+            python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" --kind flatpak --value "$ref_label"
             if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' not in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
               rm -f "dist/release/$base.flatpak"
             fi
@@ -839,7 +839,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          names=(python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" --registry .nightly-tools/nightly-apps.json)
+          names=(python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME")
           for f in dist/release/*; do
             name="$(basename "$f")"
             case "$name" in
@@ -925,7 +925,7 @@ jobs:
           set -euo pipefail
           bash .nightly-tools/actions/arch-package/run.sh
           for f in dist/release/*.pkg.tar.zst; do
-            python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" --registry .nightly-tools/nightly-apps.json \
+            python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" \
               --kind arch --value "$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::$f has the wrong pkgname"; exit 1; }
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
