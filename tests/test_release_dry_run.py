@@ -19,7 +19,7 @@ class DryRunTests(unittest.TestCase):
         # The environment holds the signing secrets and only admits the release branch.
         for name, job in JOBS.items():
             env = job.get('environment')
-            if env is not None and env != 'nightly-signing':
+            if env is not None:
                 self.assertIn(DRY, env, name)
                 self.assertNotEqual(env.strip(), 'release', name)
 

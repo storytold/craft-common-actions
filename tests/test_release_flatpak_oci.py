@@ -122,7 +122,7 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
 
     def test_a_nightly_version_moves_neither_stable_nor_nightly(self):
-        # nightly-<arch> carries the .nightly app ID image that only the nightly-flatpak job builds.
+        # nightly-<arch> carries the .nightly app ID image that only the nightly pipeline builds.
         result = self.publish("1.2.0-nightly.20261123", "refs/heads/main",
                               DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
