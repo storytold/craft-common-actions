@@ -86,8 +86,8 @@ class ThreePlatformRunTests(unittest.TestCase):
         for platform, directory in directories.items():
             (manifests[platform], claims[platform]), _ = bt.verified(directory, platform=platform)
         validated = self.root/'validated'
-        bundle_digest = b.stage_bundle(validated, bt.state, directories, manifests, claims)
-        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan))
+        bundle_digest = b.stage_bundle(validated, bt.state, directories, manifests, claims, policy=bt.policy)
+        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, policy=bt.policy))
         # sign: one protected job per platform, each with only its own secret.
         signed_root = self.root/'signed'; signed_root.mkdir()
         publish_env = {'RUNNER_TEMP': str(self.root)}
@@ -164,7 +164,7 @@ class ThreePlatformRunTests(unittest.TestCase):
             validated, bt.state, directories, manifests, claims,
             linux_packages=pkg_dir, linux_package_claims=pkg_claims, policy=policy,
         )
-        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, validated, policy=policy))
+        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, policy=policy))
 
         signed_root = self.root/'signed-pkgs'; signed_root.mkdir()
         publish_env = {'RUNNER_TEMP': str(self.root)}
@@ -226,7 +226,7 @@ class ThreePlatformRunTests(unittest.TestCase):
             (manifests[platform], claims[platform]), _ = bt.verified(directory, platform=platform)
         validated = self.root/'validated-night1'
         bundle_digest = b.stage_bundle(validated, bt.state, directories, manifests, claims, policy=old_policy)
-        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, validated, policy=old_policy))
+        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, policy=old_policy))
         signed_root = self.root/'signed-night1'; signed_root.mkdir()
         publish_env = {'RUNNER_TEMP': str(self.root)}
         def windows_native(source, archive, output, env, ver):

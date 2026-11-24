@@ -395,9 +395,10 @@ def verify_oci_signature(public_key, signature, manifest, expected_reference, fi
     critical = payload.get('critical', {}) if isinstance(payload, dict) else {}
     n.require(isinstance(critical, dict) and critical.get('type') == 'atomic container signature',
               'invalid OCI signature type')
-    n.require(critical.get('identity', {}).get('docker-reference') == expected_reference,
+    identity, image = critical.get('identity'), critical.get('image')
+    n.require(isinstance(identity, dict) and identity.get('docker-reference') == expected_reference,
               'OCI signature docker-reference mismatch')
-    n.require(critical.get('image', {}).get('docker-manifest-digest') == f'sha256:{manifest_sha256}',
+    n.require(isinstance(image, dict) and image.get('docker-manifest-digest') == f'sha256:{manifest_sha256}',
               'OCI signature manifest digest mismatch')
     return fingerprint
 

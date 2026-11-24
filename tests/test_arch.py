@@ -298,16 +298,23 @@ exit 0
                     (tar_root / f"bin/{b}").write_text("#!/bin/sh\necho ok\n")
                     os.chmod(tar_root / f"bin/{b}", 0o755)
                 (tar_root / "share/applications/ai.storyteller.myapp.desktop").write_text(
-                    "[Desktop Entry]\nName=MyApp\nExec=myapp %F\nTryExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
+                    "[Desktop Entry]\nName=MyApp\nName[fr]=MonApp\nGenericName=Photo Editor\nExec=myapp %F\nTryExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
                     "\n[Desktop Action new-window]\nName=New Window\nExec=/usr/bin/myapp --new-window\n"
                     '\n[Desktop Action quoted]\nExec="myapp" "some arg" %F\nTryExec="/usr/bin/myapp"\n'
                     '\n[Desktop Action quoted-cli]\nExec="/usr/bin/myapp-cli" --run %f\n'
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
-                    "<component><id>ai.storyteller.myapp</id>"
+                    "<component><id>ai.storyteller.myapp</id><!-- <name>Old</name>\n -->\n<name>MyApp</name>"
+                    "<name xml:lang=\"fr\">MonApp</name>"
+                    "<developer id=\"ai.storyteller\"><name>Storyteller</name></developer>\n"
+                    "<icon type='stock'>ai.storyteller.myapp</icon>\n"
+                    "<provides><binary>myapp</binary><binary>myapp-cli</binary></provides>\n"
                     "<launchable type=\"desktop-id\">ai.storyteller.myapp.desktop</launchable></component>\n"
                 )
-                (tar_root / "share/mime/packages/ai.storyteller.myapp.xml").write_text("<mime-info/>\n")
+                (tar_root / "share/mime/packages/ai.storyteller.myapp.xml").write_text(
+                    '<mime-info><mime-type type="application/x-myapp"><icon name="ai.storyteller.myapp"/></mime-type>'
+                    "<mime-type type='application/x-myapp-2'><icon name='ai.storyteller.myapp'/></mime-type></mime-info>\n"
+                )
                 (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.png").write_bytes(b"png")
                 (tar_root / "share/man/man1/myapp-cli.1").write_text(".TH MYAPP-CLI 1\n")
                 (tar_root / "share/man/man1/myapp-cli-convert.1").write_text(".TH MYAPP-CLI-CONVERT 1\n")
@@ -328,11 +335,15 @@ exit 0
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.tools.metainfo.xml").write_text(
                     '<component><id>ai.storyteller.myapp.tools</id>'
+                    '<developer\n  id="ai.storyteller">\n  <name>Storyteller</name>\n</developer>\n<name>Tools</name>'
+                    '<icon type="stock">aaa.myapp.tools</icon>'
                     "<launchable type='desktop-id'>ai.storyteller.myapp.tools.desktop</launchable></component>\n"
                 )
                 (tar_root / "share/mime/packages/ai.storyteller.myapp.tools.xml").write_text("<mime-info>Tools</mime-info>\n")
                 (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.tools.png").write_bytes(b"tools icon")
                 (tar_root / "share/icons/hicolor/256x256/apps/myapp-custom.png").write_bytes(b"custom icon")
+                # Icon of a desktop entry that has no Icon= key: renamed by its desktop ID.
+                (tar_root / "share/icons/hicolor/256x256/apps/aaa.myapp.tools.png").write_bytes(b"aaa icon")
                 (tar_root / "share/applications/aaa.myapp.tools.desktop").write_text(
                     "[Desktop Entry]\nName=More Tools\nExec=myapp-cli --help\n"
                 )
@@ -411,12 +422,24 @@ exit 0
             self.assertIn("Exec=myapp-nightly %F\n", desktop_text)
             self.assertIn("TryExec=myapp-nightly\n", desktop_text)
             self.assertIn("Icon=ai.storyteller.myapp.nightly\n", desktop_text)
+            self.assertIn("Name=MyApp Nightly\n", desktop_text)
+            self.assertIn("Name[fr]=MonApp Nightly\n", desktop_text)
+            self.assertIn("GenericName=Photo Editor\n", desktop_text)
+            self.assertIn("Name=New Window\n", desktop_text)
             desktop_entry_section = desktop_text.split("[Desktop Action", 1)[0]
             self.assertIn("StartupWMClass=ai.storyteller.myapp\n", desktop_entry_section)
 
             metainfo_text = (nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.nightly.metainfo.xml").read_text()
             self.assertIn("<id>ai.storyteller.myapp.nightly</id>", metainfo_text)
             self.assertIn('<launchable type="desktop-id">ai.storyteller.myapp.nightly.desktop</launchable>', metainfo_text)
+            self.assertIn("<!-- <name>Old</name>\n -->\n<name>MyApp Nightly</name>", metainfo_text)
+            self.assertIn('<name xml:lang="fr">MonApp Nightly</name>', metainfo_text)
+            self.assertIn("<developer id=\"ai.storyteller\"><name>Storyteller</name></developer>", metainfo_text)
+            self.assertIn("<icon type='stock'>ai.storyteller.myapp.nightly</icon>", metainfo_text)
+            self.assertIn("<binary>myapp-nightly</binary><binary>myapp-nightly-cli</binary>", metainfo_text)
+            mime_text = (nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.nightly.xml").read_text()
+            self.assertIn('<icon name="ai.storyteller.myapp.nightly"/>', mime_text)
+            self.assertIn("<icon name='ai.storyteller.myapp.nightly'/>", mime_text)
 
             bash_comp = (nightly_pkgdir / "usr/share/bash-completion/completions/myapp-nightly-cli").read_text()
             self.assertIn("_myapp-nightly-cli()", bash_comp)
@@ -443,6 +466,9 @@ exit 0
             tools_meta = nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.tools.nightly.metainfo.xml"
             self.assertIn("<id>ai.storyteller.myapp.tools.nightly</id>", tools_meta.read_text())
             self.assertIn('>ai.storyteller.myapp.tools.nightly.desktop</launchable>', tools_meta.read_text())
+            self.assertIn('<icon type="stock">aaa.myapp.tools.nightly</icon>', tools_meta.read_text())
+            self.assertIn("usr/share/icons/hicolor/256x256/apps/aaa.myapp.tools.nightly.png", nightly_files)
+            self.assertIn('<developer\n  id="ai.storyteller">\n  <name>Storyteller</name>\n</developer>\n<name>Tools Nightly</name>', tools_meta.read_text())
             tools_mime = nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.tools.nightly.xml"
             self.assertEqual(tools_mime.read_text(), "<mime-info>Tools</mime-info>\n")
             for n, path in enumerate(("bin/myapp-nightly", "bin/myapp-nightly-cli", "share/doc/myapp-nightly", "share/man/man1/myapp-nightly-cli.1")):

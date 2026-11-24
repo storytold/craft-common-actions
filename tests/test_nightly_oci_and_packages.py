@@ -691,12 +691,12 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         )
 
         # Unmodified validated bundle passes verify_bundle.
-        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
+        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, policy=policy))
 
         # Tampering with the staged Linux package breaks bundle verification.
         (validated / deb_name).write_bytes(b"tampered-deb-bytes")
         with self.assertRaises(n.InvalidNightly):
-            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
+            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, policy=policy))
 
     def test_verify_oci_signature_checks_reference_and_manifest_digest(self):
         import nightly_signing as signing
@@ -704,17 +704,16 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         manifest = self.pkg_dir / f"{self.base}.oci-manifest.json"
         sig = self.pkg_dir / f"{self.base}.oci.sig"
         manifest_sha = hashlib.sha256(self.manifest_bytes).hexdigest()
+        critical = {
+            "type": "atomic container signature",
+            "identity": {"docker-reference": "ghcr.io/storytold/photocraft"},
+            "image": {"docker-manifest-digest": f"sha256:{manifest_sha}"},
+        }
 
         def fake_cmd(argv, *, stdin=None, env=None, timeout=3900):
             if argv[0] == "/usr/bin/gpgv":
                 out_idx = argv.index("--output") + 1
-                Path(argv[out_idx]).write_text(json.dumps({
-                    "critical": {
-                        "type": "atomic container signature",
-                        "identity": {"docker-reference": "ghcr.io/storytold/photocraft"},
-                        "image": {"docker-manifest-digest": f"sha256:{manifest_sha}"},
-                    }
-                }), encoding="utf-8")
+                Path(argv[out_idx]).write_text(json.dumps({"critical": critical}), encoding="utf-8")
                 return f"[GNUPG:] NEWSIG\n[GNUPG:] GOODSIG 1234 Test\n[GNUPG:] VALIDSIG {self.fingerprint} 2026-11-23 1795477446 0 4 0 22 10 00 {self.fingerprint}\n"
             raise AssertionError(f"unexpected command: {argv}")
 
@@ -727,6 +726,10 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(n.InvalidNightly, "docker-reference mismatch"):
                 signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/other", self.fingerprint, self.env)
+            critical["identity"] = "ghcr.io/storytold/photocraft"
+            with self.assertRaisesRegex(n.InvalidNightly, "docker-reference mismatch"):
+                signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/photocraft", self.fingerprint, self.env)
+            critical["identity"] = {"docker-reference": "ghcr.io/storytold/photocraft"}
             manifest.write_bytes(b'{"tampered":true}')
             with self.assertRaisesRegex(n.InvalidNightly, "manifest digest mismatch"):
                 signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/photocraft", self.fingerprint, self.env)

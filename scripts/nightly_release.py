@@ -180,28 +180,12 @@ def verify_bundle(directory, expected_sha256, extra, *, signed=False):
     return {name[:-5]: n.bounded_json(Path(directory)/name) for name in BUNDLE_FILES | ({"signing.json"} if signed else set())}
 
 
-def linux_package_names(directory, plan):
-    """Extra validated Linux package filenames present alongside the unsigned bundle."""
-    if directory is None or "linux-x86_64" not in plan.get("platforms", {}):
-        return set()
-    version = plan["identity"]["version"]
-    known = BUNDLE_FILES | {row["unsigned_asset"] for row in plan["platforms"].values()}
-    names = set()
-    for path in Path(directory).iterdir():
-        if path.name not in known and path.is_file() and not path.is_symlink() and f"-{version}-linux-" in path.name and path.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES):
-            names.add(path.name)
-    return names
-
-
-def validated_names(plan, directory=None, *, policy=None):
+def validated_names(plan, *, policy):
     base = {row["unsigned_asset"] for row in plan["platforms"].values()}
-    if policy is not None:
-        formats = r.policy_linux_package_formats(policy)
-        if formats:
-            app = LINUX_PACKAGE_APP
-            return base | r.expected_linux_package_names(app, plan["identity"]["version"], formats)
-        return base
-    return base | linux_package_names(directory, plan)
+    formats = r.policy_linux_package_formats(policy)
+    if formats:
+        return base | r.expected_linux_package_names(LINUX_PACKAGE_APP, plan["identity"]["version"], formats)
+    return base
 
 
 def signed_names(receipt, plan):
@@ -464,7 +448,7 @@ def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
     return claims
 
 
-def stage_bundle(output, state, directories, manifests, claims, linux_packages=None, linux_package_claims=None, *, policy=None):
+def stage_bundle(output, state, directories, manifests, claims, linux_packages=None, linux_package_claims=None, *, policy):
     """One validated bundle: shared admission JSON plus every platform's unsigned payload."""
     n.fields(state, {"request", "quality", "plan"}, "validator state")
     plan = state["plan"]
@@ -497,7 +481,7 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
                 n.require(name in linux_package_claims and
                     n.digest_file(output, name)[1] == linux_package_claims[name]["payload_sha256"],
                     "staged Linux package payload changed")
-    return bundle_hash(output, validated_names(plan, output, policy=policy))
+    return bundle_hash(output, validated_names(plan, policy=policy))
 
 
 def require_unsigned_binding(policy, state, platform, directory):
@@ -859,7 +843,7 @@ def main():
         if args.mode in ("guard", "sign"):
             n.require(args.directory and args.platform and args.expected_sha256, "independent exact trusted-job bundle binding required")
             unverified = n.bounded_json(Path(args.directory)/"plan.json")
-            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified, args.directory, policy=policy))
+            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified, policy=policy))
             n.require(args.platform in state["plan"]["platforms"], "platform absent from validated bundle")
             require_unsigned_binding(policy, state, args.platform, args.directory)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
