@@ -31,7 +31,7 @@ class HandoffTests(unittest.TestCase):
         self.registry = feed.load_registry()
 
     def artifacts(self, app="photocraft", groups=(True, True), attempt=1, name="artifacts"):
-        """Producer artifacts as nightly-attest downloads them: <dir>/<artifact>/<file>."""
+        """Producer artifacts as the nightly-handoff attest job downloads them: <dir>/<artifact>/<file>."""
         directory = self.root / name
         manifest = {"app": app, "prefix": app, "identity": IDENTITY, "nv": feed.ni.nv_from_identity(IDENTITY),
                     "groups": {"riscv64": groups[0], "arch": groups[1]}}

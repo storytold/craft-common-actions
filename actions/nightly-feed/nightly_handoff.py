@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The producer-to-signer handoff manifest (schema craft-nightly-handoff/v1).
 
-The producer's nightly-attest job writes nightly-manifest.json over every nightly artifact of
+The attest job of nightly-handoff.yml writes nightly-manifest.json over every nightly artifact of
 its run attempt and attests that one file; the manifest's hashes then bind every payload. The
 signer's admit job verifies the downloaded artifacts against it.
 
