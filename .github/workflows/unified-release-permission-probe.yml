@@ -1,0 +1,12 @@
+name: Unified release permission probe
+on:
+  push:
+    branches: [verify/unified-release-permission-phase]
+permissions: {}
+jobs:
+  standard:
+    uses: ./.github/workflows/unified-release-permission-fixture.yml
+    permissions:
+      contents: read
+    with:
+      phase: standard

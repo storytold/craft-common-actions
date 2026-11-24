@@ -1,0 +1,23 @@
+name: Unified release permission fixture
+on:
+  workflow_call:
+    inputs:
+      phase:
+        type: string
+        required: true
+permissions: {}
+jobs:
+  standard:
+    if: inputs.phase == 'standard'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "Skipped phases did not prevent the standard call"
+  inactive-oci:
+    if: inputs.phase == 'oci'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - run: exit 1
