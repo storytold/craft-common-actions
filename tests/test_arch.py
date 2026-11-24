@@ -279,7 +279,7 @@ exit 0
             tmp_path = Path(tmpdir)
             version = "0.24.0-nightly.20261124.100.1.gaaaaaaaaaaaa"
 
-            def build_full_tarball(filename):
+            def build_full_tarball(filename, conflict=None, prepackaged=False):
                 tar_root = tmp_path / f"src-{filename}"
                 for rel_dir in (
                     "bin",
@@ -299,7 +299,9 @@ exit 0
                     os.chmod(tar_root / f"bin/{b}", 0o755)
                 (tar_root / "share/applications/ai.storyteller.myapp.desktop").write_text(
                     "[Desktop Entry]\nName=MyApp\nExec=myapp %F\nTryExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
-                    "\n[Desktop Action new-window]\nName=New Window\nExec=myapp --new-window\n"
+                    "\n[Desktop Action new-window]\nName=New Window\nExec=/usr/bin/myapp --new-window\n"
+                    '\n[Desktop Action quoted]\nExec="myapp" "some arg" %F\nTryExec="/usr/bin/myapp"\n'
+                    '\n[Desktop Action quoted-cli]\nExec="/usr/bin/myapp-cli" --run %f\n'
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
                     "<component><id>ai.storyteller.myapp</id>"
@@ -319,13 +321,40 @@ exit 0
                     "complete -c myapp-cli -f\n"
                 )
                 (tar_root / "share/doc/myapp/LICENSE").write_text("MIT\n")
+                (tar_root / "share/applications/ai.storyteller.myapp.tools.desktop").write_text(
+                    "[Desktop Entry]\nName=Tools\nExec=/usr/bin/myapp-cli --tools %F\nTryExec=/usr/bin/myapp\nIcon=ai.storyteller.myapp.tools\n"
+                    "\n[Desktop Action unrelated]\nExec=/usr/bin/myapp-helper --arg\nIcon=system-run\n"
+                    "\n[Desktop Action custom-icon]\nIcon=myapp-custom\n"
+                )
+                (tar_root / "share/metainfo/ai.storyteller.myapp.tools.metainfo.xml").write_text(
+                    '<component><id>ai.storyteller.myapp.tools</id>'
+                    '<launchable type="desktop-id">ai.storyteller.myapp.tools.desktop</launchable></component>\n'
+                )
+                (tar_root / "share/mime/packages/ai.storyteller.myapp.tools.xml").write_text("<mime-info>Tools</mime-info>\n")
+                (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.tools.png").write_bytes(b"tools icon")
+                (tar_root / "share/icons/hicolor/256x256/apps/myapp-custom.png").write_bytes(b"custom icon")
+                if conflict:
+                    extra = tar_root / conflict
+                    if conflict.startswith("share/doc/"):
+                        extra.mkdir()
+                        (extra / "README").write_text("already namespaced\n")
+                    else:
+                        extra.write_text("already namespaced\n")
+                if prepackaged:
+                    resources = ["share/applications/ai.storyteller.myapp.desktop"]
+                    if prepackaged != "stable-icon":
+                        resources.append("share/icons/hicolor/256x256/apps/ai.storyteller.myapp.png")
+                    for resource in resources:
+                        path = tar_root / resource
+                        path.rename(path.with_name(path.stem + ".nightly" + path.suffix))
+
                 tb = tmp_path / filename
                 with tarfile.open(tb, "w:gz") as tar:
                     for item in tar_root.iterdir():
                         tar.add(item, arcname=item.name)
                 return tb
 
-            def run_package(tarball, name_tag):
+            def run_package(tarball, name_tag, *, reject=False):
                 capture = tmp_path / f"capture-{name_tag}"
                 capture.mkdir()
                 pkgdir = capture / "pkgdir"
@@ -352,6 +381,10 @@ exit 0
                     text=True,
                     env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
                 )
+                if reject:
+                    self.assertNotEqual(res.returncode, 0, res.stdout)
+                    self.assertIn("conflicting stable and nightly paths", res.stderr)
+                    return
                 self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
                 pkgbuild_path = capture / "PKGBUILD"
                 files = {
@@ -389,6 +422,39 @@ exit 0
             self.assertIn("#compdef myapp-nightly-cli", zsh_comp)
             self.assertIn('"_myapp-nightly-cli"', zsh_comp)
             self.assertIn("usr/share/man/man1/myapp-nightly-cli-convert.1", nightly_files)
+            self.assertIn("Exec=/usr/bin/myapp-nightly --new-window\n", desktop_text)
+            self.assertIn('Exec="myapp-nightly" "some arg" %F\n', desktop_text)
+            self.assertIn('TryExec="/usr/bin/myapp-nightly"\n', desktop_text)
+            self.assertIn('Exec="/usr/bin/myapp-nightly-cli" --run %f\n', desktop_text)
+            tools = nightly_pkgdir / "usr/share/applications/ai.storyteller.myapp.tools.nightly.desktop"
+            self.assertIn("Exec=/usr/bin/myapp-nightly-cli --tools %F\n", tools.read_text())
+            self.assertIn("TryExec=/usr/bin/myapp-nightly\n", tools.read_text())
+            self.assertIn("Exec=/usr/bin/myapp-helper --arg\n", tools.read_text())
+            self.assertIn("Icon=ai.storyteller.myapp.tools.nightly\n", tools.read_text())
+            self.assertIn("Icon=system-run\n", tools.read_text())
+            self.assertIn("Icon=myapp-custom-nightly\n", tools.read_text())
+            custom_icon = nightly_pkgdir / "usr/share/icons/hicolor/256x256/apps/myapp-custom-nightly.png"
+            self.assertEqual(custom_icon.read_bytes(), b"custom icon")
+            tools_icon = nightly_pkgdir / "usr/share/icons/hicolor/256x256/apps/ai.storyteller.myapp.tools.nightly.png"
+            self.assertEqual(tools_icon.read_bytes(), b"tools icon")
+            tools_meta = nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.tools.nightly.metainfo.xml"
+            self.assertIn("<id>ai.storyteller.myapp.tools.nightly</id>", tools_meta.read_text())
+            self.assertIn('>ai.storyteller.myapp.tools.nightly.desktop</launchable>', tools_meta.read_text())
+            tools_mime = nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.tools.nightly.xml"
+            self.assertEqual(tools_mime.read_text(), "<mime-info>Tools</mime-info>\n")
+            for n, path in enumerate(("bin/myapp-nightly", "bin/myapp-nightly-cli", "share/doc/myapp-nightly")):
+                tarball = build_full_tarball(f"myapp-{version}.{n}-linux-x86_64.tar.gz", conflict=path)
+                run_package(tarball, f"collision-{n}", reject=True)
+            packaged = build_full_tarball(f"myapp-{version}.4-linux-x86_64.tar.gz", prepackaged=True)
+            _, _, packaged_files = run_package(packaged, "already-nightly")
+            self.assertIn("usr/share/icons/hicolor/256x256/apps/ai.storyteller.myapp.nightly.png", packaged_files)
+            mixed = build_full_tarball(f"myapp-{version}.5-linux-x86_64.tar.gz", prepackaged="stable-icon")
+            _, mixed_dir, mixed_files = run_package(mixed, "already-nightly-stable-icon")
+            self.assertIn("usr/share/icons/hicolor/256x256/apps/ai.storyteller.myapp.nightly.png", mixed_files)
+            self.assertNotIn("usr/share/icons/hicolor/256x256/apps/ai.storyteller.myapp.png", mixed_files)
+            mixed_desktop = mixed_dir / "usr/share/applications/ai.storyteller.myapp.nightly.desktop"
+            self.assertIn("Icon=ai.storyteller.myapp.nightly\n", mixed_desktop.read_text())
+
 
     def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
         """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
