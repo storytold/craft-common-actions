@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -116,6 +117,125 @@ class WorkflowTextTests(unittest.TestCase):
         step = next(s for s in job['steps'] if s.get('id') == 'names')
         self.assertEqual(step['env']['APP_NAME'], '${{ inputs.app-name }}')
         self.assertNotIn('--registry', text)  # The script reads its own checkout's registry.
+
+
+
+STUBS = {
+    # Each fixture file holds the metadata the real tool would print; FAIL-AFTER makes the tool
+    # print it and then fail, like a decompression error after partial output.
+    'dpkg-deb': '#!/bin/sh\n[ "$1" = -f ] && [ "$3" = Package ] || exit 64\nsed -n "s/^Package: //p" "$2"\n! grep -q FAIL-AFTER "$2"\n',
+    'rpm': '#!/bin/sh\nfor last; do :; done\nsed -n "s/^Name: //p" "$last"\n! grep -q FAIL-AFTER "$last"\n',
+    'tar': '#!/bin/sh\n[ "$1" = --zstd ] && [ "$2" = -xOf ] && [ "$4" = .PKGINFO ] || exit 64\ngrep "^pkgname = " "$3"\n! grep -q FAIL-AFTER "$3"\n',
+}
+
+
+ACTIVE_STUBS = [STUBS]
+
+
+@contextlib.contextmanager
+def patch_stubs(stubs):
+    ACTIVE_STUBS.append(stubs)
+    try:
+        yield
+    finally:
+        ACTIVE_STUBS.pop()
+
+
+class PackageCheckBehaviourTests(unittest.TestCase):
+    """Run nightly-unsigned.yml's own package-check scripts against package-metadata fixtures."""
+    DATA = yaml.load((ROOT / '.github/workflows/nightly-unsigned.yml').read_text(), Loader=yaml.BaseLoader)
+
+    def step(self, job, name):
+        return next(s for s in self.DATA['jobs'][job]['steps'] if s.get('name') == name)
+
+    def run_step(self, job, name, app, packages, binary=False):
+        import shutil, subprocess, tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = root / '.nightly-tools'
+            (tools / 'actions/arch-package').mkdir(parents=True)
+            (tools / 'actions/arch-package/run.sh').write_text('exit 0\n')  # packaging itself is not under test
+            (tools / 'scripts').symlink_to(ROOT / 'scripts')
+            shutil.copyfile(ROOT / 'nightly-apps.json', tools / 'nightly-apps.json')
+            stubs = root / 'stubs'; stubs.mkdir()
+            for tool, body in ACTIVE_STUBS[-1].items():
+                (stubs / tool).write_text(body); (stubs / tool).chmod(0o755)
+            (root / 'dist/release').mkdir(parents=True)
+            for filename, body in packages.items():
+                path = root / 'dist/release' / filename
+                path.write_bytes(body.encode('latin-1')) if binary else path.write_text(body)
+            env = {'PATH': f"{stubs}:{os.environ['PATH']}", 'VERSION': '1.2.3-nightly.1', 'ARCH': 'x86_64',
+                   'APP_NAME': app, 'HOME': directory}
+            result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', self.step(job, name)['run']],
+                                    cwd=root, env=env, capture_output=True, text=True, timeout=60)
+            return result.returncode, result.stdout + result.stderr
+
+    def verify(self, app, packages):
+        return self.run_step('build-linux-packages', 'Verify built Linux package versions and nightly identities', app, packages)
+
+    def fixtures(self, deb, rpm, arch, tail=''):
+        base = '-1.2.3-nightly.1-linux-x86_64'
+        return {f'designcraft{base}.deb': f'Package: {deb}\n{tail}', f'designcraft{base}.rpm': f'Name: {rpm}\n{tail}',
+                f'designcraft{base}.pkg.tar.zst': f'pkgname = {arch}\n{tail}', f'designcraft{base}.AppImage': ''}
+
+    def test_second_app_packages_pass_and_photocraft_named_ones_refuse(self):
+        good = self.fixtures('designcraft-nightly', 'designcraft-nightly', 'ai.storyteller.designcraft.nightly')
+        self.assertEqual(self.verify('designcraft', good)[0], 0)
+        for kind, bad in (('deb', self.fixtures('photocraft-nightly', 'designcraft-nightly', 'ai.storyteller.designcraft.nightly')),
+                          ('rpm', self.fixtures('designcraft-nightly', 'photocraft-nightly', 'ai.storyteller.designcraft.nightly')),
+                          ('arch', self.fixtures('designcraft-nightly', 'designcraft-nightly', 'ai.storyteller.photocraft.nightly'))):
+            with self.subTest(kind=kind):
+                code, output = self.verify('designcraft', bad)
+                self.assertEqual(code, 1, output)
+                self.assertIn('::error::', output)
+
+    def test_extraction_failure_after_correct_partial_output_refuses(self):
+        # The tools print the right name, then fail: the check must not pass on the partial read.
+        failing = self.fixtures('designcraft-nightly', 'designcraft-nightly', 'ai.storyteller.designcraft.nightly', 'FAIL-AFTER\n')
+        for name in list(failing):
+            if name.endswith('.AppImage'):
+                continue
+            with self.subTest(package=name):
+                packages = self.fixtures('designcraft-nightly', 'designcraft-nightly', 'ai.storyteller.designcraft.nightly')
+                packages[name] = failing[name]
+                code, output = self.verify('designcraft', packages)
+                self.assertEqual(code, 1, output)
+                self.assertIn('could not read', output)
+
+    def test_aarch64_arch_job_checks_the_app_name_and_refuses_partial_reads(self):
+        name = 'Build aarch64 Arch package with reviewed tooling revision'
+        package = 'designcraft-1.2.3-nightly.1-linux-aarch64.pkg.tar.zst'
+        self.assertEqual(self.run_step('build-linux-arch-arm', name, 'designcraft', {package: 'pkgname = ai.storyteller.designcraft.nightly\n'})[0], 0)
+        for body in ('pkgname = ai.storyteller.photocraft.nightly\n', 'pkgname = ai.storyteller.designcraft.nightly\nFAIL-AFTER\n'):
+            with self.subTest(body=body):
+                code, output = self.run_step('build-linux-arch-arm', name, 'designcraft', {package: body})
+                self.assertEqual(code, 1, output)
+
+    def test_truncated_real_pkg_tar_zst_refuses_in_both_arch_checks(self):
+        # Real GNU tar and zstd: .PKGINFO is the first member, so a truncated archive prints the
+        # right pkgname before tar fails. The check must refuse it, and accept the intact archive.
+        import shutil, subprocess, tempfile
+        if not (shutil.which('zstd') and shutil.which('tar')):
+            self.skipTest('GNU tar and zstd are required')
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / 'pkg').mkdir()
+            (work / 'pkg/.PKGINFO').write_text('pkgname = ai.storyteller.designcraft.nightly\npkgver = 1.2.3\n')
+            (work / 'pkg/payload.bin').write_bytes(os.urandom(512 * 1024))  # incompressible, so truncation hits it
+            archive = work / 'good.pkg.tar.zst'
+            subprocess.run(['tar', '--zstd', '-cf', str(archive), '-C', str(work / 'pkg'), '.PKGINFO', 'payload.bin'], check=True)
+            raw = archive.read_bytes()
+            intact, truncated = raw.decode('latin-1'), raw[: len(raw) // 2].decode('latin-1')
+        real = dict(STUBS); del real['tar']  # real tar for these cases
+        for job, name, filename in (
+                ('build-linux-packages', 'Verify built Linux package versions and nightly identities',
+                 'designcraft-1.2.3-nightly.1-linux-x86_64.pkg.tar.zst'),
+                ('build-linux-arch-arm', 'Build aarch64 Arch package with reviewed tooling revision',
+                 'designcraft-1.2.3-nightly.1-linux-aarch64.pkg.tar.zst')):
+            for label, body, expected in (('intact', intact, 0), ('truncated', truncated, 1)):
+                with self.subTest(job=job, archive=label), patch_stubs(real):
+                    code, output = self.run_step(job, name, 'designcraft', {filename: body}, binary=True)
+                    self.assertEqual(code, expected, output)
 
 
 if __name__ == '__main__':

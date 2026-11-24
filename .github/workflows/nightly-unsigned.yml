@@ -844,13 +844,17 @@ jobs:
             name="$(basename "$f")"
             case "$name" in
               *-"${VERSION}"-linux-"${ARCH}".deb)
-                "${names[@]}" --kind deb --value "$(dpkg-deb -f "$f" Package)" || { echo "::error::$name has the wrong deb Package"; exit 1; }
+                value="$(dpkg-deb -f "$f" Package)" || { echo "::error::could not read the deb Package of $name"; exit 1; }
+                "${names[@]}" --kind deb --value "$value" || { echo "::error::$name has the wrong deb Package"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".rpm)
-                "${names[@]}" --kind rpm --value "$(rpm -qp --qf '%{NAME}' "$f")" || { echo "::error::$name has the wrong rpm Name"; exit 1; }
+                value="$(rpm -qp --qf '%{NAME}' "$f")" || { echo "::error::could not read the rpm Name of $name"; exit 1; }
+                "${names[@]}" --kind rpm --value "$value" || { echo "::error::$name has the wrong rpm Name"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".pkg.tar.zst)
-                "${names[@]}" --kind arch --value "$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::$name has the wrong pkgname"; exit 1; }
+                # A separate assignment keeps pipefail: a read or decompression error after partial output refuses.
+                value="$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::could not read .PKGINFO of $name"; exit 1; }
+                "${names[@]}" --kind arch --value "$value" || { echo "::error::$name has the wrong pkgname"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".*) ;;
               *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
@@ -925,8 +929,10 @@ jobs:
           set -euo pipefail
           bash .nightly-tools/actions/arch-package/run.sh
           for f in dist/release/*.pkg.tar.zst; do
+            # A separate assignment keeps pipefail: a read or decompression error after partial output refuses.
+            value="$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::could not read .PKGINFO of $f"; exit 1; }
             python3 -I -B .nightly-tools/scripts/nightly_linux_names.py check --app-name "$APP_NAME" \
-              --kind arch --value "$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::$f has the wrong pkgname"; exit 1; }
+              --kind arch --value "$value" || { echo "::error::$f has the wrong pkgname"; exit 1; }
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
