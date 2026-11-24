@@ -25,16 +25,10 @@ class SupplyChainOptInTests(unittest.TestCase):
         self.supply = load(SUPPLY)
 
     def test_release_workflow_does_not_call_supply_chain(self):
-        self.assertNotIn("supply-chain.yml", RELEASE.read_text())
-        # Only the nightly handoff attests; every other release job stays without OIDC.
-        for name, job in self.release["jobs"].items():
-            if name == "nightly-attest":
-                continue
-            with self.subTest(job=name):
-                permissions = job.get("permissions") or {}
-                self.assertNotIn("id-token", permissions)
-                self.assertNotIn("attestations", permissions)
-        self.assertNotIn("id-token", self.release.get("permissions") or {})
+        text = RELEASE.read_text()
+        self.assertNotIn("supply-chain.yml", text)
+        self.assertNotIn("id-token", text)
+        self.assertNotIn("attestations:", text)
 
     def test_release_exposes_version_for_an_optional_follow_up_job(self):
         outputs = self.release["on"]["workflow_call"]["outputs"]

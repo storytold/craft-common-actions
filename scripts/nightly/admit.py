@@ -3,7 +3,7 @@
 
 The signer (the app's `release`-branch caller of nightly-sign.yml) admits exactly one attempt of
 the app's producer run (release.yml on main calling craft-common-actions release.yml@main in
-nightly mode). The steps of the admit job, in order:
+nightly mode, then nightly-handoff.yml@main, which attests the manifest). The steps of the admit job, in order:
 
   request  signer context, producer run metadata, artifact selection (GET only)
   attest   gh attestation verify of the downloaded handoff manifest, then the manifest itself
@@ -36,7 +36,9 @@ import nightly_handoff as handoff  # noqa: E402
 import nightly_identity as ni  # noqa: E402
 
 DEFINING_REPOSITORY = "storytold/craft-common-actions"
-BUILDER_WORKFLOW = DEFINING_REPOSITORY + "/.github/workflows/release.yml"
+# The attesting workflow; the producer must also call PRODUCER_WORKFLOW, which built the payloads.
+BUILDER_WORKFLOW = DEFINING_REPOSITORY + "/.github/workflows/nightly-handoff.yml"
+PRODUCER_WORKFLOW = DEFINING_REPOSITORY + "/.github/workflows/release.yml"
 BUILDER_REF = "refs/heads/main"
 BUILDER = f"https://github.com/{BUILDER_WORKFLOW}@{BUILDER_REF}"
 ISSUER = "https://token.actions.githubusercontent.com"
@@ -209,9 +211,10 @@ def producer_role(row, context, run_id, attempt, workflow, manual, now):
     event = row.get("event")
     require(event in ("schedule", "workflow_dispatch"), "producer run event must be schedule or workflow_dispatch")
     refs = row.get("referenced_workflows")
-    require(isinstance(refs, list) and len(refs) <= 32 and sum(
-        isinstance(item, dict) and item.get("path") == BUILDER_WORKFLOW + "@main" for item in refs) == 1,
-        f"producer run does not call {BUILDER_WORKFLOW}@main")
+    require(isinstance(refs, list) and len(refs) <= 32, "invalid producer referenced workflows")
+    for called in (PRODUCER_WORKFLOW, BUILDER_WORKFLOW):
+        require(sum(isinstance(item, dict) and item.get("path") == called + "@main" for item in refs) == 1,
+                f"producer run does not call {called}@main")
     actor = row.get("triggering_actor")
     login = actor.get("login") if isinstance(actor, dict) else None
     require(valid_login(login), "producer triggering actor missing")
@@ -347,7 +350,7 @@ def verify_attestation(state, results, manifest_sha256):
 
     Not a cryptographic verifier: the caller runs gh itself on the hashed manifest, requires exit
     0, and passes only gh's own stdout. buildSignerDigest is not pinned: the producer calls
-    release.yml@main, so only the ref and path bind the builder.
+    nightly-handoff.yml@main, so only the ref and path bind the builder.
     """
     require(isinstance(manifest_sha256, str) and SHA256.fullmatch(manifest_sha256), "manifest digest required")
     require(isinstance(results, list) and 0 < len(results) <= 32, "gh verification returned no results")

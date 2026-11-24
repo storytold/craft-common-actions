@@ -106,8 +106,8 @@ class AdmitTests(unittest.TestCase):
         row = {"id": RUN_ID, "run_attempt": 1, "workflow_id": 77, "path": WORKFLOW, "head_branch": "main",
                "head_sha": SHA, "event": "schedule", "status": "in_progress", "conclusion": None,
                "repository": {"id": REPO_ID, "full_name": REPO}, "head_repository": {"id": REPO_ID, "full_name": REPO},
-               "referenced_workflows": [{"path": admit.BUILDER_WORKFLOW + "@main", "sha": "c" * 40,
-                                         "ref": "refs/heads/main"}],
+               "referenced_workflows": [{"path": path + "@main", "sha": "c" * 40, "ref": "refs/heads/main"}
+                                        for path in (admit.PRODUCER_WORKFLOW, admit.BUILDER_WORKFLOW)],
                "triggering_actor": {"login": "someone"}, "created_at": CREATED, "run_started_at": CREATED}
         row.update(changes)
         return row
@@ -183,7 +183,16 @@ class AdmitTests(unittest.TestCase):
             ({"path": ".github/workflows/other.yml"}, "on main"),
             ({"event": "push"}, "schedule or workflow_dispatch"),
             ({"referenced_workflows": []}, "does not call"),
-            ({"referenced_workflows": [{"path": admit.BUILDER_WORKFLOW + "@" + "c" * 40}]}, "does not call"),
+            ({"referenced_workflows": [{"path": admit.PRODUCER_WORKFLOW + "@main"},
+                                       {"path": admit.BUILDER_WORKFLOW + "@" + "c" * 40}]}, "does not call"),
+            # The handoff alone did not build the payloads; release.yml must have run in the same producer.
+            ({"referenced_workflows": [{"path": admit.BUILDER_WORKFLOW + "@main"}]},
+             f"does not call {admit.PRODUCER_WORKFLOW}@main"),
+            ({"referenced_workflows": [{"path": admit.PRODUCER_WORKFLOW + "@main"}]},
+             f"does not call {admit.BUILDER_WORKFLOW}@main"),
+            ({"referenced_workflows": [{"path": admit.PRODUCER_WORKFLOW + "@main"},
+                                       {"path": admit.BUILDER_WORKFLOW + "@main"},
+                                       {"path": admit.BUILDER_WORKFLOW + "@main"}]}, "does not call"),
             ({"repository": {"id": 1, "full_name": REPO}}, "producer repository"),
             ({"head_sha": "short"}, "head_sha"),
             ({"created_at": old, "run_started_at": old}, "36 hours"),
@@ -264,6 +273,8 @@ class AdmitTests(unittest.TestCase):
         cert = ("signature", "certificate")
         cases = [
             mutate(cert + ("buildSignerURI",), admit.BUILDER.replace("refs/heads/main", "c" * 40)),
+            # An attestation made by release.yml itself is not the handoff's.
+            mutate(cert + ("buildSignerURI",), admit.BUILDER.replace("nightly-handoff.yml", "release.yml")),
             mutate(cert + ("sourceRepositoryDigest",), "b" * 40),
             mutate(cert + ("buildConfigURI",), f"{BASE}/.github/workflows/other.yml@refs/heads/main"),
             mutate(cert + ("sourceRepositoryRef",), "refs/heads/release"),
@@ -296,6 +307,13 @@ class AdmitTests(unittest.TestCase):
             kwargs["stdout"].write(json.dumps(results).encode())
             return Done()
         return run, calls
+
+    def test_the_builder_is_the_handoff_workflow_on_main(self):
+        self.assertEqual(admit.BUILDER, "https://github.com/storytold/craft-common-actions/.github/workflows/"
+                                        "nightly-handoff.yml@refs/heads/main")
+        self.assertEqual(admit.PRODUCER_WORKFLOW, "storytold/craft-common-actions/.github/workflows/release.yml")
+        for name in (admit.BUILDER_WORKFLOW, admit.PRODUCER_WORKFLOW):
+            self.assertTrue((ROOT / name.removeprefix(admit.DEFINING_REPOSITORY + "/")).is_file(), name)
 
     def test_attest_runs_gh_and_checks_the_manifest(self):
         state = self.request()

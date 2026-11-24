@@ -1,0 +1,176 @@
+name: Nightly handoff
+
+# The producer's half of the nightly handoff, called by the app's release.yml caller after
+# release.yml (nightly mode) reports nightly-ready. It attests one manifest over every nightly
+# payload of the run attempt and starts the app's signer on the release branch. A called workflow's
+# artifacts belong to the caller's run, so the payloads release.yml uploaded are this run's too.
+# Kept out of release.yml because its OIDC, attestation and dispatch rights would have to be granted
+# by every release.yml caller, stable releases included.
+
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "App name, as passed to release.yml"
+        type: string
+        required: true
+      ready:
+        description: "release.yml's nightly-ready output; anything but 'true' skips the handoff"
+        type: string
+        required: true
+      nightly-identity:
+        description: "release.yml's nightly-identity output"
+        type: string
+        required: true
+      nightly-version:
+        description: "release.yml's nightly-version output"
+        type: string
+        required: true
+      nightly-published-at:
+        description: "release.yml's nightly-published-at output"
+        type: string
+        required: true
+      signer-workflow:
+        description: >-
+          The caller repository's workflow file on its release branch that the dispatch job starts
+          with producer_run_id and producer_run_attempt
+        type: string
+        required: false
+        default: "nightly-sign.yml"
+      dry-run:
+        description: >-
+          Write and check the manifest only: no attestation and no dispatch, so nothing from this run
+          can be signed
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # One attested manifest binds every payload of this attempt by hash; the signer admits only
+  # payloads that match it. No app checkout: the manifest comes from the artifacts and the tooling of
+  # this workflow's own commit.
+  attest:
+    timeout-minutes: 15
+    name: Attest the nightly payloads
+    if: ${{ !cancelled() && inputs.ready == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Require the attempt that planned the identity
+        env:
+          IDENTITY: ${{ inputs.nightly-identity }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          # "Re-run failed jobs" keeps the outputs of jobs that passed in the earlier attempt, so the
+          # identity would name an attempt whose payloads this run did not build.
+          rest="${IDENTITY%.g*}"
+          attempt="${rest##*.}"
+          run="${rest%.*}"
+          run="${run##*.}"
+          if [ -z "$IDENTITY" ] || [ "$run" != "$RUN_ID" ] || [ "$attempt" != "$RUN_ATTEMPT" ]; then
+            echo "::error::the nightly identity '$IDENTITY' does not belong to attempt $RUN_ATTEMPT of run $RUN_ID. A partial re-run cannot publish a nightly: use Re-run all jobs."
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # One directory per artifact (<dir>/<artifact>/<file>), which the manifest records.
+          pattern: nightly-*-${{ github.run_attempt }}
+          path: .nightly-artifacts
+          digest-mismatch: error
+      - name: Check out this workflow's own tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify the tooling checkout
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$WORKFLOW_SHA"
+      - name: Find the file prefix
+        id: prefix
+        env:
+          NIGHTLY_VERSION: ${{ inputs.nightly-version }}
+          ARTIFACT: .nightly-artifacts/nightly-flatpak-x86_64-${{ github.run_attempt }}
+        run: |
+          # The Flatpak artifact holds exactly one bundle, <prefix>-nightly-<nv>-linux-x86_64.flatpak.
+          shopt -s nullglob
+          bundles=("$ARTIFACT"/*-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak)
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "::error::expected one nightly Flatpak bundle for ${NIGHTLY_VERSION} in $ARTIFACT, found ${#bundles[@]}: ${bundles[*]}"
+            exit 1
+          fi
+          base="${bundles[0]##*/}"
+          echo "prefix=${base%-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak}" >>"$GITHUB_OUTPUT"
+      - name: Write the nightly manifest
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+          IDENTITY: ${{ inputs.nightly-identity }}
+          PUBLISHED_AT: ${{ inputs.nightly-published-at }}
+          PREFIX: ${{ steps.prefix.outputs.prefix }}
+        run: |
+          python3 -I -B .nightly-tools/actions/nightly-feed/nightly_handoff.py write --app "$APP_NAME" \
+            --artifacts .nightly-artifacts --output .nightly-manifest --identity "$IDENTITY" \
+            --published-at "$PUBLISHED_AT" --prefix "$PREFIX"
+      - name: Attest the nightly manifest
+        if: ${{ !inputs.dry-run }}
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: .nightly-manifest/nightly-manifest.json
+      - name: Upload the nightly manifest
+        if: ${{ !inputs.dry-run }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .nightly-manifest/nightly-manifest.json
+          if-no-files-found: error
+
+  # The signer runs on the release branch, where the release environment holds the signing keys,
+  # and admits this run by its attested manifest.
+  dispatch:
+    timeout-minutes: 5
+    name: Start the nightly signer
+    if: ${{ !cancelled() && !inputs.dry-run && needs.attest.result == 'success' }}
+    needs: [attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Dispatch the signer on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ inputs.signer-workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+            echo "::error::signer-workflow must be a workflow file name such as nightly-sign.yml, not '$WORKFLOW'"
+            exit 1
+          fi
+          if ! gh api "repos/$REPO/contents/.github/workflows/$WORKFLOW?ref=release" --silent; then
+            echo "::error::$REPO has no .github/workflows/$WORKFLOW on its release branch, so nothing can sign this nightly. Add the signer caller there, or point signer-workflow at it."
+            exit 1
+          fi
+          gh workflow run "$WORKFLOW" --repo "$REPO" --ref release \
+            -f producer_run_id="$RUN_ID" -f producer_run_attempt="$RUN_ATTEMPT"
+          echo "Dispatched $WORKFLOW on release for run $RUN_ID, attempt $RUN_ATTEMPT." >>"$GITHUB_STEP_SUMMARY"

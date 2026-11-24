@@ -307,7 +307,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
     RELEASE_INPUTS_OUTSIDE_THE_KEY = {
         "app-title", "web-craft-fonts", "version", "contributors-artifact", "has-web", "has-riscv64",
         "has-freebsd", "has-arch", "wix-version", "nfpm-version", "trunk-version",
-        "freebsd-architectures", "has-server", "dry-run", "nightly", "nightly-signer-workflow", "publish",
+        "freebsd-architectures", "has-server", "dry-run", "nightly", "publish",
     }
 
     def test_release_cache_key_names_every_input_that_changes_the_freebsd_build(self):

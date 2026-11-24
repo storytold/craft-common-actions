@@ -181,16 +181,18 @@ nightly's, a scheduled run skips every nightly job.
 
 **How a run flows**
 
-1. The producer, `release.yml` on `main`, builds the Linux, Flatpak and (for registry apps)
-   launcher payloads with no secrets. `nightly-attest` writes `nightly-manifest.json` (every
-   file's name, size and sha256, the identity, the commit and the run) and attests it.
-   `nightly-dispatch` then starts the app's signer workflow on the `release` branch with
-   `producer_run_id` and `producer_run_attempt`.
+1. The producer is the app's `release.yml` caller on `main`. Its `release` job (`release.yml`)
+   builds the Linux, Flatpak and (for registry apps) launcher payloads with no secrets and sets
+   the `nightly-ready` output once every expected payload of the attempt exists. Its
+   `nightly-handoff` job (`nightly-handoff.yml`) then writes `nightly-manifest.json` (every file's
+   name, size and sha256, the identity, the commit and the run), attests it, and starts the app's
+   signer workflow on the `release` branch with `producer_run_id` and `producer_run_attempt`.
 2. The signer, `.github/workflows/nightly-sign.yml` here, called from the app's own
    `nightly-sign.yml` on `release`:
    - `admit` (no keys) checks the dispatch context and the producer run, downloads the manifest,
-     verifies its attestation with `gh attestation verify` (builder workflow `release.yml`, ref
-     `refs/heads/main`, the producer's commit and run), recomputes the identity, hashes every
+     verifies its attestation with `gh attestation verify` (builder workflow `nightly-handoff.yml`,
+     ref `refs/heads/main`, the producer's commit and run; the producer run must call both
+     `release.yml@main` and `nightly-handoff.yml@main`), recomputes the identity, hashes every
      payload against the manifest, and checks package identity, the OCI layout's Flatpak ref, the
      launcher archive contents, the exact asset set and the tag rules.
    - `sign-windows` and `sign-macos` (environment `release`) sign the launcher payloads, and
@@ -205,9 +207,9 @@ nightly's, a scheduled run skips every nightly job.
      release and deletes the release if that fails.
    - `retain` prunes to 3 and dispatches the website.
 
-   Signer runs of one repository queue; none is cancelled. The producer run does not have to be
-   finished or green when the signer starts (Windows or FreeBSD may still be running): the attested
-   manifest is what the signer trusts.
+   Signer runs of one repository queue; none is cancelled. The handoff waits for the whole
+   `release` job, but it does not need it green: a failed stable-only job (Windows, FreeBSD, web)
+   does not stop the nightly. The attested manifest is what the signer trusts.
 
 All Linux packages are signed with the one stable `LINUX_SIGNING_KEY`, which artcraft-services
 already serves, so no separate nightly key exists. Because that key signs code from `main`, the
@@ -216,29 +218,46 @@ before the key is used. No build job on `main` holds a secret.
 
 **Opting an app in**
 
-1. In the app's `release.yml` caller, replace the scheduled `dry-run` expression and grant the
-   dispatch and attestation permissions:
+1. In the app's `release.yml` caller, replace the scheduled `dry-run` expression and add the
+   `nightly-handoff` job. The `release` job keeps the caller's permissions; only the handoff job
+   gets the attestation and dispatch rights, so a stable release run never needs them.
 
    ```yaml
    permissions:
      contents: write
      packages: write
-     actions: write        # nightly-dispatch
-     id-token: write       # nightly-attest
-     attestations: write   # nightly-attest
    jobs:
      release:
        uses: storytold/craft-common-actions/.github/workflows/release.yml@main
        with:
+         app-name: photocraft
          nightly: ${{ github.event_name == 'schedule' }}
+       # secrets: as in the caller example above
+     nightly-handoff:
+       needs: release
+       # !cancelled(): a failed stable-only job must not skip the handoff of a finished nightly.
+       if: ${{ !cancelled() && needs.release.outputs.nightly-ready == 'true' }}
+       permissions:
+         contents: read
+         actions: write        # starts the signer
+         id-token: write       # attests the manifest
+         attestations: write
+       uses: storytold/craft-common-actions/.github/workflows/nightly-handoff.yml@main
+       with:
+         app-name: photocraft
+         ready: ${{ needs.release.outputs.nightly-ready }}
+         nightly-identity: ${{ needs.release.outputs.nightly-identity }}
+         nightly-version: ${{ needs.release.outputs.nightly-version }}
+         nightly-published-at: ${{ needs.release.outputs.nightly-published-at }}
    ```
 
-   Set `nightly-signer-workflow` (a file name, default `nightly-sign.yml`) if the signer caller has
-   another name.
+   Set the handoff's `signer-workflow` (a file name, default `nightly-sign.yml`) if the signer
+   caller has another name. With `dry-run: true` the handoff writes and checks the manifest but
+   neither attests nor dispatches, so nothing from that run can be signed.
 
 2. Add the signer caller `.github/workflows/nightly-sign.yml` on `main` and on `release`. GitHub
    dispatches only workflows that exist on the default branch, and the signer runs from `release`.
-   Without it on `release`, `nightly-dispatch` fails with a message saying so.
+   Without it on `release`, the handoff's dispatch job fails with a message saying so.
 
    ```yaml
    name: Nightly signer
@@ -293,8 +312,8 @@ before the key is used. No build job on `main` holds a secret.
    the distro packages. A registry entry (`actions/nightly-feed/apps.json`) adds the launcher part.
 
 **Re-runs.** Use "Re-run all jobs". A partial re-run ("Re-run failed jobs") reuses the version
-job's identity from attempt 1 while new artifacts carry attempt 2, so `nightly-attest` fails early
-with that hint and nothing publishes.
+job's identity from attempt 1 while new artifacts carry attempt 2, so the handoff fails before it
+attests, with that hint, and nothing publishes.
 
 **Build channel.** The distro packages are the stable Linux builds renamed, built without a build
 channel. PhotoCraft's deb, rpm, Arch and Flatpak nightlies therefore report the stable version and
@@ -309,8 +328,7 @@ cannot stop an app's own `package.sh` from setting the channel, so apps must not
   `.asc` signature and the OCI image has an `.oci.sig` signature; verify those.
 - Nightly desktop entries and metainfo register no file associations, so a nightly never takes
   files from the stable app.
-- A failed riscv64, Arch or Flatpak build blocks the whole nightly, launcher assets included. With
-  `dry-run` also set, nightly payloads are built and attested but not dispatched.
+- A failed riscv64, Arch or Flatpak build blocks the whole nightly, launcher assets included.
 - No AppImage nightlies.
 - pdfcraft looks for OCR models at `<exe>/../share/pdfcraft/models`; the nightly package installs
   them under `share/pdfcraft-nightly`, so pdfcraft-nightly needs that lookup to follow its own name.
@@ -408,7 +426,7 @@ Rust build code.
 
 List every signing secret explicitly. The signing jobs run in the caller repo's `release` environment and read the values from there, but only for the names listed here: an unlisted name is empty. On the `release` branch the macOS and Windows jobs fail when their signing secrets are empty, rather than shipping unsigned builds.
 
-macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token` or `attestations`, so existing callers keep building as they do now.
+macOS and Windows packages are signed by the app's own packaging scripts. `release.yml` does not request `id-token`, `attestations` or `actions: write`, so existing callers keep building as they do now; the nightly handoff that needs them is the separate `nightly-handoff.yml` (see Nightly releases).
 
 Build provenance, a CycloneDX SBOM, and a Sigstore signature of the published files are a second job. Add it only in an app that is ready to grant those permissions. `release.yml` does not call `supply-chain.yml`.
 

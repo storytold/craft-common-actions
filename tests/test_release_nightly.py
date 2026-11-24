@@ -1,11 +1,9 @@
-"""release.yml's nightly input: a dry run of the stable release plus the attested nightly payloads."""
+"""release.yml's nightly input: a dry run of the stable release plus the nightly payloads."""
 from pathlib import Path
-import fnmatch
 import json
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -15,13 +13,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "actions/nightly-feed"))
-import nightly_feed as feed  # noqa: E402
 import nightly_handoff as handoff  # noqa: E402
 
 DATA = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
 JOBS = DATA["jobs"]
 DRAFT = yaml.load((ROOT / "actions/draft-release/action.yml").read_text(), Loader=yaml.BaseLoader)
-NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak", "nightly-attest")
+NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak", "nightly-ready")
 LAUNCHER = {
     "linux": ("ubuntu-22.04", "packaging/linux/nightly.sh --arch x86_64"),
     "windows": ("windows-latest", "./packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly"),
@@ -54,22 +51,9 @@ def upstream(*names):
     return seen
 
 
-def executable(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR)
-
-
 def run(script, cwd, bin_dir, **env):
     env = dict(os.environ, PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}", **env)
     return subprocess.run([BASH, "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
-
-
-ATTEMPT = "${{ github.run_attempt }}"
-SHA = "abcdefabcdef" + "0123456789abcdef0123456789ab"
-RUN_ID = 19876543210
-IDENTITY = f"0.24.1-nightly.20261124.{RUN_ID}.2.gabcdefabcdef"
-PUBLISHED = 1795487280
 
 
 def render(value, **expressions):
@@ -84,14 +68,49 @@ def artifact_name(job, arch="", attempt=1):
                   **{"matrix.arch": arch, "github.run_attempt": attempt})
 
 
-def evaluate(condition, inputs, results, outputs, cancelled=False):
-    """A job `if` written with the operators release.yml uses, evaluated for one scenario."""
-    expr = re.sub(r"needs\.version\.outputs\.([\w-]+)", lambda m: repr(outputs[m[1]]), condition)
-    expr = re.sub(r"needs\.([\w-]+)\.result", lambda m: repr(results[m[1]]), expr)
-    expr = re.sub(r"inputs\.([\w-]+)", lambda m: repr(inputs[m[1]]), expr)
+STATUS = re.compile(r"\b(?:success|failure|cancelled|always)\(\)")
+
+
+def evaluate(condition, values, cancelled=False, ancestors_succeeded=True):
+    """A job `if`, written with the operators these workflows use, for one scenario.
+
+    `values` maps each `inputs.*` and `needs.*` reference to its value. A condition without a status
+    function gets GitHub's implicit success(), which is false unless every ancestor job succeeded.
+    """
+    expr = condition.strip()
+    if expr.startswith("${{"):
+        expr = expr.removeprefix("${{").removesuffix("}}")
+    implicit = STATUS.search(expr) is None
+    expr = re.sub(r"\b(?:inputs|needs)\.[\w.-]+", lambda m: repr(values[m[0]]), expr)
     expr = re.sub(r"!(?=[\w(])", " not ", expr).replace("&&", " and ").replace("||", " or ")
     names = {"cancelled": lambda: cancelled, "fromJSON": json.loads, "contains": lambda haystack, needle: needle in haystack}
-    return eval(expr, {"__builtins__": {}}, names)  # noqa: S307 - the expression comes from release.yml
+    result = eval(expr, {"__builtins__": {}}, names)  # noqa: S307 - the expression comes from a workflow
+    return bool(result) and (ancestors_succeeded or not implicit)
+
+
+NIGHTLY_ORDER = ("nightly-linux", "nightly-arch", "nightly-flatpak", *LAUNCHER_JOBS, "nightly-ready")
+ALL_PLATFORMS = ["linux", "windows", "macos"]
+
+
+def simulate(inputs=(), platforms=ALL_PLATFORMS, results=(), skip="false", cancelled=False, failed=()):
+    """The result of every nightly job in one scenario: the stable jobs they need succeed unless
+    `results` says otherwise (linux-riscv64 is skipped when has-riscv64 is off), and a nightly job
+    that runs succeeds unless it is in `failed`."""
+    inputs = {"nightly": True, "dry-run": False, "has-arch": True, "has-riscv64": True, **dict(inputs)}
+    stable = upstream(*NIGHTLY_ORDER) - set(NIGHTLY_ORDER)
+    done = {name: "success" for name in stable}
+    if not inputs["has-riscv64"]:
+        done["linux-riscv64"] = "skipped"
+    done.update(dict(results))
+    values = {f"inputs.{k}": v for k, v in inputs.items()}
+    values.update({"needs.version.outputs.skip": skip, "needs.version.outputs.launcher-platforms": json.dumps(platforms)})
+    for name in NIGHTLY_ORDER:
+        values.update({f"needs.{job}.result": result for job, result in done.items()})
+        ancestors = all(done[job] == "success" for job in upstream(name) - {name})
+        ran = evaluate(JOBS[name]["if"], values, cancelled, ancestors)
+        done[name] = ("failure" if name in failed else "success") if ran else "skipped"
+    return done
+
 
 class NightlyModeTests(unittest.TestCase):
     def test_the_input_defaults_off(self):
@@ -111,8 +130,8 @@ class NightlyModeTests(unittest.TestCase):
         self.assertIn("!inputs.nightly", step("flatpak", "Publish Flatpak OCI layout to GHCR and Docker Hub")["if"])
 
     def test_only_nightly_mode_runs_the_nightly_jobs(self):
-        for name in NIGHTLY_JOBS + LAUNCHER_JOBS + ("nightly-dispatch",):
-            self.assertTrue(JOBS[name]["if"].startswith("inputs.nightly && "), name)
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS:
+            self.assertTrue(JOBS[name]["if"].startswith("inputs.nightly && !cancelled() && "), name)
         # The nightly-flatpak and nightly-arch jobs build those packages in nightly mode.
         self.assertEqual(JOBS["flatpak"]["if"], "${{ !inputs.nightly }}")
         self.assertEqual(JOBS["arch"]["if"], "inputs.has-arch && !inputs.nightly")
@@ -312,17 +331,6 @@ class ArtifactNameTests(unittest.TestCase):
         self.assertEqual(uses("nightly-arch", "actions/download-artifact@")["with"]["name"],
                          uses("nightly-linux", "actions/upload-artifact@")["with"]["name"])
 
-    def test_the_attest_job_downloads_exactly_this_attempts_payloads(self):
-        download = uses("nightly-attest", "actions/download-artifact@")["with"]
-        # Without merge-multiple each artifact keeps its own directory, which the manifest records.
-        self.assertNotIn("merge-multiple", download)
-        self.assertEqual(download["digest-mismatch"], "error")
-        pattern = render(download["pattern"], **{"github.run_attempt": 2})
-        for job in PAYLOAD_JOBS:
-            for attempt, wanted in ((2, True), (1, False), (12, False)):
-                self.assertEqual(fnmatch.fnmatchcase(artifact_name(job, "x86_64", attempt), pattern), wanted, (job, attempt))
-        self.assertFalse(fnmatch.fnmatchcase("release-linux-x86_64", pattern))
-
 
 class NightlyFlatpakTests(unittest.TestCase):
     def test_it_pushes_nothing_and_needs_no_package_write(self):
@@ -341,170 +349,79 @@ class NightlyFlatpakTests(unittest.TestCase):
                                                   "${{ steps.bundle.outputs.oci-archive }}"])
         self.assertEqual(upload["if-no-files-found"], "error")
 
+    def test_the_action_installs_its_own_tools(self):
+        # actions/nightly-flatpak installs flatpak-builder through install-apt-packages when missing.
+        for s in JOBS["nightly-flatpak"]["steps"]:
+            self.assertNotIn("apt", json.dumps(s).replace("nightly-flatpak", ""), s)
+        action = (ROOT / "actions/nightly-flatpak/action.yml").read_text()
+        self.assertIn("storytold/craft-common-actions/actions/install-apt-packages@", action)
 
-class AttestTests(unittest.TestCase):
-    JOB = JOBS["nightly-attest"]
-    ALL = ["linux", "macos", "windows"]
 
-    def gate(self, inputs=(), results=(), platforms=ALL, skip="false", cancelled=False):
-        inputs = {"nightly": True, "has-arch": True, **dict(inputs)}
-        results = {"version": "success", **{job: "success" for job in PAYLOAD_JOBS}, **dict(results)}
-        outputs = {"skip": skip, "launcher-platforms": json.dumps(platforms)}
-        return evaluate(self.JOB["if"], inputs, results, outputs, cancelled)
+class ReadyTests(unittest.TestCase):
+    JOB = JOBS["nightly-ready"]
 
-    def test_it_needs_every_nightly_build_and_only_attestation_rights(self):
+    def test_it_needs_every_nightly_build_and_no_permissions(self):
         self.assertEqual(self.JOB["needs"], ["version", *PAYLOAD_JOBS])
-        self.assertEqual(self.JOB["permissions"], {"contents": "read", "actions": "read", "id-token": "write",
-                                                   "attestations": "write"})
+        self.assertNotIn("permissions", self.JOB)
         self.assertNotIn("environment", self.JOB)
-        self.assertFalse(any("secrets." in json.dumps(s) for s in self.JOB["steps"]))
+        self.assertEqual(self.JOB["outputs"], {"ready": "${{ steps.ready.outputs.ready }}"})
+        self.assertEqual(self.JOB["steps"][-1]["run"], 'echo "ready=true" >>"$GITHUB_OUTPUT"')
+        outputs = DATA["on"]["workflow_call"]["outputs"]
+        self.assertEqual(outputs["nightly-ready"]["value"], "${{ jobs.nightly-ready.outputs.ready }}")
+        self.assertEqual(outputs["nightly-published-at"]["value"], "${{ jobs.version.outputs.nightly-published-at }}")
 
-    def test_it_runs_only_when_every_expected_payload_was_built(self):
+    def test_it_is_ready_only_when_every_expected_payload_was_built(self):
         launchers_skipped = {job: "skipped" for job in LAUNCHER_JOBS}
         for case, kwargs, wanted in (
-            ("registry app", {}, True),
-            ("distro-only app", {"platforms": [], "results": launchers_skipped}, True),
-            ("Arch turned off", {"inputs": {"has-arch": False}, "results": {"nightly-arch": "skipped"}}, True),
-            ("Arch skipped although on", {"results": {"nightly-arch": "skipped"}}, False),
-            ("listed launcher skipped", {"results": {"nightly-launcher-windows": "skipped"}}, False),
-            ("launcher failed", {"results": {"nightly-launcher-macos": "failure"}}, False),
-            ("unlisted launcher failed", {"platforms": ["linux"], "results": {
-                "nightly-launcher-windows": "failure", "nightly-launcher-macos": "skipped"}}, False),
-            ("Flatpak failed", {"results": {"nightly-flatpak": "failure"}}, False),
-            ("Linux failed", {"results": {"nightly-linux": "failure"}}, False),
+            ("PhotoCraft, every platform", {}, True),
+            ("distro-only app", {"platforms": []}, True),
+            ("Arch turned off", {"inputs": {"has-arch": False}}, True),
+            ("riscv64 turned off", {"inputs": {"has-riscv64": False}}, True),
+            ("distro-only, no Arch, no riscv64", {"platforms": [], "inputs": {"has-arch": False, "has-riscv64": False}}, True),
+            ("dry run", {"inputs": {"dry-run": True}}, True),
+            ("stable riscv64 failed", {"results": {"linux-riscv64": "failure"}}, False),
+            ("stable riscv64 skipped although on", {"results": {"linux-riscv64": "skipped"}}, False),
+            ("Arch failed", {"failed": ["nightly-arch"]}, False),
+            ("launcher failed", {"failed": ["nightly-launcher-macos"]}, False),
+            ("Flatpak failed", {"failed": ["nightly-flatpak"]}, False),
+            ("Linux failed", {"failed": ["nightly-linux"]}, False),
             ("unchanged source", {"skip": "true"}, False),
             ("cancelled", {"cancelled": True}, False),
             ("not nightly", {"inputs": {"nightly": False}}, False),
         ):
             with self.subTest(case):
-                self.assertEqual(self.gate(**kwargs), wanted)
+                self.assertEqual(simulate(**kwargs)["nightly-ready"], "success" if wanted else "skipped")
+        self.assertEqual({job: simulate(platforms=[])[job] for job in LAUNCHER_JOBS}, launchers_skipped)
 
-    @unittest.skipUnless(BASH, "needs bash")
-    def test_a_partial_re_run_stops_before_anything_else(self):
-        names = [s.get("name") or s.get("uses") for s in self.JOB["steps"]]
-        check = "Require the attempt that planned the identity"
-        self.assertEqual(names.index(check), 1)
-        script = step("nightly-attest", check)["run"]
-        for identity, attempt, ok in ((IDENTITY, "2", True), (IDENTITY, "3", False), ("", "2", False),
-                                      (IDENTITY.replace(str(RUN_ID), "1"), "2", False)):
-            with self.subTest(identity=identity, attempt=attempt), tempfile.TemporaryDirectory() as tmp:
-                result = run(script, tmp, tmp, IDENTITY=identity, RUN_ID=str(RUN_ID), RUN_ATTEMPT=attempt)
-                self.assertEqual(result.returncode == 0, ok, result.stdout)
-                if not ok:
-                    self.assertIn("use Re-run all jobs", result.stdout)
+    def test_a_skipped_launcher_or_arch_job_is_one_the_app_does_not_ship(self):
+        # The skip that the gate allows must be the one the app asked for, not a missed build.
+        for platform in ALL_PLATFORMS:
+            job = f"nightly-launcher-{platform}"
+            with self.subTest(job=job):
+                values = {f"needs.{j}.result": "success" for j in ["version", *PAYLOAD_JOBS]}
+                values.update({f"needs.{job}.result": "skipped", "inputs.nightly": True, "inputs.has-arch": True,
+                               "needs.version.outputs.skip": "false",
+                               "needs.version.outputs.launcher-platforms": json.dumps(ALL_PLATFORMS)})
+                self.assertFalse(evaluate(self.JOB["if"], values, ancestors_succeeded=False))
 
-    def test_the_tooling_is_this_workflows_own_commit_and_the_app_is_never_checked_out(self):
-        checkouts = [s for s in self.JOB["steps"] if s.get("uses", "").startswith("actions/checkout@")]
-        self.assertEqual([c["with"] for c in checkouts], [{
-            "repository": "${{ job.workflow_repository }}", "ref": "${{ job.workflow_sha }}",
-            "path": ".nightly-tools", "persist-credentials": "false"}])
-        self.assertEqual(step("nightly-attest", "Verify the tooling checkout")["env"]["WORKFLOW_SHA"], "${{ job.workflow_sha }}")
-        self.assertIn(".nightly-tools/actions/nightly-feed/nightly_handoff.py write",
-                      step("nightly-attest", "Write the nightly manifest")["run"])
-
-    def test_the_manifest_is_attested_then_uploaded_under_its_run_and_attempt(self):
-        names = [s.get("name") or s.get("uses") for s in self.JOB["steps"]]
-        attest = step("nightly-attest", "Attest the nightly manifest")
-        pins = {s["uses"] for path in (ROOT / ".github/workflows").glob("*.yml") for s in re.finditer(
-            r"uses: (actions/attest-build-provenance@\S+)", path.read_text()) for s in [{"uses": s[1]}]}
-        self.assertEqual(pins, {attest["uses"]})
-        self.assertEqual(attest["with"], {"subject-path": ".nightly-manifest/nightly-manifest.json"})
-        upload = uses("nightly-attest", "actions/upload-artifact@")
-        self.assertEqual(upload["with"]["name"], "nightly-manifest-${{ github.run_id }}-${{ github.run_attempt }}")
-        self.assertEqual(upload["with"]["path"], attest["with"]["subject-path"])
-        self.assertLess(names.index("Write the nightly manifest"), names.index("Attest the nightly manifest"))
-        self.assertLess(names.index("Attest the nightly manifest"), names.index(upload["uses"]))
-
-    @unittest.skipUnless(BASH, "needs bash")
-    def test_the_manifest_covers_every_payload_release_yml_uploads(self):
-        # The artifacts as download-artifact lays them out, named by the upload steps above.
-        with tempfile.TemporaryDirectory() as tmp:
-            work = Path(tmp).resolve()
-            (work / ".nightly-tools").symlink_to(ROOT)
-            nv = feed.ni.nv_from_identity(IDENTITY)
-            plan = {"app": "photocraft", "prefix": "photocraft", "identity": IDENTITY, "nv": nv,
-                    "groups": {"riscv64": True, "arch": True}}
-            for name, info in feed.expected_release_assets(plan, stage="producer").items():
-                kind, _, arch = info["origin"].removeprefix("nightly-").partition("-")
-                job = info["origin"] if kind == "launcher" else f"nightly-{kind}"
-                folder = work / ".nightly-artifacts" / artifact_name(job, arch, 2)
-                folder.mkdir(parents=True, exist_ok=True)
-                (folder / name).write_text(name)
-            values = {"github.run_attempt": 2, "needs.version.outputs.nightly-version": nv,
-                      "inputs.app-name": "photocraft", "needs.version.outputs.nightly-identity": IDENTITY,
-                      "needs.version.outputs.nightly-published-at": PUBLISHED}
-            github = {"GITHUB_WORKSPACE": str(work), "GITHUB_REPOSITORY": "storytold/photocraft", "GITHUB_SHA": SHA,
-                      "GITHUB_RUN_ID": str(RUN_ID), "GITHUB_RUN_ATTEMPT": "2", "GITHUB_OUTPUT": str(work / "output"),
-                      "GITHUB_WORKFLOW_REF": "storytold/photocraft/.github/workflows/release.yml@refs/heads/main"}
-            find = step("nightly-attest", "Find the file prefix")
-            result = run(find["run"], work, work, **github,
-                         **{k: render(v, **values) for k, v in find["env"].items()})
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual((work / "output").read_text(), "prefix=photocraft\n")
-            values["steps.prefix.outputs.prefix"] = "photocraft"
-            write = step("nightly-attest", "Write the nightly manifest")
-            result = run(write["run"], work, work, **github,
-                         **{k: render(v, **values) for k, v in write["env"].items()})
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            manifest = json.loads((work / ".nightly-manifest/nightly-manifest.json").read_text())
-            self.assertEqual((manifest["tag"], manifest["run_attempt"], manifest["workflow"], len(manifest["files"])),
-                             ("v" + IDENTITY, 2, ".github/workflows/release.yml", 20))
-            self.assertTrue(all(f["artifact"].endswith("-2") for f in manifest["files"]))
+    def test_the_evaluator_models_the_implicit_success(self):
+        # Without a status function a skipped ancestor skips the job, which is why every nightly
+        # condition starts with !cancelled().
+        values = {"inputs.nightly": True}
+        self.assertFalse(evaluate("inputs.nightly", values, ancestors_succeeded=False))
+        self.assertTrue(evaluate("inputs.nightly && !cancelled()", values, ancestors_succeeded=False))
 
 
-@unittest.skipUnless(BASH, "needs bash")
-class DispatchTests(unittest.TestCase):
-    JOB = JOBS["nightly-dispatch"]
-    STEP = step("nightly-dispatch", "Dispatch the signer on the release branch")
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.log = self.root / "calls.log"
-        self.log.touch()
-        executable(self.root / "bin/gh", '#!/usr/bin/env bash\necho "gh $*" >>"$FAKE_LOG"\n'
-                                         '[[ "$1" != api || -z "${FAKE_MISSING:-}" ]]\n')
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def dispatch(self, workflow="nightly-sign.yml", **extra):
-        return run(self.STEP["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log), REPO="storytold/photocraft",
-                   WORKFLOW=workflow, RUN_ID="57", RUN_ATTEMPT="2", GITHUB_STEP_SUMMARY=str(self.root / "summary"), **extra)
-
-    def test_it_runs_after_the_attestation_unless_dry_run(self):
-        self.assertEqual(self.JOB["needs"], ["nightly-attest"])
-        self.assertEqual(self.JOB["permissions"], {"contents": "read", "actions": "write"})
-        results = {"nightly-attest": "success"}
-        for dry, attested, wanted in ((False, "success", True), (True, "success", False), (False, "skipped", False)):
-            with self.subTest(dry_run=dry, attest=attested):
-                self.assertEqual(evaluate(self.JOB["if"], {"nightly": True, "dry-run": dry},
-                                          dict(results, **{"nightly-attest": attested}), {}), wanted)
-        spec = DATA["on"]["workflow_call"]["inputs"]["nightly-signer-workflow"]
-        self.assertEqual((spec["type"], spec["default"]), ("string", "nightly-sign.yml"))
-        self.assertEqual(self.STEP["env"]["WORKFLOW"], "${{ inputs.nightly-signer-workflow }}")
-        self.assertEqual((self.STEP["env"]["RUN_ID"], self.STEP["env"]["RUN_ATTEMPT"]),
-                         ("${{ github.run_id }}", "${{ github.run_attempt }}"))
-
-    def test_it_dispatches_the_signer_on_release_with_this_run(self):
-        result = self.dispatch()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.log.read_text().splitlines()[-1],
-                         "gh workflow run nightly-sign.yml --repo storytold/photocraft --ref release "
-                         "-f producer_run_id=57 -f producer_run_attempt=2")
-
-    def test_a_signer_missing_on_release_fails_clearly(self):
-        result = self.dispatch(FAKE_MISSING="1")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("::error::storytold/photocraft has no .github/workflows/nightly-sign.yml on its release branch",
-                      result.stdout)
-        self.assertNotIn("workflow run", self.log.read_text())
-
-    def test_it_refuses_a_workflow_that_is_not_a_file_name(self):
-        for workflow in ("../x.yml", "nightly sign.yml", "nightly-sign", ""):
-            with self.subTest(workflow=workflow):
-                self.assertNotEqual(self.dispatch(workflow).returncode, 0)
-        self.assertEqual(self.log.read_text(), "")
+class PermissionTests(unittest.TestCase):
+    def test_release_yml_asks_for_no_oidc_attestation_or_dispatch_rights(self):
+        # GitHub checks a called workflow's job permissions against the caller's grant when the run
+        # starts, even for jobs that would be skipped, so any of these would break every caller.
+        text = (ROOT / ".github/workflows/release.yml").read_text()
+        for word in ("id-token", "attestations", "actions: write"):
+            self.assertNotIn(word, text)
+        for name, job in JOBS.items():
+            with self.subTest(job=name):
+                self.assertNotEqual((job.get("permissions") or {}).get("actions"), "write")
 
 
 class ProducerInterfaceTests(unittest.TestCase):
@@ -513,7 +430,7 @@ class ProducerInterfaceTests(unittest.TestCase):
         self.assertNotIn("nightly-release", JOBS)
         self.assertNotIn("LINUX_NIGHTLY_SIGNING_KEY", text)
         self.assertNotIn("nightly-signing", text)
-        for name in NIGHTLY_JOBS + LAUNCHER_JOBS + ("nightly-dispatch",):
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS:
             permissions = JOBS[name].get("permissions", {})
             self.assertNotIn("packages", permissions, name)
             self.assertNotIn("contents: write", f"contents: {permissions.get('contents', 'read')}", name)

@@ -106,20 +106,13 @@ on:
           Build everything as a dry run does, plus the nightly payloads of the run: <prefix>-nightly-<nv>
           deb, rpm, Arch and Flatpak packages that install beside the stable app, and for an app in the
           nightly-feed registry the launcher payloads, built with the registry's build channel (the
-          distro packages never take one). nightly-attest attests a manifest of every payload, and
-          nightly-dispatch starts nightly-signer-workflow on the release branch, which signs and
-          publishes them. Default branch only; with dry-run set too, nothing is dispatched. Refuses a
-          version override. Only "Re-run all jobs" can publish a failed nightly.
+          distro packages never take one). When every payload is built, the nightly-ready output is
+          true and the caller's nightly-handoff.yml job attests and dispatches them to the signer.
+          Default branch only. Refuses a version override. Only "Re-run all jobs" can publish a
+          failed nightly.
         type: boolean
         required: false
         default: false
-      nightly-signer-workflow:
-        description: >-
-          The caller repository's workflow file on its release branch that nightly-dispatch starts
-          with producer_run_id and producer_run_attempt
-        type: string
-        required: false
-        default: "nightly-sign.yml"
 
     secrets:
       APPLE_CERTIFICATE:
@@ -180,6 +173,12 @@ on:
       nightly-tag:
         description: "Nightly release tag (v<identity> for a launcher registry app, nightly_<nv> otherwise) in nightly mode, else empty"
         value: ${{ jobs.version.outputs.nightly-tag }}
+      nightly-published-at:
+        description: "Nightly release time (the run's created_at, Unix seconds) in nightly mode, else empty"
+        value: ${{ jobs.version.outputs.nightly-published-at }}
+      nightly-ready:
+        description: "'true' when every nightly payload of this attempt is built, for the caller's nightly-handoff.yml job; else empty"
+        value: ${{ jobs.nightly-ready.outputs.ready }}
 
 permissions:
   contents: read
@@ -1541,7 +1540,7 @@ jobs:
 
   # Nightly mode: the stable Linux builds above, renamed to <prefix>-nightly so they install beside
   # the stable app. Every nightly payload artifact ends in -<run attempt>, so the signer takes the
-  # payloads of exactly the attempt that nightly-attest attested.
+  # payloads of exactly the attempt that nightly-handoff.yml attested.
   nightly-linux:
     timeout-minutes: 30
     name: Nightly Linux ${{ matrix.arch }}
@@ -1582,7 +1581,7 @@ jobs:
     timeout-minutes: 30
     name: Nightly Arch Linux ${{ matrix.arch }}
     if: >-
-      inputs.nightly && inputs.has-arch && !cancelled() && needs.version.result == 'success'
+      inputs.nightly && !cancelled() && inputs.has-arch && needs.version.result == 'success'
       && needs.version.outputs.skip != 'true' && needs.nightly-linux.result == 'success'
     needs: [version, nightly-linux]
     runs-on: ubuntu-24.04
@@ -1672,15 +1671,6 @@ jobs:
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/linux
-      - name: Configure apt mirrors
-        uses: storytold/craft-common-actions/actions/configure-apt-mirrors@main
-      - name: Install flatpak-builder
-        run: |
-          sudo apt-get update
-          # elfutils is only a Recommends of flatpak-builder, but flatpak-builder runs its eu-strip
-          # on every module it builds with debuginfo, such as the apps' cups-client.
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Find the release tarball
         id: tarball
         env:
@@ -1703,6 +1693,7 @@ jobs:
           base="${tarball##*/}"
           echo "path=$tarball" >>"$GITHUB_OUTPUT"
           echo "prefix=${base%-"${RELEASE_VERSION}"-linux-"${ARCH}".tar.gz}" >>"$GITHUB_OUTPUT"
+      # The action installs flatpak-builder and its tools itself.
       - name: Build the nightly Flatpak bundle
         id: bundle
         uses: storytold/craft-common-actions/actions/nightly-flatpak@main
@@ -1730,7 +1721,7 @@ jobs:
     timeout-minutes: 90
     name: Nightly launcher Linux x86_64
     if: >-
-      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
       && contains(fromJSON(needs.version.outputs.launcher-platforms), 'linux')
     needs: [version]
     runs-on: ubuntu-22.04
@@ -1814,7 +1805,7 @@ jobs:
     timeout-minutes: 90
     name: Nightly launcher Windows x64
     if: >-
-      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
       && contains(fromJSON(needs.version.outputs.launcher-platforms), 'windows')
     needs: [version]
     runs-on: windows-latest
@@ -1892,7 +1883,7 @@ jobs:
     timeout-minutes: 90
     name: Nightly launcher macOS aarch64
     if: >-
-      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
       && contains(fromJSON(needs.version.outputs.launcher-platforms), 'macos')
     needs: [version]
     # The free Arm runner: an unsigned build needs no larger runner.
@@ -1970,12 +1961,13 @@ jobs:
           path: ${{ steps.payload.outputs.path }}
           if-no-files-found: error
 
-  # One attested manifest binds every payload of this attempt by hash; the signer admits only
-  # payloads that match it. No app checkout: the manifest comes from the artifacts and the tooling of
-  # this workflow's own commit.
-  nightly-attest:
-    timeout-minutes: 15
-    name: Attest the nightly payloads
+  # The handoff (attestation and signer dispatch) needs OIDC, attestation and workflow-dispatch
+  # rights, and GitHub checks a called workflow's job permissions against the caller's grant when
+  # the run starts, even for jobs that would be skipped. So the handoff is the caller's own
+  # nightly-handoff.yml job, and this job only tells it that every payload of the attempt exists.
+  nightly-ready:
+    timeout-minutes: 5
+    name: Nightly payloads ready
     # A job the caller turned off, or a launcher platform the app does not ship, may be skipped; any
     # other result stops the nightly, since the signer needs the exact asset set.
     if: >-
@@ -1987,117 +1979,12 @@ jobs:
       && (needs.nightly-launcher-macos.result == 'success' || (!contains(fromJSON(needs.version.outputs.launcher-platforms), 'macos') && needs.nightly-launcher-macos.result == 'skipped'))
     needs: [version, nightly-linux, nightly-arch, nightly-flatpak, nightly-launcher-linux, nightly-launcher-windows, nightly-launcher-macos]
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: read
-      id-token: write
-      attestations: write
+    outputs:
+      ready: ${{ steps.ready.outputs.ready }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
-      - name: Require the attempt that planned the identity
-        env:
-          IDENTITY: ${{ needs.version.outputs.nightly-identity }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          # "Re-run failed jobs" keeps the version job's outputs from the earlier attempt, so the
-          # identity would name an attempt whose payloads this run did not build.
-          rest="${IDENTITY%.g*}"
-          attempt="${rest##*.}"
-          run="${rest%.*}"
-          run="${run##*.}"
-          if [ -z "$IDENTITY" ] || [ "$run" != "$RUN_ID" ] || [ "$attempt" != "$RUN_ATTEMPT" ]; then
-            echo "::error::the nightly identity '$IDENTITY' does not belong to attempt $RUN_ATTEMPT of run $RUN_ID. A partial re-run cannot publish a nightly: use Re-run all jobs."
-            exit 1
-          fi
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          # One directory per artifact (<dir>/<artifact>/<file>), which the manifest records.
-          pattern: nightly-*-${{ github.run_attempt }}
-          path: .nightly-artifacts
-          digest-mismatch: error
-      - name: Check out this workflow's own tooling
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ job.workflow_repository }}
-          ref: ${{ job.workflow_sha }}
-          path: .nightly-tools
-          persist-credentials: false
-      - name: Verify the tooling checkout
-        env:
-          WORKFLOW_SHA: ${{ job.workflow_sha }}
-        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$WORKFLOW_SHA"
-      - name: Find the file prefix
-        id: prefix
-        env:
-          NIGHTLY_VERSION: ${{ needs.version.outputs.nightly-version }}
-          ARTIFACT: .nightly-artifacts/nightly-flatpak-x86_64-${{ github.run_attempt }}
-        run: |
-          # The Flatpak artifact holds exactly one bundle, <prefix>-nightly-<nv>-linux-x86_64.flatpak.
-          shopt -s nullglob
-          bundles=("$ARTIFACT"/*-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak)
-          if [ "${#bundles[@]}" -ne 1 ]; then
-            echo "::error::expected one nightly Flatpak bundle for ${NIGHTLY_VERSION} in $ARTIFACT, found ${#bundles[@]}: ${bundles[*]}"
-            exit 1
-          fi
-          base="${bundles[0]##*/}"
-          echo "prefix=${base%-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak}" >>"$GITHUB_OUTPUT"
-      - name: Write the nightly manifest
-        env:
-          APP_NAME: ${{ inputs.app-name }}
-          IDENTITY: ${{ needs.version.outputs.nightly-identity }}
-          PUBLISHED_AT: ${{ needs.version.outputs.nightly-published-at }}
-          PREFIX: ${{ steps.prefix.outputs.prefix }}
-        run: |
-          python3 -I -B .nightly-tools/actions/nightly-feed/nightly_handoff.py write --app "$APP_NAME" \
-            --artifacts .nightly-artifacts --output .nightly-manifest --identity "$IDENTITY" \
-            --published-at "$PUBLISHED_AT" --prefix "$PREFIX"
-      - name: Attest the nightly manifest
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
-        with:
-          subject-path: .nightly-manifest/nightly-manifest.json
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: nightly-manifest-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .nightly-manifest/nightly-manifest.json
-          if-no-files-found: error
-
-  # The signer runs on the release branch, where the release environment holds the signing keys,
-  # and admits this run by its attested manifest.
-  nightly-dispatch:
-    timeout-minutes: 5
-    name: Start the nightly signer
-    if: inputs.nightly && !inputs.dry-run && needs.nightly-attest.result == 'success'
-    needs: [nightly-attest]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      actions: write
-    steps:
-      - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
-        with:
-          egress-policy: audit
-      - name: Dispatch the signer on the release branch
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          WORKFLOW: ${{ inputs.nightly-signer-workflow }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-          if [[ ! "$WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
-            echo "::error::nightly-signer-workflow must be a workflow file name such as nightly-sign.yml, not '$WORKFLOW'"
-            exit 1
-          fi
-          if ! gh api "repos/$REPO/contents/.github/workflows/$WORKFLOW?ref=release" --silent; then
-            echo "::error::$REPO has no .github/workflows/$WORKFLOW on its release branch, so nothing can sign this nightly. Add the signer caller there, or point nightly-signer-workflow at it."
-            exit 1
-          fi
-          gh workflow run "$WORKFLOW" --repo "$REPO" --ref release \
-            -f producer_run_id="$RUN_ID" -f producer_run_attempt="$RUN_ATTEMPT"
-          echo "Dispatched $WORKFLOW on release for run $RUN_ID, attempt $RUN_ATTEMPT." >>"$GITHUB_STEP_SUMMARY"
+      - id: ready
+        run: echo "ready=true" >>"$GITHUB_OUTPUT"
