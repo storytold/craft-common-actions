@@ -115,6 +115,15 @@ if [[ "${#desktops[@]}" -gt 0 ]]; then
 else
   pkgname="ai.storyteller.$app"
 fi
+is_nightly=0
+pkg_alias="$app"
+if [[ "$raw_version" == *-nightly* ]]; then
+  is_nightly=1
+  pkg_alias="$app-nightly"
+  if [[ "$pkgname" != *-nightly && "$pkgname" != *.nightly ]]; then
+    pkgname="${pkgname}-nightly"
+  fi
+fi
 
 # The package name is derived from an archive-controlled .desktop basename and is
 # written into PKGBUILD (evaluated by makepkg as Bash). Validate it against a safe
@@ -231,8 +240,8 @@ optdepends=(
   'xdg-desktop-portal: native desktop integration and file dialogs'
   'cups: printing support'
 )
-provides=($(printf '%q' "$app=$pkgver-$pkgrel"))
-conflicts=($(printf '%q' "$app") $(printf '%q' "$app-bin") $(printf '%q' "$app-git"))
+provides=($(printf '%q' "$pkg_alias=$pkgver-$pkgrel"))
+conflicts=($(printf '%q' "$pkg_alias") $(printf '%q' "$pkg_alias-bin") $(printf '%q' "$pkg_alias-git"))
 options=('!strip' '!debug')
 
 package() {
@@ -243,6 +252,27 @@ package() {
   if [ -d "$stage/share" ]; then
     cp -dr --no-preserve=ownership "$stage/share" "\$pkgdir/usr/"
   fi
+$(if [[ "$is_nightly" -eq 1 ]]; then
+cat <<NIGHTLY_PKG
+  if [ -e "\$pkgdir/usr/bin/$app" ] && [ ! -e "\$pkgdir/usr/bin/$app-nightly" ]; then
+    mv "\$pkgdir/usr/bin/$app" "\$pkgdir/usr/bin/$app-nightly"
+  fi
+  if [ -e "\$pkgdir/usr/bin/$app-cli" ] && [ ! -e "\$pkgdir/usr/bin/$app-nightly-cli" ]; then
+    mv "\$pkgdir/usr/bin/$app-cli" "\$pkgdir/usr/bin/$app-nightly-cli"
+  fi
+  if [ -d "\$pkgdir/usr/share/doc/$app" ] && [ ! -e "\$pkgdir/usr/share/doc/$app-nightly" ]; then
+    mv "\$pkgdir/usr/share/doc/$app" "\$pkgdir/usr/share/doc/$app-nightly"
+  fi
+  for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
+    [ -f "\$desktop_file" ] || continue
+    sed -i -E "s|^Exec=$app([[:space:]]|$)|Exec=$app-nightly\\1|" "\$desktop_file"
+    case "\$desktop_file" in
+      *-nightly.desktop | *.nightly.desktop) ;;
+      *) mv "\$desktop_file" "\${desktop_file%.desktop}-nightly.desktop" ;;
+    esac
+  done
+NIGHTLY_PKG
+fi)
 
   find "\$pkgdir/usr" -type d -exec chmod 0755 {} +
   find "\$pkgdir/usr" -type f -perm /111 -exec chmod 0755 {} +

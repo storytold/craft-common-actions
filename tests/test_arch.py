@@ -272,6 +272,28 @@ exit 0
                 self.assertEqual([p.name for p in (tmp_path / "out").iterdir()],
                                  [f"myapp-{version}-linux-x86_64.pkg.tar.zst"])
 
+    def test_nightly_tarball_uses_nightly_pkgname_and_binary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            version = "0.24.0-nightly.20261124.100.1.gaaaaaaaaaaaa"
+            tarball = self._create_fixture_tarball(tmp_path, filename=f"myapp-{version}-linux-x86_64.tar.gz")
+            tools = self._setup_mock_tools(tmp_path)
+            (tools / "tar").unlink()
+            capture = tmp_path / "capture"
+            capture.mkdir()
+            res = subprocess.run(
+                [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+            )
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            pkgbuild = (capture / "PKGBUILD").read_text()
+            self.assertIn("pkgname=ai.storyteller.myapp-nightly\n", pkgbuild)
+            self.assertIn("provides=(myapp-nightly=0.24.0nightly.20261124.100.1.gaaaaaaaaaaaa-1)", pkgbuild)
+            self.assertIn("conflicts=(myapp-nightly myapp-nightly-bin myapp-nightly-git)", pkgbuild)
+            self.assertIn("/usr/bin/myapp-nightly", pkgbuild)
+
     def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
         """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
 
