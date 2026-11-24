@@ -10,7 +10,7 @@ inputs:
     required: false
     default: "dist/nightly"
   version:
-    description: "Stable version in the input file names"
+    description: "Stable version in the input file names (must not contain -nightly)"
     required: true
   nightly-version:
     description: "Version of the nightly packages, digits and dots only (e.g. 0.24.1.202611240228)"

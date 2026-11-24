@@ -89,7 +89,9 @@ class Names:
 
     def rename_id(self, name: str) -> str:
         for app_id in self.app_ids:
-            if name == app_id or name.startswith(app_id + '.'):
+            # <id>-symbolic(.ext) are the symbolic icon variants.
+            if (name == app_id or name.startswith(app_id + '.')
+                    or name == app_id + '-symbolic' or name.startswith(app_id + '-symbolic.')):
                 return app_id + ID_SUFFIX + name[len(app_id):]
         return name
 
@@ -163,6 +165,8 @@ def rewrite_desktop(text: str, names: Names) -> str:
         elif '=' in body and not stripped.startswith('#'):
             key, value = body.split('=', 1)
             base = key.strip().split('[', 1)[0]
+            if base == 'MimeType' and group == 'Desktop Entry':
+                continue  # nightlies claim no file associations; the stable app keeps them
             if base == 'Name' and group == 'Desktop Entry':
                 value = value.rstrip() + LABEL
             elif base in ('Exec', 'TryExec'):
@@ -182,18 +186,29 @@ _XML_TAG = re.compile(
 def rewrite_metainfo(text: str, names: Names, path_map: dict[str, str]) -> str:
     """Rename the component's ID, desktop ID, icon and binaries; label its <name>."""
     edits = []    # (start, end, new text) of leaf element contents
-    stack = []    # (tag, end of its start tag, index of the tag match)
+    stack = []    # (tag, end of its start tag, index of the tag match, start of its start tag)
     for index, m in enumerate(_XML_TAG.finditer(text)):
         closing, tag, empty = m.group(1), m.group(2), m.group(3)
         if tag is None or empty:
             continue
         if not closing:
-            stack.append((tag, m.end(), index))
+            stack.append((tag, m.end(), index, m.start()))
             continue
-        open_tag, start, open_index = stack.pop()
+        open_tag, start, open_index, open_start = stack.pop()
         if open_tag != tag or open_index != index - 1:
             continue  # not a leaf (children or comments inside)
         depth = len(stack)  # the component root is depth 0
+        if tag == 'mediatype' and stack and stack[-1][0] == 'provides':
+            # Nightlies claim no file associations. Remove the whole line when it holds only this element.
+            first, last = open_start, m.end()
+            while first > 0 and text[first - 1] in ' \t':
+                first -= 1
+            if first == 0 or text[first - 1] == '\n':
+                last += len(re.match(r'\r?\n|', text[last:]).group())
+            else:
+                first = open_start
+            edits.append((first, last, ''))
+            continue
         content = text[start:m.start()]
         value = content.strip()
         if tag == 'name' and depth == 1:
@@ -208,7 +223,7 @@ def rewrite_metainfo(text: str, names: Names, path_map: dict[str, str]) -> str:
             edits.append((start, m.start(), new))
     for start, end, new in reversed(edits):
         text = text[:start] + new + text[end:]
-    return text
+    return re.sub(r'[ \t]*<provides>\s*</provides>[ \t]*(?:\r?\n)?', '', text)
 
 
 def rewrite_mime(text: str, names: Names) -> str:
@@ -217,7 +232,7 @@ def rewrite_mime(text: str, names: Names) -> str:
                   lambda m: m.group(1) + names.rename_id(m.group(2)) + m.group(3), text)
 
 
-def rewrite_completion(text: str, names: Names, zsh: bool) -> str:
+def rewrite_completion(text: str, names: Names, shell: str) -> str:
     out = []
     for line in text.splitlines(keepends=True):
         words = line.split(None, 1)
@@ -226,8 +241,14 @@ def rewrite_completion(text: str, names: Names, zsh: bool) -> str:
                 line = sub(exact(token), token + SUFFIX, line)
         out.append(line)
     text = ''.join(out)
-    if zsh:
-        # zsh autoloads _cmd-nightly from its file and compares $funcstack[1] with the function name.
+    if shell == 'fish':
+        # Helper functions are global, so the stable and nightly completions must not share names.
+        helpers = '|'.join(re.escape(t.replace('-', '_')) for t in names.tokens)
+        text = re.sub(r'(?<![\w])(__fish_(?:' + helpers + r'))(?=_)',
+                      lambda m: m.group(1) + '_nightly', text)
+    else:
+        # zsh autoloads _cmd-nightly from its file and compares $funcstack[1] with the function name;
+        # bash loads the file by command name, and its _cmd function would shadow the stable one.
         for token in names.tokens:
             text = sub(exact('_' + token), '_' + token + SUFFIX, text)
     return text
@@ -243,8 +264,11 @@ def rewrite_content(entry: Entry, names: Names, path_map: dict[str, str]) -> byt
         rewrite = lambda t: rewrite_metainfo(t, names, path_map)
     elif p.startswith('/usr/share/mime/packages/') and p.endswith('.xml'):
         rewrite = lambda t: rewrite_mime(t, names)
+    elif p.startswith('/usr/share/thumbnailers/') and p.endswith('.thumbnailer'):
+        rewrite = lambda t: rewrite_desktop(t, names)
     elif p.startswith(COMPLETION_DIRS):
-        rewrite = lambda t: rewrite_completion(t, names, p.startswith('/usr/share/zsh/'))
+        shell = 'fish' if p.startswith('/usr/share/fish/') else 'other'
+        rewrite = lambda t: rewrite_completion(t, names, shell)
     else:
         return entry.data
     try:
@@ -285,9 +309,9 @@ def rewrite_tarball_extra(entry: Entry, names: Names, path_map: dict[str, str]) 
 def convert(entries: list[Entry], names: Names, tarball: bool = False) -> tuple[list[Entry], dict[str, str]]:
     path_map = {e.path: names.path(e.path) for e in entries}
     stable = set(path_map)
-    # A tarball's files outside bin/ and share/ (install.sh) sit beside the tree, not in it.
+    # A tarball's direct children (install.sh) sit beside the tree, not in it; lib/ and the rest are installed.
     def installed(e: Entry) -> bool:
-        return not tarball or e.path.startswith(('/usr/bin/', '/usr/share/'))
+        return not tarball or posixpath.dirname(e.path) != '/usr'
     shared = sorted(path_map[e.path] for e in entries
                     if e.kind != 'dir' and installed(e) and path_map[e.path] in stable)
     if shared:
@@ -311,6 +335,8 @@ def entries_from_tar(tar: tarfile.TarFile, root: str, mount: str) -> list[Entry]
     for m in tar.getmembers():
         name = m.name[2:] if m.name.startswith('./') else m.name
         name = name.rstrip('/')
+        if '..' in name.split('/'):
+            raise RebrandError(f'member {m.name} escapes its directory')
         if name == root.rstrip('/'):
             rel = ''
         elif name.startswith(root):
@@ -320,6 +346,8 @@ def entries_from_tar(tar: tarfile.TarFile, root: str, mount: str) -> list[Entry]
         path = posixpath.normpath(posixpath.join(mount, rel)) if rel else mount
         if path == '/':
             continue
+        if path != mount and not path.startswith(mount.rstrip('/') + '/'):
+            raise RebrandError(f'member {m.name} installs outside {mount}')
         if m.isdir():
             out.append(Entry(path, 'dir', m.mode & 0o7777, mtime=int(m.mtime)))
         elif m.issym():
@@ -334,6 +362,8 @@ def entries_from_tar(tar: tarfile.TarFile, root: str, mount: str) -> list[Entry]
 def write_tarball(out: Path, top: str, entries: list[Entry]) -> None:
     with tarfile.open(out, 'w:gz', format=tarfile.PAX_FORMAT) as tar:
         for e in sorted(entries, key=lambda e: e.path):
+            if e.path != '/usr' and not e.path.startswith('/usr/'):
+                raise RebrandError(f'{e.path} is outside /usr and cannot go in the tarball')
             info = tarfile.TarInfo(top + e.path[len('/usr'):])
             info.mode, info.mtime = e.mode, e.mtime
             info.uid = info.gid = 0
@@ -393,7 +423,7 @@ def convert_tarball(src: Path, out: Path, prefix: str, stable_top: str, nightly_
 def parse_control(text: str) -> list[list[str]]:
     fields: list[list[str]] = []
     for line in text.splitlines():
-        if not line.strip():
+        if not line.strip() or line.startswith('#'):
             continue
         if line[0] in ' \t':
             fields[-1][1] += '\n' + line
@@ -474,20 +504,23 @@ def convert_deb(src: Path, out: Path, prefix: str, nightly_version: str, work: P
 # ---- rpm ------------------------------------------------------------------------------------------
 
 def parse_cpio(data: bytes):
-    """Yield (name, mode, mtime, body) from a newc cpio archive (an rpm payload)."""
+    """Yield (name, mode, mtime, body, inode, nlink) from a newc cpio archive (an rpm payload).
+
+    inode is (devmajor, devminor, ino). Hardlinked files carry their payload on the last link only."""
     pos = 0
     while True:
         if data[pos:pos + 6] not in (b'070701', b'070702'):
             raise RebrandError('rpm payload is not a newc cpio archive')
         fields = [int(data[pos + 6 + 8 * i:pos + 14 + 8 * i], 16) for i in range(13)]
-        mode, mtime, size, namesize = fields[1], fields[5], fields[6], fields[11]
+        mode, nlink, mtime, size, namesize = fields[1], fields[4], fields[5], fields[6], fields[11]
+        inode = (fields[7], fields[8], fields[0])
         name = data[pos + 110:pos + 110 + namesize - 1].decode()
         pos = (pos + 110 + namesize + 3) & ~3
         body = data[pos:pos + size]
         pos = (pos + size + 3) & ~3
         if name == 'TRAILER!!!':
             return
-        yield name, mode, mtime, body
+        yield name, mode, mtime, body, inode, nlink
 
 
 def rpm_query(src: Path, *args: str) -> str:
@@ -538,7 +571,17 @@ def rpm_payload(src: Path, compressor: str) -> bytes:
 
 def entries_from_cpio(data: bytes, config_paths: set[str]) -> list[Entry]:
     entries = []
-    for name, mode, mtime, body in parse_cpio(data):
+    members = list(parse_cpio(data))
+    bodies: dict[tuple, set[bytes]] = collections.defaultdict(set)
+    for _name, mode, _mtime, body, inode, nlink in members:
+        if stat.S_ISREG(mode) and nlink > 1 and body:
+            bodies[inode].add(body)
+    for inode, found in bodies.items():
+        if len(found) > 1:
+            raise RebrandError('hardlinked files in the rpm payload carry different data')
+    for name, mode, mtime, body, inode, nlink in members:
+        if stat.S_ISREG(mode) and nlink > 1 and not body and inode in bodies:
+            body = next(iter(bodies[inode]))
         path = posixpath.normpath(posixpath.join('/', name[2:] if name.startswith('./') else name))
         if path == '/':
             continue
@@ -663,6 +706,9 @@ def find_inputs(input_dir: Path, version: str) -> tuple[str, str, dict[str, Path
 def rebrand(input_dir: Path, output_dir: Path, version: str, nightly_version: str) -> dict:
     if not re.fullmatch(r'[0-9]+(\.[0-9]+)*', nightly_version):
         raise RebrandError(f'nightly version {nightly_version!r} must be digits and dots')
+    if SUFFIX in version:
+        raise RebrandError(f'version {version!r} is a nightly channel version: distro packages take '
+                           'the stable version in their names and the nightly version only as the package version')
     prefix, arch, inputs = find_inputs(input_dir, version)
     if prefix.endswith(SUFFIX):
         refuse_nightly_input(f'the input files are named {prefix}-{version}-linux-{arch}.*')
