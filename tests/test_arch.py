@@ -276,37 +276,116 @@ exit 0
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
             version = "0.24.0-nightly.20261124.100.1.gaaaaaaaaaaaa"
-            tarball = self._create_fixture_tarball(tmp_path, filename=f"myapp-{version}-linux-x86_64.tar.gz")
-            tools = self._setup_mock_tools(tmp_path)
-            (tools / "tar").unlink()
-            capture = tmp_path / "capture"
-            capture.mkdir()
-            res = subprocess.run(
-                [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / "out")],
-                capture_output=True,
-                text=True,
-                env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
-            )
-            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
-            pkgbuild = (capture / "PKGBUILD").read_text()
-            self.assertIn("pkgname=ai.storyteller.myapp-nightly\n", pkgbuild)
-            self.assertIn("provides=(myapp-nightly=0.24.0nightly.20261124.100.1.gaaaaaaaaaaaa-1)", pkgbuild)
-            self.assertIn("conflicts=(myapp-nightly myapp-nightly-bin myapp-nightly-git)", pkgbuild)
-            for expected in (
-                "/usr/bin/myapp-nightly",
-                "/usr/bin/myapp-nightly-cli",
-                "/usr/share/doc/myapp-nightly",
-                "/usr/share/applications/ai.storyteller.myapp-nightly.desktop",
-                "StartupWMClass=",
-                "/usr/share/metainfo/ai.storyteller.myapp-nightly.metainfo.xml",
-                "/usr/share/mime/packages/ai.storyteller.myapp-nightly.xml",
-                "/usr/share/icons",
-                "/usr/share/man",
-                "/usr/share/bash-completion/completions/",
-                "/usr/share/zsh/site-functions/_",
-                "/usr/share/fish/vendor_completions.d/",
-            ):
-                self.assertIn(expected, pkgbuild)
+
+            def build_full_tarball(filename):
+                tar_root = tmp_path / f"src-{filename}"
+                for rel_dir in (
+                    "bin",
+                    "share/applications",
+                    "share/metainfo",
+                    "share/mime/packages",
+                    "share/icons/hicolor/256x256/apps",
+                    "share/man/man1",
+                    "share/bash-completion/completions",
+                    "share/zsh/site-functions",
+                    "share/fish/vendor_completions.d",
+                    "share/doc/myapp",
+                ):
+                    (tar_root / rel_dir).mkdir(parents=True, exist_ok=True)
+                for b in ("myapp", "myapp-cli"):
+                    (tar_root / f"bin/{b}").write_text("#!/bin/sh\necho ok\n")
+                    os.chmod(tar_root / f"bin/{b}", 0o755)
+                (tar_root / "share/applications/ai.storyteller.myapp.desktop").write_text(
+                    "[Desktop Entry]\nName=MyApp\nExec=myapp %F\nIcon=ai.storyteller.myapp\nType=Application\n"
+                    "\n[Desktop Action new-window]\nName=New Window\nExec=myapp --new-window\n"
+                )
+                (tar_root / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
+                    "<component><id>ai.storyteller.myapp</id>"
+                    "<launchable type=\"desktop-id\">ai.storyteller.myapp.desktop</launchable></component>\n"
+                )
+                (tar_root / "share/mime/packages/ai.storyteller.myapp.xml").write_text("<mime-info/>\n")
+                (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.png").write_bytes(b"png")
+                (tar_root / "share/man/man1/myapp-cli.1").write_text(".TH MYAPP-CLI 1\n")
+                (tar_root / "share/man/man1/myapp-cli-convert.1").write_text(".TH MYAPP-CLI-CONVERT 1\n")
+                (tar_root / "share/bash-completion/completions/myapp-cli").write_text(
+                    "_myapp-cli() { :; }\ncomplete -F _myapp-cli myapp-cli\n"
+                )
+                (tar_root / "share/zsh/site-functions/_myapp-cli").write_text(
+                    "#compdef myapp-cli\n_myapp-cli() { :; }\nif [ \"$funcstack[1]\" = \"_myapp-cli\" ]; then _myapp-cli; fi\n"
+                )
+                (tar_root / "share/fish/vendor_completions.d/myapp-cli.fish").write_text(
+                    "complete -c myapp-cli -f\n"
+                )
+                (tar_root / "share/doc/myapp/LICENSE").write_text("MIT\n")
+                tb = tmp_path / filename
+                with tarfile.open(tb, "w:gz") as tar:
+                    for item in tar_root.iterdir():
+                        tar.add(item, arcname=item.name)
+                return tb
+
+            def run_package(tarball, name_tag):
+                capture = tmp_path / f"capture-{name_tag}"
+                capture.mkdir()
+                pkgdir = capture / "pkgdir"
+                pkgdir.mkdir()
+                makepkg_body = (
+                    "#!/bin/bash\n"
+                    "set -euo pipefail\n"
+                    "cp PKGBUILD \"$MOCK_CAPTURE/PKGBUILD\"\n"
+                    "source PKGBUILD\n"
+                    "pkgdir=\"$MOCK_CAPTURE/pkgdir\"\n"
+                    "package\n"
+                    "touch \"myapp-1.2.3-1-x86_64.pkg.tar.zst\"\n"
+                )
+                tools = self._setup_mock_tools(tmp_path / f"tools-{name_tag}", makepkg_body=makepkg_body)
+                (tools / "tar").unlink()
+                # macOS BSD realpath lacks GNU -e; shim it for local test runs.
+                if subprocess.run(["realpath", "-e", "/"], capture_output=True).returncode != 0:
+                    rp = tools / "realpath"
+                    rp.write_text("#!/usr/bin/env python3\nimport os, sys\nargs=[a for a in sys.argv[1:] if a not in ('-e','-m','--')]\nprint(os.path.realpath(args[0]))\n")
+                    os.chmod(rp, 0o755)
+                res = subprocess.run(
+                    [str(ARCH_SCRIPT), str(tarball), "x86_64", str(tmp_path / f"out-{name_tag}")],
+                    capture_output=True,
+                    text=True,
+                    env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+                )
+                self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+                pkgbuild_path = capture / "PKGBUILD"
+                files = {
+                    str(p.relative_to(pkgdir))
+                    for p in pkgdir.rglob("*")
+                    if p.is_file() or p.is_symlink()
+                }
+                return pkgbuild_path.read_text(), pkgdir, files
+
+            stable_tb = build_full_tarball("myapp-1.2.3-linux-x86_64.tar.gz")
+            nightly_tb = build_full_tarball(f"myapp-{version}-linux-x86_64.tar.gz")
+            _, _, stable_files = run_package(stable_tb, "stable")
+            nightly_pkgbuild, nightly_pkgdir, nightly_files = run_package(nightly_tb, "nightly")
+
+            self.assertIn("pkgname=ai.storyteller.myapp-nightly\n", nightly_pkgbuild)
+            self.assertIn("provides=(myapp-nightly=0.24.0nightly.20261124.100.1.gaaaaaaaaaaaa-1)", nightly_pkgbuild)
+            self.assertIn("conflicts=(myapp-nightly myapp-nightly-bin myapp-nightly-git)", nightly_pkgbuild)
+            self.assertEqual(stable_files & nightly_files, set(), f"colliding files: {stable_files & nightly_files}")
+
+            desktop_text = (nightly_pkgdir / "usr/share/applications/ai.storyteller.myapp-nightly.desktop").read_text()
+            self.assertIn("Exec=myapp-nightly %F\n", desktop_text)
+            self.assertIn("Icon=ai.storyteller.myapp-nightly\n", desktop_text)
+            desktop_entry_section = desktop_text.split("[Desktop Action", 1)[0]
+            self.assertIn("StartupWMClass=ai.storyteller.myapp\n", desktop_entry_section)
+
+            metainfo_text = (nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp-nightly.metainfo.xml").read_text()
+            self.assertIn("<id>ai.storyteller.myapp-nightly</id>", metainfo_text)
+            self.assertIn('<launchable type="desktop-id">ai.storyteller.myapp-nightly.desktop</launchable>', metainfo_text)
+
+            bash_comp = (nightly_pkgdir / "usr/share/bash-completion/completions/myapp-nightly-cli").read_text()
+            self.assertIn("_myapp-nightly-cli()", bash_comp)
+            self.assertIn("complete -F _myapp-nightly-cli myapp-nightly-cli", bash_comp)
+            zsh_comp = (nightly_pkgdir / "usr/share/zsh/site-functions/_myapp-nightly-cli").read_text()
+            self.assertIn("#compdef myapp-nightly-cli", zsh_comp)
+            self.assertIn('"_myapp-nightly-cli"', zsh_comp)
+            self.assertIn("usr/share/man/man1/myapp-nightly-cli-convert.1", nightly_files)
 
     def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
         """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.

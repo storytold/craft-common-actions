@@ -268,12 +268,17 @@ cat <<NIGHTLY_PKG
   fi
   for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
     [ -f "\$desktop_file" ] || continue
-    sed -i -E \
-      -e "s|^Exec=${app_re}([[:space:]]|$)|Exec=$app-nightly\\1|" \
-      -e "s|^Icon=${base_pkgname_re}$|Icon=$pkgname|" \
-      "\$desktop_file"
+    sed -E \
+      -e "s@^Exec=${app_re}([[:space:]]|\$)@Exec=$app-nightly\\1@" \
+      -e "s@^Icon=${base_pkgname_re}\$@Icon=$pkgname@" \
+      "\$desktop_file" > "\$desktop_file.tmp" && mv "\$desktop_file.tmp" "\$desktop_file"
     if ! grep -q '^StartupWMClass=' "\$desktop_file"; then
-      printf 'StartupWMClass=%s\n' "$base_pkgname" >> "\$desktop_file"
+      awk -v wm="$base_pkgname" '
+        BEGIN { inserted = 0 }
+        /^\[Desktop Entry\]$/ && !inserted { print; print "StartupWMClass=" wm; inserted = 1; next }
+        { print }
+        END { if (!inserted) print "StartupWMClass=" wm }
+      ' "\$desktop_file" > "\$desktop_file.tmp" && mv "\$desktop_file.tmp" "\$desktop_file"
     fi
     case "\$desktop_file" in
       *-nightly.desktop | *.nightly.desktop) ;;
@@ -282,10 +287,10 @@ cat <<NIGHTLY_PKG
   done
   for metainfo_file in "\$pkgdir/usr/share/metainfo/"*.metainfo.xml; do
     [ -f "\$metainfo_file" ] || continue
-    sed -i -E \
-      -e "s|<id>${base_pkgname_re}</id>|<id>$pkgname</id>|g" \
-      -e "s|<launchable type=\"desktop-id\">${base_pkgname_re}\\.desktop</launchable>|<launchable type=\"desktop-id\">$pkgname.desktop</launchable>|g" \
-      "\$metainfo_file"
+    sed -E \
+      -e "s@<id>${base_pkgname_re}</id>@<id>$pkgname</id>@g" \
+      -e "s@<launchable type=\"desktop-id\">${base_pkgname_re}\\.desktop</launchable>@<launchable type=\"desktop-id\">$pkgname.desktop</launchable>@g" \
+      "\$metainfo_file" > "\$metainfo_file.tmp" && mv "\$metainfo_file.tmp" "\$metainfo_file"
     case "\$metainfo_file" in
       *-nightly.metainfo.xml | *.nightly.metainfo.xml) ;;
       *) mv "\$metainfo_file" "\$pkgdir/usr/share/metainfo/$pkgname.metainfo.xml" ;;
@@ -305,10 +310,10 @@ cat <<NIGHTLY_PKG
     done
   fi
   if [ -d "\$pkgdir/usr/share/man" ]; then
-    find "\$pkgdir/usr/share/man" -type f \( -name "$app.1*" -o -name "$app-cli.1*" \) | while IFS= read -r man_path; do
+    find "\$pkgdir/usr/share/man" -type f \( -name "$app.1*" -o -name "$app-cli.1*" -o -name "$app-cli-*.1*" \) | while IFS= read -r man_path; do
       man_base="\$(basename "\$man_path")"
       case "\$man_base" in
-        "$app-cli.1"*) new_base="$app-nightly-cli\${man_base#"$app-cli"}" ;;
+        "$app-cli.1"* | "$app-cli-"*.1*) new_base="$app-nightly-cli\${man_base#"$app-cli"}" ;;
         "$app.1"*) new_base="$app-nightly\${man_base#"$app"}" ;;
         *) continue ;;
       esac
@@ -319,21 +324,29 @@ cat <<NIGHTLY_PKG
     [ -f "\$comp" ] || continue
     comp_base="\$(basename "\$comp")"
     new_comp="\${comp_base/#$app/$app-nightly}"
-    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    sed -E \
+      -e "s@(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1_$app-nightly\\2\\3@g" \
+      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
   for comp in "\$pkgdir/usr/share/zsh/site-functions/_$app-cli" "\$pkgdir/usr/share/zsh/site-functions/_$app"; do
     [ -f "\$comp" ] || continue
     comp_base="\$(basename "\$comp")"
     new_comp="_$app-nightly\${comp_base#_$app}"
-    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    sed -E \
+      -e "s@(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1_$app-nightly\\2\\3@g" \
+      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
   for comp in "\$pkgdir/usr/share/fish/vendor_completions.d/$app-cli.fish" "\$pkgdir/usr/share/fish/vendor_completions.d/$app.fish"; do
     [ -f "\$comp" ] || continue
     comp_base="\$(basename "\$comp")"
     new_comp="\${comp_base/#$app/$app-nightly}"
-    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    sed -E \
+      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
 NIGHTLY_PKG
