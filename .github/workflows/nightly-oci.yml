@@ -82,6 +82,7 @@ jobs:
           name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
           path: .linux-packages
           merge-multiple: true
+          digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
@@ -90,6 +91,7 @@ jobs:
           name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
           path: .linux-packages
           merge-multiple: true
+          digest-mismatch: error
       - name: Verify release target, SHA256SUMS.txt, and .oci.sig before pushing OCI tags
         env:
           GH_TOKEN: ${{ github.token }}
@@ -99,11 +101,15 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,url > .release.json
+          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,url,body > .release.json
+          gh release list -R "$GITHUB_REPOSITORY" --limit 20 --json databaseId,tagName,isDraft,isPrerelease,publishedAt > .releases.json
+          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "NIGHTLY.json" --output .linux-packages/NIGHTLY.json
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --output .linux-packages/SHA256SUMS.txt
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci-manifest.json" --dir .linux-packages --clobber
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci.sig" --dir .linux-packages --clobber
@@ -122,6 +128,7 @@ jobs:
               "draft": raw_rel["isDraft"],
               "prerelease": raw_rel["isPrerelease"],
               "html_url": raw_rel.get("url", ""),
+              "body": raw_rel.get("body", ""),
           }
           oci.verify_and_push_oci(
               release=release,
@@ -135,5 +142,9 @@ jobs:
               public_key=".release-source/.github/nightly-linux-signing-key.asc",
               fingerprint=fingerprint,
               environment=os.environ,
+              producer_run_id=int(os.environ["PRODUCER_RUN_ID"]),
+              producer_run_attempt=int(os.environ["PRODUCER_RUN_ATTEMPT"]),
+              recent_releases=n.bounded_json(".releases.json"),
+              nightly_json_bytes=open(".linux-packages/NIGHTLY.json", "rb").read(),
           )
           PY

@@ -389,6 +389,38 @@ def platform_directories(directory, platforms):
     return {platform: directory/platform for platform in sorted(platforms)}
 
 
+def linux_package_paths(pkg_dir, version):
+    """Sorted validated (filename, Path) pairs for Linux packages in a directory."""
+    root = n.owned_path(pkg_dir)
+    n.require(root.is_dir() and not root.is_symlink(), "Linux packages directory required")
+    items = []
+    for entry in sorted(root.iterdir()):
+        if entry.is_dir() and not entry.is_symlink():
+            continue
+        n.require(n.NAME.fullmatch(entry.name) and f"-{version}-linux-" in entry.name and
+            entry.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES), f"invalid Linux package {entry.name}")
+        items.append((entry.name, entry))
+    n.require(bool(items), "no Linux packages found")
+    return items
+
+
+def _gh_attest_verify(policy, request, file_path, payload_sha256, *, multi_subject=False, runner=subprocess.run):
+    """Run trusted gh attestation verify on one payload and validate its provenance."""
+    version = runner(["gh", "--version"], check=True, capture_output=True, timeout=30).stdout.decode()
+    r.require_gh_version(version)
+    workflow = "github.com/"+policy["producer_workflow_ref"].split("@", 1)[0]
+    with tempfile.TemporaryDirectory(prefix="nightly-gh-verify-", dir=os.environ["RUNNER_TEMP"]) as temporary:
+        evidence = Path(temporary)/"verified.json"
+        with evidence.open("xb") as stream:
+            runner(["gh", "attestation", "verify", str(Path(file_path).resolve()),
+                "--repo", policy["repository"], "--signer-workflow", workflow,
+                "--signer-digest", policy["producer_tooling_revision"], "--source-ref", "refs/heads/main",
+                "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"],
+                check=True, stdout=stream, timeout=120)
+        return r.verify_unsigned_attestation(policy, request, n.bounded_json(evidence), payload_sha256,
+            multi_subject=multi_subject)
+
+
 def verified_unsigned(policy, state, platform, directory, *, runner=subprocess.run):
     """Run trusted gh itself; downloaded JSON is never verification evidence."""
     plan, request = state["plan"], state["request"]
@@ -397,19 +429,20 @@ def verified_unsigned(policy, state, platform, directory, *, runner=subprocess.r
     _, digest = n.digest_file(directory, names["unsigned_asset"])
     manifest = unsigned_manifest(plan, request["producer"], platform, digest)
     n.require(n.bounded_json(Path(directory)/"unsigned.json") == manifest, "unsigned source/version/hash differs")
-    version = runner(["gh", "--version"], check=True, capture_output=True, timeout=30).stdout.decode()
-    r.require_gh_version(version)
-    workflow = "github.com/"+policy["producer_workflow_ref"].split("@", 1)[0]
-    with tempfile.TemporaryDirectory(prefix="nightly-gh-verify-", dir=os.environ["RUNNER_TEMP"]) as temporary:
-        evidence = Path(temporary)/"verified.json"
-        with evidence.open("xb") as stream:
-            runner(["gh", "attestation", "verify", str(Path(directory, names["unsigned_asset"]).resolve()),
-                "--repo", policy["repository"], "--signer-workflow", workflow,
-                "--signer-digest", policy["producer_tooling_revision"], "--source-ref", "refs/heads/main",
-                "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"],
-                check=True, stdout=stream, timeout=120)
-        claims = r.verify_unsigned_attestation(policy, request, n.bounded_json(evidence), digest)
+    claims = _gh_attest_verify(policy, request, Path(directory, names["unsigned_asset"]), digest, runner=runner)
     return manifest, claims
+
+
+def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
+    """Verify build provenance attestation for every staged Linux package file."""
+    plan, request = state["plan"], state["request"]
+    n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
+    version = plan["identity"]["version"]
+    claims = {}
+    for name, path in linux_package_paths(pkg_dir, version):
+        _, digest = n.digest_file(pkg_dir, name)
+        claims[name] = _gh_attest_verify(policy, request, path, digest, multi_subject=True, runner=runner)
+    return claims
 
 
 def stage_bundle(output, state, directories, manifests, claims, linux_packages=None):
@@ -431,17 +464,11 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
             shutil.copyfileobj(stream, destination, 1024*1024)
         n.require(n.digest_file(output, asset)[1] == claims[platform]["payload_sha256"], "staged payload changed")
     if linux_packages is not None:
-        pkg_dir = n.owned_path(linux_packages)
-        n.require(pkg_dir.is_dir() and not pkg_dir.is_symlink(), "Linux packages directory required")
         n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
         version = plan["identity"]["version"]
-        for entry in sorted(pkg_dir.iterdir()):
-            if entry.is_dir() and not entry.is_symlink():
-                continue
-            n.require(n.NAME.fullmatch(entry.name) and f"-{version}-linux-" in entry.name and
-                entry.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES), f"invalid Linux package {entry.name}")
-            stream, _ = n.regular_file(pkg_dir, entry.name)
-            with stream, (output/entry.name).open("xb") as destination:
+        for name, _ in linux_package_paths(linux_packages, version):
+            stream, _ = n.regular_file(linux_packages, name)
+            with stream, (output/name).open("xb") as destination:
                 shutil.copyfileobj(stream, destination, 1024*1024)
     return bundle_hash(output, validated_names(plan, output))
 
@@ -705,8 +732,8 @@ def source_policy(source, environment):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "admit", "validate", "guard", "sign",
-        "verify-platform", "final", "publish"))
+    parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "main-packages-subject",
+        "admit", "validate", "guard", "sign", "verify-platform", "final", "publish"))
     for name in ("source", "directory", "output", "plan", "state", "platform", "expected-sha256", "producer-run-id",
             "producer-run-attempt", "packet", "ownership", "combined", "linux-packages"):
         parser.add_argument("--"+name)
@@ -738,6 +765,10 @@ def main():
                 n.require(n.digest_file(output, names["unsigned_asset"])[1] == digest, "producer payload changed while copying")
                 write_json(output/"unsigned.json", manifest)
                 outputs({"unsigned-sha256": digest})
+            elif args.mode == "main-packages-subject":
+                n.require(args.directory, "Linux packages directory required")
+                paths = linux_package_paths(args.directory, plan["identity"]["version"])
+                outputs({"subject-path": ",".join(str(path.resolve()) for _, path in paths)})
             else:
                 n.require(args.directory, "exact compiler artifact directory required")
                 finite_files(args.directory, {names["unsigned_asset"], "unsigned.json"})
@@ -759,6 +790,8 @@ def main():
                 "platforms": json.dumps(sorted(state["plan"]["platforms"]), separators=(",", ":"))}
             for platform, item in state["request"]["artifacts"].items():
                 values["artifact-id-"+platform] = item["id"]
+            for kind, item in state["request"].get("linux_package_artifacts", {}).items():
+                values["artifact-id-"+kind] = item["id"]
             outputs(values)
             return
         if args.mode == "validate":
@@ -769,6 +802,9 @@ def main():
             manifests, claims = {}, {}
             for platform, directory in directories.items():
                 manifests[platform], claims[platform] = verified_unsigned(policy, state, platform, directory)
+            if "linux-x86_64" in state["plan"]["platforms"]:
+                n.require(args.linux_packages is not None, "Linux packages directory required")
+                verified_linux_packages(policy, state, args.linux_packages)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
             digest = stage_bundle(args.output, state, directories, manifests, claims, linux_packages=args.linux_packages)
             outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})

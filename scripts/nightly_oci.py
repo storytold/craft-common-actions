@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """Verify published nightly OCI signatures and checksums before pushing OCI tags."""
 import argparse
+import base64
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import nightly_feed as n
 import nightly_signing as signing
 
 ALLOWED_ARCHES = ("x86_64", "aarch64")
 OCI_ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
 SHA256_RE = re.compile(r"^sha256:([a-f0-9]{64})$")
+VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9._-]+$")
+MARKER_V2 = "craft-nightly-release-publication/v2:"
 
 
 def parse_sha256sums(raw):
@@ -30,7 +34,19 @@ def parse_sha256sums(raw):
     return sums
 
 
-def verify_release_target(release, *, repository, tag, source_commit, release_id=None):
+def verify_release_target(
+    release,
+    *,
+    repository,
+    tag,
+    source_commit,
+    release_id=None,
+    version=None,
+    producer_run_id=None,
+    producer_run_attempt=None,
+    recent_releases=None,
+    nightly_json_bytes=None,
+):
     """Ensure the target GitHub release matches the exact published nightly of this run."""
     n.require(isinstance(release, dict) and type(release.get("id")) is int and release["id"] > 0, "invalid release object")
     n.require(release_id is None or release["id"] == release_id, "release ID mismatch")
@@ -42,6 +58,40 @@ def verify_release_target(release, *, repository, tag, source_commit, release_id
     html_url = release.get("html_url", "")
     if html_url:
         n.require(html_url.startswith(expected_prefix), "release repository URL mismatch")
+    if version is not None:
+        n.require(isinstance(version, str) and VERSION_RE.fullmatch(version) is not None, "invalid nightly version")
+        n.require(tag.startswith("nightly-"), "release tag must be a nightly tag")
+    if producer_run_id is not None:
+        body = release.get("body", "")
+        n.require(isinstance(body, str) and body.count(MARKER_V2) == 1, "missing or ambiguous release publication marker")
+        pub = json.loads(body.split(MARKER_V2, 1)[1])
+        prod = pub.get("request", {}).get("producer", {})
+        ident = pub.get("plan", {}).get("identity", {})
+        n.require(prod.get("run_id") == producer_run_id, "release producer_run_id mismatch")
+        if producer_run_attempt is not None:
+            n.require(prod.get("run_attempt") == producer_run_attempt, "release producer_run_attempt mismatch")
+        n.require(prod.get("source_commit") == source_commit, "release producer commit mismatch")
+        n.require(ident.get("tag") == tag and (version is None or ident.get("version") == version),
+                  "release publication identity mismatch")
+    if nightly_json_bytes is not None:
+        feed = json.loads(nightly_json_bytes.decode("utf-8"))
+        n.require(feed.get("tag") == tag and feed.get("commit") == source_commit and
+                  (version is None or feed.get("version") == version), "NIGHTLY.json identity mismatch")
+    if recent_releases is not None:
+        published_nightlies = [
+            rel for rel in recent_releases
+            if isinstance(rel, dict)
+            and not rel.get("isDraft", rel.get("draft", False))
+            and rel.get("isPrerelease", rel.get("prerelease", False))
+            and str(rel.get("tagName", rel.get("tag_name", ""))).startswith("nightly-")
+        ]
+        n.require(bool(published_nightlies), "no published nightly releases found")
+        newest = max(
+            published_nightlies,
+            key=lambda rel: (rel.get("publishedAt", rel.get("published_at", "")), rel.get("databaseId", rel.get("id", 0))),
+        )
+        newest_id = newest.get("databaseId", newest.get("id"))
+        n.require(newest_id == release["id"], "refusing to push floating OCI tags for non-newest nightly release")
     return release["id"]
 
 
@@ -91,10 +141,25 @@ def verify_and_push_oci(
     public_key,
     fingerprint,
     environment,
+    producer_run_id=None,
+    producer_run_attempt=None,
+    recent_releases=None,
+    nightly_json_bytes=None,
     runner=subprocess.run,
 ):
     """Verify release target, SHA256SUMS, .oci.sig, and OCI layout digest before pushing tags."""
-    verify_release_target(release, repository=repository, tag=tag, source_commit=source_commit, release_id=release_id)
+    verify_release_target(
+        release,
+        repository=repository,
+        tag=tag,
+        source_commit=source_commit,
+        release_id=release_id,
+        version=version,
+        producer_run_id=producer_run_id,
+        producer_run_attempt=producer_run_attempt,
+        recent_releases=recent_releases,
+        nightly_json_bytes=nightly_json_bytes,
+    )
     sums = parse_sha256sums(sums_bytes)
     pkg_root = n.owned_path(package_dir)
     n.require(pkg_root.is_dir() and not pkg_root.is_symlink(), "package directory required")
@@ -130,21 +195,33 @@ def verify_and_push_oci(
         n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
         verified_layouts.append((arch, layout))
 
-    for arch, layout in verified_layouts:
-        for oci_tag in (f"{version}-{arch}", f"nightly-{arch}"):
-            target = f"docker://{registry}:{oci_tag}"
-            runner(
-                ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{gh_user}:{gh_token}", f"oci:{layout}", target],
-                check=True,
-            )
-            pushed.append(target)
-            if dh_user and dh_token:
-                dh_repo = repository.split("/", 1)[1].lower()
-                dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
+    with tempfile.TemporaryDirectory(prefix="nightly-oci-auth-") as auth_dir:
+        auth_file = Path(auth_dir) / "auth.json"
+        auths = {"ghcr.io": {"auth": base64.b64encode(f"{gh_user}:{gh_token}".encode("utf-8")).decode("ascii")}}
+        if dh_user and dh_token:
+            auths["https://index.docker.io/v1/"] = {
+                "auth": base64.b64encode(f"{dh_user}:{dh_token}".encode("utf-8")).decode("ascii")
+            }
+        fd = os.open(auth_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"auths": auths}, stream)
+
+        for tag_kind in ("version", "nightly"):
+            for arch, layout in verified_layouts:
+                oci_tag = f"{version}-{arch}" if tag_kind == "version" else f"nightly-{arch}"
+                target = f"docker://{registry}:{oci_tag}"
                 runner(
-                    ["skopeo", "copy", "--format", "oci", "--dest-creds", f"{dh_user}:{dh_token}", f"oci:{layout}", dh_target],
+                    ["skopeo", "copy", "--format", "oci", "--authfile", str(auth_file), f"oci:{layout}", target],
                     check=True,
                 )
-                pushed.append(dh_target)
+                pushed.append(target)
+                if dh_user and dh_token:
+                    dh_repo = repository.split("/", 1)[1].lower()
+                    dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
+                    runner(
+                        ["skopeo", "copy", "--format", "oci", "--authfile", str(auth_file), f"oci:{layout}", dh_target],
+                        check=True,
+                    )
+                    pushed.append(dh_target)
 
     return pushed

@@ -73,14 +73,21 @@ class RequestTests(unittest.TestCase):
                 'head_sha': 'a'*40, 'head_branch': 'main'}}
         self.mac_item = {**copy.deepcopy(self.item), 'id': 302, 'name': MAC_KIND+'-100-1', 'digest': 'sha256:'+'c'*64}
         self.linux_item = {**copy.deepcopy(self.item), 'id': 304, 'name': LINUX_KIND+'-100-1', 'digest': 'sha256:'+'4'*64}
+        self.pkg_x86_item = {**copy.deepcopy(self.item), 'id': 306, 'name': 'nightly-linux-packages-x86_64-100-1', 'digest': 'sha256:'+'6'*64}
+        self.pkg_arm_item = {**copy.deepcopy(self.item), 'id': 308, 'name': 'nightly-linux-packages-aarch64-100-1', 'digest': 'sha256:'+'8'*64}
+        self.pkg_arch_item = {**copy.deepcopy(self.item), 'id': 310, 'name': 'nightly-linux-arch-aarch64-100-1', 'digest': 'sha256:'+'9'*64}
         rows = {'/actions/runs/100': producer, '/actions/runs/100/attempts/1': copy.deepcopy(producer),
             '/actions/runs/200': signer, '/actions/runs/200/attempts/1': copy.deepcopy(signer),
             '/actions/workflows/91': {'id': 91, 'path': producer['path'], 'state': 'active'},
             '/actions/workflows/92': {'id': 92, 'path': signer['path'], 'state': 'active'},
-            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 3, 'artifacts': [self.item, self.mac_item, self.linux_item]},
+            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 6,
+                'artifacts': [self.item, self.mac_item, self.linux_item, self.pkg_x86_item, self.pkg_arm_item, self.pkg_arch_item]},
             '/actions/artifacts/300': copy.deepcopy(self.item),
             '/actions/artifacts/302': copy.deepcopy(self.mac_item),
             '/actions/artifacts/304': copy.deepcopy(self.linux_item),
+            '/actions/artifacts/306': copy.deepcopy(self.pkg_x86_item),
+            '/actions/artifacts/308': copy.deepcopy(self.pkg_arm_item),
+            '/actions/artifacts/310': copy.deepcopy(self.pkg_arch_item),
             'newest': {'workflow_runs': [copy.deepcopy(producer)]}}
         self.api = API(rows)
         self.now = r.p.timestamp('2026-11-22T01:00:00Z')
@@ -100,6 +107,7 @@ class RequestTests(unittest.TestCase):
         policy = policy or self.legacy_policy(); request = copy.deepcopy(self.invoke())
         request['schema'] = 'craft-nightly-release-request/v1'; request['policy_sha256'] = r.digest(policy)
         request['artifact'] = request.pop('artifacts')['windows-x86_64']
+        request.pop('linux_package_artifacts', None)
         return request
 
     def modify_run(self, which, key, value):
@@ -231,6 +239,8 @@ class RequestTests(unittest.TestCase):
                     retained[name].update(event='workflow_dispatch',run_attempt=attempt)
                     for platform in retained['artifacts']:
                         retained['artifacts'][platform]['name']=r.artifact_name(self.policy,retained['producer'],platform)
+                    for kind, pkg_name in r.linux_package_artifact_names(retained['producer']).items():
+                        retained['linux_package_artifacts'][kind]['name']=pkg_name
                     r.request_contract(self.policy,retained)  # Reviewed manual actor still passes.
                     retained[name]['triggering_actor']='unapproved'
                     with self.assertRaisesRegex(ValueError,'role current actor not authorized'):
@@ -471,10 +481,18 @@ class RequestTests(unittest.TestCase):
         rerun_item={**copy.deepcopy(self.item),'id':301,'name':WINDOWS_KIND+'-100-2'}
         rerun_mac={**copy.deepcopy(self.mac_item),'id':303,'name':MAC_KIND+'-100-2'}
         rerun_linux={**copy.deepcopy(self.linux_item),'id':305,'name':LINUX_KIND+'-100-2'}
+        rerun_pkg_x86={**copy.deepcopy(self.pkg_x86_item),'id':307,'name':'nightly-linux-packages-x86_64-100-2'}
+        rerun_pkg_arm={**copy.deepcopy(self.pkg_arm_item),'id':309,'name':'nightly-linux-packages-aarch64-100-2'}
+        rerun_pkg_arch={**copy.deepcopy(self.pkg_arch_item),'id':311,'name':'nightly-linux-arch-aarch64-100-2'}
         self.api.rows['/actions/artifacts/301']=rerun_item
         self.api.rows['/actions/artifacts/303']=rerun_mac
         self.api.rows['/actions/artifacts/305']=rerun_linux
-        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':6,'artifacts':[self.item,rerun_item,self.mac_item,rerun_mac,self.linux_item,rerun_linux]}
+        self.api.rows['/actions/artifacts/307']=rerun_pkg_x86
+        self.api.rows['/actions/artifacts/309']=rerun_pkg_arm
+        self.api.rows['/actions/artifacts/311']=rerun_pkg_arch
+        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':12,'artifacts':[
+            self.item,rerun_item,self.mac_item,rerun_mac,self.linux_item,rerun_linux,
+            self.pkg_x86_item,rerun_pkg_x86,self.pkg_arm_item,rerun_pkg_arm,self.pkg_arch_item,rerun_pkg_arch]}
         request=r.validate_request(self.policy,self.env,100,2,self.api,now=self.now)
         self.assertEqual(request['artifacts']['windows-x86_64']['id'],301)
         self.assertEqual(request['artifacts']['macos-aarch64']['id'],303)
@@ -576,7 +594,9 @@ class RequestTests(unittest.TestCase):
     def test_complete_artifact_inventory_on_the_last_allowed_full_page_is_accepted(self):
         limit = r.p.MAX_PAGES*r.p.PAGE_SIZE
         rows = [{**copy.deepcopy(self.item), 'id': 1000+index, 'name': 'other-'+str(index)} for index in range(limit-1)]
-        rows.insert(limit//2, copy.deepcopy(self.item)); rows[limit//3] = copy.deepcopy(self.linux_item); rows[-1] = copy.deepcopy(self.mac_item)
+        rows.insert(limit//2, copy.deepcopy(self.item)); rows[limit//3] = copy.deepcopy(self.linux_item)
+        rows[1] = copy.deepcopy(self.pkg_x86_item); rows[2] = copy.deepcopy(self.pkg_arm_item); rows[3] = copy.deepcopy(self.pkg_arch_item)
+        rows[-1] = copy.deepcopy(self.mac_item)
         for page in range(1, r.p.MAX_PAGES+1):
             self.api.rows[f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={page}'] = {'total_count': limit,
                 'artifacts': rows[(page-1)*r.p.PAGE_SIZE:page*r.p.PAGE_SIZE]}
@@ -639,7 +659,7 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'admitted platform'): self.invoke()
         self.api.rows[key] = {'total_count': 2, 'artifacts': [self.item, self.mac_item]}
         with self.assertRaisesRegex(ValueError, 'admitted platform'): self.invoke()  # Linux artifact missing.
-        self.api.rows[key] = {'total_count': 3, 'artifacts': [self.item, self.mac_item, self.linux_item]}
+        self.api.rows[key] = {'total_count': 6, 'artifacts': [self.item, self.mac_item, self.linux_item, self.pkg_x86_item, self.pkg_arm_item, self.pkg_arch_item]}
         self.api.rows['/actions/artifacts/302']['digest'] = 'sha256:'+'9'*64
         with self.assertRaisesRegex(ValueError, 'substituted'): self.invoke()
         self.api.rows['/actions/artifacts/302'] = copy.deepcopy(self.mac_item)

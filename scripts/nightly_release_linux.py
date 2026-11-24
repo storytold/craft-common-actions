@@ -114,6 +114,13 @@ def verify(trust, directory, asset, support, source, environment, version):
     signer = signing.verify_linux_signature(Path(source)/PUBLIC_KEY, directory/(asset+".asc"), directory/asset,
                                             fingerprint, environment)
     n.require(signer == fingerprint, "verified Linux signer differs from reviewed trust")
+    for name in sorted(extra_support):
+        if name.endswith(".oci-manifest.json"):
+            n.require(name[:-len(".oci-manifest.json")] + ".oci.sig" in extra_support, f"missing .oci.sig for {name}")
+        elif name.endswith(".pkg.tar.zst"):
+            n.require(name + ".sig" in extra_support, f"missing .sig for {name}")
+        elif name.endswith((".deb", ".rpm", ".AppImage", ".AppImage.zsync", ".flatpak")):
+            n.require(name + ".asc" in extra_support, f"missing .asc for {name}")
     for sig_name in sorted(extra_support):
         if sig_name.endswith(".oci.sig"):
             target_name = sig_name[:-len(".oci.sig")] + ".oci-manifest.json"
@@ -130,6 +137,8 @@ def verify(trust, directory, asset, support, source, environment, version):
                 Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment, binary=True
             )
             n.require(sig_signer == fingerprint, f"verified Arch package signer for {sig_name} differs from reviewed trust")
+        elif sig_name.endswith(".sig"):
+            raise n.InvalidNightly(f"unexpected signature {sig_name}")
         elif sig_name.endswith(".asc"):
             target_name = sig_name[:-len(".asc")]
             n.require(target_name in expected, f"missing payload for {sig_name}")

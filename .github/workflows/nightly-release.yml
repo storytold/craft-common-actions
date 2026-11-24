@@ -104,36 +104,36 @@ jobs:
           path: .unsigned/linux-x86_64
           merge-multiple: true
           digest-mismatch: error
-      - name: Download Linux x86_64 packages from producer run for validation
+      - name: Download exact authenticated Linux x86_64 packages from producer run for validation
         if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-packages-x86_64 }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error
-      - name: Download Linux aarch64 packages from producer run for validation
+      - name: Download exact authenticated Linux aarch64 packages from producer run for validation
         if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-packages-aarch64 }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error
-      - name: Download Linux aarch64 Arch package from producer run for validation
+      - name: Download exact authenticated Linux aarch64 Arch package from producer run for validation
         if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-arch-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-arch-aarch64 }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error

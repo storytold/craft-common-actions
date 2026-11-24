@@ -119,10 +119,10 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         self.assertEqual(pushed, [
             f"docker://ghcr.io/storytold/photocraft:{self.version}-x86_64",
             f"docker://docker.io/storytold/photocraft:{self.version}-x86_64",
-            "docker://ghcr.io/storytold/photocraft:nightly-x86_64",
-            "docker://docker.io/storytold/photocraft:nightly-x86_64",
             f"docker://ghcr.io/storytold/photocraft:{self.version}-aarch64",
             f"docker://docker.io/storytold/photocraft:{self.version}-aarch64",
+            "docker://ghcr.io/storytold/photocraft:nightly-x86_64",
+            "docker://docker.io/storytold/photocraft:nightly-x86_64",
             "docker://ghcr.io/storytold/photocraft:nightly-aarch64",
             "docker://docker.io/storytold/photocraft:nightly-aarch64",
         ])
@@ -383,6 +383,32 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                         "expires_at": "2026-12-23T00:05:00Z",
                     }
                 },
+                "linux_package_artifacts": {
+                    "nightly-linux-packages-x86_64": {
+                        "id": 104,
+                        "name": "nightly-linux-packages-x86_64-101-1",
+                        "size_in_bytes": 1000,
+                        "wrapper_sha256": "6" * 64,
+                        "created_at": "2026-11-23T00:05:00Z",
+                        "expires_at": "2026-12-23T00:05:00Z",
+                    },
+                    "nightly-linux-packages-aarch64": {
+                        "id": 105,
+                        "name": "nightly-linux-packages-aarch64-101-1",
+                        "size_in_bytes": 1000,
+                        "wrapper_sha256": "7" * 64,
+                        "created_at": "2026-11-23T00:05:00Z",
+                        "expires_at": "2026-12-23T00:05:00Z",
+                    },
+                    "nightly-linux-arch-aarch64": {
+                        "id": 106,
+                        "name": "nightly-linux-arch-aarch64-101-1",
+                        "size_in_bytes": 1000,
+                        "wrapper_sha256": "8" * 64,
+                        "created_at": "2026-11-23T00:05:00Z",
+                        "expires_at": "2026-12-23T00:05:00Z",
+                    },
+                },
             }
             support = {
                 tar_asc: {"size": 100, "sha256": digest_asc},
@@ -527,3 +553,221 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     environment=self.env, runner=lambda c, check=True: calls.append(c),
                 )
         self.assertEqual(calls, [])
+
+    def test_oci_rollback_and_producer_binding_and_no_argv_tokens(self):
+        calls = []
+        recent = [
+            {"databaseId": 99, "tagName": "nightly-2026-11-24", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-24T00:00:00Z"},
+            {"databaseId": 42, "tagName": self.tag, "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-23T00:00:00Z"},
+        ]
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "non-newest nightly release"):
+                oci.verify_and_push_oci(
+                    release=self.release, repository=self.repo, tag=self.tag, version=self.version,
+                    source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
+                    package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
+                    environment=self.env, recent_releases=recent, runner=lambda c, check=True: calls.append(c),
+                )
+        self.assertEqual(calls, [])
+
+        rel_with_body = {
+            **self.release,
+            "body": "Notes\n" + oci.MARKER_V2 + json.dumps({
+                "request": {"producer": {"run_id": 100, "run_attempt": 1, "source_commit": self.commit}},
+                "plan": {"identity": {"version": self.version, "tag": self.tag}},
+            }),
+        }
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "producer_run_id mismatch"):
+                oci.verify_and_push_oci(
+                    release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
+                    source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
+                    package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
+                    environment=self.env, producer_run_id=999, producer_run_attempt=1,
+                    runner=lambda c, check=True: calls.append(c),
+                )
+        self.assertEqual(calls, [])
+
+        newest_only = [
+            {"databaseId": 42, "tagName": self.tag, "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-23T00:00:00Z"},
+            {"databaseId": 40, "tagName": "nightly-2026-11-22", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-22T00:00:00Z"},
+        ]
+        nightly_json = json.dumps({"tag": self.tag, "commit": self.commit, "version": self.version}).encode("utf-8")
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            oci.verify_and_push_oci(
+                release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
+                source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
+                package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
+                environment=self.env, producer_run_id=100, producer_run_attempt=1,
+                recent_releases=newest_only, nightly_json_bytes=nightly_json,
+                runner=lambda c, check=True: calls.append(c),
+            )
+        self.assertEqual(len(calls), 8)
+        for cmd in calls:
+            self.assertNotIn("--dest-creds", cmd)
+            self.assertIn("--authfile", cmd)
+            self.assertFalse(any("gh-tok" in arg or "dh-tok" in arg for arg in cmd))
+
+    def test_verify_linux_requires_signature_for_every_package_and_rejects_unknown_sig(self):
+        import nightly_release_linux as linux_rel
+        pkg_dir = self.root / "linux-verify"
+        pkg_dir.mkdir()
+        asset = f"photocraft-{self.version}-linux-x86_64-nightly.tar.gz"
+        deb_name = f"photocraft-{self.version}-linux-x86_64.deb"
+        (pkg_dir / asset).write_bytes(b"tar-bytes")
+        (pkg_dir / (asset + ".asc")).write_bytes(b"-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n")
+        (pkg_dir / deb_name).write_bytes(b"deb-bytes")
+        trust = {"fingerprint": self.fingerprint}
+        env = {"GITHUB_REPOSITORY": self.repo, "RUNNER_TEMP": str(self.root), "GITHUB_WORKSPACE": str(self.root)}
+        source_dir = self.root / "src"
+        source_dir.mkdir()
+        with patch.object(linux_rel.signing, "adapter"), \
+             patch.object(linux_rel, "pending", return_value={}), \
+             patch.object(linux_rel, "assets", return_value={"asset": asset, "unsigned_asset": asset}), \
+             patch.object(linux_rel.u, "verify_archive"), \
+             patch.object(linux_rel.signing, "verify_linux_signature", return_value=self.fingerprint):
+            support = linux_rel.support_binding(pkg_dir, asset, extra_names=(deb_name,))
+            with self.assertRaisesRegex(n.InvalidNightly, r"missing \.asc"):
+                linux_rel.verify(trust, pkg_dir, asset, support, source_dir, env, self.version)
+
+            (pkg_dir / "rogue.sig").write_bytes(b"sig")
+            support2 = linux_rel.support_binding(pkg_dir, asset, extra_names=("rogue.sig",))
+            (pkg_dir / deb_name).unlink()
+            with self.assertRaisesRegex(n.InvalidNightly, "unexpected signature rogue.sig"):
+                linux_rel.verify(trust, pkg_dir, asset, support2, source_dir, env, self.version)
+
+    def test_verified_linux_packages_verifies_multi_subject_attestations(self):
+        import nightly_release as rel
+        import nightly_release_request as req
+        pkg_dir = self.root / "pkgs"
+        pkg_dir.mkdir()
+        deb = pkg_dir / f"photocraft-{self.version}-linux-x86_64.deb"
+        rpm = pkg_dir / f"photocraft-{self.version}-linux-x86_64.rpm"
+        deb.write_bytes(b"deb-bytes")
+        rpm.write_bytes(b"rpm-bytes")
+        deb_sha = hashlib.sha256(b"deb-bytes").hexdigest()
+        rpm_sha = hashlib.sha256(b"rpm-bytes").hexdigest()
+        policy = {
+            "repository": self.repo,
+            "repository_id": 123,
+            "producer_workflow_id": 91,
+            "producer_workflow_path": ".github/workflows/nightly-unsigned.yml",
+            "producer_workflow_ref": f"{self.repo}/.github/workflows/nightly-unsigned.yml@{'b' * 40}",
+            "producer_tooling_revision": "b" * 40,
+            "signer_workflow_path": ".github/workflows/nightly-sign.yml",
+            "signer_tooling_revision": "c" * 40,
+            "release_branch": "release",
+            "manual_actors": ["approved"],
+            "automatic_signer_actors": [],
+            "max_age_seconds": 86400,
+            "max_artifact_bytes": 1000000,
+            "candidate_policy": {"schema": "craft-nightly-candidate-policy/v3"},
+            "platforms": {
+                "linux-x86_64": {
+                    "unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
+                    "trust": {"fingerprint": self.fingerprint},
+                }
+            },
+            "schema": req.LIVE_POLICY,
+        }
+        producer = {
+            "repository": self.repo,
+            "source_commit": self.commit,
+            "run_id": 100,
+            "run_attempt": 1,
+            "run_number": 10,
+            "workflow_id": 91,
+            "workflow_path": policy["producer_workflow_path"],
+            "created_at": "2026-11-22T00:00:00Z",
+            "tooling_revision": "b" * 40,
+            "event": "schedule",
+            "triggering_actor": "github-actions[bot]",
+            "run_started_at": "2026-11-22T00:00:01Z",
+        }
+        signer = {
+            **producer,
+            "run_id": 200,
+            "run_number": 20,
+            "workflow_id": 92,
+            "workflow_path": policy["signer_workflow_path"],
+            "tooling_revision": "c" * 40,
+            "event": "workflow_dispatch",
+            "triggering_actor": "approved",
+        }
+        base_item = {
+            "id": 1,
+            "name": "nightly-unsigned-linux-x86_64-100-1",
+            "size_in_bytes": 100,
+            "wrapper_sha256": "1" * 64,
+            "created_at": "2026-11-22T00:01:00Z",
+            "expires_at": "2026-11-29T00:00:00Z",
+        }
+        request = {
+            "schema": "craft-nightly-release-request/v2",
+            "repository": self.repo,
+            "policy_sha256": req.digest(policy),
+            "producer": producer,
+            "signer": signer,
+            "artifacts": {"linux-x86_64": base_item},
+            "linux_package_artifacts": {
+                "nightly-linux-packages-x86_64": {**base_item, "id": 2, "name": "nightly-linux-packages-x86_64-100-1"},
+                "nightly-linux-packages-aarch64": {**base_item, "id": 3, "name": "nightly-linux-packages-aarch64-100-1"},
+                "nightly-linux-arch-aarch64": {**base_item, "id": 4, "name": "nightly-linux-arch-aarch64-100-1"},
+            },
+        }
+        state = {"plan": {"platforms": {"linux-x86_64": {}}, "identity": {"version": self.version}}, "request": request}
+        evidence = [{
+            "verificationResult": {
+                "signature": {"certificate": {
+                    "issuer": "https://token.actions.githubusercontent.com",
+                    "buildSignerURI": "https://github.com/" + policy["producer_workflow_ref"],
+                    "buildSignerDigest": policy["producer_tooling_revision"],
+                    "sourceRepositoryURI": "https://github.com/" + self.repo,
+                    "sourceRepositoryIdentifier": "123",
+                    "sourceRepositoryRef": "refs/heads/main",
+                    "sourceRepositoryDigest": self.commit,
+                    "buildConfigURI": f"https://github.com/{self.repo}/{policy['producer_workflow_path']}@refs/heads/main",
+                }},
+                "statement": {
+                    "_type": "https://in-toto.io/Statement/v1",
+                    "predicateType": "https://slsa.dev/provenance/v1",
+                    "subject": [
+                        {"name": deb.name, "digest": {"sha256": deb_sha}},
+                        {"name": rpm.name, "digest": {"sha256": rpm_sha}},
+                    ],
+                    "predicate": {
+                        "buildDefinition": {
+                            "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                            "externalParameters": {"workflow": {
+                                "repository": "https://github.com/" + self.repo,
+                                "path": policy["producer_workflow_path"],
+                                "ref": "refs/heads/main",
+                            }},
+                            "internalParameters": {"github": {"event_name": "schedule", "repository_id": "123"}},
+                            "resolvedDependencies": [{"uri": f"git+https://github.com/{self.repo}@refs/heads/main", "digest": {"gitCommit": self.commit}}],
+                        },
+                        "runDetails": {
+                            "builder": {"id": "https://github.com/" + policy["producer_workflow_ref"]},
+                            "metadata": {"invocationId": f"https://github.com/{self.repo}/actions/runs/100/attempts/1"},
+                        },
+                    },
+                },
+            }
+        }]
+
+        def fake_runner(cmd, check=True, capture_output=False, stdout=None, timeout=None):
+            class Res:
+                def __init__(self, out=b""):
+                    self.stdout = out
+            if cmd[:2] == ["gh", "--version"]:
+                return Res(b"gh version 2.104.0 (2026-10-01)\n")
+            stdout.write(json.dumps(evidence).encode("utf-8"))
+            return Res()
+
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            claims = rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
+        self.assertEqual(sorted(claims), [deb.name, rpm.name])
+        deb.write_bytes(b"tampered")
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            with self.assertRaisesRegex(n.InvalidNightly, "unsigned payload digest differs"):
+                rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)

@@ -31,7 +31,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_main_build_and_attester_are_separate_and_credential_bound(self):
         graph = jobs(self.unsigned)
-        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux", "build-linux-packages", "build-linux-arch-arm"})
+        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux", "build-linux-packages", "build-linux-arch-arm", "attest-linux-packages"})
         self.assertEqual(graph["select-platforms"].count("secrets."), 0); self.assertIn("permissions: {}", graph["select-platforms"])
         self.assertIn("cargo metadata --locked", graph["git-sources"])
         self.assertIn("-Nightly -BuildOnly", graph["build"])
