@@ -182,6 +182,14 @@ class NightlyReleaseTests(unittest.TestCase):
                       step("nightly-release", "Publish the prerelease")["run"])
         self.assertEqual(JOBS["nightly-release"]["env"]["TAG"], "nightly-${{ needs.version.outputs.nightly-version }}")
 
+    def test_nightly_tags_move_only_after_publishing_and_keep_the_signed_digest(self):
+        names = [s.get("name") for s in JOBS["nightly-release"]["steps"]]
+        self.assertLess(names.index("Publish the prerelease"), names.index("Move the nightly-<arch> Flatpak tags"))
+        run = step("nightly-release", "Move the nightly-<arch> Flatpak tags")["run"]
+        self.assertIn("--preserve-digests", run)
+        self.assertIn('"docker://$1:$NIGHTLY_VERSION-nightly-$3" "docker://$1:nightly-$3"', run)
+        self.assertNotIn("stable-", run)
+
 
 @unittest.skipUnless(BASH and JQ, "needs bash and jq")
 class NightlyRetentionTests(unittest.TestCase):
