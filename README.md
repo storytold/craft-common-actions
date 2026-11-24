@@ -133,6 +133,41 @@ gpg --armor --export-secret-subkeys <signing-subkey-fingerprint>! | gh secret se
 
 Without the secret the release is published unsigned, with a warning.
 
+#### Nightly releases
+
+With `nightly: true`, a run on `main` builds everything a `dry-run` builds and releases nothing
+stable (no macOS, no `release` environment, no draft, no `stable-<arch>` push). It then turns the
+Linux builds into packages that install beside the stable app and publishes them:
+
+- Version `<nv>` = the Cargo version without its prerelease, plus the UTC minute:
+  `0.24.1.202611240228`. The `nightly-version` output carries it.
+- A GitHub prerelease `nightly-<nv>` titled `<App> Nightly <nv>`, never marked latest, with
+  `<prefix>-nightly-<nv>-linux-<arch>.deb` and `.rpm` (x86_64, aarch64, riscv64), `.pkg.tar.zst`
+  (Arch package `ai.storyteller.<prefix>-nightly`) and `.flatpak` (x86_64, aarch64; app ID with a
+  `.nightly` suffix), signed as in [Linux package signing](#linux-package-signing), with
+  `SHA256SUMS.txt`.
+- Flatpak OCI images in `ghcr.io/<repo>` tagged `<nv>-nightly-<arch>` and `nightly-<arch>`, and in
+  `docker.io/storytold/<app>` when the Docker Hub secrets are set.
+- Only the newest 3 nightly prereleases (with their tags) and the newest 3 nightly-only image
+  versions per architecture are kept. A failed cleanup only warns.
+- `storytold/artcraft-services` is dispatched as after a stable release.
+
+Nothing is published if any nightly build fails or is cancelled. With `dry-run` also set, the
+nightly packages are built but not published. Nightly mode refuses to run on the `release` branch.
+
+To opt in, replace the nightly dry run in the caller with:
+
+```yaml
+    with:
+      nightly: ${{ github.event_name == 'schedule' }}
+```
+
+The caller's `permissions` must grant `contents: write` and `packages: write` (as in the caller
+example above). One-time repo setup: create a `nightly-signing` environment whose deployment
+branches are limited to `main`, holding `LINUX_SIGNING_KEY` (the same key as the `release`
+environment). Without the secret, the nightly is published unsigned with a warning, and the website
+withholds its rpm and Arch packages.
+
 #### Automatic contributor credits (opt-in)
 
 Apps using `contributors/contributors.json` and `contributors/people.toml` can refresh bundled
@@ -1004,7 +1039,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
-- `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
+- `actions/draft-release`: Collects the run's artifacts matching `artifact-pattern` (default `release-*`), signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release titled `title` (default `<app-title> v<version>`).
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/import-macos-certificate`: Imports a Developer ID Application certificate into a private temporary keychain and exports `MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` (see "macOS code signing").
 - `actions/packaging-lint`: Steps for packaging linter.

@@ -19,7 +19,7 @@ class DryRunTests(unittest.TestCase):
         # The environment holds the signing secrets and only admits the release branch.
         for name, job in JOBS.items():
             env = job.get('environment')
-            if env is not None:
+            if env is not None and env != 'nightly-signing':
                 self.assertIn(DRY, env, name)
                 self.assertNotEqual(env.strip(), 'release', name)
 
@@ -42,7 +42,7 @@ class DryRunTests(unittest.TestCase):
                 uses = step.get('uses', '')
                 if uses.startswith('Swatinem/rust-cache@'):
                     saving += 1
-                    self.assertEqual(step['with'].get('save-if'), '${{ !inputs.dry-run }}', name)
+                    self.assertEqual(step['with'].get('save-if'), '${{ !inputs.dry-run && !inputs.nightly }}', name)
                 if uses.startswith('storytold/craft-common-actions/actions/freebsd-cargo-cache@') and step['with'].get('phase') == 'save':
                     saving += 1
                     self.assertIn(DRY, step.get('if', ''), name)

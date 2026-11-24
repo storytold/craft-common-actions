@@ -351,7 +351,7 @@ class UnixWorkflowTests(unittest.TestCase):
     def test_existing_dry_run_mac_exclusion_is_not_new_coverage_or_target_admission(self):
         release=(ROOT/'.github/workflows/release.yml').read_text()
         mac=release.split('  macos:\n',1)[1].split('  windows:\n',1)[0]
-        self.assertIn('if: ${{ !inputs.dry-run }}',mac)
+        self.assertIn('if: ${{ !inputs.dry-run && !inputs.nightly }}',mac)
         source=(ROOT/'.github/workflows/nightly.yml').read_text()
         linux=source.split('  build-linux:\n',1)[1].split('  build-macos:\n',1)[0]
         self.assertIn("if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true",linux)

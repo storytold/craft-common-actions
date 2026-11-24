@@ -15,7 +15,7 @@ SCRIPT = ACTION_DIR / "export-app-build-env.sh"
 ACTION = yaml.load((ACTION_DIR / "action.yml").read_text(), Loader=yaml.BaseLoader)
 RELEASE = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
 BASH = shutil.which("bash")
-GENERIC = {"VERSION", "BUILD_DATE", "BUILD_SHA", "RELEASE_VERSION", "INPUT_VERSION"}
+GENERIC = {"VERSION", "BUILD_DATE", "BUILD_SHA", "RELEASE_VERSION", "INPUT_VERSION", "NIGHTLY_VERSION"}
 # What an app's own variable looks like: <PREFIX>_VERSION, _BUILD_DATE or _BUILD_SHA.
 PER_APP = re.compile(r"^[A-Z][A-Z0-9_]*_(VERSION|BUILD_DATE|BUILD_SHA)$")
 

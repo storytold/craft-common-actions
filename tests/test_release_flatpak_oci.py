@@ -98,8 +98,8 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.log.read_text(), "")
 
-    def test_the_step_never_runs_for_a_pull_request_or_a_dry_run(self):
-        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request' && !inputs.dry-run")
+    def test_the_step_never_runs_for_a_pull_request_a_dry_run_or_a_nightly(self):
+        self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request' && !inputs.dry-run && !inputs.nightly")
 
     def test_dockerhub_credentials_trigger_dual_push_for_stable_release(self):
         result = self.publish("1.2.0", "refs/heads/release", DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
@@ -120,20 +120,12 @@ class FlatpakOciPublishTests(unittest.TestCase):
         self.assertIn("docker://docker.io/storytold/democraft:1.2.0-rc.1-x86_64", log)
         self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
 
-    def test_a_nightly_build_pushes_nightly_tag_and_leaves_stable_alone(self):
+    def test_a_nightly_version_moves_neither_stable_nor_nightly(self):
+        # nightly-<arch> carries the .nightly app ID image that only the nightly-flatpak job builds.
         result = self.publish("1.2.0-nightly.20261123", "refs/heads/main",
                               DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        log = self.log.read_text()
-        self.assertIn("docker://ghcr.io/storytold/democraft:1.2.0-nightly.20261123-x86_64", log)
-        self.assertIn("docker://ghcr.io/storytold/democraft:nightly-x86_64", log)
-        self.assertNotIn("docker://ghcr.io/storytold/democraft:stable-x86_64", log)
-        self.assertIn("docker://docker.io/storytold/democraft:1.2.0-nightly.20261123-x86_64", log)
-        self.assertIn("docker://docker.io/storytold/democraft:nightly-x86_64", log)
-        self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
-        self.assertNotIn("docker://docker.io/storytold/democraft:stable-x86_64", log)
-        self.assertIn("Leaving docker.io/storytold/democraft:stable-x86_64 unchanged", result.stdout)
-
+        self.assertEqual(self.pushed_tags(), ["1.2.0-nightly.20261123-x86_64"] * 2)
 
 if __name__ == "__main__":
     unittest.main()

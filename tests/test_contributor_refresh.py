@@ -158,8 +158,10 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
                 if step.get('uses', '').startswith('actions/upload-artifact@'):
                     name = step['with']['name'].replace('${{ matrix.arch }}', 'x86_64')
                     filename = f'fixture-{job}.tar.gz'
-                    packages[filename] = f'package from {job}'.encode()
-                    artifacts[name] = {filename: packages[filename]}
+                    artifacts[name] = {filename: f'package from {job}'.encode()}
+                    # The nightly jobs' artifacts belong to the nightly prerelease, not this draft.
+                    if name.startswith('release-'):
+                        packages[filename] = artifacts[name][filename]
         self.assertTrue(packages, 'The fixture must include real release artifact producers')
 
         action = yaml.load((ROOT / 'actions/draft-release/action.yml').read_text(),
@@ -167,6 +169,8 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
         steps = action['runs']['steps']
         download = next(s for s in steps if s.get('uses', '').startswith('actions/download-artifact@'))
         self.assertEqual(download['with']['merge-multiple'], 'true')
+        self.assertEqual(download['with']['pattern'], '${{ inputs.artifact-pattern }}')
+        pattern = action['inputs']['artifact-pattern']['default']
         expected_checksums = {name: hashlib.sha256(data).hexdigest()
                               for name, data in packages.items()}
         for is_draft in (False, True):
@@ -176,7 +180,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
                 destination.mkdir()
                 # Model the action's actual glob and flattened artifact download.
                 for name, files in artifacts.items():
-                    if fnmatch.fnmatchcase(name, download['with']['pattern']):
+                    if fnmatch.fnmatchcase(name, pattern):
                         for filename, data in files.items():
                             (destination / filename).write_bytes(data)
                 tools = root / 'tools'

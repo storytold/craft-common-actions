@@ -156,8 +156,8 @@ class SigningWiringTests(unittest.TestCase):
 
     def test_the_flatpak_job_imports_the_key_before_building_the_bundle(self):
         job = WORKFLOW["jobs"]["flatpak"]
-        # The release environment holds the signing key; a dry run (release.yml's dry-run) stays out.
-        self.assertEqual(job["environment"], "${{ !inputs.dry-run && 'release' || '' }}")
+        # The release environment holds the signing key; a dry or nightly run stays out.
+        self.assertEqual(job["environment"], "${{ !inputs.dry-run && !inputs.nightly && 'release' || '' }}")
         uses = [s.get("uses", "") for s in job["steps"]]
         names = [s.get("name") for s in job["steps"]]
         imported = next(i for i, u in enumerate(uses) if u.startswith("storytold/craft-common-actions/actions/import-signing-key@"))
