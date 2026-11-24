@@ -67,6 +67,6 @@ Reusable GitHub Actions workflows and composite actions that the Craft repositor
 
 - Layout: `.github/workflows/` holds the reusable workflows (`on: workflow_call`: `gate.yml`, `release.yml`, `nightly*.yml`, `house-rules.yml`, `sonarcloud.yml`, ...) and the `test-*.yml` and `*-fixtures.yml` workflows that test them; `actions/<name>/action.yml` are the composite actions, some with a script beside them (`actions/house-rules/house_rules.py` writes and checks the shared `AGENTS.md` block); `scripts/` holds the release, nightly and Cargo-measurement scripts; `tests/` the `unittest` suites and their fixtures; `docs/` the nightly and release designs and ADRs.
 - Callers use `@main`, so a merge here reaches every repository at once. Keep inputs and outputs backward compatible, or change the callers first.
-- Checks: each script's suite under `tests/`, run as CI does (`python3 -m unittest tests/test_<name>.py`; the `run:` lines in `.github/workflows/` show which suite each workflow runs and the environment some need). Action changes are exercised by their `test-*.yml` workflow on the pull request.
+- Checks: each script's suite under `tests/`, run as CI does (`python3 -m unittest tests/test_<name>.py`; the `run:` lines in `.github/workflows/` show which suite each workflow runs and the environment some need). Only some actions have a `test-*.yml` workflow that exercises them on a pull request; the rest first run in their callers.
 - `unsafe`: no Rust code here.
 - More: [README.md](README.md), one section per workflow and action.
