@@ -121,6 +121,12 @@ def validate_policy(policy):
     return policy
 
 
+def validate_linux_package_formats(formats, *, reason, allow_empty=True):
+    n.require(isinstance(formats, list) and (allow_empty or formats) and
+        all(isinstance(f, str) and f in SUPPORTED_LINUX_PACKAGE_FORMATS for f in formats) and
+        len(formats) == len(set(formats)), reason)
+
+
 def validate_platforms(platforms):
     """Exact per-platform artifact kind and one protected trust value each."""
     import nightly_release_platforms as plat
@@ -130,9 +136,7 @@ def validate_platforms(platforms):
         if platform == 'linux-x86_64' and isinstance(entry, dict) and 'package_formats' in entry:
             n.fields(entry, PLATFORM_POLICY_FIELDS | {'package_formats'}, 'platform policy')
             fmts = entry['package_formats']
-            n.require(isinstance(fmts, list) and len(fmts) == len(set(fmts)) and
-                all(isinstance(f, str) and f in SUPPORTED_LINUX_PACKAGE_FORMATS for f in fmts),
-                'invalid Linux package_formats')
+            validate_linux_package_formats(fmts, reason='invalid Linux package_formats')
         else:
             n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
         n.require(entry['unsigned_artifact_name'] == 'nightly-unsigned-'+platform, 'unsigned artifact kind must be nightly-unsigned-<platform>')

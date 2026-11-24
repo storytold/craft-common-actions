@@ -680,6 +680,8 @@ class RequestTests(unittest.TestCase):
             lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=['unknown']),
             lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=['deb', 'deb']),
             lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[1]),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[{}]),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[['deb']]),
         ):
             bad = copy.deepcopy(self.policy); bad_mutate(bad)
             with self.assertRaises(ValueError): r.validate_policy(bad)

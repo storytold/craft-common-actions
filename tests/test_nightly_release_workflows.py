@@ -256,6 +256,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set", r.stdout)
 
+    def test_linux_package_selector_rejects_malformed_members_without_an_output(self):
+        import os, subprocess, tempfile, textwrap
+
+        block = jobs(self.unsigned)["select-platforms"].split("      - name: Validate optional Linux package formats", 1)[1]
+        script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        for formats in ('[{}]', '[["deb"]]', '["deb", "deb"]'):
+            with self.subTest(formats=formats), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)/"output"
+                env = dict(os.environ, PLATFORMS='["linux-x86_64"]',
+                    LINUX_PACKAGE_FORMATS=formats, GITHUB_OUTPUT=str(output))
+                result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.strip(), "linux-package-formats must be a JSON array of distinct supported formats")
+                self.assertFalse(output.exists())
+
     def test_outside_git_origin_refuses_without_running_cargo(self):
         import os, subprocess, sys, tempfile, textwrap
         for name in ("nightly-unsigned.yml",):  # windows/unix: their own test files

@@ -128,7 +128,7 @@ jobs:
               fmts = json.loads(os.environ['LINUX_PACKAGE_FORMATS'])
           except ValueError:
               sys.exit('linux-package-formats must be a JSON array')
-          if not (isinstance(fmts, list) and len(set(fmts)) == len(fmts) and all(isinstance(f, str) and f in supported for f in fmts)):
+          if not (isinstance(fmts, list) and all(isinstance(f, str) and f in supported for f in fmts) and len(set(fmts)) == len(fmts)):
               sys.exit('linux-package-formats must be a JSON array of distinct supported formats')
           if fmts and 'linux-x86_64' not in platforms:
               sys.exit('linux-package-formats requires linux-x86_64 in platforms')
@@ -824,7 +824,7 @@ jobs:
                 test "$(rpm -qp --qf '%{NAME}' "$f")" = "photocraft-nightly" || { echo "::error::$name is not Name: photocraft-nightly"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".pkg.tar.zst)
-                tar --zstd -xOf "$f" .PKGINFO | grep -qx 'pkgname = ai.storyteller.photocraft.nightly' || { echo "::error::$name is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+                tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$name is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".*) ;;
               *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
@@ -897,7 +897,7 @@ jobs:
         run: |
           bash .nightly-tools/actions/arch-package/run.sh
           for f in dist/release/*.pkg.tar.zst; do
-            tar --zstd -xOf "$f" .PKGINFO | grep -qx 'pkgname = ai.storyteller.photocraft.nightly' || { echo "::error::$f is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+            tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$f is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

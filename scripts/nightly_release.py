@@ -31,6 +31,8 @@ MARKER_V2 = "craft-nightly-release-publication/v2:"
 METADATA_SUFFIX = ".json"  # Bundle metadata is always JSON; payload archives (.zip/.tar.gz/.asc) are not.
 BUNDLE_FILES = {"request.json", "quality.json", "plan.json", "unsigned.json", "unsigned-claims.json"}
 PUBLISH_STEP = "Publish the signed nightly and preserve ownership"
+# Linux distro package publication is admitted only for the PhotoCraft workflow.
+LINUX_PACKAGE_APP = "photocraft"
 
 
 class UpToDate(n.InvalidNightly):
@@ -196,7 +198,7 @@ def validated_names(plan, directory=None, *, policy=None):
     if policy is not None:
         formats = r.policy_linux_package_formats(policy)
         if formats:
-            app = plan["identity"].get("app", "photocraft")
+            app = LINUX_PACKAGE_APP
             return base | r.expected_linux_package_names(app, plan["identity"]["version"], formats)
         return base
     return base | linux_package_names(directory, plan)
@@ -309,7 +311,7 @@ def previous_publication(api, registry, policy, current_request, rows):
             if platform == "linux-x86_64":
                 formats = r.policy_linux_package_formats(old_policy)
                 if formats:
-                    app = plan["identity"].get("app", "photocraft")
+                    app = LINUX_PACKAGE_APP
                     required = required | r.expected_signed_linux_support_names(app, plan["identity"]["version"], formats)
             n.require(set(receipt["support"]) == required,
                 "prior platform support set differs from its required detached signature files")
@@ -391,7 +393,7 @@ def platform_directories(directory, platforms):
     return {platform: directory/platform for platform in sorted(platforms)}
 
 
-def linux_package_paths(pkg_dir, version, *, app="photocraft", formats=None):
+def linux_package_paths(pkg_dir, version, *, app=LINUX_PACKAGE_APP, formats=None):
     """Sorted validated (filename, Path) pairs for Linux packages in a directory."""
     root = n.owned_path(pkg_dir)
     n.require(root.is_dir() and not root.is_symlink(), "Linux packages directory required")
@@ -449,7 +451,7 @@ def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
     n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
     formats = r.policy_linux_package_formats(policy)
     n.require(bool(formats), "Linux packages staged when policy package_formats is empty")
-    app = plan["identity"].get("app", "photocraft")
+    app = LINUX_PACKAGE_APP
     version = plan["identity"]["version"]
     claims = {}
     for name, path in linux_package_paths(pkg_dir, version, app=app, formats=formats):
@@ -481,7 +483,7 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
         n.require(n.digest_file(output, asset)[1] == claims[platform]["payload_sha256"], "staged payload changed")
     if linux_packages is not None:
         n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
-        app = plan["identity"].get("app", "photocraft")
+        app = LINUX_PACKAGE_APP
         version = plan["identity"]["version"]
         for name, _ in linux_package_paths(linux_packages, version, app=app, formats=formats):
             stream, _ = n.regular_file(linux_packages, name)
@@ -524,7 +526,7 @@ def native_sign(policy, state, platform, directory, source, output, environment)
         if platform == "linux-x86_64":
             formats = r.policy_linux_package_formats(policy)
             if formats:
-                app = plan["identity"].get("app", "photocraft")
+                app = LINUX_PACKAGE_APP
                 pkg_names = sorted(r.expected_linux_package_names(app, plan["identity"]["version"], formats))
                 pkg_stage = Path(temporary)/"validated-linux-packages"; pkg_stage.mkdir()
                 for name in pkg_names:
@@ -564,7 +566,7 @@ def expected_platform_receipt(policy, state, platform, directory):
     if platform == "linux-x86_64":
         formats = r.policy_linux_package_formats(policy)
         if formats:
-            app = plan["identity"].get("app", "photocraft")
+            app = LINUX_PACKAGE_APP
             required = required | r.expected_signed_linux_support_names(app, plan["identity"]["version"], formats)
     n.require(set(support) == required,
         "platform support set differs from its required detached signature files")
@@ -800,12 +802,10 @@ def main():
                 fmts = None
                 if args.formats is not None:
                     parsed_fmts = loads(args.formats.encode("utf-8"))
-                    n.require(isinstance(parsed_fmts, list) and parsed_fmts and len(parsed_fmts) == len(set(parsed_fmts)) and
-                        all(isinstance(f, str) and f in r.SUPPORTED_LINUX_PACKAGE_FORMATS for f in parsed_fmts),
-                        "invalid Linux package formats")
+                    r.validate_linux_package_formats(parsed_fmts, reason="invalid Linux package formats", allow_empty=False)
                     fmts = tuple(sorted(parsed_fmts))
                 paths = linux_package_paths(args.directory, plan["identity"]["version"],
-                    app=plan["identity"].get("app", "photocraft"), formats=fmts)
+                    app=LINUX_PACKAGE_APP, formats=fmts)
                 outputs({"subject-path": ",".join(str(path.resolve()) for _, path in paths)})
             else:
                 n.require(args.directory, "exact compiler artifact directory required")
