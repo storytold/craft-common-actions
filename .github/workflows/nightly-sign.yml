@@ -3,6 +3,8 @@ name: Nightly signer
 # (release.yml on main, nightly mode) dispatches with producer_run_id and producer_run_attempt.
 # admit authenticates that producer attempt without keys; each key job then exposes its secrets
 # to one step; every public write happens in publish, after keyless verification of everything.
+# The package prefix and Flatpak ID come from the caller on `release`, never from the producer.
+# smoke-macos runs app code built from main on a runner of this release-ref run, with no secrets.
 on:
   workflow_call:
     inputs:
@@ -30,6 +32,14 @@ on:
         description: "JSON array of logins allowed to start or re-run nightlies by hand"
         type: string
         default: "[]"
+      package-prefix:
+        description: "Stable package name, e.g. photocraft; the nightly packages are <package-prefix>-nightly"
+        type: string
+        required: true
+      flatpak-id:
+        description: "Stable Flatpak app ID, e.g. ai.storyteller.photocraft; the nightly's is <flatpak-id>.nightly"
+        type: string
+        required: true
     # The caller lists these by name; the values come from its `release` environment.
     secrets:
       LINUX_SIGNING_KEY:
@@ -93,7 +103,6 @@ jobs:
       nv: ${{ steps.files.outputs.nv }}
       identity: ${{ steps.files.outputs.identity }}
       payload-artifact-ids: ${{ steps.attest.outputs.payload-artifact-ids }}
-      flatpak-artifact-ids: ${{ steps.attest.outputs.flatpak-artifact-ids }}
       launcher-artifact-windows: ${{ steps.attest.outputs.launcher-artifact-windows }}
       launcher-artifact-macos: ${{ steps.attest.outputs.launcher-artifact-macos }}
     steps:
@@ -117,7 +126,7 @@ jobs:
           path: .nightly-tools
           persist-credentials: false
       - name: Install package inspection tools
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: ./.nightly-tools/actions/install-apt-packages
         with:
           packages: zstd
       - name: Admit the producer run and select its artifacts
@@ -168,7 +177,12 @@ jobs:
           python3 -I -B .nightly-tools/scripts/nightly/run.py admit files --state "$RUNNER_TEMP/admit"
           --manifest .handoff --directory .producer --output .admission
       - name: Check the Linux packages before any key exists
-        run: python3 -I -B .nightly-tools/scripts/nightly/run.py linux precheck --admission .admission --directory .producer
+        env:
+          PACKAGE_PREFIX: ${{ inputs.package-prefix }}
+          FLATPAK_ID: ${{ inputs.flatpak-id }}
+        run: >-
+          python3 -I -B .nightly-tools/scripts/nightly/run.py linux precheck --admission .admission --directory .producer
+          --prefix "$PACKAGE_PREFIX" --flatpak-id "$FLATPAK_ID"
       - name: Check the release tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -638,19 +652,22 @@ jobs:
           if [[ "$PLATFORMS" == *'"windows"'* ]]; then python3 -I -B "$tools" admit unseal --directory .signed/windows --sha256 "$WINDOWS_SHA256"; fi
           if [[ "$PLATFORMS" == *'"macos"'* ]]; then python3 -I -B "$tools" admit unseal --directory .signed/macos --sha256 "$MACOS_SHA256"; fi
       - name: Install the signing tools
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: ./.nightly-tools/actions/install-apt-packages
         with:
           packages: rpm debsigs skopeo binutils zstd
       - name: Sign the Linux packages, NIGHTLY.json and SHA256SUMS.txt
         env:
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          PACKAGE_PREFIX: ${{ inputs.package-prefix }}
+          FLATPAK_ID: ${{ inputs.flatpak-id }}
         run: |
           set -euo pipefail
           signed=()
           for platform in windows macos; do
             if [ -d ".signed/$platform" ]; then signed+=(".signed/$platform"); fi
           done
-          python3 -I -B .nightly-tools/scripts/nightly/run.py linux sign --admission .admission --directory .producer --signed "${signed[@]}" --output .final
+          python3 -I -B .nightly-tools/scripts/nightly/run.py linux sign --admission .admission --directory .producer \
+            --prefix "$PACKAGE_PREFIX" --flatpak-id "$FLATPAK_ID" --signed "${signed[@]}" --output .final
       - name: Seal the final assets
         id: seal
         run: python3 -I -B .nightly-tools/scripts/nightly/run.py admit seal --directory .final
@@ -693,7 +710,7 @@ jobs:
           path: .nightly-tools
           persist-credentials: false
       - name: Install signature verification tools
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: ./.nightly-tools/actions/install-apt-packages
         with:
           packages: rpm skopeo zstd
       - name: Download the admission
@@ -719,7 +736,12 @@ jobs:
           python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
           python3 -I -B .nightly-tools/scripts/nightly/run.py admit unseal --directory .final --sha256 "$FINAL_SHA256"
       - name: Verify every signature, the asset set and NIGHTLY.json without keys
-        run: python3 -I -B .nightly-tools/scripts/nightly/run.py linux verify-final --admission .admission --directory .final
+        env:
+          PACKAGE_PREFIX: ${{ inputs.package-prefix }}
+          FLATPAK_ID: ${{ inputs.flatpak-id }}
+        run: >-
+          python3 -I -B .nightly-tools/scripts/nightly/run.py linux verify-final --admission .admission --directory .final
+          --prefix "$PACKAGE_PREFIX" --flatpak-id "$FLATPAK_ID"
 
   publish:
     needs: [admit, sign-linux, verify-final]
@@ -729,10 +751,12 @@ jobs:
       && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # The Docker Hub secrets live in `release`, as for the stable Flatpak job. Only
+    # craft-common-actions code from .nightly-tools runs here, never app code.
+    environment: release
     permissions:
       contents: write
       packages: write
-      actions: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -754,7 +778,7 @@ jobs:
           path: .nightly-tools
           persist-credentials: false
       - name: Install skopeo
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        uses: ./.nightly-tools/actions/install-apt-packages
         with:
           packages: skopeo
       - name: Download the admission
@@ -771,16 +795,7 @@ jobs:
           path: .final
           merge-multiple: true
           digest-mismatch: error
-      - name: Download the Flatpak OCI layouts
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.producer_run_id }}
-          artifact-ids: ${{ needs.admit.outputs.flatpak-artifact-ids }}
-          path: .producer
-          digest-mismatch: error
-      - name: Check the admission, the final assets and the layouts
+      - name: Check the admission and the final assets
         env:
           ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
           FINAL_SHA256: ${{ needs.sign-linux.outputs.final-sha256 }}
@@ -789,12 +804,6 @@ jobs:
           tools=.nightly-tools/scripts/nightly/run.py
           python3 -I -B "$tools" admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
           python3 -I -B "$tools" admit unseal --directory .final --sha256 "$FINAL_SHA256"
-          artifacts=()
-          for folder in .producer/*/; do artifacts+=(--artifact "$(basename "$folder")"); done
-          python3 -I -B "$tools" admit payloads --admission .admission --directory .producer "${artifacts[@]}"
-          # publish oci reads each <base>.oci.tar beside its signed .oci-manifest.json; the
-          # release upload takes only the exact final asset set.
-          cp -n .producer/*/*.oci.tar .final/
       - name: Push the Flatpak images
         env:
           GH_TOKEN: ${{ github.token }}
@@ -823,6 +832,8 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    # The website dispatch token lives in `release`, as for the stable release job.
+    environment: release
     permissions:
       contents: write
       packages: write

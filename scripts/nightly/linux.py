@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Linux nightly packages: keyless identity checks, signing with the stable key, final verification.
 
-    linux precheck     --admission DIR --directory DIR
-    linux sign         --admission DIR --directory DIR [--signed DIR ...] --output DIR
-    linux verify-final --admission DIR --directory DIR
+    linux precheck     --admission DIR --directory DIR --prefix P --flatpak-id ID
+    linux sign         --admission DIR --directory DIR --prefix P --flatpak-id ID [--signed DIR ...] --output DIR
+    linux verify-final --admission DIR --directory DIR --prefix P --flatpak-id ID
 
 One stable OpenPGP key signs stable and nightly packages alike, so a nightly package that claims a
-stable identity would be trusted by apt, dnf and pacman. precheck therefore proves, before any
-key exists, that every package names itself `-nightly` with the nightly version: deb Package and
-Version, rpm Name and Version, `.PKGINFO` pkgname and pkgver, the Flatpak ref in the OCI image
-config and the bundle header, the distro tarball's top directory, and the launcher tarball's
-inventory. No package may provide, replace or obsolete the stable name.
+stable identity would be trusted by apt, dnf and pacman. The package prefix and the stable Flatpak
+ID are pinned by the signer's caller on its release branch (and by the registry for launcher
+apps), because the producer on main names its own files. precheck proves, before any key exists,
+that the manifest's prefix is the pinned one and that every package names itself `-nightly` with
+the nightly version: deb Package and Version, rpm Name and Version, `.PKGINFO` pkgname and pkgver,
+the Flatpak ref `app/<ID>.nightly/<arch>/stable` in the OCI image config and the bundle header,
+the distro tarball's top directory, and the launcher tarball's inventory. Package relations
+(provides, replaces, obsoletes, conflicts, breaks) may name only the app's own nightly packages.
 
 sign re-runs precheck, imports LINUX_SIGNING_KEY into a private keyring and refuses unless it is
 the key the registry pins, signs through actions/draft-release/sign-linux.sh, writes NIGHTLY.json
@@ -51,8 +54,11 @@ SIGNING_CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "G
 # Files signing leaves byte for byte as the producer built them; sign-linux.sh rewrites deb and
 # rpm (embedded signatures) and the macOS and Windows zips arrive signed.
 UNCHANGED_KINDS = {"tar_gz", "flatpak", "oci_manifest", "arch_pkg"}
-RPM_TAGS = {1000: "NAME", 1001: "VERSION", 1002: "RELEASE", 1022: "ARCH", 1047: "PROVIDENAME", 1090: "OBSOLETENAME"}
-FLATPAK_REF = re.compile(r"app/(?P<id>[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)+)\.nightly/(?P<arch>[a-z0-9_]+)/stable")
+RPM_TAGS = {1000: "NAME", 1001: "VERSION", 1002: "RELEASE", 1022: "ARCH", 1047: "PROVIDENAME", 1054: "CONFLICTNAME",
+            1090: "OBSOLETENAME"}
+DEB_RELATIONS = ("Provides", "Replaces", "Conflicts", "Breaks")
+RPM_RELATIONS = {"PROVIDENAME": "Provides", "OBSOLETENAME": "Obsoletes", "CONFLICTNAME": "Conflicts"}
+PACMAN_RELATIONS = ("provides", "replaces", "conflicts")
 
 
 def clean_env(environment, extra=None):
@@ -411,7 +417,38 @@ def tarball_top(path):
 
 # ---- Identity checks --------------------------------------------------------------------------
 
-def check_identity(manifest, name, path, environment, registry):
+def check_pins(manifest, pins, registry):
+    """The pinned stable Flatpak ID, once the manifest's prefix is the pinned prefix."""
+    prefix, flatpak_id = feed.pinned_packages(manifest["app"], *pins, registry)
+    c.require(manifest["prefix"] == prefix,
+              f"the producer's package prefix {manifest['prefix']!r} is not the pinned {prefix!r}")
+    return flatpak_id
+
+
+def nightly_relation(name, prefix):
+    """Whether a package relation may name `name`: only the app's own nightly packages.
+
+    Signed by the stable key, a relation naming any other package would let the nightly take
+    over or remove it. arch-package names `<P>-nightly-bin` and `-git` as conflicts.
+    """
+    nightly = f"{prefix}-nightly"
+    return name in (nightly, "ai.storyteller." + nightly) or name.startswith(nightly + "-")
+
+
+def check_relations(name, what, names, prefix):
+    foreign = sorted(n for n in names if not nightly_relation(n, prefix))
+    c.require(not foreign, f"{name}: {what} names {', '.join(map(repr, foreign))}, not only {prefix}-nightly packages")
+
+
+def rpm_relation_name(value):
+    """The package an rpm relation names: config(N) and N(arch) both name N."""
+    value = value.strip()
+    if value.startswith("config(") and value.endswith(")"):
+        return value[len("config("):-1]
+    return value.split("(", 1)[0].split(" ", 1)[0].strip()
+
+
+def check_identity(manifest, name, path, environment, registry, flatpak_id):
     """Refuse a package whose own metadata isn't the nightly identity its name claims."""
     info = feed.classify(name)
     prefix, nv, kind = manifest["prefix"], manifest["nv"], info["kind"]
@@ -424,16 +461,15 @@ def check_identity(manifest, name, path, environment, registry):
         c.require(re.fullmatch(re.escape(nv) + r"(-[1-9][0-9]*)?", control.get("Version", "")),
                   f"{name}: deb Version is {control.get('Version')!r}, not {nv}")
         c.require(control.get("Architecture") == DEB_ARCH[arch], f"{name}: deb Architecture differs from {arch}")
-        for field in ("Provides", "Replaces"):
-            c.require(prefix not in relation_names(control.get(field)), f"{name}: deb {field} names the stable {prefix}")
+        for field in DEB_RELATIONS:
+            check_relations(name, f"deb {field}", relation_names(control.get(field)), prefix)
     elif kind == "rpm":
         header = rpm_header(path)
         c.require(header.get("NAME") == package, f"{name}: rpm Name is {header.get('NAME')!r}, not {package}")
         c.require(header.get("VERSION") == nv, f"{name}: rpm Version is {header.get('VERSION')!r}, not {nv}")
         c.require(header.get("ARCH") == arch, f"{name}: rpm Arch differs from {arch}")
-        provides = {p.split("(", 1)[0].strip() for p in header.get("PROVIDENAME", [])}
-        c.require(prefix not in provides and prefix not in header.get("OBSOLETENAME", []),
-                  f"{name}: rpm provides or obsoletes the stable {prefix}")
+        for tag, field in RPM_RELATIONS.items():
+            check_relations(name, f"rpm {field}", {rpm_relation_name(v) for v in header.get(tag, [])}, prefix)
     elif kind == "arch_pkg":
         values = pkginfo(path, environment)
         stable = f"ai.storyteller.{prefix}"
@@ -441,25 +477,24 @@ def check_identity(manifest, name, path, environment, registry):
         c.require(len(values.get("pkgver", [])) == 1 and values["pkgver"][0].rsplit("-", 1)[0] == nv,
                   f"{name}: pkgver is {values.get('pkgver')}, not {nv}")
         c.require(values.get("arch") == [arch], f"{name}: pacman arch differs from {arch}")
-        named = {v.split("=", 1)[0].split("<", 1)[0].split(">", 1)[0] for k in ("provides", "replaces")
-                 for v in values.get(k, [])}
-        c.require(not named & {stable, prefix}, f"{name}: provides or replaces the stable package")
+        for key in PACMAN_RELATIONS:
+            check_relations(name, f"pacman {key}", {re.split(r"[<>=]", v, maxsplit=1)[0] for v in values.get(key, [])},
+                            prefix)
     elif kind == "tar_gz":
         stem = name[: -len(".tar.gz")]
         c.require(tarball_top(path) == {stem}, f"{name}: every member must sit under {stem}/")
     elif kind == "flatpak":
-        return flatpak_ref(name, flatpak_bundle_ref(path), arch)
+        return flatpak_ref(name, flatpak_bundle_ref(path), arch, flatpak_id)
     return None
 
 
-def flatpak_ref(name, ref, arch):
-    match = FLATPAK_REF.fullmatch(ref or "")
-    c.require(match is not None and match["arch"] == arch,
-              f"{name}: Flatpak ref {ref!r} is not app/<id>.nightly/{arch}/stable")
+def flatpak_ref(name, ref, arch, flatpak_id):
+    expected = feed.nightly_flatpak_ref(flatpak_id, arch)
+    c.require(ref == expected, f"{name}: Flatpak ref {ref!r} is not {expected}")
     return ref
 
 
-def precheck_files(manifest, files, environment, registry):
+def precheck_files(manifest, files, environment, registry, flatpak_id):
     """Identity checks over {name: path}; the OCI layout tar, when present, must match its bundle."""
     refs = {}
     for name in sorted(files):
@@ -468,7 +503,7 @@ def precheck_files(manifest, files, environment, registry):
             continue
         if info["kind"] in ("oci_manifest", "oci_archive"):
             continue
-        ref = check_identity(manifest, name, files[name], environment, registry)
+        ref = check_identity(manifest, name, files[name], environment, registry, flatpak_id)
         if ref:
             refs[info["arch"]] = ref
     for name, path in sorted(files.items()):
@@ -476,7 +511,7 @@ def precheck_files(manifest, files, environment, registry):
         if info["kind"] == "oci_archive":
             manifest_name = name[: -len("oci.tar")] + "oci-manifest.json"
             c.require(manifest_name in files, f"{manifest_name} must accompany {name}")
-            ref = flatpak_ref(name, oci_archive_ref(path, files[manifest_name]), info["arch"])
+            ref = flatpak_ref(name, oci_archive_ref(path, files[manifest_name]), info["arch"], flatpak_id)
             c.require(refs.get(info["arch"]) == ref, f"{name}: the OCI ref differs from the bundle's {refs.get(info['arch'])}")
     return refs
 
@@ -488,11 +523,12 @@ def admitted_distro(manifest, directory):
     return {name: inventory.admitted_file(manifest, directory, name) for name in names}
 
 
-def precheck(admission, directory, environment, registry=None):
+def precheck(admission, directory, environment, pins, registry=None):
     registry = registry if registry is not None else feed.load_registry()
     manifest, _ = inventory.load_admission(admission, registry)
+    flatpak_id = check_pins(manifest, pins, registry)
     files = admitted_distro(manifest, directory)
-    refs = precheck_files(manifest, files, clean_env(environment), registry)
+    refs = precheck_files(manifest, files, clean_env(environment), registry, flatpak_id)
     return {"checked": sorted(files), "flatpak_refs": refs}
 
 
@@ -552,14 +588,15 @@ def write_sums(directory):
     return names
 
 
-def sign(admission, directory, signed_dirs, output, environment, registry=None):
+def sign(admission, directory, signed_dirs, output, environment, pins, registry=None):
     registry = registry if registry is not None else feed.load_registry()
     manifest, _ = inventory.load_admission(admission, registry)
     env = clean_env(environment)
+    flatpak_id = check_pins(manifest, pins, registry)
     key_file, primary, subkey = pinned_key(manifest["app"], registry)
     files = admitted_distro(manifest, directory)
     # Every identity is proven before the key is imported.
-    precheck_files(manifest, files, env, registry)
+    precheck_files(manifest, files, env, registry, flatpak_id)
     signed = collect_signed(manifest, signed_dirs or [], registry)
     armored = environment.get("LINUX_SIGNING_KEY", "")
     c.require(armored.strip(), "LINUX_SIGNING_KEY is required; an unsigned nightly is refused")
@@ -595,7 +632,7 @@ def sign(admission, directory, signed_dirs, output, environment, registry=None):
     # The OCI layout tars ride along for the publisher, which pushes them and never uploads them.
     # They arrive only now: sign-linux.sh signs every *-linux-* file it finds.
     stage({n: p for n, p in files.items() if is_layout(n)})
-    result = verify_final_files(manifest, output, environment, registry)
+    result = verify_final_files(manifest, output, environment, registry, flatpak_id)
     _, sums = c.digest_file(output, feed.SUMS_NAME)
     return {**result, "sha256sums_sha256": sums}
 
@@ -632,9 +669,11 @@ def check_oci_signature(keyring, signature, manifest_file, registry_ref, pin, en
               f"{Path(signature).name} does not sign {digest} for {registry_ref}")
 
 
-def verify_final_files(manifest, directory, environment, registry):
+def verify_final_files(manifest, directory, environment, registry, flatpak_id):
     directory = c.owned_path(directory)
     env = clean_env(environment)
+    # Both are required: a check that is skipped when its tool is missing proves nothing.
+    skopeo, rpmkeys = tool("skopeo", env), tool("rpmkeys", env)
     names, layouts = [], []
     for path in directory.iterdir():
         c.require(stat.S_ISREG(path.lstat().st_mode), f"{path.name} is not a regular file")
@@ -668,16 +707,15 @@ def verify_final_files(manifest, directory, environment, registry):
                     verify_signature(keyring, directory / name, directory / feed.SUMS_NAME, pin, env, armored=True)
                 elif info["kind"] == "oci_sig":
                     check_oci_signature(keyring, directory / name, directory / info["signs"], oci_ref, pin, env, work)
-                    if skopeo := shutil.which("skopeo", path=env["PATH"]):
-                        run([skopeo, "standalone-verify", directory / info["signs"], oci_ref, subkey, directory / name],
-                            {**env, "GNUPGHOME": str(keyring.parent)})
+                    run([skopeo, "standalone-verify", directory / info["signs"], oci_ref, subkey, directory / name],
+                        {**env, "GNUPGHOME": str(keyring.parent)})
                 elif info["kind"] == "deb":
                     deb_origin(keyring, directory / name, pin, env, work)
-                    check_identity(manifest, name, directory / name, env, registry)
+                    check_identity(manifest, name, directory / name, env, registry, flatpak_id)
                 elif info["kind"] == "rpm":
-                    check_identity(manifest, name, directory / name, env, registry)
+                    check_identity(manifest, name, directory / name, env, registry, flatpak_id)
             rpms = sorted(n for n, i in expected.items() if i["kind"] == "rpm")
-            if rpms and (rpmkeys := shutil.which("rpmkeys", path=env["PATH"])):
+            if rpms:
                 db = work / "rpmdb"
                 run([rpmkeys, "--dbpath", db, "--import", pin_file], env)
                 for name in rpms:
@@ -698,16 +736,15 @@ def verify_final_files(manifest, directory, environment, registry):
         body = c.bounded_bytes(directory / feed.MANIFEST_NAME, c.MAX_JSON_BYTES, "NIGHTLY.json")
         descriptor = feed.check_descriptor(body, feed.synthetic_release(manifest, directory), manifest["app"],
                                            registry, sums=sums_text)
-    return {"assets": sorted(names), "descriptor": descriptor is not None,
-            "rpm_checksig": bool(shutil.which("rpmkeys", path=env["PATH"])),
-            "skopeo_verify": bool(shutil.which("skopeo", path=env["PATH"]))}
+    return {"assets": sorted(names), "descriptor": descriptor is not None}
 
 
-def verify_final(admission, directory, environment, registry=None):
+def verify_final(admission, directory, environment, pins, registry=None):
     registry = registry if registry is not None else feed.load_registry()
     manifest, _ = inventory.load_admission(admission, registry)
+    flatpak_id = check_pins(manifest, pins, registry)
     environment = {k: v for k, v in environment.items() if k != "LINUX_SIGNING_KEY"}
-    return verify_final_files(manifest, directory, environment, registry)
+    return verify_final_files(manifest, directory, environment, registry, flatpak_id)
 
 
 # ---- CLI --------------------------------------------------------------------------------------
@@ -718,22 +755,25 @@ def main(argv):
     parser.add_argument("mode", choices=("precheck", "sign", "verify-final"))
     parser.add_argument("--admission", required=True)
     parser.add_argument("--directory", required=True)
+    parser.add_argument("--prefix", required=True, help="the app's stable package name, pinned by the caller")
+    parser.add_argument("--flatpak-id", required=True, help="the app's stable Flatpak ID, pinned by the caller")
     parser.add_argument("--signed", nargs="*", default=[])
     parser.add_argument("--output")
     args = parser.parse_args(argv)
     environment = dict(os.environ)
+    pins = (args.prefix, args.flatpak_id)
     try:
         if args.mode == "precheck":
-            result = precheck(args.admission, args.directory, environment)
+            result = precheck(args.admission, args.directory, environment, pins)
         elif args.mode == "sign":
             c.require(args.output, "sign needs --output")
-            result = sign(args.admission, args.directory, args.signed, args.output, environment)
+            result = sign(args.admission, args.directory, args.signed, args.output, environment, pins)
             if destination := os.environ.get("GITHUB_OUTPUT"):
                 with open(destination, "a", encoding="utf-8") as stream:
                     stream.write(f"sha256sums-sha256={result['sha256sums_sha256']}\n")
         else:
             c.require(not args.signed and not args.output, "verify-final takes only --admission and --directory")
-            result = verify_final(args.admission, args.directory, environment)
+            result = verify_final(args.admission, args.directory, environment, pins)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (c.InvalidNightly, OSError, ValueError, KeyError, TypeError, UnicodeError, tarfile.TarError) as error:

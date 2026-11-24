@@ -68,6 +68,10 @@ class RegistryTests(unittest.TestCase):
         broken(lambda r: r["targets"]["linux"]["target"].update(format="appimage"))
         broken(lambda r: r["targets"].update(freebsd=r["targets"]["linux"]))
         broken(lambda r: r["trust"].pop("macos"))
+        broken(lambda r: r.pop("flatpak_id"))
+        broken(lambda r: r.update(flatpak_id="ai.storyteller.photocraft.nightly"))
+        broken(lambda r: r.update(package_prefix="photocraft-nightly"))
+        broken(lambda r: r.update(package_prefix="-photocraft"))
 
 
 class AssetSetTests(unittest.TestCase):

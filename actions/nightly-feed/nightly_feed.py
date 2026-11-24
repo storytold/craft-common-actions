@@ -45,6 +45,9 @@ DISTRO_REQUIRED_ARCHES = ("x86_64", "aarch64")
 DISTRO_PACKAGES = {"deb": "deb", "rpm": "rpm", "tar.gz": "tar_gz"}
 FLATPAK_FILES = {"flatpak": "flatpak", "oci-manifest.json": "oci_manifest", "oci.tar": "oci_archive"}
 ARCH_PACKAGE = "pkg.tar.zst"
+PACKAGE_PREFIX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+# flatpak's own rule: two or more dot-separated elements, at most 255 bytes.
+FLATPAK_ID = re.compile(r"(?=.{1,255}$)[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)+")
 
 
 # ---- Registry --------------------------------------------------------------------------------
@@ -133,8 +136,9 @@ def validate_registry(registry):
     require(isinstance(registry["apps"], dict) and registry["apps"], "registry lists no apps")
     for app, record in registry["apps"].items():
         require(isinstance(app, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", app), "invalid app name")
-        fields(record, {"repository", "default_branch", "build_channel", "product_name", "trust", "targets"},
-               f"{app} registry entry")
+        fields(record, {"repository", "default_branch", "build_channel", "product_name", "package_prefix",
+                        "flatpak_id", "trust", "targets"}, f"{app} registry entry")
+        _check_package_names(record["package_prefix"], record["flatpak_id"], app)
         require(record["repository"] == "storytold/" + app, f"{app}: repository must be storytold/{app}")
         require(record["default_branch"] == "main", f"{app}: unreviewed default branch")
         require(_name(record["build_channel"]), f"{app}: invalid build channel")
@@ -147,6 +151,33 @@ def validate_registry(registry):
             _check_row(app, platform, row)
         _check_trust(app, record["trust"], targets)
     return registry
+
+
+def _check_package_names(prefix, flatpak_id, where):
+    require(isinstance(prefix, str) and PACKAGE_PREFIX.fullmatch(prefix) and not prefix.endswith("-nightly"),
+            f"{where}: invalid package prefix {prefix!r}")
+    require(isinstance(flatpak_id, str) and FLATPAK_ID.fullmatch(flatpak_id) and not flatpak_id.endswith(".nightly"),
+            f"{where}: invalid stable Flatpak ID {flatpak_id!r}")
+
+
+def pinned_packages(app, prefix, flatpak_id, registry=None):
+    """(package prefix, stable Flatpak ID) the signer's caller pins on its release branch.
+
+    The producer names its own packages, so the signer never takes these from the handoff
+    manifest. A registry app's entry pins them too, and both must agree.
+    """
+    _check_package_names(prefix, flatpak_id, "the signer caller")
+    record = app_record(registry if registry is not None else load_registry(), app)
+    if record is not None:
+        require(record["package_prefix"] == prefix, f"{app}: package prefix {prefix!r} differs from the registry's "
+                f"{record['package_prefix']!r}")
+        require(record["flatpak_id"] == flatpak_id, f"{app}: Flatpak ID {flatpak_id!r} differs from the registry's "
+                f"{record['flatpak_id']!r}")
+    return prefix, flatpak_id
+
+
+def nightly_flatpak_ref(flatpak_id, arch):
+    return f"app/{flatpak_id}.nightly/{arch}/stable"
 
 
 def load_registry(path=None):

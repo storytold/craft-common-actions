@@ -6,6 +6,8 @@
       "default_branch": "main",
       "build_channel": "nightly-v1",
       "product_name": "PhotoCraft Nightly",
+      "package_prefix": "photocraft",
+      "flatpak_id": "ai.storyteller.photocraft",
       "trust": {
         "linux": {
           "public_key": "linux-release-signing-key.asc",
