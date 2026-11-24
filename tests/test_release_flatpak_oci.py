@@ -100,6 +100,7 @@ class FlatpakOciPublishTests(unittest.TestCase):
 
     def test_the_step_never_runs_for_a_pull_request_a_dry_run_or_a_nightly(self):
         self.assertEqual(STEP.get("if"), "github.event_name != 'pull_request' && !inputs.dry-run && !inputs.nightly")
+        self.assertEqual(WORKFLOW["jobs"]["flatpak"]["if"], "${{ !inputs.nightly }}")
 
     def test_dockerhub_credentials_trigger_dual_push_for_stable_release(self):
         result = self.publish("1.2.0", "refs/heads/release", DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
