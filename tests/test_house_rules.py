@@ -62,7 +62,7 @@ class HouseRulesTests(unittest.TestCase):
 
     def check(self, require_rust: bool = True):
         text = (self.app / "AGENTS.md").read_text(encoding="utf-8")
-        return house_rules.check_file(text, self.source, require_rust)
+        return house_rules.check_file(text, self.source, require_rust, allow_house_rules=True)
 
     def test_initial_write_keeps_bom_at_start(self):
         target = self.app / "AGENTS.md"
@@ -315,7 +315,7 @@ class HouseRulesTests(unittest.TestCase):
         with mock.patch.object(house_rules, "git", side_effect=git_error):
             self.assertEqual(house_rules.revision_state(str(self.source), self.first), "missing")
             failures, _ = house_rules.check_file(
-                house_rules.render("core", self.first, "Core one.\n"), self.source, False)
+                house_rules.render("core", self.first, "Core one.\n"), self.source, False, allow_house_rules=True)
             self.assertTrue(any("could not check" in item for item in failures))
 
     def test_git_uses_explicit_utf8_and_reports_invalid_output(self):
@@ -393,11 +393,16 @@ class AgentsBlockTests(unittest.TestCase):
         self.assertTrue(text.endswith("<!-- craft-agents:end -->\nLocal facts.\n"))
         self.assertEqual(self.check(), ([], []))
 
-    def test_the_old_format_still_passes(self):
+    def test_the_old_format_fails_as_retired(self):
         # setUp's history has no house-rules-rust.md, so only the core block is written.
         house_rules.write_agents(self.app, self.source, False)
         text = self.target.read_text(encoding="utf-8")
-        self.assertEqual(house_rules.check_file(text, self.source, False), ([], []))
+        self.assertEqual(house_rules.check_file(text, self.source, False), ([house_rules.RETIRED], []))
+        self.assertEqual(house_rules.check_file(text, self.source, False, allow_house_rules=True), ([], []))
+
+    def test_a_file_with_no_block_asks_for_the_agents_block(self):
+        self.target.write_text("Local facts.\n")
+        self.assertEqual(self.check(), (["house rules: the agents block is missing"], []))
 
     def test_an_edited_block_fails_even_when_its_digest_is_rewritten(self):
         self.write()
