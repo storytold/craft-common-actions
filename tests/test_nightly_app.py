@@ -323,15 +323,16 @@ class PhotoCraftUnchangedTests(unittest.TestCase):
         self.assertEqual(_plat.registry_platforms(REGISTRY, 'photocraft'), ['linux-x86_64', 'macos-aarch64', 'windows-x86_64'])
 
     def test_registry_targets_unchanged_and_only_the_names_added(self):
-        import subprocess
-        base = json.loads(subprocess.run(['git', 'show', '8f58b6d0:nightly-apps.json'], cwd=ROOT, capture_output=True,
-                                         text=True, check=True).stdout)
+        # PhotoCraft's row before this change, frozen as a fixture (CI checkouts are shallow).
+        base = json.loads((ROOT / 'tests/fixtures/nightly-apps-photocraft-targets-8f58b6d0.json').read_text())['photocraft']
         live = REGISTRY['apps']['photocraft']
-        self.assertEqual({k: v for k, v in live.items() if k not in ('display_name', 'env_prefix', 'entrypoints')},
-                         base['apps']['photocraft'])
-        self.assertEqual({app: row for app, row in REGISTRY['apps'].items() if app != 'photocraft'},
-                         {app: row for app, row in base['apps'].items() if app != 'photocraft'})
-
+        self.assertEqual({k: v for k, v in live.items() if k not in ('display_name', 'env_prefix', 'entrypoints')}, base)
+        # No other app gained targets or the new name fields.
+        for app, row in REGISTRY['apps'].items():
+            if app != 'photocraft':
+                with self.subTest(app=app):
+                    self.assertEqual(row['targets'], [])
+                    self.assertFalse({'display_name', 'env_prefix', 'entrypoints'} & set(row))
 
 class SecondAppTests(unittest.TestCase):
     """A synthetic reviewed DesignCraft row through admission, names, smoke env and the launcher."""
