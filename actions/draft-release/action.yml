@@ -26,14 +26,6 @@ inputs:
   tag-prefix:
     description: "Release tag prefix"
     default: "v"
-  title:
-    description: "Release title (empty: '<app-title> v<version>')"
-    required: false
-    default: ""
-  artifact-pattern:
-    description: "Pattern of this run's artifacts that make up the release"
-    required: false
-    default: "release-*"
   signing-key:
     description: "ASCII-armored OpenPGP secret key (LINUX_SIGNING_KEY) that signs the Linux packages and SHA256SUMS.txt; empty publishes them unsigned"
     required: false
@@ -45,7 +37,7 @@ runs:
     - name: Download all release artifacts
       uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
-        pattern: ${{ inputs.artifact-pattern }}
+        pattern: release-*
         path: artifacts
         merge-multiple: true
 
@@ -96,13 +88,12 @@ runs:
         TAG_PREFIX: ${{ inputs.tag-prefix }}
         VERSION: ${{ inputs.version }}
         APP_TITLE: ${{ inputs.app-title }}
-        TITLE: ${{ inputs.title }}
         PRERELEASE: ${{ inputs.prerelease }}
         GH_TOKEN: ${{ inputs.github-token }}
         GH_REPO: ${{ github.repository }}
       run: |
         tag="${TAG_PREFIX}$VERSION"
-        title="${TITLE:-$APP_TITLE v$VERSION}"
+        title="$APP_TITLE v$VERSION"
         pre=()
         if [ "$PRERELEASE" = "true" ]; then pre=(--prerelease); fi
         if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then

@@ -103,16 +103,23 @@ on:
         default: false
       nightly:
         description: >-
-          Build everything as a dry run does, then publish the Linux packages as a nightly
-          prerelease that installs beside the stable app: <prefix>-nightly-<version> deb, rpm, Arch
-          and Flatpak packages under the tag nightly_<version>, and the Flatpak OCI tags
-          <version>-nightly-<arch> and nightly-<arch>. Keeps the newest 3 nightlies. Default branch only;
-          with dry-run set too, the nightly packages are built but nothing is published. An app in the
-          nightly-feed registry also gets its launcher payloads, built with the registry's build
-          channel; the distro packages never take a build channel. Refuses a version override.
+          Build everything as a dry run does, plus the nightly payloads of the run: <prefix>-nightly-<nv>
+          deb, rpm, Arch and Flatpak packages that install beside the stable app, and for an app in the
+          nightly-feed registry the launcher payloads, built with the registry's build channel (the
+          distro packages never take one). nightly-attest attests a manifest of every payload, and
+          nightly-dispatch starts nightly-signer-workflow on the release branch, which signs and
+          publishes them. Default branch only; with dry-run set too, nothing is dispatched. Refuses a
+          version override. Only "Re-run all jobs" can publish a failed nightly.
         type: boolean
         required: false
         default: false
+      nightly-signer-workflow:
+        description: >-
+          The caller repository's workflow file on its release branch that nightly-dispatch starts
+          with producer_run_id and producer_run_attempt
+        type: string
+        required: false
+        default: "nightly-sign.yml"
 
     secrets:
       APPLE_CERTIFICATE:
@@ -147,10 +154,6 @@ on:
       # every Linux package format, the Flatpak bundle's commit and OCI image, and SHA256SUMS.txt.
       LINUX_SIGNING_KEY:
         required: false
-      # Signs the nightly prerelease like LINUX_SIGNING_KEY signs a release; kept in the repo's
-      # nightly-signing environment. It may hold the same key.
-      LINUX_NIGHTLY_SIGNING_KEY:
-        required: false
       DOCKERHUB_USERNAME:
         description: "Username for publishing Flatpak OCI layouts to Docker Hub"
         required: false
@@ -174,6 +177,9 @@ on:
       nightly-identity:
         description: "Nightly app identity (<X.Y.Z>-nightly.<YYYYMMDD>.<run ID>.<run attempt>.g<12-digit sha>) in nightly mode, else empty"
         value: ${{ jobs.version.outputs.nightly-identity }}
+      nightly-tag:
+        description: "Nightly release tag (v<identity> for a launcher registry app, nightly_<nv> otherwise) in nightly mode, else empty"
+        value: ${{ jobs.version.outputs.nightly-tag }}
 
 permissions:
   contents: read
@@ -761,7 +767,7 @@ jobs:
             echo "==> Pushing to $REGISTRY:$RELEASE_VERSION-$ARCH"
             skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:$RELEASE_VERSION-$ARCH"
             # Only a stable version built from the release branch may move the stable tag. The
-            # nightly-<arch> tag belongs to the nightly-flatpak job, whose image has the .nightly app ID.
+            # nightly-<arch> tag belongs to the nightly signer, whose image has the .nightly app ID.
             if [[ "$RELEASE_VERSION" != *-* && "$GITHUB_REF" == refs/heads/release ]]; then
               echo "==> Pushing to $REGISTRY:stable-$ARCH"
               skopeo copy --format oci --dest-creds "$creds" "oci:$layout" "docker://$REGISTRY:stable-$ARCH"
@@ -1534,7 +1540,8 @@ jobs:
           fi
 
   # Nightly mode: the stable Linux builds above, renamed to <prefix>-nightly so they install beside
-  # the stable app, and published as a prerelease plus Flatpak OCI tags that artcraft-services reads.
+  # the stable app. Every nightly payload artifact ends in -<run attempt>, so the signer takes the
+  # payloads of exactly the attempt that nightly-attest attested.
   nightly-linux:
     timeout-minutes: 30
     name: Nightly Linux ${{ matrix.arch }}
@@ -1567,7 +1574,7 @@ jobs:
           nfpm-version: ${{ inputs.nfpm-version }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-linux-${{ matrix.arch }}
+          name: nightly-linux-${{ matrix.arch }}-${{ github.run_attempt }}
           path: dist/nightly/*
           if-no-files-found: error
 
@@ -1593,7 +1600,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: nightly-linux-${{ matrix.arch }}
+          name: nightly-linux-${{ matrix.arch }}-${{ github.run_attempt }}
           path: dist/linux
       - name: Find the nightly tarball
         id: tarball
@@ -1607,7 +1614,7 @@ jobs:
             case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
           done
           if [ "${#tarballs[@]}" -ne 1 ]; then
-            echo "::error::expected one nightly app tarball for ${NIGHTLY_VERSION} in nightly-linux-${ARCH}, found ${#tarballs[@]}: ${tarballs[*]}"
+            echo "::error::expected one nightly app tarball for ${NIGHTLY_VERSION} in nightly-linux-${ARCH}-${GITHUB_RUN_ATTEMPT}, found ${#tarballs[@]}: ${tarballs[*]}"
             exit 1
           fi
           tarball="${tarballs[0]}"
@@ -1623,7 +1630,7 @@ jobs:
           output-dir: dist/nightly
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-arch-${{ matrix.arch }}
+          name: nightly-arch-${{ matrix.arch }}-${{ github.run_attempt }}
           path: dist/nightly/*.pkg.tar.zst
           if-no-files-found: error
 
@@ -1635,9 +1642,6 @@ jobs:
       && needs.linux.result == 'success'
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -1675,7 +1679,7 @@ jobs:
           sudo apt-get update
           # elfutils is only a Recommends of flatpak-builder, but flatpak-builder runs its eu-strip
           # on every module it builds with debuginfo, such as the apps' cups-client.
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Find the release tarball
         id: tarball
@@ -1707,52 +1711,15 @@ jobs:
           nightly-version: ${{ needs.version.outputs.nightly-version }}
           prefix: ${{ steps.tarball.outputs.prefix }}
           output-dir: dist/nightly
-      - name: Publish the nightly Flatpak OCI image to GHCR and Docker Hub
-        if: github.event_name != 'pull_request' && !inputs.dry-run
-        env:
-          NIGHTLY_VERSION: ${{ needs.version.outputs.nightly-version }}
-          ARCH: ${{ matrix.arch }}
-          REGISTRY: ghcr.io/${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          BUNDLE: ${{ steps.bundle.outputs.bundle }}
-          LAYOUT: ${{ steps.bundle.outputs.layout }}
-        run: |
-          set -euo pipefail
-          if [ ! -d "$LAYOUT" ]; then
-            echo "::error::nightly-flatpak did not write the OCI layout $LAYOUT"
-            exit 1
-          fi
-          REGISTRY="${REGISTRY,,}"
-          creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
-          # Same repository as the stable images, other tags: stable-<arch> is never touched here.
-          # nightly-<arch> moves in nightly-release, once the prerelease is published.
-          tags=("$NIGHTLY_VERSION-nightly-$ARCH")
-          for tag in "${tags[@]}"; do
-            echo "==> Pushing to $REGISTRY:$tag"
-            skopeo copy --format oci --dest-creds "$creds" "oci:$LAYOUT" "docker://$REGISTRY:$tag"
-          done
-          # The pushed manifest, byte for byte: nightly-release signs its digest for Flatpak's
-          # signature lookaside, and the release keeps it so the digest can be checked.
-          base="$(basename "$BUNDLE" .flatpak)"
-          skopeo inspect --raw --creds "$creds" \
-            "docker://$REGISTRY:${tags[0]}" >"$(dirname "$BUNDLE")/$base.oci-manifest.json"
-
-          if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-            dh_registry="docker.io/storytold/${REGISTRY##*/}"
-            dh_creds="$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN"
-            for tag in "${tags[@]}"; do
-              echo "==> Pushing to $dh_registry:$tag"
-              skopeo copy --format oci --dest-creds "$dh_creds" "oci:$LAYOUT" "docker://$dh_registry:$tag"
-            done
-          fi
+      # The signer pushes the image by digest from the archive once the release is published; the
+      # layout directory itself is never uploaded.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-flatpak-${{ matrix.arch }}
+          name: nightly-flatpak-${{ matrix.arch }}-${{ github.run_attempt }}
           path: |
-            dist/nightly/*.flatpak
-            dist/nightly/*.oci-manifest.json
+            ${{ steps.bundle.outputs.bundle }}
+            ${{ steps.bundle.outputs.oci-manifest }}
+            ${{ steps.bundle.outputs.oci-archive }}
           if-no-files-found: error
 
   # Launcher payloads, for apps in the nightly-feed registry: the app's own nightly script builds a
@@ -1839,7 +1806,7 @@ jobs:
           archive: ${{ steps.payload.outputs.path }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-launcher-linux
+          name: nightly-launcher-linux-${{ github.run_attempt }}
           path: ${{ steps.payload.outputs.path }}
           if-no-files-found: error
 
@@ -1917,7 +1884,7 @@ jobs:
           archive: ${{ steps.payload.outputs.path }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-launcher-windows
+          name: nightly-launcher-windows-${{ github.run_attempt }}
           path: ${{ steps.payload.outputs.path }}
           if-no-files-found: error
 
@@ -1999,135 +1966,138 @@ jobs:
           archive: ${{ steps.payload.outputs.path }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-launcher-macos
+          name: nightly-launcher-macos-${{ github.run_attempt }}
           path: ${{ steps.payload.outputs.path }}
           if-no-files-found: error
 
-  nightly-release:
+  # One attested manifest binds every payload of this attempt by hash; the signer admits only
+  # payloads that match it. No app checkout: the manifest comes from the artifacts and the tooling of
+  # this workflow's own commit.
+  nightly-attest:
     timeout-minutes: 15
-    name: Publish the nightly prerelease
-    # nightly-arch may be skipped only when the caller turned Arch off.
+    name: Attest the nightly payloads
+    # A job the caller turned off, or a launcher platform the app does not ship, may be skipped; any
+    # other result stops the nightly, since the signer needs the exact asset set.
     if: >-
-      inputs.nightly && !inputs.dry-run && !cancelled() && needs.version.result == 'success'
-      && needs.version.outputs.skip != 'true' && needs.nightly-linux.result == 'success'
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && needs.nightly-linux.result == 'success' && needs.nightly-flatpak.result == 'success'
       && (needs.nightly-arch.result == 'success' || (!inputs.has-arch && needs.nightly-arch.result == 'skipped'))
-      && needs.nightly-flatpak.result == 'success'
-    needs: [version, nightly-linux, nightly-arch, nightly-flatpak]
+      && (needs.nightly-launcher-linux.result == 'success' || (!contains(fromJSON(needs.version.outputs.launcher-platforms), 'linux') && needs.nightly-launcher-linux.result == 'skipped'))
+      && (needs.nightly-launcher-windows.result == 'success' || (!contains(fromJSON(needs.version.outputs.launcher-platforms), 'windows') && needs.nightly-launcher-windows.result == 'skipped'))
+      && (needs.nightly-launcher-macos.result == 'success' || (!contains(fromJSON(needs.version.outputs.launcher-platforms), 'macos') && needs.nightly-launcher-macos.result == 'skipped'))
+    needs: [version, nightly-linux, nightly-arch, nightly-flatpak, nightly-launcher-linux, nightly-launcher-windows, nightly-launcher-macos]
     runs-on: ubuntu-24.04
-    # Holds LINUX_NIGHTLY_SIGNING_KEY and admits main only.
-    environment: nightly-signing
     permissions:
-      contents: write
-      packages: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GH_REPO: ${{ github.repository }}
-      # Not nightly-<nv>: craft-launcher's Nightly track treats any prerelease whose tag has a
-      # `nightly` part between `.` or `-` as its own candidate and fails the lookup when it is not
-      # SemVer with a NIGHTLY.json descriptor.
-      TAG: nightly_${{ needs.version.outputs.nightly-version }}
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
-      - uses: storytold/craft-common-actions/actions/draft-release@main
-        with:
-          version: ${{ needs.version.outputs.nightly-version }}
-          app-title: ${{ inputs.app-title }}
-          title: ${{ inputs.app-title }} Nightly ${{ needs.version.outputs.nightly-version }}
-          tag-prefix: nightly_
-          prerelease: "true"
-          # Not nightly-*: that would also take the unsigned nightly-launcher-* payloads.
-          artifact-pattern: nightly-{linux,arch,flatpak}-*
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          signing-key: ${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}
-      - name: Publish the prerelease
+      - name: Require the attempt that planned the identity
+        env:
+          IDENTITY: ${{ needs.version.outputs.nightly-identity }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          set -euo pipefail
-          gh release edit "$TAG" --draft=false --prerelease --latest=false
-          echo "Published $TAG." >>"$GITHUB_STEP_SUMMARY"
-      - name: Move the nightly-<arch> Flatpak tags
-        if: ${{ !inputs.dry-run }}
+          # "Re-run failed jobs" keeps the version job's outputs from the earlier attempt, so the
+          # identity would name an attempt whose payloads this run did not build.
+          rest="${IDENTITY%.g*}"
+          attempt="${rest##*.}"
+          run="${rest%.*}"
+          run="${run##*.}"
+          if [ -z "$IDENTITY" ] || [ "$run" != "$RUN_ID" ] || [ "$attempt" != "$RUN_ATTEMPT" ]; then
+            echo "::error::the nightly identity '$IDENTITY' does not belong to attempt $RUN_ATTEMPT of run $RUN_ID. A partial re-run cannot publish a nightly: use Re-run all jobs."
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          # One directory per artifact (<dir>/<artifact>/<file>), which the manifest records.
+          pattern: nightly-*-${{ github.run_attempt }}
+          path: .nightly-artifacts
+          digest-mismatch: error
+      - name: Check out this workflow's own tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify the tooling checkout
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$WORKFLOW_SHA"
+      - name: Find the file prefix
+        id: prefix
         env:
           NIGHTLY_VERSION: ${{ needs.version.outputs.nightly-version }}
-          REGISTRY: ghcr.io/${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ARTIFACT: .nightly-artifacts/nightly-flatpak-x86_64-${{ github.run_attempt }}
         run: |
-          # Only after publishing, so nightly-<arch> never names an image without a release.
-          # --preserve-digests keeps the digest the release's .oci.sig covers. A failure only warns:
-          # the website resolves the versioned tags.
-          set -uo pipefail
-          command -v skopeo >/dev/null || sudo apt-get install -y --no-install-recommends skopeo
-          REGISTRY="${REGISTRY,,}"
-          move() { # <registry> <creds> <arch>
-            if skopeo copy --preserve-digests --src-creds "$2" --dest-creds "$2" \
-              "docker://$1:$NIGHTLY_VERSION-nightly-$3" "docker://$1:nightly-$3"; then
-              echo "Moved $1:nightly-$3 to $NIGHTLY_VERSION." >>"$GITHUB_STEP_SUMMARY"
-            else
-              echo "::warning::Could not move $1:nightly-$3 to $NIGHTLY_VERSION-nightly-$3."
-            fi
-          }
-          for arch in x86_64 aarch64; do
-            move "$REGISTRY" "${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN" "$arch"
-            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
-              move "docker.io/storytold/${REGISTRY##*/}" "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" "$arch"
-            fi
-          done
-      - name: Keep the newest 3 nightly prereleases
-        run: |
-          # gh lists by creation; sort by publication. A failed cleanup only warns.
-          if ! old="$(gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,publishedAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly_")))] | sort_by(.publishedAt) | reverse | .[3:] | .[].tagName')"; then
-            echo "::warning::Could not list the nightly prereleases; none deleted."
-            exit 0
+          # The Flatpak artifact holds exactly one bundle, <prefix>-nightly-<nv>-linux-x86_64.flatpak.
+          shopt -s nullglob
+          bundles=("$ARTIFACT"/*-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak)
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "::error::expected one nightly Flatpak bundle for ${NIGHTLY_VERSION} in $ARTIFACT, found ${#bundles[@]}: ${bundles[*]}"
+            exit 1
           fi
-          for tag in $old; do
-            echo "Deleting $tag"
-            gh release delete "$tag" --yes --cleanup-tag || echo "::warning::Could not delete the nightly prerelease $tag."
-          done
-      - name: Keep the Flatpak images of the kept nightly prereleases
-        run: |
-          # A failed cleanup only warns. Only versions whose every tag is <version>-nightly-<arch> or
-          # nightly-<arch> are candidates, so stable images and untagged manifests are never deleted.
-          # A candidate stays when it carries nightly-<arch> or belongs to a kept prerelease; images
-          # pushed by runs that never published are deleted.
-          warn() { echo "::warning::$1"; exit 0; }
-          kept="$(gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,publishedAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly_")))] | sort_by(.publishedAt) | reverse | .[:3] | map(.tagName | ltrimstr("nightly_"))')" \
-            || warn "Could not list the nightly prereleases; no nightly images deleted."
-          [ "$kept" != "[]" ] || warn "No published nightly prerelease found; no nightly images deleted."
-          owner="$GITHUB_REPOSITORY_OWNER"
-          package="${GITHUB_REPOSITORY#*/}"
-          package="${package,,}"
-          type="$(gh api "users/$owner" --jq .type)" || warn "Could not look up $owner; no nightly images deleted."
-          if [ "$type" = Organization ]; then scope="orgs/$owner"; else scope="users/$owner"; fi
-          versions="$(gh api --paginate "$scope/packages/container/$package/versions" --jq '.[]')" \
-            || warn "Could not list the versions of ghcr.io/$owner/$package; no nightly images deleted."
-          for arch in x86_64 aarch64; do
-            ids="$(jq -rs --arg arch "$arch" --argjson kept "$kept" '
-              [.[] | (.metadata.container.tags // []) as $tags
-               | select(($tags | length) > 0 and all($tags[]; test("(^|-)nightly-" + $arch + "$")))
-               | select(any($tags[]; . == "nightly-" + $arch or (rtrimstr("-nightly-" + $arch) as $v | $kept | index($v))) | not)]
-              | .[].id' <<<"$versions")" \
-              || warn "Could not read the versions of ghcr.io/$owner/$package; no nightly images deleted."
-            for id in $ids; do
-              echo "Deleting ghcr.io/$owner/$package version $id ($arch)"
-              gh api -X DELETE "$scope/packages/container/$package/versions/$id" >/dev/null \
-                || echo "::warning::Could not delete ghcr.io/$owner/$package version $id."
-            done
-          done
-      - name: Trigger website repo version bump
+          base="${bundles[0]##*/}"
+          echo "prefix=${base%-nightly-"${NIGHTLY_VERSION}"-linux-x86_64.flatpak}" >>"$GITHUB_OUTPUT"
+      - name: Write the nightly manifest
         env:
-          GH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
+          APP_NAME: ${{ inputs.app-name }}
+          IDENTITY: ${{ needs.version.outputs.nightly-identity }}
+          PUBLISHED_AT: ${{ needs.version.outputs.nightly-published-at }}
+          PREFIX: ${{ steps.prefix.outputs.prefix }}
+        run: |
+          python3 -I -B .nightly-tools/actions/nightly-feed/nightly_handoff.py write --app "$APP_NAME" \
+            --artifacts .nightly-artifacts --output .nightly-manifest --identity "$IDENTITY" \
+            --published-at "$PUBLISHED_AT" --prefix "$PREFIX"
+      - name: Attest the nightly manifest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: .nightly-manifest/nightly-manifest.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .nightly-manifest/nightly-manifest.json
+          if-no-files-found: error
+
+  # The signer runs on the release branch, where the release environment holds the signing keys,
+  # and admits this run by its attested manifest.
+  nightly-dispatch:
+    timeout-minutes: 5
+    name: Start the nightly signer
+    if: inputs.nightly && !inputs.dry-run && needs.nightly-attest.result == 'success'
+    needs: [nightly-attest]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Dispatch the signer on the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ inputs.nightly-signer-workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set; skipping storytold/artcraft-services update-craft-release-versions.yml dispatch."
-            exit 0
+          if [[ ! "$WORKFLOW" =~ ^[A-Za-z0-9._-]+\.ya?ml$ ]]; then
+            echo "::error::nightly-signer-workflow must be a workflow file name such as nightly-sign.yml, not '$WORKFLOW'"
+            exit 1
           fi
-          if ! gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services; then
-            echo "::warning::Failed to dispatch update-craft-release-versions.yml on storytold/artcraft-services."
+          if ! gh api "repos/$REPO/contents/.github/workflows/$WORKFLOW?ref=release" --silent; then
+            echo "::error::$REPO has no .github/workflows/$WORKFLOW on its release branch, so nothing can sign this nightly. Add the signer caller there, or point nightly-signer-workflow at it."
+            exit 1
           fi
+          gh workflow run "$WORKFLOW" --repo "$REPO" --ref release \
+            -f producer_run_id="$RUN_ID" -f producer_run_attempt="$RUN_ATTEMPT"
+          echo "Dispatched $WORKFLOW on release for run $RUN_ID, attempt $RUN_ATTEMPT." >>"$GITHUB_STEP_SUMMARY"

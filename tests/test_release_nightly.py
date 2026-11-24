@@ -1,4 +1,4 @@
-"""release.yml's nightly input: a dry run of the stable release plus a Linux nightly prerelease."""
+"""release.yml's nightly input: a dry run of the stable release plus the attested nightly payloads."""
 from pathlib import Path
 import fnmatch
 import json
@@ -7,16 +7,21 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "actions/nightly-feed"))
+import nightly_feed as feed  # noqa: E402
+import nightly_handoff as handoff  # noqa: E402
+
 DATA = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
 JOBS = DATA["jobs"]
 DRAFT = yaml.load((ROOT / "actions/draft-release/action.yml").read_text(), Loader=yaml.BaseLoader)
-NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak", "nightly-release")
+NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak", "nightly-attest")
 LAUNCHER = {
     "linux": ("ubuntu-22.04", "packaging/linux/nightly.sh --arch x86_64"),
     "windows": ("windows-latest", "./packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly"),
@@ -24,9 +29,9 @@ LAUNCHER = {
 }
 LAUNCHER_JOBS = tuple(f"nightly-launcher-{platform}" for platform in LAUNCHER)
 DISTRO_NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak")
+PAYLOAD_JOBS = DISTRO_NIGHTLY_JOBS + LAUNCHER_JOBS
 EXPORT_ENV = "storytold/craft-common-actions/actions/export-app-build-env@"
 BASH = shutil.which("bash")
-JQ = shutil.which("jq")
 
 
 def step(job, name):
@@ -60,23 +65,33 @@ def run(script, cwd, bin_dir, **env):
     return subprocess.run([BASH, "-e", "-c", script], cwd=cwd, env=env, capture_output=True, text=True)
 
 
-# gh that answers `--jq` queries from a JSON fixture with the real jq and logs everything else.
-FAKE_GH = """#!/usr/bin/env bash
-echo "gh $*" >>"$FAKE_LOG"
-jq_filter=""
-args=("$@")
-for ((i = 0; i < ${#args[@]}; i++)); do
-  [[ "${args[i]}" == --jq ]] && jq_filter="${args[i+1]}"
-done
-case "$*" in
-  "api users/"*) jq -r "$jq_filter" <<<'{"type": "Organization"}' ;;
-  "api repos/"*) jq -r "$jq_filter" <<<'{"default_branch": "main"}' ;;
-  "release list"*) jq -r "$jq_filter" "${FAKE_RELEASES:-$FAKE_FIXTURE}" ;;
-  *-X\\ DELETE*|"release delete"*) ;;
-  *) jq -r "$jq_filter" "$FAKE_FIXTURE" ;;
-esac
-"""
+ATTEMPT = "${{ github.run_attempt }}"
+SHA = "abcdefabcdef" + "0123456789abcdef0123456789ab"
+RUN_ID = 19876543210
+IDENTITY = f"0.24.1-nightly.20261124.{RUN_ID}.2.gabcdefabcdef"
+PUBLISHED = 1795487280
 
+
+def render(value, **expressions):
+    """Replace each ${{ <expression> }} with expressions[<expression>]; refuse any left over."""
+    out = re.sub(r"\$\{\{ ([^}]+) \}\}", lambda m: str(expressions[m[1]]), value)
+    assert "${{" not in out, out
+    return out
+
+
+def artifact_name(job, arch="", attempt=1):
+    return render(uses(job, "actions/upload-artifact@")["with"]["name"],
+                  **{"matrix.arch": arch, "github.run_attempt": attempt})
+
+
+def evaluate(condition, inputs, results, outputs, cancelled=False):
+    """A job `if` written with the operators release.yml uses, evaluated for one scenario."""
+    expr = re.sub(r"needs\.version\.outputs\.([\w-]+)", lambda m: repr(outputs[m[1]]), condition)
+    expr = re.sub(r"needs\.([\w-]+)\.result", lambda m: repr(results[m[1]]), expr)
+    expr = re.sub(r"inputs\.([\w-]+)", lambda m: repr(inputs[m[1]]), expr)
+    expr = re.sub(r"!(?=[\w(])", " not ", expr).replace("&&", " and ").replace("||", " or ")
+    names = {"cancelled": lambda: cancelled, "fromJSON": json.loads, "contains": lambda haystack, needle: needle in haystack}
+    return eval(expr, {"__builtins__": {}}, names)  # noqa: S307 - the expression comes from release.yml
 
 class NightlyModeTests(unittest.TestCase):
     def test_the_input_defaults_off(self):
@@ -96,7 +111,7 @@ class NightlyModeTests(unittest.TestCase):
         self.assertIn("!inputs.nightly", step("flatpak", "Publish Flatpak OCI layout to GHCR and Docker Hub")["if"])
 
     def test_only_nightly_mode_runs_the_nightly_jobs(self):
-        for name in NIGHTLY_JOBS + LAUNCHER_JOBS:
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS + ("nightly-dispatch",):
             self.assertTrue(JOBS[name]["if"].startswith("inputs.nightly && "), name)
         # The nightly-flatpak and nightly-arch jobs build those packages in nightly mode.
         self.assertEqual(JOBS["flatpak"]["if"], "${{ !inputs.nightly }}")
@@ -141,14 +156,11 @@ class NightlyPlanTests(unittest.TestCase):
                 self.assertIn("needs.version.result == 'success'", condition)
                 self.assertNotIn("contains(needs.*.result", condition)
         for name, required in (("nightly-linux", "linux"), ("nightly-arch", "nightly-linux"),
-                               ("nightly-flatpak", "linux"), ("nightly-release", "nightly-linux"),
-                               ("nightly-release", "nightly-flatpak")):
+                               ("nightly-flatpak", "linux")):
             self.assertIn(f"needs.{required}.result == 'success'", JOBS[name]["if"], name)
         # A job the caller turned off may be skipped; one that should have run may not.
         self.assertIn("(needs.linux-riscv64.result == 'success' || (!inputs.has-riscv64 && needs.linux-riscv64.result == 'skipped'))",
                       JOBS["nightly-linux"]["if"])
-        self.assertIn("(needs.nightly-arch.result == 'success' || (!inputs.has-arch && needs.nightly-arch.result == 'skipped'))",
-                      JOBS["nightly-release"]["if"])
 
 
 class LauncherJobTests(unittest.TestCase):
@@ -197,7 +209,7 @@ class LauncherJobTests(unittest.TestCase):
                     "archive": "${{ steps.payload.outputs.path }}",
                 })
                 upload = uses(name, "actions/upload-artifact@")
-                self.assertEqual(upload["with"]["name"], name)
+                self.assertEqual(upload["with"]["name"], f"{name}-${{{{ github.run_attempt }}}}")
                 self.assertEqual(upload["with"]["path"], "${{ steps.payload.outputs.path }}")
                 # Checked before it is uploaded.
                 self.assertLess(names.index("Build the launcher payload"), names.index(check["uses"]))
@@ -218,52 +230,6 @@ class LauncherJobTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, ok, result.stdout)
                 self.assertEqual(out.read_text(), f"path={dist}/a.tar.gz\n" if ok else "")
         self.assertEqual(script, step("nightly-launcher-macos", "Find the launcher payload")["run"])
-
-
-@unittest.skipUnless(BASH, "needs bash")
-class NightlyFlatpakPushTests(unittest.TestCase):
-    STEP = step("nightly-flatpak", "Publish the nightly Flatpak OCI image to GHCR and Docker Hub")
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.log = self.root / "calls.log"
-        self.log.touch()
-        executable(self.root / "bin/skopeo",
-                   '#!/usr/bin/env bash\necho "skopeo $*" >>"$FAKE_LOG"\n'
-                   'if [[ "$1" == inspect ]]; then echo \'{"schemaVersion":2}\'; fi\n')
-        self.base = "democraft-nightly-1.2.0.20261124.57.1-linux-x86_64"
-        (self.root / "dist/nightly" / f"{self.base}-oci").mkdir(parents=True)
-
-    def tearDown(self):
-        self.temp.cleanup()
-
-    def publish(self, **extra):
-        return run(self.STEP["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log),
-                   NIGHTLY_VERSION="1.2.0.20261124.57.1", ARCH="x86_64", REGISTRY="ghcr.io/storytold/DemoCraft",
-                   GITHUB_TOKEN="token", GITHUB_ACTOR="bot", BUNDLE=f"dist/nightly/{self.base}.flatpak",
-                   LAYOUT=f"dist/nightly/{self.base}-oci", **extra)
-
-    def pushed(self):
-        return [line.rsplit("docker://", 1)[1] for line in self.log.read_text().splitlines()
-                if line.startswith("skopeo copy")]
-
-    def test_it_pushes_only_the_versioned_tag(self):
-        self.assertEqual(self.STEP["if"], "github.event_name != 'pull_request' && !inputs.dry-run")
-        result = self.publish(DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.pushed(), [
-            "ghcr.io/storytold/democraft:1.2.0.20261124.57.1-nightly-x86_64",
-            "docker.io/storytold/democraft:1.2.0.20261124.57.1-nightly-x86_64",
-        ])
-        manifest = self.root / "dist/nightly" / f"{self.base}.oci-manifest.json"
-        self.assertEqual(manifest.read_text().strip(), '{"schemaVersion":2}')
-
-    def test_a_missing_layout_fails_before_pushing(self):
-        shutil.rmtree(self.root / "dist/nightly" / f"{self.base}-oci")
-        result = self.publish()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(self.pushed(), [])
 
 
 class BuildChannelTests(unittest.TestCase):
@@ -324,135 +290,243 @@ class BuildChannelTests(unittest.TestCase):
                                       result.stdout)
 
 
-class NightlyReleaseTests(unittest.TestCase):
-    def test_it_runs_only_when_every_nightly_build_succeeded_or_was_skipped(self):
-        job = JOBS["nightly-release"]
-        self.assertEqual(job["needs"], ["version", "nightly-linux", "nightly-arch", "nightly-flatpak"])
-        for clause in ("!inputs.dry-run", "!cancelled()", "needs.nightly-linux.result == 'success'",
-                       "needs.nightly-flatpak.result == 'success'"):
-            self.assertIn(clause, job["if"])
-        self.assertEqual(job["environment"], "nightly-signing")
-        self.assertEqual(job["permissions"], {"contents": "write", "packages": "write"})
+class ArtifactNameTests(unittest.TestCase):
+    def test_every_payload_artifact_names_its_run_attempt(self):
+        names = {job: uses(job, "actions/upload-artifact@")["with"]["name"] for job in PAYLOAD_JOBS}
+        self.assertEqual(names, {
+            "nightly-linux": "nightly-linux-${{ matrix.arch }}-${{ github.run_attempt }}",
+            "nightly-arch": "nightly-arch-${{ matrix.arch }}-${{ github.run_attempt }}",
+            "nightly-flatpak": "nightly-flatpak-${{ matrix.arch }}-${{ github.run_attempt }}",
+            **{job: f"{job}-${{{{ github.run_attempt }}}}" for job in LAUNCHER_JOBS},
+        })
 
-    def test_the_prerelease_collects_exactly_the_nightly_artifacts(self):
-        draft = uses("nightly-release", "storytold/craft-common-actions/actions/draft-release@")["with"]
-        self.assertEqual((draft["tag-prefix"], draft["prerelease"], draft["artifact-pattern"]),
-                         ("nightly_", "true", "nightly-{linux,arch,flatpak}-*"))
-        # fnmatch has no brace expansion; download-artifact's minimatch does.
-        prerelease = [f"nightly-{kind}-*" for kind in ("linux", "arch", "flatpak")]
-        self.assertEqual(draft["version"], "${{ needs.version.outputs.nightly-version }}")
-        self.assertEqual(draft["signing-key"], "${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}")
-        self.assertIn("LINUX_NIGHTLY_SIGNING_KEY", DATA["on"]["workflow_call"]["secrets"])
-        uploads = [(name, s["with"]["name"]) for name, job in JOBS.items() for s in job.get("steps", [])
-                   if s.get("uses", "").startswith("actions/upload-artifact@")]
-        stable = DRAFT["inputs"]["artifact-pattern"]["default"]
-        for job, artifact in uploads:
-            with self.subTest(job=job):
-                # Each release collects its own artifacts and none of the other's; the unsigned
-                # launcher payloads go into neither.
-                collected = any(fnmatch.fnmatchcase(artifact, p) for p in prerelease)
-                self.assertEqual(collected, job in NIGHTLY_JOBS)
-                self.assertEqual(fnmatch.fnmatchcase(artifact, "nightly-*"), job in NIGHTLY_JOBS + LAUNCHER_JOBS)
-                if job in NIGHTLY_JOBS + LAUNCHER_JOBS:
-                    self.assertFalse(fnmatch.fnmatchcase(artifact, stable))
-                if job in NIGHTLY_JOBS:
-                    self.assertTrue(artifact.endswith("-${{ matrix.arch }}"))
+    def test_the_names_are_the_ones_the_handoff_accepts(self):
+        for job, arches in (("nightly-linux", ("x86_64", "aarch64", "riscv64")), ("nightly-arch", ("x86_64", "aarch64")),
+                            ("nightly-flatpak", ("x86_64", "aarch64"))) + tuple((job, ("",)) for job in LAUNCHER_JOBS):
+            for arch in arches:
+                match = handoff.ARTIFACT.fullmatch(artifact_name(job, arch, 3))
+                self.assertIsNotNone(match, (job, arch))
+                self.assertEqual(match["attempt"], "3")
 
-    def test_it_is_published_as_a_prerelease_that_never_becomes_latest(self):
-        self.assertIn('gh release edit "$TAG" --draft=false --prerelease --latest=false',
-                      step("nightly-release", "Publish the prerelease")["run"])
-        self.assertEqual(JOBS["nightly-release"]["env"]["TAG"], "nightly_${{ needs.version.outputs.nightly-version }}")
+    def test_nightly_arch_reads_this_attempts_linux_artifact(self):
+        self.assertEqual(uses("nightly-arch", "actions/download-artifact@")["with"]["name"],
+                         uses("nightly-linux", "actions/upload-artifact@")["with"]["name"])
 
-    def test_the_tag_is_not_a_craft_launcher_nightly_candidate(self):
-        # craft-launcher crates/native/src/nightly_lookup.rs: a prerelease whose tag has a part
-        # equal to "nightly" (split on . and -) must be canonical SemVer with NIGHTLY.json.
-        tag = JOBS["nightly-release"]["env"]["TAG"].replace("${{ needs.version.outputs.nightly-version }}", "0.24.1.20261124.57.2")
-        self.assertNotIn("nightly", [part.lower() for part in re.split(r"[.-]", tag)])
-
-    def test_nightly_tags_move_only_after_publishing_and_keep_the_signed_digest(self):
-        names = [s.get("name") for s in JOBS["nightly-release"]["steps"]]
-        self.assertLess(names.index("Publish the prerelease"), names.index("Move the nightly-<arch> Flatpak tags"))
-        run = step("nightly-release", "Move the nightly-<arch> Flatpak tags")["run"]
-        self.assertIn("--preserve-digests", run)
-        self.assertIn('"docker://$1:$NIGHTLY_VERSION-nightly-$3" "docker://$1:nightly-$3"', run)
-        self.assertNotIn("stable-", run)
+    def test_the_attest_job_downloads_exactly_this_attempts_payloads(self):
+        download = uses("nightly-attest", "actions/download-artifact@")["with"]
+        # Without merge-multiple each artifact keeps its own directory, which the manifest records.
+        self.assertNotIn("merge-multiple", download)
+        self.assertEqual(download["digest-mismatch"], "error")
+        pattern = render(download["pattern"], **{"github.run_attempt": 2})
+        for job in PAYLOAD_JOBS:
+            for attempt, wanted in ((2, True), (1, False), (12, False)):
+                self.assertEqual(fnmatch.fnmatchcase(artifact_name(job, "x86_64", attempt), pattern), wanted, (job, attempt))
+        self.assertFalse(fnmatch.fnmatchcase("release-linux-x86_64", pattern))
 
 
-@unittest.skipUnless(BASH and JQ, "needs bash and jq")
-class NightlyRetentionTests(unittest.TestCase):
+class NightlyFlatpakTests(unittest.TestCase):
+    def test_it_pushes_nothing_and_needs_no_package_write(self):
+        # The signer pushes by digest once the release is published.
+        job = JOBS["nightly-flatpak"]
+        self.assertNotIn("permissions", job)
+        for s in job["steps"]:
+            text = json.dumps(s)
+            for word in ("skopeo", "docker://", "ghcr.io", "secrets."):
+                self.assertNotIn(word, text, s)
+
+    def test_it_uploads_the_bundle_the_oci_manifest_and_the_oci_archive(self):
+        upload = uses("nightly-flatpak", "actions/upload-artifact@")["with"]
+        self.assertEqual(upload["path"].splitlines(), ["${{ steps.bundle.outputs.bundle }}",
+                                                  "${{ steps.bundle.outputs.oci-manifest }}",
+                                                  "${{ steps.bundle.outputs.oci-archive }}"])
+        self.assertEqual(upload["if-no-files-found"], "error")
+
+
+class AttestTests(unittest.TestCase):
+    JOB = JOBS["nightly-attest"]
+    ALL = ["linux", "macos", "windows"]
+
+    def gate(self, inputs=(), results=(), platforms=ALL, skip="false", cancelled=False):
+        inputs = {"nightly": True, "has-arch": True, **dict(inputs)}
+        results = {"version": "success", **{job: "success" for job in PAYLOAD_JOBS}, **dict(results)}
+        outputs = {"skip": skip, "launcher-platforms": json.dumps(platforms)}
+        return evaluate(self.JOB["if"], inputs, results, outputs, cancelled)
+
+    def test_it_needs_every_nightly_build_and_only_attestation_rights(self):
+        self.assertEqual(self.JOB["needs"], ["version", *PAYLOAD_JOBS])
+        self.assertEqual(self.JOB["permissions"], {"contents": "read", "actions": "read", "id-token": "write",
+                                                   "attestations": "write"})
+        self.assertNotIn("environment", self.JOB)
+        self.assertFalse(any("secrets." in json.dumps(s) for s in self.JOB["steps"]))
+
+    def test_it_runs_only_when_every_expected_payload_was_built(self):
+        launchers_skipped = {job: "skipped" for job in LAUNCHER_JOBS}
+        for case, kwargs, wanted in (
+            ("registry app", {}, True),
+            ("distro-only app", {"platforms": [], "results": launchers_skipped}, True),
+            ("Arch turned off", {"inputs": {"has-arch": False}, "results": {"nightly-arch": "skipped"}}, True),
+            ("Arch skipped although on", {"results": {"nightly-arch": "skipped"}}, False),
+            ("listed launcher skipped", {"results": {"nightly-launcher-windows": "skipped"}}, False),
+            ("launcher failed", {"results": {"nightly-launcher-macos": "failure"}}, False),
+            ("unlisted launcher failed", {"platforms": ["linux"], "results": {
+                "nightly-launcher-windows": "failure", "nightly-launcher-macos": "skipped"}}, False),
+            ("Flatpak failed", {"results": {"nightly-flatpak": "failure"}}, False),
+            ("Linux failed", {"results": {"nightly-linux": "failure"}}, False),
+            ("unchanged source", {"skip": "true"}, False),
+            ("cancelled", {"cancelled": True}, False),
+            ("not nightly", {"inputs": {"nightly": False}}, False),
+        ):
+            with self.subTest(case):
+                self.assertEqual(self.gate(**kwargs), wanted)
+
+    @unittest.skipUnless(BASH, "needs bash")
+    def test_a_partial_re_run_stops_before_anything_else(self):
+        names = [s.get("name") or s.get("uses") for s in self.JOB["steps"]]
+        check = "Require the attempt that planned the identity"
+        self.assertEqual(names.index(check), 1)
+        script = step("nightly-attest", check)["run"]
+        for identity, attempt, ok in ((IDENTITY, "2", True), (IDENTITY, "3", False), ("", "2", False),
+                                      (IDENTITY.replace(str(RUN_ID), "1"), "2", False)):
+            with self.subTest(identity=identity, attempt=attempt), tempfile.TemporaryDirectory() as tmp:
+                result = run(script, tmp, tmp, IDENTITY=identity, RUN_ID=str(RUN_ID), RUN_ATTEMPT=attempt)
+                self.assertEqual(result.returncode == 0, ok, result.stdout)
+                if not ok:
+                    self.assertIn("use Re-run all jobs", result.stdout)
+
+    def test_the_tooling_is_this_workflows_own_commit_and_the_app_is_never_checked_out(self):
+        checkouts = [s for s in self.JOB["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+        self.assertEqual([c["with"] for c in checkouts], [{
+            "repository": "${{ job.workflow_repository }}", "ref": "${{ job.workflow_sha }}",
+            "path": ".nightly-tools", "persist-credentials": "false"}])
+        self.assertEqual(step("nightly-attest", "Verify the tooling checkout")["env"]["WORKFLOW_SHA"], "${{ job.workflow_sha }}")
+        self.assertIn(".nightly-tools/actions/nightly-feed/nightly_handoff.py write",
+                      step("nightly-attest", "Write the nightly manifest")["run"])
+
+    def test_the_manifest_is_attested_then_uploaded_under_its_run_and_attempt(self):
+        names = [s.get("name") or s.get("uses") for s in self.JOB["steps"]]
+        attest = step("nightly-attest", "Attest the nightly manifest")
+        pins = {s["uses"] for path in (ROOT / ".github/workflows").glob("*.yml") for s in re.finditer(
+            r"uses: (actions/attest-build-provenance@\S+)", path.read_text()) for s in [{"uses": s[1]}]}
+        self.assertEqual(pins, {attest["uses"]})
+        self.assertEqual(attest["with"], {"subject-path": ".nightly-manifest/nightly-manifest.json"})
+        upload = uses("nightly-attest", "actions/upload-artifact@")
+        self.assertEqual(upload["with"]["name"], "nightly-manifest-${{ github.run_id }}-${{ github.run_attempt }}")
+        self.assertEqual(upload["with"]["path"], attest["with"]["subject-path"])
+        self.assertLess(names.index("Write the nightly manifest"), names.index("Attest the nightly manifest"))
+        self.assertLess(names.index("Attest the nightly manifest"), names.index(upload["uses"]))
+
+    @unittest.skipUnless(BASH, "needs bash")
+    def test_the_manifest_covers_every_payload_release_yml_uploads(self):
+        # The artifacts as download-artifact lays them out, named by the upload steps above.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp).resolve()
+            (work / ".nightly-tools").symlink_to(ROOT)
+            nv = feed.ni.nv_from_identity(IDENTITY)
+            plan = {"app": "photocraft", "prefix": "photocraft", "identity": IDENTITY, "nv": nv,
+                    "groups": {"riscv64": True, "arch": True}}
+            for name, info in feed.expected_release_assets(plan, stage="producer").items():
+                kind, _, arch = info["origin"].removeprefix("nightly-").partition("-")
+                job = info["origin"] if kind == "launcher" else f"nightly-{kind}"
+                folder = work / ".nightly-artifacts" / artifact_name(job, arch, 2)
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / name).write_text(name)
+            values = {"github.run_attempt": 2, "needs.version.outputs.nightly-version": nv,
+                      "inputs.app-name": "photocraft", "needs.version.outputs.nightly-identity": IDENTITY,
+                      "needs.version.outputs.nightly-published-at": PUBLISHED}
+            github = {"GITHUB_WORKSPACE": str(work), "GITHUB_REPOSITORY": "storytold/photocraft", "GITHUB_SHA": SHA,
+                      "GITHUB_RUN_ID": str(RUN_ID), "GITHUB_RUN_ATTEMPT": "2", "GITHUB_OUTPUT": str(work / "output"),
+                      "GITHUB_WORKFLOW_REF": "storytold/photocraft/.github/workflows/release.yml@refs/heads/main"}
+            find = step("nightly-attest", "Find the file prefix")
+            result = run(find["run"], work, work, **github,
+                         **{k: render(v, **values) for k, v in find["env"].items()})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((work / "output").read_text(), "prefix=photocraft\n")
+            values["steps.prefix.outputs.prefix"] = "photocraft"
+            write = step("nightly-attest", "Write the nightly manifest")
+            result = run(write["run"], work, work, **github,
+                         **{k: render(v, **values) for k, v in write["env"].items()})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            manifest = json.loads((work / ".nightly-manifest/nightly-manifest.json").read_text())
+            self.assertEqual((manifest["tag"], manifest["run_attempt"], manifest["workflow"], len(manifest["files"])),
+                             ("v" + IDENTITY, 2, ".github/workflows/release.yml", 20))
+            self.assertTrue(all(f["artifact"].endswith("-2") for f in manifest["files"]))
+
+
+@unittest.skipUnless(BASH, "needs bash")
+class DispatchTests(unittest.TestCase):
+    JOB = JOBS["nightly-dispatch"]
+    STEP = step("nightly-dispatch", "Dispatch the signer on the release branch")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.log = self.root / "calls.log"
         self.log.touch()
-        executable(self.root / "bin/gh", FAKE_GH)
+        executable(self.root / "bin/gh", '#!/usr/bin/env bash\necho "gh $*" >>"$FAKE_LOG"\n'
+                                         '[[ "$1" != api || -z "${FAKE_MISSING:-}" ]]\n')
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_step(self, name, fixture, releases=None):
-        (self.root / "fixture.json").write_text(json.dumps(fixture))
-        extra = {}
-        if releases is not None:
-            (self.root / "releases.json").write_text(json.dumps(releases))
-            extra["FAKE_RELEASES"] = str(self.root / "releases.json")
-        result = run(step("nightly-release", name)["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log), **extra,
-                     FAKE_FIXTURE=str(self.root / "fixture.json"), GITHUB_REPOSITORY="storytold/DemoCraft",
-                     GITHUB_REPOSITORY_OWNER="storytold")
+    def dispatch(self, workflow="nightly-sign.yml", **extra):
+        return run(self.STEP["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log), REPO="storytold/photocraft",
+                   WORKFLOW=workflow, RUN_ID="57", RUN_ATTEMPT="2", GITHUB_STEP_SUMMARY=str(self.root / "summary"), **extra)
+
+    def test_it_runs_after_the_attestation_unless_dry_run(self):
+        self.assertEqual(self.JOB["needs"], ["nightly-attest"])
+        self.assertEqual(self.JOB["permissions"], {"contents": "read", "actions": "write"})
+        results = {"nightly-attest": "success"}
+        for dry, attested, wanted in ((False, "success", True), (True, "success", False), (False, "skipped", False)):
+            with self.subTest(dry_run=dry, attest=attested):
+                self.assertEqual(evaluate(self.JOB["if"], {"nightly": True, "dry-run": dry},
+                                          dict(results, **{"nightly-attest": attested}), {}), wanted)
+        spec = DATA["on"]["workflow_call"]["inputs"]["nightly-signer-workflow"]
+        self.assertEqual((spec["type"], spec["default"]), ("string", "nightly-sign.yml"))
+        self.assertEqual(self.STEP["env"]["WORKFLOW"], "${{ inputs.nightly-signer-workflow }}")
+        self.assertEqual((self.STEP["env"]["RUN_ID"], self.STEP["env"]["RUN_ATTEMPT"]),
+                         ("${{ github.run_id }}", "${{ github.run_attempt }}"))
+
+    def test_it_dispatches_the_signer_on_release_with_this_run(self):
+        result = self.dispatch()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        return [line for line in self.log.read_text().splitlines() if "DELETE" in line or "release delete" in line]
+        self.assertEqual(self.log.read_text().splitlines()[-1],
+                         "gh workflow run nightly-sign.yml --repo storytold/photocraft --ref release "
+                         "-f producer_run_id=57 -f producer_run_attempt=2")
 
-    def test_older_nightly_prereleases_are_deleted_with_their_tags(self):
-        releases = [{"tagName": f"nightly_1.0.0.20261{day:03d}0000", "isPrerelease": True,
-                     "publishedAt": f"2026-11-{day:02d}T00:00:00Z"} for day in (20, 24, 21, 23, 22)]
-        releases += [{"tagName": "v1.0.0", "isPrerelease": False, "publishedAt": "2026-11-01T00:00:00Z"},
-                     {"tagName": "v1.1.0-rc.1", "isPrerelease": True, "publishedAt": "2026-10-01T00:00:00Z"}]
-        deleted = self.run_step("Keep the newest 3 nightly prereleases", releases)
-        self.assertEqual(deleted, ["gh release delete nightly_1.0.0.202610210000 --yes --cleanup-tag",
-                                   "gh release delete nightly_1.0.0.202610200000 --yes --cleanup-tag"])
+    def test_a_signer_missing_on_release_fails_clearly(self):
+        result = self.dispatch(FAKE_MISSING="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::storytold/photocraft has no .github/workflows/nightly-sign.yml on its release branch",
+                      result.stdout)
+        self.assertNotIn("workflow run", self.log.read_text())
 
-    def test_only_nightly_images_of_unkept_or_unpublished_runs_are_deleted(self):
-        def version(id, day, *tags):
-            return {"id": id, "created_at": f"2026-11-{day:02d}T00:00:00Z", "metadata": {"container": {"tags": list(tags)}}}
-        versions = [
-            version(1, 24, "1.0.0.202611240000-nightly-x86_64", "nightly-x86_64"),
-            version(2, 23, "1.0.0.202611230000-nightly-x86_64"),
-            version(3, 22, "1.0.0.202611220000-nightly-x86_64"),
-            version(4, 21, "1.0.0.202611210000-nightly-x86_64"),
-            version(5, 20, "1.0.0-x86_64", "stable-x86_64"),
-            version(6, 19, "1.0.0.202611190000-nightly-x86_64", "1.0.0-x86_64"),
-            version(7, 18),
-            version(8, 17, "1.0.0.202611170000-nightly-aarch64"),
-            # Pushed by a run whose prerelease was never published.
-            version(9, 25, "1.0.0.202611250000-nightly-x86_64"),
-        ]
-        releases = [{"tagName": f"nightly_1.0.0.202611{day}0000", "isPrerelease": True,
-                     "publishedAt": f"2026-11-{day}T00:00:00Z"} for day in (21, 22, 23, 24)]
-        releases.append({"tagName": "v1.0.0", "isPrerelease": False, "publishedAt": "2026-11-26T00:00:00Z"})
-        deleted = self.run_step("Keep the Flatpak images of the kept nightly prereleases", versions, releases)
-        # Kept: 1 (nightly-x86_64, also the newest release), 2, 3; stable-tagged 5 and 6 and untagged 7 never.
-        self.assertEqual(sorted(deleted), [f"gh api -X DELETE orgs/storytold/packages/container/democraft/versions/{i}"
-                                           for i in (4, 8, 9)])
+    def test_it_refuses_a_workflow_that_is_not_a_file_name(self):
+        for workflow in ("../x.yml", "nightly sign.yml", "nightly-sign", ""):
+            with self.subTest(workflow=workflow):
+                self.assertNotEqual(self.dispatch(workflow).returncode, 0)
+        self.assertEqual(self.log.read_text(), "")
 
 
-@unittest.skipUnless(BASH, "needs bash")
-class DraftTitleTests(unittest.TestCase):
-    def test_a_title_replaces_the_default(self):
-        create = next(s for s in DRAFT["runs"]["steps"] if s["name"] == "Create or update draft release")
-        self.assertEqual(create["env"]["TITLE"], "${{ inputs.title }}")
-        for title, expected in (("", "Studio v0.42.0"), ("Studio Nightly 0.42.0.20261124.57.1", None)):
-            with self.subTest(title=title), tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                executable(root / "gh", '#!/usr/bin/env bash\necho "$*" >>calls\n[[ "$1 $2" != "release view" ]]\n')
-                (root / "SHA256SUMS.txt").write_text("checksum  package.deb\n")
-                result = run(create["run"], root, root, TAG_PREFIX="nightly-", VERSION="0.42.0", APP_TITLE="Studio",
-                             TITLE=title, PRERELEASE="true", GITHUB_SHA="a" * 40,
-                             GITHUB_STEP_SUMMARY=str(root / "summary"))
-                self.assertEqual(result.returncode, 0, result.stderr)
-                created = (root / "calls").read_text().splitlines()[1]
-                self.assertIn(f"--title {expected or title} --target", created)
-                self.assertIn("--prerelease", created)
+class ProducerInterfaceTests(unittest.TestCase):
+    def test_the_producer_holds_no_signing_key_and_publishes_nothing(self):
+        text = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("nightly-release", JOBS)
+        self.assertNotIn("LINUX_NIGHTLY_SIGNING_KEY", text)
+        self.assertNotIn("nightly-signing", text)
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS + ("nightly-dispatch",):
+            permissions = JOBS[name].get("permissions", {})
+            self.assertNotIn("packages", permissions, name)
+            self.assertNotIn("contents: write", f"contents: {permissions.get('contents', 'read')}", name)
 
+    def test_the_workflow_reports_the_nightly_tag(self):
+        self.assertEqual(DATA["on"]["workflow_call"]["outputs"]["nightly-tag"]["value"],
+                         "${{ jobs.version.outputs.nightly-tag }}")
+
+    def test_draft_release_takes_the_stable_artifacts_and_title_only(self):
+        self.assertNotIn("title", DRAFT["inputs"])
+        self.assertNotIn("artifact-pattern", DRAFT["inputs"])
+        download = next(s for s in DRAFT["runs"]["steps"] if s.get("uses", "").startswith("actions/download-artifact@"))
+        self.assertEqual(download["with"]["pattern"], "release-*")
 
 if __name__ == "__main__":
     unittest.main()
