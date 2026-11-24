@@ -8,8 +8,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+from urllib.parse import quote
 import tempfile
 import time
+
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import nightly_feed as n
 import nightly_policy as p
 import nightly_release as release_tools
@@ -102,10 +108,7 @@ def verify_release_target(
         n.require(ident.get("tag") == tag and (version is None or ident.get("version") == version),
                   "release publication identity mismatch")
     if nightly_json_bytes is not None:
-        feed = json.loads(nightly_json_bytes.decode("utf-8"))
-        n.require(feed.get("schema") == "craft-nightly/v2" and feed.get("repository") == repository and
-                  feed.get("tag") == tag and feed.get("source_commit") == source_commit,
-                  "NIGHTLY.json identity mismatch")
+        verify_descriptor(nightly_json_bytes, repository, tag, source_commit)
     if recent_releases is not None:
         normalized = [
             {
@@ -123,6 +126,13 @@ def verify_release_target(
                   "refusing to push floating OCI tags for non-newest nightly release")
     return release["id"]
 
+
+
+def verify_descriptor(raw, repository, tag, source_commit):
+    feed = release_tools.loads(raw)
+    n.require(isinstance(feed, dict) and feed.get("schema") == "craft-nightly/v2" and
+              feed.get("repository") == repository and feed.get("tag") == tag and
+              feed.get("source_commit") == source_commit, "NIGHTLY.json identity mismatch")
 
 
 def release_bindings(release, policy, receipt_sha256, *, repository, release_id, tag, version,
@@ -155,6 +165,32 @@ def release_bindings(release, policy, receipt_sha256, *, repository, release_id,
     names = request_tools.expected_signed_linux_support_names("photocraft", version, ("oci",))
     n.require(names <= set(linux["support"]), "OCI manifest/signature absent from Linux signing receipt")
     return req, {name: linux["support"][name] for name in names}
+
+
+def completed_publication(api, policy, proof, *, signer_id, signer_attempt, signer_sha):
+    """Authorize OCI against the exact completed publisher, never the invoking workflow."""
+    n.fields(proof, {"ownership", "checksums_sha256"}, "protected OCI proof")
+    owner = proof["ownership"]
+    n.fields(owner, {"schema", "app", "repository", "tag", "source_commit", "release_id",
+                     "producer", "signer", "policy_sha256", "signing_receipt_sha256"}, "OCI ownership")
+    n.require(owner["schema"] == "craft-nightly-ownership/v2" and owner["app"] == "photocraft" and
+              owner["repository"] == policy["repository"] == "storytold/photocraft" and
+              owner["policy_sha256"] == request_tools.digest(policy), "OCI ownership policy differs")
+    n.positive(owner["release_id"], "publisher release ID")
+    checksums = request_tools.hash_value(proof["checksums_sha256"])
+    release = api.request("GET", f"/releases/{owner['release_id']}")
+    tag = owner["tag"]
+    request_tools.commit(owner["source_commit"])
+    request, support = release_bindings(
+        release, policy, owner["signing_receipt_sha256"], repository=owner["repository"],
+        release_id=owner["release_id"], tag=tag, version=tag.removeprefix("v"),
+        source_commit=owner["source_commit"], producer_run_id=owner["producer"]["run_id"],
+        producer_run_attempt=owner["producer"]["run_attempt"], signer_run_id=signer_id,
+        signer_run_attempt=signer_attempt, signer_source_commit=signer_sha)
+    n.require(owner["signer"] == request["signer"] and owner["producer"] == request["producer"],
+              "protected ownership roles differ from immutable release")
+    release_tools.verified_history_roles(api, policy, request)
+    return owner, release, request, support, checksums
 
 
 def gh_json(repository, path, *, runner=subprocess.run):
@@ -218,16 +254,34 @@ def download_release_evidence(repository, bindings, directory, *, runner=subproc
                   "downloaded OCI publication file differs from immutable API bytes")
 
 
-def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, history_runner=subprocess.run, **kwargs):
+class ReadOnlyGitHub:
+    def __init__(self, repository):
+        self.repository = repository
+
+    def request(self, method, path):
+        n.require(method == "GET" and path.startswith("/"), "OCI publication proof permits only GET")
+        return gh_json(self.repository, path[1:])
+
+
+def recheck_publication(api, request):
+    for name in ("producer", "signer"):
+        request_tools.active(api, request[name])
+    ref = api.request("GET", "/git/ref/heads/release")
+    live = ref.get("object", {})
+    n.require(ref.get("ref") == "refs/heads/release" and live.get("type") == "commit" and
+              live.get("sha") == request["signer"]["source_commit"],
+              "protected release ref advanced during OCI publication")
+
+
+def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, publication_guard=None, history_runner=subprocess.run, **kwargs):
     """Only this bound publisher entry point may push; private verifier is testable offline."""
     directory = n.owned_path(evidence_dir)
-    sums = directory / "SHA256SUMS.txt"
-    n.require(n.digest_file(directory, sums.name)[1] == request_tools.hash_value(checksum_sha256),
+    sums_bytes = n.bounded_bytes(directory / "SHA256SUMS.txt", 65536, "OCI checksum inventory")
+    n.require(hashlib.sha256(sums_bytes).hexdigest() == request_tools.hash_value(checksum_sha256),
               "checksum inventory differs from publisher")
     for name, bound in release_support.items():
         n.require(n.digest_file(directory, name) == (bound["size"], bound["sha256"]),
                   "downloaded OCI support differs from publisher receipt")
-    sums_bytes = sums.read_bytes()
     checksums = parse_sha256sums(sums_bytes)
     descriptor = n.bounded_bytes(directory / "NIGHTLY.json", n.MAX_JSON_BYTES, "OCI descriptor")
     n.require(checksums.get("NIGHTLY.json") == hashlib.sha256(descriptor).hexdigest(),
@@ -251,7 +305,7 @@ def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, histo
         n.require(newest is not None and newest["id"] == kwargs["release_id"] and newest["tag_name"] == kwargs["tag"],
                   "refusing to push floating OCI tags for non-newest nightly release")
     return _verify_and_push_oci(sums_bytes=sums_bytes, package_dir=root, nightly_json_bytes=descriptor,
-                                freshness=freshness, **kwargs)
+                                freshness=freshness, publication_guard=publication_guard, **kwargs)
 
 
 def layout_manifest_digest(layout_dir):
@@ -315,7 +369,7 @@ def _copy_verified_oci(runner, layout, target, auth_file, expected_digest_hex, d
 
 def _verify_and_push_oci(
     *,
-    release,
+    release=None,
     repository,
     tag,
     version,
@@ -331,21 +385,25 @@ def _verify_and_push_oci(
     recent_releases=None,
     nightly_json_bytes=None,
     freshness=None,
+    publication_guard=None,
     runner=subprocess.run,
 ):
     """Verify release target, SHA256SUMS, .oci.sig, and OCI layout digest before pushing tags."""
-    verify_release_target(
-        release,
-        repository=repository,
-        tag=tag,
-        source_commit=source_commit,
-        release_id=release_id,
-        version=version,
-        producer_run_id=producer_run_id,
-        producer_run_attempt=producer_run_attempt,
-        recent_releases=recent_releases,
-        nightly_json_bytes=nightly_json_bytes,
-    )
+    if release is not None:
+        verify_release_target(
+            release,
+            repository=repository,
+            tag=tag,
+            source_commit=source_commit,
+            release_id=release_id,
+            version=version,
+            producer_run_id=producer_run_id,
+            producer_run_attempt=producer_run_attempt,
+            recent_releases=recent_releases,
+            nightly_json_bytes=nightly_json_bytes,
+        )
+    elif nightly_json_bytes is not None:
+        verify_descriptor(nightly_json_bytes, repository, tag, source_commit)
     sums = parse_sha256sums(sums_bytes)
     pkg_root = n.owned_path(package_dir)
     n.require(pkg_root.is_dir() and not pkg_root.is_symlink(), "package directory required")
@@ -381,6 +439,8 @@ def _verify_and_push_oci(
         n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
         verified_layouts.append((arch, layout, manifest_digest))
 
+    if publication_guard is not None:
+        publication_guard()
     with tempfile.TemporaryDirectory(prefix="nightly-oci-auth-") as auth_dir:
         auth_file = Path(auth_dir) / "auth.json"
         auths = {"ghcr.io": {"auth": base64.b64encode(f"{gh_user}:{gh_token}".encode("utf-8")).decode("ascii")}}
@@ -411,3 +471,79 @@ def _verify_and_push_oci(
                     pushed.append(dh_target)
 
     return pushed
+
+
+def report_policy():
+    policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+    request_tools.validate_policy(policy)
+    n.require(policy["signer_tooling_revision"] == os.environ["TOOLING_REVISION"], "policy signer_tooling_revision mismatch")
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+        out.write(f"oci-enabled={str('oci' in request_tools.policy_linux_package_formats(policy)).lower()}\n")
+
+
+def stage_proof():
+    policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+    if "oci" not in request_tools.policy_linux_package_formats(policy):
+        return
+    owner = n.bounded_json(".ownership/ownership.json")
+    n.require(owner["schema"] == "craft-nightly-ownership/v2", "finalized ownership required")
+    n.positive(owner["release_id"], "publisher release ID")
+    request_tools.hash_value(owner["signing_receipt_sha256"])
+    _, checksums = n.digest_file(".packet", "SHA256SUMS.txt")
+    Path(".oci-proof").mkdir()
+    with Path(".oci-proof/proof.json").open("x", encoding="utf-8") as out:
+        json.dump({"ownership": owner, "checksums_sha256": checksums}, out)
+
+
+def resolve_completed_publication():
+    env = os.environ
+    repo = env["GITHUB_REPOSITORY"]
+    policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+    proof = n.bounded_json(".publisher-proof/proof.json")
+    api = ReadOnlyGitHub(repo)
+    ownership, release, request, support, checksums = completed_publication(
+        api, policy, proof, signer_id=int(env["SIGNER_ID"]),
+        signer_attempt=int(env["SIGNER_ATTEMPT"]), signer_sha=env["SIGNER_SHA"])
+    rel_id, tag, source = (ownership[key] for key in ("release_id", "tag", "source_commit"))
+    ref = gh_json(repo, "git/ref/tags/" + quote(tag, safe=""))
+    target = ref.get("object", {})
+    n.require(target.get("type") == "commit" and target.get("sha") == source,
+              "immutable release tag commit differs from publisher")
+    bindings = verified_release_assets(release, support, checksums, repository=repo)
+    download_release_evidence(repo, bindings, ".release-evidence")
+    ids = verify_producer_artifacts(repo, request, policy)
+    # The later step consumes this already-validated identity, not stdout or a raw release body.
+    state = {"repository": repo, "release_id": rel_id, "tag": tag, "version": tag.removeprefix("v"),
+             "source_commit": source, "checksum_sha256": checksums, "release_support": support,
+             "roles": {name: request[name] for name in ("producer", "signer")}}
+    release_tools.write_json(Path("oci-release-state.json"), state)
+    with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+        out.write(f"producer-id={request['producer']['run_id']}\n")
+        for arch, artifact_id in ids.items():
+            out.write(f"artifact-id-{arch}={artifact_id}\n")
+
+
+def push_completed_publication():
+    policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+    state = n.bounded_json("oci-release-state.json")
+    n.fields(state, {"repository", "release_id", "tag", "version", "source_commit",
+                     "checksum_sha256", "release_support", "roles"}, "bound OCI publication state")
+    roles = state.pop("roles")
+    api = ReadOnlyGitHub(state["repository"])
+    verify_and_push_oci(
+        **state,
+        evidence_dir=".release-evidence",
+        package_dir=".linux-packages",
+        public_key=".release-source/.github/nightly-linux-signing-key.asc",
+        fingerprint=policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"],
+        environment=os.environ,
+        publication_guard=lambda: recheck_publication(api, roles),
+    )
+
+
+if __name__ == "__main__":
+    commands = {"policy": report_policy, "stage-proof": stage_proof,
+                "resolve": resolve_completed_publication, "push": push_completed_publication}
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=commands)
+    commands[parser.parse_args().command]()

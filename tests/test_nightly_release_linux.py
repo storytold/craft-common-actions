@@ -470,8 +470,8 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
                 self.assertIn('path: .linux-packages', step)
                 self.assertIn('digest-mismatch: error', step)
+                self.assertLess(validate.index(step), validate.index('nightly_release_entry.py validate'))
         self.assertLess(validate.index('path: .unsigned/linux-x86_64'), validate.index('nightly_release_entry.py validate'))
-        self.assertLess(validate.index('path: .linux-packages'), validate.index('nightly_release_entry.py validate'))
 
     def test_publish_stops_when_the_run_is_cancelled(self):
         condition = job_block(self.release, 'publish').split('    runs-on:', 1)[0]

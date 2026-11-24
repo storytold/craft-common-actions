@@ -129,9 +129,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         publisher = jobs(self.release)["publish"]
         steps = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - |\Z)", publisher)
         tolerant = {name for name, block in steps if "continue-on-error:" in block}
-        proof = "Export confirmed immutable publication identity for downstream OCI"
-        self.assertEqual(tolerant, {"Retain only finalized ownership evidence", proof})
-        self.assertEqual(self.release.count("continue-on-error:"), 2)
+        proof = "Stage immutable OCI publication proof"
+        self.assertEqual(tolerant, {"Retain only finalized ownership evidence", "Retain finalized OCI publication proof", proof})
+        self.assertEqual(self.release.count("continue-on-error:"), 3)
         steps_by_name = dict(steps)
         self.assertIn(".ownership/ownership.json", steps_by_name[proof])
         self.assertIn('n.digest_file(".packet", "SHA256SUMS.txt")', steps_by_name[proof])
@@ -247,7 +247,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         oci = workflow("nightly-oci.yml")
         self.assertIn("packages: write", oci)
         self.assertNotIn("packages: write", self.release)
-        self.assertIn("verify_and_push_oci", oci)
+        self.assertIn("push_completed_publication", oci)
 
         unsigned_pkg = jobs(self.unsigned)["build-linux-packages"]
         self.assertNotIn("publish-linux-packages", self.unsigned.split("\njobs:\n", 1)[0])

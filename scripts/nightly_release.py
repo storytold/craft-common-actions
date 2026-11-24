@@ -849,7 +849,8 @@ def main():
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
             digest = stage_bundle(args.output, state, directories, manifests, claims,
                 linux_packages=linux_pkgs_arg, linux_package_claims=pkg_claims, policy=policy)
-            outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})
+            outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest,
+                "has-linux-packages": "true" if linux_pkgs_arg is not None else "false"})
             return
         if args.mode in ("guard", "sign"):
             n.require(args.directory and args.platform and args.expected_sha256, "independent exact trusted-job bundle binding required")

@@ -154,6 +154,8 @@ def publish_packet(api, ident, metadata, directory, guard=None, policy=None, *, 
     # Check the complete body before the exclusive tag reservation: a draft
     # refused after the tag exists cannot be retried by this flow.
     n.require(len(body)<=MAX_RELEASE_BODY_CHARACTERS and len(body.encode())<=n.MAX_JSON_BYTES,"publication policy body exceeds bound")
+    for name, (size, _) in metadata.items():
+        n.require(0 < size < 2 * 1024**3, f"release asset must be smaller than 2 GiB: {name}")
     tag = quote(ident["tag"], safe="")
     absent(api, "/releases/tags/" + tag)
     absent(api, "/git/ref/tags/" + tag)

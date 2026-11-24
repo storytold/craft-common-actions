@@ -713,10 +713,10 @@ jobs:
             echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
             exit 1
           fi
+          base="$(basename "${tarballs[0]}" .tar.gz)"
           if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'oci' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
             test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
             packaging/linux/flatpak-oci.sh "${tarballs[0]}"
-            base="$(basename "${tarballs[0]}" .tar.gz)"
             test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
             python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
           import hashlib, json, pathlib, shutil, sys
@@ -740,6 +740,12 @@ jobs:
             fi
           else
             packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
+          fi
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            test -f "dist/release/$base.flatpak" && test -s "dist/release/$base.flatpak" || {
+              echo "::error::expected Flatpak bundle dist/release/$base.flatpak not found or empty"
+              exit 1
+            }
           fi
       - name: Find tarball for Arch package
         id: tarball

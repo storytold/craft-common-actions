@@ -108,10 +108,10 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             "html_url": f"https://github.com/{self.repo}/releases/tag/{self.tag}",
         }
         self.env = {
-            "GITHUB_TOKEN": "tok",
+            "GITHUB_TOKEN": "fixture-ghcr-secret",
             "GITHUB_ACTOR": "bot",
             "DOCKERHUB_USERNAME": "dhuser",
-            "DOCKERHUB_TOKEN": "dhtok",
+            "DOCKERHUB_TOKEN": "fixture-dockerhub-secret",
             "RUNNER_TEMP": str(self.root),
         }
 
@@ -592,6 +592,39 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             with self.assertRaisesRegex(n.InvalidNightly, "immutable"):
                 oci.release_bindings({**oci_release, "immutable": False}, oci_policy, req.digest(oci_receipts), **binds)
 
+            # The detached OCI invocation may proceed only from an exact completed
+            # source-owned publisher, not just from a green workflow_run event.
+            owner = {"schema": "craft-nightly-ownership/v2", "app": "photocraft", "repository": self.repo,
+                     "tag": oci_release["tag_name"], "release_id": 42, "source_commit": self.commit,
+                     "producer": producer, "signer": signer, "policy_sha256": req.digest(oci_policy),
+                     "signing_receipt_sha256": req.digest(oci_receipts)}
+            proof = {"ownership": owner, "checksums_sha256": "8" * 64}
+            repository = {"id": 1, "full_name": self.repo}
+
+            def run(role, branch):
+                return {**role, "id": role["run_id"], "head_sha": role["source_commit"], "head_branch": branch,
+                        "path": role["workflow_path"], "repository": repository, "head_repository": repository,
+                        "triggering_actor": {"login": role["triggering_actor"]}, "status": "completed", "conclusion": "success"}
+
+            class CompletionAPI:
+                def request(self, method, path):
+                    self_test.assertEqual(method, "GET")
+                    if path.startswith("/actions/runs/102/attempts/1/jobs?"):
+                        return {"total_count": 1, "jobs": [job]}
+                    return rows[path]
+
+            self_test = self
+            rows = {"/releases/42": oci_release, "/actions/runs/101/attempts/1": run(producer, "main"),
+                    "/actions/runs/102/attempts/1": run(signer, "release")}
+            job = {"status": "completed", "conclusion": "success",
+                   "steps": [{"name": rel.PUBLISH_STEP, "conclusion": "success"}]}
+            completed = dict(signer_id=102, signer_attempt=1, signer_sha=signer["source_commit"])
+            self.assertEqual(oci.completed_publication(CompletionAPI(), oci_policy, proof, **completed),
+                             (owner, oci_release, oci_req, oci_support, "8" * 64))
+            job["steps"][0]["conclusion"] = "failure"
+            with self.assertRaisesRegex(n.InvalidNightly, "publication step absent"):
+                oci.completed_publication(CompletionAPI(), oci_policy, proof, **completed)
+
     def test_validate_and_guard_reject_tampered_linux_package_in_bundle(self):
         import nightly_release as rel
 
@@ -759,7 +792,8 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         for cmd in calls:
             self.assertNotIn("--dest-creds", cmd)
             self.assertIn("--authfile", cmd)
-            self.assertFalse(any("gh-tok" in arg or "dh-tok" in arg for arg in cmd))
+            for key in ("GITHUB_TOKEN", "DOCKERHUB_TOKEN"):
+                self.assertNotIn(self.env[key], " ".join(cmd))
 
     def test_verify_linux_requires_signature_for_every_package_and_rejects_unknown_sig(self):
         import nightly_release_linux as linux_rel
