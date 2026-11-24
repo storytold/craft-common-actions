@@ -110,11 +110,32 @@ pkgver="${pkgver//-/}"
 shopt -s nullglob
 desktops=("$stage"/share/applications/*.desktop)
 shopt -u nullglob
-if [[ "${#desktops[@]}" -gt 0 ]]; then
-  pkgname="$(basename "${desktops[0]}" .desktop)"
+canonical="ai.storyteller.$app"
+if [[ -f "$stage/share/applications/$canonical.desktop" ]]; then
+  base_pkgname="$canonical"
+elif [[ -f "$stage/share/applications/$canonical.nightly.desktop" ]]; then
+  base_pkgname="$canonical.nightly"
+elif [[ "${#desktops[@]}" -gt 0 ]]; then
+  base_pkgname="$(basename "${desktops[0]}" .desktop)"
 else
-  pkgname="ai.storyteller.$app"
+  base_pkgname="ai.storyteller.$app"
 fi
+pkgname="$base_pkgname"
+is_nightly=0
+pkg_alias="$app"
+if [[ "$raw_version" == *-nightly* ]]; then
+  is_nightly=1
+  pkg_alias="$app-nightly"
+  if [[ "$pkgname" != *-nightly && "$pkgname" != *.nightly ]]; then
+    if [[ "$pkgname" == *.* ]]; then
+      pkgname="${pkgname}.nightly"
+    else
+      pkgname="${pkgname}-nightly"
+    fi
+  fi
+fi
+app_re="$(printf '%s' "$app" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
+base_pkgname_re="$(printf '%s' "$base_pkgname" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
 
 # The package name is derived from an archive-controlled .desktop basename and is
 # written into PKGBUILD (evaluated by makepkg as Bash). Validate it against a safe
@@ -231,8 +252,8 @@ optdepends=(
   'xdg-desktop-portal: native desktop integration and file dialogs'
   'cups: printing support'
 )
-provides=($(printf '%q' "$app=$pkgver-$pkgrel"))
-conflicts=($(printf '%q' "$app") $(printf '%q' "$app-bin") $(printf '%q' "$app-git"))
+provides=($(printf '%q' "$pkg_alias=$pkgver-$pkgrel"))
+conflicts=($(printf '%q' "$pkg_alias") $(printf '%q' "$pkg_alias-bin") $(printf '%q' "$pkg_alias-git"))
 options=('!strip' '!debug')
 
 package() {
@@ -243,6 +264,218 @@ package() {
   if [ -d "$stage/share" ]; then
     cp -dr --no-preserve=ownership "$stage/share" "\$pkgdir/usr/"
   fi
+$(if [[ "$is_nightly" -eq 1 ]]; then
+cat <<NIGHTLY_PKG
+  nightly_id() {
+    case "\$1" in
+      *-nightly | *.nightly) printf '%s' "\$1" ;;
+      *.*) printf '%s.nightly' "\$1" ;;
+      *) printf '%s-nightly' "\$1" ;;
+    esac
+  }
+  move_nightly() {
+    [ "\$1" != "\$2" ] || return 0
+    if [ -e "\$2" ] || [ -L "\$2" ]; then
+      printf 'error: conflicting stable and nightly paths: %s and %s\n' "\$1" "\$2" >&2
+      return 1
+    fi
+    mv -- "\$1" "\$2"
+  }
+  for pair in "bin/$app:bin/$app-nightly" "bin/$app-cli:bin/$app-nightly-cli" "share/doc/$app:share/doc/$app-nightly"; do
+    from="\$pkgdir/usr/\${pair%:*}"
+    to="\$pkgdir/usr/\${pair#*:}"
+    if [ -e "\$from" ] || [ -L "\$from" ]; then
+      move_nightly "\$from" "\$to" || return 1
+    fi
+  done
+
+  desktop_map="\$(mktemp)" || return 1
+  for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
+    [ -f "\$desktop_file" ] || continue
+    desktop_id="\${desktop_file##*/}"
+    desktop_id="\${desktop_id%.desktop}"
+    if [[ ! "\$desktop_id" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*\$ ]]; then
+      printf 'error: invalid desktop ID: %s\n' "\$desktop_id" >&2
+      rm -f -- "\$desktop_map"
+      return 1
+    fi
+    new_id="\$(nightly_id "\$desktop_id")"
+    printf '%s %s\n' "\$desktop_id.desktop" "\$new_id.desktop" >> "\$desktop_map"
+    case "\$desktop_id" in
+      *.nightly | *-nightly)
+        stable_id="\${desktop_id%[.-]nightly}"
+        printf 'icon %s %s\n' "\$stable_id" "\$new_id" >> "\$desktop_map"
+        ;;
+    esac
+    if [ -d "\$pkgdir/usr/share/icons" ]; then
+      while IFS= read -r icon; do
+        icon="\${icon#Icon=}"
+        [[ "\$icon" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*\$ ]] || continue
+        if find "\$pkgdir/usr/share/icons" -type f \( -name "\$icon.png" -o -name "\$icon.svg" -o -name "\$icon.xpm" \) -print -quit | grep -q .; then
+          printf 'icon %s %s\n' "\$icon" "\$(nightly_id "\$icon")" >> "\$desktop_map"
+        fi
+      done < <(grep '^Icon=' "\$desktop_file")
+    fi
+  done
+  for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
+    [ -f "\$desktop_file" ] || continue
+    desktop_id="\${desktop_file##*/}"
+    new_id="\$(nightly_id "\${desktop_id%.desktop}")"
+    insert_wm=1
+    if grep -q '^StartupWMClass=' "\$desktop_file"; then
+      insert_wm=0
+    fi
+    awk -v app="$app" -v base="$base_pkgname" -v pkg="$pkgname" -v insert_wm="\$insert_wm" '
+      BEGIN { inserted = 0 }
+      FILENAME == ARGV[1] {
+        if (\$1 == "icon") {
+          if (!(\$2 in icons)) icons[\$2] = \$3
+        } else desktop[substr(\$1, 1, length(\$1) - 8)] = substr(\$2, 1, length(\$2) - 8)
+        next
+      }
+      /^\[Desktop Entry\]$/ {
+        print
+        if (insert_wm == 1 && !inserted) { print "StartupWMClass=" base; inserted = 1 }
+        next
+      }
+      /^(Exec|TryExec)=/ {
+        at = index(\$0, "=")
+        rest = substr(\$0, at + 1)
+        quote = ""
+        if (substr(rest, 1, 1) == "\\"") {
+          if (!match(rest, /^"[^"]+"/)) { print; next }
+          quote = "\\""
+          token_len = RLENGTH
+          cmd = substr(rest, 2, token_len - 2)
+        } else {
+          if (!match(rest, /^[^ \t]+/)) { print; next }
+          token_len = RLENGTH
+          cmd = substr(rest, 1, token_len)
+        }
+        suffix = substr(rest, token_len + 1)
+        if (suffix != "" && suffix !~ /^[ \t]/) { print; next }
+        prefix = ""
+        if (index(cmd, "/usr/bin/") == 1) { prefix = "/usr/bin/"; cmd = substr(cmd, 10) }
+        if (cmd == app || cmd == app "-cli") {
+          print substr(\$0, 1, at) quote prefix app "-nightly" substr(cmd, length(app) + 1) quote suffix
+          next
+        }
+      }
+      /^Icon=/ {
+        icon = substr(\$0, 6)
+        if (icon in desktop) { print "Icon=" desktop[icon]; next }
+        if (icon in icons) { print "Icon=" icons[icon]; next }
+        if (icon == base) { print "Icon=" pkg; next }
+      }
+      { print }
+      END { if (insert_wm == 1 && !inserted) print "StartupWMClass=" base }
+    ' "\$desktop_map" "\$desktop_file" > "\$desktop_file.tmp" && mv -- "\$desktop_file.tmp" "\$desktop_file" || { rm -f -- "\$desktop_map"; return 1; }
+    move_nightly "\$desktop_file" "\${desktop_file%/*}/\$new_id.desktop" || { rm -f -- "\$desktop_map"; return 1; }
+  done
+  for metainfo_file in "\$pkgdir/usr/share/metainfo/"*.metainfo.xml; do
+    [ -f "\$metainfo_file" ] || continue
+    stem="\${metainfo_file##*/}"
+    stem="\${stem%.metainfo.xml}"
+    awk '
+      function nightly(s) {
+        if (s ~ /[.-]nightly\$/) return s
+        return s (index(s, ".") ? ".nightly" : "-nightly")
+      }
+      function replace_all(s, old, new,    i, out) {
+        out = ""
+        while ((i = index(s, old)) > 0) {
+          out = out substr(s, 1, i - 1) new
+          s = substr(s, i + length(old))
+        }
+        return out s
+      }
+      FILENAME == ARGV[1] { if (\$1 != "icon") desktop[\$1] = \$2; next }
+      {
+        if (match(\$0, /<id>[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*<\\/id>/)) {
+          id = substr(\$0, RSTART + 4, RLENGTH - 9)
+          \$0 = substr(\$0, 1, RSTART + 3) nightly(id) substr(\$0, RSTART + RLENGTH - 5)
+        }
+        for (old in desktop) {
+          single = sprintf("%c", 39)
+          tag = "<launchable type=" single "desktop-id" single ">"
+          \$0 = replace_all(\$0, tag old "</launchable>", tag desktop[old] "</launchable>")
+          \$0 = replace_all(\$0, "<launchable type=\\"desktop-id\\">" old "</launchable>", "<launchable type=\\"desktop-id\\">" desktop[old] "</launchable>")
+        }
+        print
+      }
+    ' "\$desktop_map" "\$metainfo_file" > "\$metainfo_file.tmp" && mv -- "\$metainfo_file.tmp" "\$metainfo_file" || { rm -f -- "\$desktop_map"; return 1; }
+    move_nightly "\$metainfo_file" "\${metainfo_file%/*}/\$(nightly_id "\$stem").metainfo.xml" || { rm -f -- "\$desktop_map"; return 1; }
+  done
+  for mime_file in "\$pkgdir/usr/share/mime/packages/"*.xml; do
+    [ -f "\$mime_file" ] || continue
+    stem="\${mime_file##*/}"
+    move_nightly "\$mime_file" "\${mime_file%/*}/\$(nightly_id "\${stem%.xml}").xml" || { rm -f -- "\$desktop_map"; return 1; }
+  done
+  if [ -d "\$pkgdir/usr/share/icons" ]; then
+    find "\$pkgdir/usr/share/icons" -type f -print0 | while IFS= read -r -d '' icon_path; do
+      icon_name="\${icon_path##*/}"
+      ext="\${icon_name##*.}"
+      [ "\$icon_name" != "\$ext" ] || continue
+      stem="\${icon_name%.*}"
+      [[ "\$stem" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*\$ ]] || continue
+      if [ "\$stem" = "$base_pkgname" ]; then
+        icon_id="$pkgname"
+      else
+        icon_id="\$(awk -v name="\$stem" '
+          \$1 == name ".desktop" { desktop = substr(\$2, 1, length(\$2) - 8) }
+          \$1 == "icon" && \$2 == name && icon == "" { icon = \$3 }
+          END { print (desktop != "" ? desktop : icon) }
+        ' "\$desktop_map")"
+        [ -n "\$icon_id" ] || continue
+      fi
+      move_nightly "\$icon_path" "\${icon_path%/*}/\$icon_id.\$ext" || exit 1
+    done || { rm -f -- "\$desktop_map"; return 1; }
+  fi
+  rm -f -- "\$desktop_map"
+  if [ -d "\$pkgdir/usr/share/man" ]; then
+    find "\$pkgdir/usr/share/man" -type f \( -name "$app.1*" -o -name "$app-cli.1*" -o -name "$app-cli-*.1*" \) | while IFS= read -r man_path; do
+      man_base="\$(basename "\$man_path")"
+      case "\$man_base" in
+        "$app-cli.1"* | "$app-cli-"*.1*) new_base="$app-nightly-cli\${man_base#"$app-cli"}" ;;
+        "$app.1"*) new_base="$app-nightly\${man_base#"$app"}" ;;
+        *) continue ;;
+      esac
+      move_nightly "\$man_path" "\${man_path%/*}/\$new_base" || exit 1
+    done || return 1
+  fi
+  for comp in "\$pkgdir/usr/share/bash-completion/completions/$app-cli" "\$pkgdir/usr/share/bash-completion/completions/$app"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="\${comp_base/#$app/$app-nightly}"
+    sed -E \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(_cli)([^[:alnum:]_-]|\$)#\\1_${app}_nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
+  done
+  for comp in "\$pkgdir/usr/share/zsh/site-functions/_$app-cli" "\$pkgdir/usr/share/zsh/site-functions/_$app"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="_$app-nightly\${comp_base#_$app}"
+    sed -E \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(_cli)([^[:alnum:]_-]|\$)#\\1_${app}_nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
+  done
+  for comp in "\$pkgdir/usr/share/fish/vendor_completions.d/$app-cli.fish" "\$pkgdir/usr/share/fish/vendor_completions.d/$app.fish"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="\${comp_base/#$app/$app-nightly}"
+    sed -E \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
+      "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
+  done
+NIGHTLY_PKG
+fi)
 
   find "\$pkgdir/usr" -type d -exec chmod 0755 {} +
   find "\$pkgdir/usr" -type f -perm /111 -exec chmod 0755 {} +

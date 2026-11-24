@@ -132,6 +132,139 @@ class ThreePlatformRunTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.previous_publication(api, bt.registry, policy, bt.request, [api.release])
 
+    def test_linux_packages_run_end_to_end_through_verify_publish_and_history(self):
+        import copy
+        bt = self.bt
+        formats = ['appimage', 'flatpak', 'arch']
+        bt.fx.policy['platforms'][LINUX]['package_formats'] = formats
+        key = '/actions/runs/100/artifacts?per_page=20&page=1'
+        bt.fx.api.rows[key] = {'total_count': 6, 'artifacts': [
+            bt.fx.item, bt.fx.mac_item, bt.fx.linux_item,
+            bt.fx.pkg_x86_item, bt.fx.pkg_arm_item, bt.fx.pkg_arch_item]}
+        bt.policy = bt.fx.policy
+        bt.request = bt.fx.invoke()
+        bt.state = {'request': bt.request, 'quality': bt.state['quality'], 'plan': bt.plan}
+        policy = bt.policy
+        version = bt.plan['identity']['version']
+
+        directories = b.platform_directories(self.downloaded(), b.r.policy_platforms(policy))
+        manifests, claims = {}, {}
+        for platform, directory in directories.items():
+            (manifests[platform], claims[platform]), _ = bt.verified(directory, platform=platform)
+
+        pkg_dir = self.root/'linux-packages'; pkg_dir.mkdir()
+        expected_pkgs = b.r.expected_linux_package_names('photocraft', version, formats)
+        pkg_claims = {}
+        for name in sorted(expected_pkgs):
+            (pkg_dir/name).write_bytes(b'synthetic-linux-package-'+name.encode())
+            pkg_claims[name] = {'payload_sha256': b.n.digest_file(pkg_dir, name)[1]}
+
+        validated = self.root/'validated-pkgs'
+        bundle_digest = b.stage_bundle(
+            validated, bt.state, directories, manifests, claims,
+            linux_packages=pkg_dir, linux_package_claims=pkg_claims, policy=policy,
+        )
+        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, validated, policy=policy))
+
+        signed_root = self.root/'signed-pkgs'; signed_root.mkdir()
+        publish_env = {'RUNNER_TEMP': str(self.root)}
+        def windows_native(source, archive, output, env, ver):
+            Path(output).write_bytes(b'synthetic Authenticode-signed ZIP'); return SUBJECT
+        def mac_native(trust, unsigned, output, source, environment, ver):
+            (Path(output)/bt.plan['platforms'][MAC]['asset']).write_bytes(b'synthetic notarized app ZIP')
+            return {'verified_signer': TEAM, 'support': {}}
+        with patch.object(b.plat.signing, 'adapter'), patch.object(b.plat.signing, 'require_config'), \
+                patch.object(b.plat.signing, 'sign_windows', side_effect=windows_native), \
+                patch.object(b.plat.WINDOWS, 'verify', return_value=SUBJECT), \
+                patch.object(b.plat.plugin(MAC), 'sign', side_effect=mac_native):
+            for platform, secrets in ((WINDOWS, {'WINDOWS_CERTIFICATE': 'synthetic', 'WINDOWS_CERTIFICATE_PASSWORD': 'synthetic'}),
+                                      (MAC, {'APPLE_CERTIFICATE': 'synthetic'}),
+                                      (LINUX, {'LINUX_SIGNING_KEY': self.secret})):
+                digest = b.native_sign(policy, state, platform, validated, self.source, signed_root/platform, {**self.env, **secrets})
+                publish_env['SIGNED_BUNDLE_SHA256_'+b.plat.secret_key(platform)] = digest
+
+        for platform in (LINUX, MAC):
+            signed_state = b.verify_signed_bundle(signed_root/platform, publish_env['SIGNED_BUNDLE_SHA256_'+b.plat.secret_key(platform)], platform)
+            with patch.object(b.plat.plugin(MAC), 'verify', return_value=TEAM):
+                final = b.verify_platform(policy, signed_state, platform, signed_root/platform, self.source, self.env)
+            publish_env['VERIFIED_FINAL_SHA256_'+b.plat.secret_key(platform)] = final
+
+        shared, signed_dirs = b.signed_states(policy, signed_root, publish_env)
+        with patch.object(b.plat.WINDOWS, 'verify', return_value=SUBJECT):
+            self.assertTrue(b.verify_final(policy, shared, signed_dirs, self.source, {**self.env, **publish_env}))
+
+        # Reject if an expected signed Linux package or architecture is missing from the receipt.
+        dropped = copy.deepcopy(shared)
+        missing_arm = f'photocraft-{version}-linux-aarch64.pkg.tar.zst'
+        dropped['signing'][LINUX]['support'].pop(missing_arm)
+        dropped['signing'][LINUX]['support'].pop(missing_arm+'.sig')
+        with patch.object(b.plat.WINDOWS, 'verify', return_value=SUBJECT):
+            with self.assertRaises(ValueError):
+                b.verify_final(policy, dropped, signed_dirs, self.source, {**self.env, **publish_env})
+
+        combined = b.combine(shared, signed_dirs, self.root/'combined-pkgs')
+        api = bt.publication_api()
+        result = b.publish(policy, shared, combined, self.root/'packet-pkgs', self.root/'ownership-pkgs', api, lambda: True, bt.registry)
+        self.assertEqual(result['id'], 7)
+        uploads = {name for kind, name, _ in api.writes if kind == 'UPLOAD'}
+        expected_support = b.r.expected_signed_linux_support_names('photocraft', version, formats)
+        self.assertTrue(expected_support <= uploads)
+
+        prior = b.previous_publication(api, bt.registry, policy, bt.request, [api.release])
+        self.assertEqual(prior['identity'], bt.plan['identity'])
+        api.assets[:] = [asset for asset in api.assets if asset['name'] != missing_arm+'.sig']
+        with self.assertRaises(ValueError):
+            b.previous_publication(api, bt.registry, policy, bt.request, [api.release])
+
+    def test_pre_package_linux_history_validates_after_policy_enables_package_formats(self):
+        import copy
+        bt, old_policy = self.bt, copy.deepcopy(self.bt.policy)
+        platforms = b.r.policy_platforms(old_policy)
+        directories = b.platform_directories(self.downloaded(), platforms)
+        manifests, claims = {}, {}
+        for platform, directory in directories.items():
+            (manifests[platform], claims[platform]), _ = bt.verified(directory, platform=platform)
+        validated = self.root/'validated-night1'
+        bundle_digest = b.stage_bundle(validated, bt.state, directories, manifests, claims, policy=old_policy)
+        state = b.verify_bundle(validated, bundle_digest, b.validated_names(bt.plan, validated, policy=old_policy))
+        signed_root = self.root/'signed-night1'; signed_root.mkdir()
+        publish_env = {'RUNNER_TEMP': str(self.root)}
+        def windows_native(source, archive, output, env, ver):
+            Path(output).write_bytes(b'synthetic Authenticode-signed ZIP'); return SUBJECT
+        def mac_native(trust, unsigned, output, source, environment, ver):
+            (Path(output)/bt.plan['platforms'][MAC]['asset']).write_bytes(b'synthetic notarized app ZIP')
+            return {'verified_signer': TEAM, 'support': {}}
+        with patch.object(b.plat.signing, 'adapter'), patch.object(b.plat.signing, 'require_config'), \
+                patch.object(b.plat.signing, 'sign_windows', side_effect=windows_native), \
+                patch.object(b.plat.WINDOWS, 'verify', return_value=SUBJECT), \
+                patch.object(b.plat.plugin(MAC), 'sign', side_effect=mac_native):
+            for platform, secrets in ((WINDOWS, {'WINDOWS_CERTIFICATE': 'synthetic', 'WINDOWS_CERTIFICATE_PASSWORD': 'synthetic'}),
+                                      (MAC, {'APPLE_CERTIFICATE': 'synthetic'}),
+                                      (LINUX, {'LINUX_SIGNING_KEY': self.secret})):
+                digest = b.native_sign(old_policy, state, platform, validated, self.source, signed_root/platform, {**self.env, **secrets})
+                publish_env['SIGNED_BUNDLE_SHA256_'+b.plat.secret_key(platform)] = digest
+        for platform in (LINUX, MAC):
+            signed_state = b.verify_signed_bundle(signed_root/platform, publish_env['SIGNED_BUNDLE_SHA256_'+b.plat.secret_key(platform)], platform)
+            with patch.object(b.plat.plugin(MAC), 'verify', return_value=TEAM):
+                final = b.verify_platform(old_policy, signed_state, platform, signed_root/platform, self.source, self.env)
+            publish_env['VERIFIED_FINAL_SHA256_'+b.plat.secret_key(platform)] = final
+        shared, signed_dirs = b.signed_states(old_policy, signed_root, publish_env)
+        combined = b.combine(shared, signed_dirs, self.root/'combined-night1')
+        api = bt.publication_api()
+        b.publish(old_policy, shared, combined, self.root/'packet-night1', self.root/'ownership-night1', api, lambda: True, bt.registry)
+
+        # Night 2 enables all 6 Linux package formats on a newer release commit; Night 1's tarball-only receipt must still validate!
+        new_policy = copy.deepcopy(old_policy)
+        new_policy['platforms'][LINUX]['package_formats'] = list(b.r.SUPPORTED_LINUX_PACKAGE_FORMATS)
+        key = '/actions/runs/100/artifacts?per_page=20&page=1'
+        bt.fx.api.rows[key] = {'total_count': 6, 'artifacts': [
+            bt.fx.item, bt.fx.mac_item, bt.fx.linux_item,
+            bt.fx.pkg_x86_item, bt.fx.pkg_arm_item, bt.fx.pkg_arch_item]}
+        new_request = b.r.validate_request(new_policy, bt.fx.env, '100', '1', bt.fx.api, now=bt.fx.now)
+        with patch.object(b, 'prior_policy', return_value=old_policy):
+            prior = b.previous_publication(api, bt.registry, new_policy, new_request, [api.release])
+        self.assertEqual(prior['identity'], bt.plan['identity'])
+
 
 
 class BundleBoundTests(unittest.TestCase):

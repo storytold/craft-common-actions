@@ -322,16 +322,26 @@ def validate_feed_v2(registry, ident, version, feed):
     return True
 
 
-def stage_feed_v2(registry, ident, version, feed, artifacts, output):
+def stage_feed_v2(registry, ident, version, feed, artifacts, output, *, extra_assets=()):
     output = owned_path(output)
     validate_feed_v2(registry, ident, version, feed)
     require(feed == build_feed_v2(registry, ident, version, artifacts), 'signed descriptor differs from final package bytes')
     # Reuse the bounded copy-and-rehash boundary for signatures too; the serialized
     # descriptor remains the actual v2 target inventory, not flattened copy rows.
     copy_feed = {**feed, 'artifacts': list(feed['artifacts'])}
+    seen = set()
     for row in feed['artifacts']:
+        seen.add(row['asset']['name'])
         if 'signature' in row:
+            seen.add(row['signature']['name'])
             copy_feed['artifacts'].append({'asset': row['signature']})
+    for name in sorted(set(extra_assets)):
+        require(isinstance(name, str) and NAME.fullmatch(name) and name not in {'NIGHTLY.json', 'SHA256SUMS.txt'} and name not in seen,
+                'invalid or duplicate extra staged asset')
+        size, digest = digest_file(artifacts, name)
+        require(0 < size <= MAX_ASSET_BYTES, 'extra staged asset exceeds bound')
+        copy_feed['artifacts'].append({'asset': {'name': name, 'size': size, 'sha256': digest}})
+        seen.add(name)
     stage_feed(copy_feed, artifacts, output)
     descriptor = (json.dumps(feed, sort_keys=True, separators=(',', ':'))+'\n').encode()
     require(len(descriptor) <= MAX_JSON_BYTES, 'signed descriptor exceeds limit')

@@ -93,6 +93,15 @@ class PublisherTests(unittest.TestCase):
         self.assertFalse(self.api.reserved)
         self.assertFalse(self.api.published)
 
+    def test_release_asset_at_github_limit_refuses_before_tag_or_draft(self):
+        asset = "synthetic-nightly.AppImage"
+        self.metadata[asset] = (2 * 1024**3, "c" * 64)
+        with self.assertRaisesRegex(ValueError, "release asset must be smaller than 2 GiB"):
+            self.publish()
+        self.assertEqual(self.api.calls, [])
+        self.metadata[asset] = (2 * 1024**3 - 1, "c" * 64)
+        self.assertEqual(self.publish()["id"], 7)
+
     def test_bounded_release_body_preserves_the_existing_exclusive_publication_flow(self):
         result = p.publish_packet(self.api, self.ident, self.metadata, "UNUSED_FAKE_PATH",
             guard=lambda: True, policy={"synthetic": "source-only fixture"})

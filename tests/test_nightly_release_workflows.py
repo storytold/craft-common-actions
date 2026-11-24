@@ -31,7 +31,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_main_build_and_attester_are_separate_and_credential_bound(self):
         graph = jobs(self.unsigned)
-        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux"})
+        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux", "build-linux-packages", "build-linux-arch-arm", "attest-linux-packages"})
         self.assertEqual(graph["select-platforms"].count("secrets."), 0); self.assertIn("permissions: {}", graph["select-platforms"])
         self.assertIn("cargo metadata --locked", graph["git-sources"])
         self.assertIn("-Nightly -BuildOnly", graph["build"])
@@ -66,7 +66,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertIn("needs: validate", graph[name])
             self.assertIn("needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), '"+platform+"')", graph[name])
             self.assertIn("--platform "+platform, graph[name])
-        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 5)  # 3 downloads, validate, upload
+        self.assertEqual(graph["validate"].count("if: steps.admit.outputs.admitted == 'true'"), 8)  # 3 platform + 3 linux-package downloads, validate, upload
         self.assertIn("needs: [validate, sign-windows, sign-macos, verify-macos, smoke-macos, sign-linux, verify-linux]", graph["publish"])
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
@@ -88,7 +88,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                          "artifact-ids: ${{ steps.admit.outputs.artifact-id-macos-aarch64 }}", "path: .unsigned/windows-x86_64",
                          "path: .unsigned/macos-aarch64", "digest-mismatch: error"):
             self.assertIn(required, validator)
-        self.assertEqual(validator.count("merge-multiple: true"), 3)  # one exact download per supported platform
+        self.assertEqual(validator.count("merge-multiple: true"), 6)  # 3 platform + 3 linux-package downloads
 
     def test_only_signer_has_release_environment_and_only_leaf_step_exports_keys(self):
         graph = jobs(self.release)
@@ -125,12 +125,20 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("include-hidden-files: true", publisher)
         self.assertNotIn("prune", publisher.lower())
 
-    def test_only_finalized_ownership_upload_is_tolerant_not_verification_or_publication(self):
+    def test_only_post_publication_bookkeeping_is_tolerant_not_verification_or_publication(self):
         publisher = jobs(self.release)["publish"]
         steps = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - |\Z)", publisher)
         tolerant = {name for name, block in steps if "continue-on-error:" in block}
-        self.assertEqual(tolerant, {"Retain only finalized ownership evidence"})
-        self.assertEqual(self.release.count("continue-on-error:"), 1)
+        proof = "Stage immutable OCI publication proof"
+        self.assertEqual(tolerant, {"Retain only finalized ownership evidence", "Retain finalized OCI publication proof", proof})
+        self.assertEqual(self.release.count("continue-on-error:"), 3)
+        steps_by_name = dict(steps)
+        self.assertIn("nightly_oci.py stage-proof", steps_by_name[proof])
+        helper = (ROOT/"scripts/nightly_oci.py").read_text().split("def stage_proof():", 1)[1]
+        helper = helper.split("def resolve_completed_publication():", 1)[0]
+        self.assertIn(".ownership/ownership.json", helper)
+        self.assertIn('n.digest_file(".packet", "SHA256SUMS.txt")', helper)
+        self.assertLess(publisher.index("Publish the signed nightly and preserve ownership"), publisher.index(proof))
         upload = dict(steps)["Retain only finalized ownership evidence"]
         self.assertIn("        continue-on-error: true\n", upload)
         self.assertIn("path: .ownership/ownership.json", upload)
@@ -239,10 +247,37 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, notify)
         self.assertIn("gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services", notify)
 
+        oci = workflow("nightly-oci.yml")
+        self.assertIn("packages: write", oci)
+        self.assertNotIn("packages: write", self.release)
+        self.assertIn("nightly_oci.py push", jobs(oci)["push-oci"])
+
+        unsigned_pkg = jobs(self.unsigned)["build-linux-packages"]
+        self.assertNotIn("publish-linux-packages", self.unsigned.split("\njobs:\n", 1)[0])
+        for forbidden in ("secrets.", "id-token:", "attestations:", "environment:", "actions/cache"):
+            self.assertNotIn(forbidden, unsigned_pkg)
+        self.assertIn("if: matrix.arch == 'x86_64'", unsigned_pkg)
+        self.assertIn("ubuntu-24.04", jobs(self.unsigned)["build-linux-arch-arm"])
+
         step = next(s for s in data["jobs"]["notify-website"]["steps"] if s.get("name") == "Trigger website repo version bump")
         r = subprocess.run(["bash", "-c", step["run"]], env=dict(os.environ, GH_TOKEN=""), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not set", r.stdout)
+
+    def test_linux_package_selector_rejects_malformed_members_without_an_output(self):
+        import os, subprocess, tempfile, textwrap
+
+        block = jobs(self.unsigned)["select-platforms"].split("      - name: Validate optional Linux package formats", 1)[1]
+        script = textwrap.dedent(block.split("        run: |\n", 1)[1])
+        for formats in ('[{}]', '[["deb"]]', '["deb", "deb"]'):
+            with self.subTest(formats=formats), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)/"output"
+                env = dict(os.environ, PLATFORMS='["linux-x86_64"]',
+                    LINUX_PACKAGE_FORMATS=formats, GITHUB_OUTPUT=str(output))
+                result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.strip(), "linux-package-formats must be a JSON array of distinct supported formats")
+                self.assertFalse(output.exists())
 
     def test_outside_git_origin_refuses_without_running_cargo(self):
         import os, subprocess, sys, tempfile, textwrap

@@ -342,22 +342,7 @@ def linux_public_keyring(public_key, fingerprint, homedir, environment=None):
     return keyring
 
 
-def verify_linux_signature(public_key, signature, payload, fingerprint, environment):
-    """gpgv over exact bytes with only the reviewed key; one good signature bound to the primary."""
-    signature = n.owned_path(signature)
-    n.require(signature.is_file() and not signature.is_symlink() and 0 < signature.stat().st_size <= 16384,
-              'Linux detached signature missing or exceeds 16KiB')
-    raw = signature.read_bytes()
-    n.require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
-              all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
-    with tempfile.TemporaryDirectory(prefix='nightly-gpgv-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
-        homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
-        try:
-            keyring = linux_public_keyring(public_key, fingerprint, homedir, environment)
-            status = command(['/usr/bin/gpgv', '--homedir', homedir, '--status-fd', '1', '--keyring', keyring,
-                              signature, n.owned_path(payload)], env=verification_env(environment))
-        finally:
-            stop_gpg_agent(homedir)
+def _check_linux_gpgv_status(status, fingerprint):
     records = [line.split()[1:] for line in status.splitlines() if line.startswith('[GNUPG:] ')]
     kinds = [record[0] for record in records if record]
     n.require(not {'BADSIG', 'ERRSIG', 'EXPSIG', 'EXPKEYSIG', 'REVKEYSIG', 'NO_PUBKEY'} & set(kinds) and
@@ -366,6 +351,54 @@ def verify_linux_signature(public_key, signature, payload, fingerprint, environm
     valid = next(record for record in records if record and record[0] == 'VALIDSIG')
     n.require(len(valid) == 11 and valid[10] == fingerprint and valid[8] in LINUX_HASH_ALGORITHMS and valid[9] == '00',
               'Linux signature is not a binary-document signature by the reviewed primary with SHA-2')
+    return fingerprint
+
+
+def verify_linux_signature(public_key, signature, payload, fingerprint, environment, *, binary=False):
+    """gpgv over exact bytes with only the reviewed key; one good signature bound to the primary."""
+    signature = n.owned_path(signature)
+    n.require(signature.is_file() and not signature.is_symlink() and 0 < signature.stat().st_size <= 16384,
+              'Linux detached signature missing or exceeds 16KiB')
+    raw = signature.read_bytes()
+    if not binary:
+        n.require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
+                  all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
+    with tempfile.TemporaryDirectory(prefix='nightly-gpgv-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
+        homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
+        try:
+            keyring = linux_public_keyring(public_key, fingerprint, homedir, environment)
+            status = command(['/usr/bin/gpgv', '--homedir', homedir, '--status-fd', '1', '--keyring', keyring,
+                              signature, n.owned_path(payload)], env=verification_env(environment))
+        finally:
+            stop_gpg_agent(homedir)
+    return _check_linux_gpgv_status(status, fingerprint)
+
+
+def verify_oci_signature(public_key, signature, manifest, expected_reference, fingerprint, environment):
+    """Verify a containers/image simple-signing .oci.sig against the reviewed key and manifest SHA-256."""
+    signature = n.owned_path(signature)
+    manifest = n.owned_path(manifest)
+    n.require(signature.is_file() and not signature.is_symlink() and 0 < signature.stat().st_size <= 16384,
+              'OCI signature missing or exceeds 16KiB')
+    _, manifest_sha256 = n.digest_file(manifest.parent, manifest.name)
+    with tempfile.TemporaryDirectory(prefix='nightly-gpgv-oci-', dir=n.owned_path(environment['RUNNER_TEMP'])) as temporary:
+        homedir = Path(temporary)/'public'; homedir.mkdir(mode=0o700)
+        out_json = Path(temporary)/'oci-payload.json'
+        try:
+            keyring = linux_public_keyring(public_key, fingerprint, homedir, environment)
+            status = command(['/usr/bin/gpgv', '--homedir', homedir, '--status-fd', '1', '--keyring', keyring,
+                              '--output', out_json, signature], env=verification_env(environment))
+        finally:
+            stop_gpg_agent(homedir)
+        _check_linux_gpgv_status(status, fingerprint)
+        payload = n.bounded_json(out_json)
+    critical = payload.get('critical', {}) if isinstance(payload, dict) else {}
+    n.require(isinstance(critical, dict) and critical.get('type') == 'atomic container signature',
+              'invalid OCI signature type')
+    n.require(critical.get('identity', {}).get('docker-reference') == expected_reference,
+              'OCI signature docker-reference mismatch')
+    n.require(critical.get('image', {}).get('docker-manifest-digest') == f'sha256:{manifest_sha256}',
+              'OCI signature manifest digest mismatch')
     return fingerprint
 
 

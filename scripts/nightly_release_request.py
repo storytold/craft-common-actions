@@ -34,6 +34,22 @@ ROLE_FIELDS = {'repository', 'source_commit', 'run_id', 'run_attempt', 'run_numb
 ARTIFACT_FIELDS = {'id', 'name', 'size_in_bytes', 'wrapper_sha256', 'created_at', 'expires_at'}
 REQUEST_FIELDS = {'schema', 'repository', 'policy_sha256', 'producer', 'signer', 'artifact'}
 REQUEST_V2_FIELDS = (REQUEST_FIELDS - {'artifact'}) | {'artifacts'}
+LINUX_PACKAGE_ARTIFACT_KINDS = (
+    'nightly-linux-packages-x86_64',
+    'nightly-linux-packages-aarch64',
+    'nightly-linux-arch-aarch64',
+)
+LINUX_PACKAGE_ARCHES = ('x86_64', 'aarch64')
+LINUX_PACKAGE_FORMAT_SUFFIXES = {
+    'deb': ('.deb',),
+    'rpm': ('.rpm',),
+    'appimage': ('.AppImage', '.AppImage.zsync'),
+    'flatpak': ('.flatpak',),
+    'oci': ('.oci-manifest.json',),
+    'arch': ('.pkg.tar.zst',),
+}
+SUPPORTED_LINUX_PACKAGE_FORMATS = tuple(LINUX_PACKAGE_FORMAT_SUFFIXES)
+REQUEST_V2_LINUX_FIELDS = REQUEST_V2_FIELDS | {'linux_package_artifacts'}
 RECEIPT_V3_FIELDS = {'schema', 'platform', 'method', 'repository', 'policy_sha256', 'request_sha256',
     'producer', 'signer', 'artifact', 'unsigned_sha256', 'final_sha256', 'verified_signer', 'support'}
 
@@ -105,16 +121,75 @@ def validate_policy(policy):
     return policy
 
 
+def validate_linux_package_formats(formats, *, reason, allow_empty=True):
+    n.require(isinstance(formats, list) and (allow_empty or formats) and
+        all(isinstance(f, str) and f in SUPPORTED_LINUX_PACKAGE_FORMATS for f in formats) and
+        len(formats) == len(set(formats)), reason)
+
+
 def validate_platforms(platforms):
     """Exact per-platform artifact kind and one protected trust value each."""
     import nightly_release_platforms as plat
     n.require(isinstance(platforms, dict) and 0 < len(platforms) <= len(plat.SUPPORTED), 'invalid platform map')
     for platform, entry in platforms.items():
         n.require(platform in plat.SUPPORTED, 'unreviewed release-ref platform')
-        n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
+        if platform == 'linux-x86_64' and isinstance(entry, dict) and 'package_formats' in entry:
+            n.fields(entry, PLATFORM_POLICY_FIELDS | {'package_formats'}, 'platform policy')
+            fmts = entry['package_formats']
+            validate_linux_package_formats(fmts, reason='invalid Linux package_formats')
+        else:
+            n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
         n.require(entry['unsigned_artifact_name'] == 'nightly-unsigned-'+platform, 'unsigned artifact kind must be nightly-unsigned-<platform>')
         plat.expected_signer(platform, entry['trust'])
     return sorted(platforms)
+
+
+def policy_linux_package_formats(policy):
+    """Configured Linux distro package formats; empty tuple (default) keeps the tarball path independent."""
+    if policy.get('schema') != LIVE_POLICY:
+        return ()
+    entry = policy.get('platforms', {}).get('linux-x86_64') or {}
+    return tuple(sorted(entry.get('package_formats') or ()))
+
+
+def required_linux_package_artifact_kinds(policy):
+    """Exact Linux package artifact kinds required for the policy's configured package_formats."""
+    formats = set(policy_linux_package_formats(policy))
+    if not formats:
+        return ()
+    kinds = ['nightly-linux-packages-x86_64']
+    if formats & {'deb', 'rpm', 'appimage', 'flatpak', 'oci'}:
+        kinds.append('nightly-linux-packages-aarch64')
+    if 'arch' in formats:
+        kinds.append('nightly-linux-arch-aarch64')
+    return tuple(sorted(kinds))
+
+
+def expected_linux_package_names(app, version, formats):
+    """Exact unsigned Linux package filenames expected across x86_64 and aarch64 for configured formats."""
+    n.require(isinstance(app, str) and n.NAME.fullmatch(app), 'invalid app name')
+    n.require(isinstance(version, str) and p.NIGHTLY.fullmatch(version), 'invalid nightly version')
+    names = set()
+    for fmt in formats:
+        n.require(fmt in LINUX_PACKAGE_FORMAT_SUFFIXES, f'unsupported Linux package format {fmt}')
+        for arch in LINUX_PACKAGE_ARCHES:
+            for suffix in LINUX_PACKAGE_FORMAT_SUFFIXES[fmt]:
+                names.add(f'{app}-{version}-linux-{arch}{suffix}')
+    return names
+
+
+def expected_signed_linux_support_names(app, version, formats):
+    """Exact signed Linux package and signature filenames expected in receipt support."""
+    pkgs = expected_linux_package_names(app, version, formats)
+    sigs = set()
+    for name in pkgs:
+        if name.endswith('.oci-manifest.json'):
+            sigs.add(name[:-len('.oci-manifest.json')] + '.oci.sig')
+        elif name.endswith('.pkg.tar.zst'):
+            sigs.add(name + '.sig')
+        else:
+            sigs.add(name + '.asc')
+    return pkgs | sigs
 
 
 def policy_platforms(policy):
@@ -233,8 +308,17 @@ def artifact_name(policy, producer, platform='windows-x86_64'):
     return prefix+'-'+str(producer['run_id'])+'-'+str(producer['run_attempt'])
 
 
-def artifact(policy, row, producer, now, platform='windows-x86_64'):
-    n.require(isinstance(row, dict) and row.get('name') == artifact_name(policy, producer, platform) and
+def linux_package_artifact_names(producer, kinds=LINUX_PACKAGE_ARTIFACT_KINDS):
+    """Fixed Linux package artifact names plus authenticated run/attempt."""
+    for key in ('run_id', 'run_attempt'):
+        n.positive(producer[key], key)
+    suffix = '-' + str(producer['run_id']) + '-' + str(producer['run_attempt'])
+    return {kind: kind + suffix for kind in kinds}
+
+
+def artifact(policy, row, producer, now, platform='windows-x86_64', *, expected_name=None):
+    expected = expected_name if expected_name is not None else artifact_name(policy, producer, platform)
+    n.require(isinstance(row, dict) and row.get('name') == expected and
         row.get('expired') is False, 'unsigned artifact missing/expired/wrong kind')
     n.positive(row.get('id'), 'artifact ID'); n.positive(row.get('size_in_bytes'), 'artifact bytes')
     n.require(row['size_in_bytes'] <= policy['max_artifact_bytes'], 'artifact exceeds bound')
@@ -292,6 +376,10 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     # the signed invocationId below supplies the indispensable attempt proof.
     selected = {platform: [] for platform in platforms}; seen = set(); total = None
     names = {artifact_name(policy, producer, platform): platform for platform in platforms}
+    required_pkg_kinds = required_linux_package_artifact_kinds(policy)
+    pkg_names = ({name: kind for kind, name in linux_package_artifact_names(producer, required_pkg_kinds).items()}
+        if required_pkg_kinds else {})
+    pkg_selected = {kind: [] for kind in required_pkg_kinds} if pkg_names else {}
     for page in range(1, p.MAX_PAGES+1):
         reply = api.request('GET', f'/actions/runs/{producer_id}/artifacts?per_page={p.PAGE_SIZE}&page={page}')
         rows = reply.get('artifacts') if isinstance(reply, dict) else None
@@ -307,6 +395,9 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
             if row.get('name') in names:
                 platform = names[row['name']]
                 selected[platform].append(artifact(policy, row, producer, now, platform))
+            elif row.get('name') in pkg_names:
+                kind = pkg_names[row['name']]
+                pkg_selected[kind].append(artifact(policy, row, producer, now, expected_name=row['name']))
         # Stop once the reported total is read, including on the last allowed full page.
         if len(rows) < p.PAGE_SIZE or len(seen) == total: break
     else: raise n.Unavailable('artifact pagination bound reached')
@@ -316,19 +407,32 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     for platform, item in chosen.items():
         n.require(artifact(policy, api.request('GET', f"/actions/artifacts/{item['id']}"), producer, now, platform) == item,
             'live artifact substituted')
+    pkg_chosen = {}
+    if pkg_names:
+        n.require(all(len(rows) == 1 for rows in pkg_selected.values()),
+            'missing/ambiguous/incomplete Linux package artifact')
+        pkg_chosen = {kind: rows[0] for kind, rows in pkg_selected.items()}
+        for kind, item in pkg_chosen.items():
+            n.require(artifact(policy, api.request('GET', f"/actions/artifacts/{item['id']}"),
+                producer, now, expected_name=item['name']) == item, 'live Linux package artifact substituted')
     n.require(read_role(api, policy, producer_id, producer_attempt) == producer and
         read_role(api, policy, signer_id, signer_attempt, signer=True, producer=producer) == signer, 'admission changed during reads')
     active(api, producer); active(api, signer)
     p.require_newest_run(api, {'run': {**producer, 'id': producer_id,
         'attempt': producer_attempt, 'number': producer['run_number']}})
-    return {'schema': 'craft-nightly-release-request/v2', 'repository': policy['repository'],
+    request = {'schema': 'craft-nightly-release-request/v2', 'repository': policy['repository'],
         'policy_sha256': digest(policy), 'producer': producer, 'signer': signer, 'artifacts': chosen}
+    if pkg_chosen:
+        request['linux_package_artifacts'] = pkg_chosen
+    return request
 
 
 def request_contract(policy, request):
     validate_policy(policy)
     live = policy['schema'] == LIVE_POLICY
-    n.fields(request, REQUEST_V2_FIELDS if live else REQUEST_FIELDS, 'release request')
+    required_pkg_kinds = required_linux_package_artifact_kinds(policy) if live else ()
+    expected_fields = REQUEST_V2_LINUX_FIELDS if required_pkg_kinds else (REQUEST_V2_FIELDS if live else REQUEST_FIELDS)
+    n.fields(request, expected_fields, 'release request')
     n.require(request['schema'] == ('craft-nightly-release-request/v2' if live else 'craft-nightly-release-request/v1') and
         request['repository'] == policy['repository'] and request['policy_sha256'] == digest(policy),
         'request policy binding differs')
@@ -362,6 +466,20 @@ def request_contract(policy, request):
             p.timestamp(producer['run_started_at']) <= p.timestamp(item['created_at']) < p.timestamp(item['expires_at']),
             'artifact request binding differs')
         hash_value(item['wrapper_sha256'])
+    if required_pkg_kinds:
+        pkg_items = request['linux_package_artifacts']
+        expected_pkg_names = linux_package_artifact_names(producer, required_pkg_kinds)
+        n.require(isinstance(pkg_items, dict) and sorted(pkg_items) == sorted(required_pkg_kinds),
+            'Linux package artifact kind set differs')
+        for kind, item in pkg_items.items():
+            n.fields(item, ARTIFACT_FIELDS, 'Linux package artifact binding')
+            n.positive(item['id'], 'artifact ID'); n.positive(item['size_in_bytes'], 'artifact bytes')
+            n.require(item['id'] not in ids, 'duplicate artifact binding'); ids.add(item['id'])
+            n.require(item['name'] == expected_pkg_names[kind] and
+                item['size_in_bytes'] <= policy['max_artifact_bytes'] and
+                p.timestamp(producer['run_started_at']) <= p.timestamp(item['created_at']) < p.timestamp(item['expires_at']),
+                'Linux package artifact request binding differs')
+            hash_value(item['wrapper_sha256'])
 
 
 def request_artifact(policy, request, platform):
@@ -382,7 +500,7 @@ def require_gh_version(version_output):
         'patched gh >= 2.102.0 required')
 
 
-def verify_unsigned_attestation(policy, request, verified_results, payload_sha256):
+def verify_unsigned_attestation(policy, request, verified_results, payload_sha256, *, subject_name=None):
     """Additional policy over SUCCESSFUL trusted gh>=2.102.0 verifier stdout.
 
     This pure parser is NOT a cryptographic verifier. The caller must execute a
@@ -394,6 +512,9 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
     format/permission/cross-attempt qualification is still required before use.
     """
     request_contract(policy, request); hash_value(payload_sha256)
+    if subject_name is not None:
+        n.require(isinstance(subject_name, str) and n.NAME.fullmatch(subject_name),
+                  'expected package basename required')
     n.require(isinstance(verified_results, list) and 0 < len(verified_results) <= 32,
         'successful gh verification result array required')
     n.require(len(json.dumps(verified_results, allow_nan=False).encode()) <= n.MAX_JSON_BYTES,
@@ -418,8 +539,18 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
         n.require(statement.get('_type') == 'https://in-toto.io/Statement/v1' and
             statement.get('predicateType') == 'https://slsa.dev/provenance/v1', 'unsigned provenance type differs')
         subjects = statement.get('subject')
-        n.require(isinstance(subjects, list) and len(subjects) == 1 and isinstance(subjects[0], dict) and
-            subjects[0].get('digest') == {'sha256': payload_sha256}, 'unsigned payload digest differs')
+        if subject_name is not None:
+            n.require(isinstance(subjects, list) and 1 <= len(subjects) <= 64 and
+                all(isinstance(s, dict) and isinstance(s.get('name'), str) and
+                    isinstance(s.get('digest'), dict) and set(s['digest']) == {'sha256'} and
+                    hash_value(s['digest']['sha256']) for s in subjects),
+                'invalid unsigned package subjects')
+            named = [s for s in subjects if s['name'] == subject_name]
+            n.require(len(named) == 1 and named[0]['digest'] == {'sha256': payload_sha256},
+                      'unsigned payload digest differs for attested package basename')
+        else:
+            n.require(isinstance(subjects, list) and len(subjects) == 1 and isinstance(subjects[0], dict) and
+                subjects[0].get('digest') == {'sha256': payload_sha256}, 'unsigned payload digest differs')
         predicate = object_value(statement.get('predicate')); build = object_value(predicate.get('buildDefinition'))
         n.require(build.get('buildType') == 'https://actions.github.io/buildtypes/workflow/v1' and
             object_value(build.get('externalParameters')).get('workflow') == {'repository': base,
@@ -458,13 +589,23 @@ def release_receipt(policy, request, unsigned_sha256, final_sha256, verified_sig
         'verified_signer': verified_signer}
 
 
+SIGNATURE_SUPPORT_SUFFIXES = ('.asc', '.sig')
+PACKAGE_SUPPORT_SUFFIXES = ('.deb', '.rpm', '.pkg.tar.zst', '.AppImage', '.AppImage.zsync', '.flatpak', '.oci-manifest.json')
+
+
 def support_binding(support):
-    """Finite signature support files (Linux .asc and public export); none for Windows/macOS."""
-    n.require(isinstance(support, dict) and len(support) <= 4, 'invalid signing support inventory')
+    """Finite signature and Linux package support files; none for Windows/macOS."""
+    n.require(isinstance(support, dict) and len(support) <= 64, 'invalid signing support inventory')
     for name, item in support.items():
         n.require(isinstance(name, str) and n.NAME.fullmatch(name), 'unsafe signing support name')
         n.fields(item, {'size', 'sha256'}, 'signing support binding')
-        n.require(type(item['size']) is int and 0 < item['size'] <= n.MAX_JSON_BYTES, 'invalid signing support size')
+        if name.endswith(SIGNATURE_SUPPORT_SUFFIXES):
+            limit = 16384
+        elif name.endswith(PACKAGE_SUPPORT_SUFFIXES):
+            limit = n.MAX_ASSET_BYTES
+        else:
+            raise n.InvalidNightly(f'unsupported signing support file {name}')
+        n.require(type(item['size']) is int and 0 < item['size'] <= limit, 'invalid signing support size')
         hash_value(item['sha256'])
     return support
 

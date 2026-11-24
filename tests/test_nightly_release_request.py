@@ -73,14 +73,21 @@ class RequestTests(unittest.TestCase):
                 'head_sha': 'a'*40, 'head_branch': 'main'}}
         self.mac_item = {**copy.deepcopy(self.item), 'id': 302, 'name': MAC_KIND+'-100-1', 'digest': 'sha256:'+'c'*64}
         self.linux_item = {**copy.deepcopy(self.item), 'id': 304, 'name': LINUX_KIND+'-100-1', 'digest': 'sha256:'+'4'*64}
+        self.pkg_x86_item = {**copy.deepcopy(self.item), 'id': 306, 'name': 'nightly-linux-packages-x86_64-100-1', 'digest': 'sha256:'+'6'*64}
+        self.pkg_arm_item = {**copy.deepcopy(self.item), 'id': 308, 'name': 'nightly-linux-packages-aarch64-100-1', 'digest': 'sha256:'+'8'*64}
+        self.pkg_arch_item = {**copy.deepcopy(self.item), 'id': 310, 'name': 'nightly-linux-arch-aarch64-100-1', 'digest': 'sha256:'+'9'*64}
         rows = {'/actions/runs/100': producer, '/actions/runs/100/attempts/1': copy.deepcopy(producer),
             '/actions/runs/200': signer, '/actions/runs/200/attempts/1': copy.deepcopy(signer),
             '/actions/workflows/91': {'id': 91, 'path': producer['path'], 'state': 'active'},
             '/actions/workflows/92': {'id': 92, 'path': signer['path'], 'state': 'active'},
-            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 3, 'artifacts': [self.item, self.mac_item, self.linux_item]},
+            '/actions/runs/100/artifacts?per_page=20&page=1': {'total_count': 3,
+                'artifacts': [self.item, self.mac_item, self.linux_item]},
             '/actions/artifacts/300': copy.deepcopy(self.item),
             '/actions/artifacts/302': copy.deepcopy(self.mac_item),
             '/actions/artifacts/304': copy.deepcopy(self.linux_item),
+            '/actions/artifacts/306': copy.deepcopy(self.pkg_x86_item),
+            '/actions/artifacts/308': copy.deepcopy(self.pkg_arm_item),
+            '/actions/artifacts/310': copy.deepcopy(self.pkg_arch_item),
             'newest': {'workflow_runs': [copy.deepcopy(producer)]}}
         self.api = API(rows)
         self.now = r.p.timestamp('2026-11-22T01:00:00Z')
@@ -100,6 +107,7 @@ class RequestTests(unittest.TestCase):
         policy = policy or self.legacy_policy(); request = copy.deepcopy(self.invoke())
         request['schema'] = 'craft-nightly-release-request/v1'; request['policy_sha256'] = r.digest(policy)
         request['artifact'] = request.pop('artifacts')['windows-x86_64']
+        request.pop('linux_package_artifacts', None)
         return request
 
     def modify_run(self, which, key, value):
@@ -474,7 +482,8 @@ class RequestTests(unittest.TestCase):
         self.api.rows['/actions/artifacts/301']=rerun_item
         self.api.rows['/actions/artifacts/303']=rerun_mac
         self.api.rows['/actions/artifacts/305']=rerun_linux
-        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':6,'artifacts':[self.item,rerun_item,self.mac_item,rerun_mac,self.linux_item,rerun_linux]}
+        self.api.rows['/actions/runs/100/artifacts?per_page=20&page=1']={'total_count':6,'artifacts':[
+            self.item,rerun_item,self.mac_item,rerun_mac,self.linux_item,rerun_linux]}
         request=r.validate_request(self.policy,self.env,100,2,self.api,now=self.now)
         self.assertEqual(request['artifacts']['windows-x86_64']['id'],301)
         self.assertEqual(request['artifacts']['macos-aarch64']['id'],303)
@@ -576,7 +585,8 @@ class RequestTests(unittest.TestCase):
     def test_complete_artifact_inventory_on_the_last_allowed_full_page_is_accepted(self):
         limit = r.p.MAX_PAGES*r.p.PAGE_SIZE
         rows = [{**copy.deepcopy(self.item), 'id': 1000+index, 'name': 'other-'+str(index)} for index in range(limit-1)]
-        rows.insert(limit//2, copy.deepcopy(self.item)); rows[limit//3] = copy.deepcopy(self.linux_item); rows[-1] = copy.deepcopy(self.mac_item)
+        rows.insert(limit//2, copy.deepcopy(self.item)); rows[limit//3] = copy.deepcopy(self.linux_item)
+        rows[-1] = copy.deepcopy(self.mac_item)
         for page in range(1, r.p.MAX_PAGES+1):
             self.api.rows[f'/actions/runs/100/artifacts?per_page={r.p.PAGE_SIZE}&page={page}'] = {'total_count': limit,
                 'artifacts': rows[(page-1)*r.p.PAGE_SIZE:page*r.p.PAGE_SIZE]}
@@ -652,6 +662,66 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'platform set'): r.request_contract(self.policy, missing)
         legacy = copy.deepcopy(request); legacy['schema'] = 'craft-nightly-release-request/v1'
         with self.assertRaises(ValueError): r.request_contract(self.policy, legacy)
+
+    def test_linux_package_formats_policy_gates_package_artifacts_and_defaults_to_none(self):
+        # Default v3 policy has no package_formats: Linux tarball publishes independently without package artifacts.
+        self.assertEqual(r.policy_linux_package_formats(self.policy), ())
+        default_req = self.invoke()
+        self.assertNotIn('linux_package_artifacts', default_req)
+        r.request_contract(self.policy, default_req)
+        with self.assertRaises(ValueError):
+            r.request_contract(self.policy, {**copy.deepcopy(default_req), 'linux_package_artifacts': {}})
+
+        # Non-Linux platforms cannot declare package_formats, and invalid format lists fail policy validation.
+        for bad_mutate in (
+            lambda pol: pol['platforms']['windows-x86_64'].update(package_formats=['deb']),
+            lambda pol: pol['platforms']['macos-aarch64'].update(package_formats=[]),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats='deb'),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=['unknown']),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=['deb', 'deb']),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[1]),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[{}]),
+            lambda pol: pol['platforms']['linux-x86_64'].update(package_formats=[['deb']]),
+        ):
+            bad = copy.deepcopy(self.policy); bad_mutate(bad)
+            with self.assertRaises(ValueError): r.validate_policy(bad)
+
+        key = '/actions/runs/100/artifacts?per_page=20&page=1'
+        self.api.rows[key] = {'total_count': 6, 'artifacts': [
+            self.item, self.mac_item, self.linux_item, self.pkg_x86_item, self.pkg_arm_item, self.pkg_arch_item]}
+
+        # deb-only requires x86_64 + aarch64 package artifacts, not arch-aarch64.
+        deb_policy = copy.deepcopy(self.policy)
+        deb_policy['platforms']['linux-x86_64']['package_formats'] = ['deb']
+        deb_req = r.validate_request(deb_policy, self.env, '100', '1', self.api, now=self.now)
+        self.assertEqual(sorted(deb_req['linux_package_artifacts']),
+                         ['nightly-linux-packages-aarch64', 'nightly-linux-packages-x86_64'])
+        r.request_contract(deb_policy, deb_req)
+
+        # arch-only requires x86_64 + arch-aarch64, not packages-aarch64.
+        arch_policy = copy.deepcopy(self.policy)
+        arch_policy['platforms']['linux-x86_64']['package_formats'] = ['arch']
+        arch_req = r.validate_request(arch_policy, self.env, '100', '1', self.api, now=self.now)
+        self.assertEqual(sorted(arch_req['linux_package_artifacts']),
+                         ['nightly-linux-arch-aarch64', 'nightly-linux-packages-x86_64'])
+        r.request_contract(arch_policy, arch_req)
+
+        # All 6 formats require all 3 package artifacts and refuse missing or substituted ones.
+        all_policy = copy.deepcopy(self.policy)
+        all_policy['platforms']['linux-x86_64']['package_formats'] = list(r.SUPPORTED_LINUX_PACKAGE_FORMATS)
+        all_req = r.validate_request(all_policy, self.env, '100', '1', self.api, now=self.now)
+        self.assertEqual(sorted(all_req['linux_package_artifacts']), sorted(r.LINUX_PACKAGE_ARTIFACT_KINDS))
+        r.request_contract(all_policy, all_req)
+        no_pkg = copy.deepcopy(all_req); del no_pkg['linux_package_artifacts']
+        with self.assertRaises(ValueError): r.request_contract(all_policy, no_pkg)
+        self.api.rows['/actions/artifacts/308']['digest'] = 'sha256:'+'0'*64
+        with self.assertRaisesRegex(ValueError, 'substituted'):
+            r.validate_request(all_policy, self.env, '100', '1', self.api, now=self.now)
+        self.api.rows['/actions/artifacts/308'] = copy.deepcopy(self.pkg_arm_item)
+        self.api.rows[key] = {'total_count': 5, 'artifacts': [
+            self.item, self.mac_item, self.linux_item, self.pkg_x86_item, self.pkg_arch_item]}
+        with self.assertRaisesRegex(ValueError, 'missing/ambiguous/incomplete Linux package artifact'):
+            r.validate_request(all_policy, self.env, '100', '1', self.api, now=self.now)
 
     def test_v3_receipt_binds_platform_trust_method_support_and_artifact(self):
         request = self.invoke()

@@ -7,9 +7,11 @@ The tar.gz bytes never change; signing adds `<asset>.asc` and the stable
 policy fingerprint, never a downloaded key. Payload bytes are inventoried as data
 and never extracted or executed here. LINUX_SIGNING_KEY reaches only `sign`.
 """
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import nightly_feed as n
 import nightly_signing as signing
@@ -24,7 +26,7 @@ PUBLIC_KEY = ".github/nightly-linux-signing-key.asc"
 PUBLIC_EXPORT = "release-signing-key.asc"
 MAX_SIGNATURE_BYTES = 16384
 SECRETS = ("LINUX_SIGNING_KEY",)
-CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE")
+CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE", "GITHUB_REPOSITORY", "NIGHTLY_LINUX_PACKAGES_DIR")
 FINGERPRINT = re.compile(r"(?:[A-F0-9]{40}|[A-F0-9]{64})")
 
 
@@ -63,11 +65,14 @@ def keyless(environment):
     return {key: value for key, value in environment.items() if key not in SECRETS}
 
 
-def support_binding(directory, asset):
+def support_binding(directory, asset, extra_names=()):
     result = {}
-    for name in sorted(support_names(asset)):
+    for name in sorted(support_names(asset) | set(extra_names)):
         size, digest = n.digest_file(directory, name)
-        n.require(0 < size <= MAX_SIGNATURE_BYTES, "Linux signature support exceeds bound")
+        if name.endswith((".asc", ".sig")):
+            n.require(0 < size <= MAX_SIGNATURE_BYTES, "Linux signature support exceeds bound")
+        else:
+            n.require(0 < size <= n.MAX_ASSET_BYTES, "Linux package support exceeds bound")
         result[name] = {"size": size, "sha256": digest}
     return result
 
@@ -93,21 +98,54 @@ def verify(trust, directory, asset, support, source, environment, version):
     directory = n.owned_path(directory)
     n.require(asset == names["asset"], "Linux asset differs from immutable identity")
     n.require(directory.is_dir() and not directory.is_symlink(), "signed Linux directory required")
-    expected = {asset} | support_names(asset)
+    n.require(isinstance(support, dict) and support_names(asset) <= set(support), "Linux signature support inventory mismatch")
+    expected = {asset} | set(support)
     actual = set()
     for path in directory.iterdir():
         n.require(len(actual) < len(expected) and path.name in expected, "unexpected signed Linux inventory")
         actual.add(path.name)
     n.require(actual == expected, "missing signed Linux package or detached-signature support")
-    n.require(isinstance(support, dict) and set(support) == support_names(asset), "Linux signature support inventory mismatch")
     for name, item in support.items():
         n.fields(item, {"size", "sha256"}, "Linux signature support binding")
-    n.require(support_binding(directory, asset) == support, "Linux signature support differs from signer binding")
+    extra_support = set(support) - support_names(asset)
+    n.require(support_binding(directory, asset, extra_names=extra_support) == support, "Linux signature support differs from signer binding")
     signing.adapter(PLATFORM, source)
     u.verify_archive(pending(), PLATFORM, directory/asset, version)
     signer = signing.verify_linux_signature(Path(source)/PUBLIC_KEY, directory/(asset+".asc"), directory/asset,
                                             fingerprint, environment)
     n.require(signer == fingerprint, "verified Linux signer differs from reviewed trust")
+    for name in sorted(extra_support):
+        if name.endswith(".oci-manifest.json"):
+            n.require(name[:-len(".oci-manifest.json")] + ".oci.sig" in extra_support, f"missing .oci.sig for {name}")
+        elif name.endswith(".pkg.tar.zst"):
+            n.require(name + ".sig" in extra_support, f"missing .sig for {name}")
+        elif name.endswith((".deb", ".rpm", ".AppImage", ".AppImage.zsync", ".flatpak")):
+            n.require(name + ".asc" in extra_support, f"missing .asc for {name}")
+    for sig_name in sorted(extra_support):
+        if sig_name.endswith(".oci.sig"):
+            target_name = sig_name[:-len(".oci.sig")] + ".oci-manifest.json"
+            n.require(target_name in expected, f"missing manifest for {sig_name}")
+            expected_ref = f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"
+            sig_signer = signing.verify_oci_signature(
+                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, expected_ref, fingerprint, environment
+            )
+            n.require(sig_signer == fingerprint, f"verified OCI signer for {sig_name} differs from reviewed trust")
+        elif sig_name.endswith(".pkg.tar.zst.sig"):
+            target_name = sig_name[:-len(".sig")]
+            n.require(target_name in expected, f"missing payload for {sig_name}")
+            sig_signer = signing.verify_linux_signature(
+                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment, binary=True
+            )
+            n.require(sig_signer == fingerprint, f"verified Arch package signer for {sig_name} differs from reviewed trust")
+        elif sig_name.endswith(".sig"):
+            raise n.InvalidNightly(f"unexpected signature {sig_name}")
+        elif sig_name.endswith(".asc"):
+            target_name = sig_name[:-len(".asc")]
+            n.require(target_name in expected, f"missing payload for {sig_name}")
+            sig_signer = signing.verify_linux_signature(
+                Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, fingerprint, environment
+            )
+            n.require(sig_signer == fingerprint, f"verified package signer for {sig_name} differs from reviewed trust")
     return signer
 
 
@@ -139,13 +177,45 @@ def sign(trust, unsigned, output, source, environment, version):
         n.require(signer == fingerprint, "Linux signer differs from reviewed trust")
         # sign_linux also writes the stable-name public export; it is trust-free and not shipped here.
         published_key_matches(signed, fingerprint, source, keyless_copy(environment))
+        extra_names = set()
+        pkg_dir_raw = environment.get("NIGHTLY_LINUX_PACKAGES_DIR", "")
+        if pkg_dir_raw:
+            pkg_dir = n.owned_path(pkg_dir_raw)
+            n.require(pkg_dir.is_dir() and not pkg_dir.is_symlink(), "Linux packages directory required")
+            pkg_stage = Path(temporary)/"packages"; pkg_stage.mkdir()
+            for entry in sorted(pkg_dir.iterdir()):
+                if entry.is_dir() or entry.is_symlink():
+                    continue
+                n.require(n.NAME.fullmatch(entry.name) and f"-{version}-linux-" in entry.name,
+                          f"Linux package {entry.name} does not match admitted version {version}")
+                stream, _ = n.regular_file(pkg_dir, entry.name)
+                with stream, (pkg_stage/entry.name).open("xb") as dst:
+                    shutil.copyfileobj(stream, dst, 1024*1024)
+            sign_script = Path(__file__).resolve().parent.parent/"actions"/"draft-release"/"sign-linux.sh"
+            sign_home = Path(temporary)/"pkg-gpg"; sign_home.mkdir(mode=0o700)
+            try:
+                pkg_env = {**env, "GNUPGHOME": str(sign_home), "SIGNING_FPR": fingerprint,
+                           "OCI_REGISTRY": f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"}
+                raw_key = pkg_env.pop("LINUX_SIGNING_KEY")
+                subprocess.run(["gpg", "--batch", "--import"], input=raw_key.encode("utf-8"),
+                               env=pkg_env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["bash", str(sign_script), str(pkg_stage)], env=pkg_env, check=True)
+            finally:
+                signing.stop_gpg_agent(sign_home)
+            for item in sorted(pkg_stage.iterdir()):
+                if item.name == PUBLIC_EXPORT:
+                    continue
+                extra_names.add(item.name)
+                stream, _ = n.regular_file(pkg_stage, item.name)
+                with stream, (output/item.name).open("xb") as dst:
+                    shutil.copyfileobj(stream, dst, 1024*1024)
         for name in sorted({names["asset"]} | support_names(names["asset"])):
             stream, _ = n.regular_file(signed, name)
             with stream, (output/name).open("xb") as destination:
                 shutil.copyfileobj(stream, destination, 1024*1024)
     n.require(n.digest_file(unsigned.parent, unsigned.name)[1] == before and
               n.digest_file(output, names["asset"])[1] == before, "Linux detached signing must not change tar.gz bytes")
-    support = support_binding(output, names["asset"])
+    support = support_binding(output, names["asset"], extra_names=extra_names)
     verified = verify(trust, output, names["asset"], support, source, keyless_copy(environment), version)
     return {"verified_signer": verified, "support": support}
 

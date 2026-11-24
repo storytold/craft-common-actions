@@ -446,7 +446,12 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
         validate = job_block(self.release, 'validate')
         downloads = [step for step in steps(validate) if 'actions/download-artifact@' in step]
         platforms = ('linux-x86_64', 'macos-aarch64', 'windows-x86_64')
-        self.assertEqual(len(downloads), len(platforms))
+        pkg_kinds = (
+            'nightly-linux-packages-x86_64',
+            'nightly-linux-packages-aarch64',
+            'nightly-linux-arch-aarch64',
+        )
+        self.assertEqual(len(downloads), len(platforms) + len(pkg_kinds))
         for platform in platforms:
             matching = [step for step in downloads if 'path: .unsigned/'+platform+'\n' in step]
             with self.subTest(platform=platform):
@@ -456,6 +461,16 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn('artifact-ids: ${{ steps.admit.outputs.artifact-id-'+platform+' }}', step)
                 self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
                 self.assertIn('digest-mismatch: error', step)
+        for pkg_kind in pkg_kinds:
+            matching = [step for step in downloads if 'artifact-ids: ${{ steps.admit.outputs.artifact-id-'+pkg_kind+' }}' in step]
+            with self.subTest(linux_packages=pkg_kind):
+                self.assertEqual(len(matching), 1)
+                step = matching[0]
+                self.assertIn("if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64') && steps.admit.outputs.artifact-id-"+pkg_kind+" != ''", step)
+                self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
+                self.assertIn('path: .linux-packages', step)
+                self.assertIn('digest-mismatch: error', step)
+                self.assertLess(validate.index(step), validate.index('nightly_release_entry.py validate'))
         self.assertLess(validate.index('path: .unsigned/linux-x86_64'), validate.index('nightly_release_entry.py validate'))
 
     def test_publish_stops_when_the_run_is_cancelled(self):
