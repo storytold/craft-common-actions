@@ -39,6 +39,16 @@ LINUX_PACKAGE_ARTIFACT_KINDS = (
     'nightly-linux-packages-aarch64',
     'nightly-linux-arch-aarch64',
 )
+LINUX_PACKAGE_ARCHES = ('x86_64', 'aarch64')
+LINUX_PACKAGE_FORMAT_SUFFIXES = {
+    'deb': ('.deb',),
+    'rpm': ('.rpm',),
+    'appimage': ('.AppImage', '.AppImage.zsync'),
+    'flatpak': ('.flatpak',),
+    'oci': ('.oci-manifest.json',),
+    'arch': ('.pkg.tar.zst',),
+}
+SUPPORTED_LINUX_PACKAGE_FORMATS = tuple(LINUX_PACKAGE_FORMAT_SUFFIXES)
 REQUEST_V2_LINUX_FIELDS = REQUEST_V2_FIELDS | {'linux_package_artifacts'}
 RECEIPT_V3_FIELDS = {'schema', 'platform', 'method', 'repository', 'policy_sha256', 'request_sha256',
     'producer', 'signer', 'artifact', 'unsigned_sha256', 'final_sha256', 'verified_signer', 'support'}
@@ -117,10 +127,65 @@ def validate_platforms(platforms):
     n.require(isinstance(platforms, dict) and 0 < len(platforms) <= len(plat.SUPPORTED), 'invalid platform map')
     for platform, entry in platforms.items():
         n.require(platform in plat.SUPPORTED, 'unreviewed release-ref platform')
-        n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
+        if platform == 'linux-x86_64' and isinstance(entry, dict) and 'package_formats' in entry:
+            n.fields(entry, PLATFORM_POLICY_FIELDS | {'package_formats'}, 'platform policy')
+            fmts = entry['package_formats']
+            n.require(isinstance(fmts, list) and len(fmts) == len(set(fmts)) and
+                all(isinstance(f, str) and f in SUPPORTED_LINUX_PACKAGE_FORMATS for f in fmts),
+                'invalid Linux package_formats')
+        else:
+            n.fields(entry, PLATFORM_POLICY_FIELDS, 'platform policy')
         n.require(entry['unsigned_artifact_name'] == 'nightly-unsigned-'+platform, 'unsigned artifact kind must be nightly-unsigned-<platform>')
         plat.expected_signer(platform, entry['trust'])
     return sorted(platforms)
+
+
+def policy_linux_package_formats(policy):
+    """Configured Linux distro package formats; empty tuple (default) keeps the tarball path independent."""
+    if policy.get('schema') != LIVE_POLICY:
+        return ()
+    entry = policy.get('platforms', {}).get('linux-x86_64') or {}
+    return tuple(sorted(entry.get('package_formats') or ()))
+
+
+def required_linux_package_artifact_kinds(policy):
+    """Exact Linux package artifact kinds required for the policy's configured package_formats."""
+    formats = set(policy_linux_package_formats(policy))
+    if not formats:
+        return ()
+    kinds = ['nightly-linux-packages-x86_64']
+    if formats & {'deb', 'rpm', 'appimage', 'flatpak', 'oci'}:
+        kinds.append('nightly-linux-packages-aarch64')
+    if 'arch' in formats:
+        kinds.append('nightly-linux-arch-aarch64')
+    return tuple(sorted(kinds))
+
+
+def expected_linux_package_names(app, version, formats):
+    """Exact unsigned Linux package filenames expected across x86_64 and aarch64 for configured formats."""
+    n.require(isinstance(app, str) and n.NAME.fullmatch(app), 'invalid app name')
+    n.require(isinstance(version, str) and p.NIGHTLY.fullmatch(version), 'invalid nightly version')
+    names = set()
+    for fmt in formats:
+        n.require(fmt in LINUX_PACKAGE_FORMAT_SUFFIXES, f'unsupported Linux package format {fmt}')
+        for arch in LINUX_PACKAGE_ARCHES:
+            for suffix in LINUX_PACKAGE_FORMAT_SUFFIXES[fmt]:
+                names.add(f'{app}-{version}-linux-{arch}{suffix}')
+    return names
+
+
+def expected_signed_linux_support_names(app, version, formats):
+    """Exact signed Linux package and signature filenames expected in receipt support."""
+    pkgs = expected_linux_package_names(app, version, formats)
+    sigs = set()
+    for name in pkgs:
+        if name.endswith('.oci-manifest.json'):
+            sigs.add(name[:-len('.oci-manifest.json')] + '.oci.sig')
+        elif name.endswith('.pkg.tar.zst'):
+            sigs.add(name + '.sig')
+        else:
+            sigs.add(name + '.asc')
+    return pkgs | sigs
 
 
 def policy_platforms(policy):
@@ -239,12 +304,12 @@ def artifact_name(policy, producer, platform='windows-x86_64'):
     return prefix+'-'+str(producer['run_id'])+'-'+str(producer['run_attempt'])
 
 
-def linux_package_artifact_names(producer):
+def linux_package_artifact_names(producer, kinds=LINUX_PACKAGE_ARTIFACT_KINDS):
     """Fixed Linux package artifact names plus authenticated run/attempt."""
     for key in ('run_id', 'run_attempt'):
         n.positive(producer[key], key)
     suffix = '-' + str(producer['run_id']) + '-' + str(producer['run_attempt'])
-    return {kind: kind + suffix for kind in LINUX_PACKAGE_ARTIFACT_KINDS}
+    return {kind: kind + suffix for kind in kinds}
 
 
 def artifact(policy, row, producer, now, platform='windows-x86_64', *, expected_name=None):
@@ -307,9 +372,10 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     # the signed invocationId below supplies the indispensable attempt proof.
     selected = {platform: [] for platform in platforms}; seen = set(); total = None
     names = {artifact_name(policy, producer, platform): platform for platform in platforms}
-    pkg_names = ({name: kind for kind, name in linux_package_artifact_names(producer).items()}
-        if 'linux-x86_64' in platforms else {})
-    pkg_selected = {kind: [] for kind in LINUX_PACKAGE_ARTIFACT_KINDS} if pkg_names else {}
+    required_pkg_kinds = required_linux_package_artifact_kinds(policy)
+    pkg_names = ({name: kind for kind, name in linux_package_artifact_names(producer, required_pkg_kinds).items()}
+        if required_pkg_kinds else {})
+    pkg_selected = {kind: [] for kind in required_pkg_kinds} if pkg_names else {}
     for page in range(1, p.MAX_PAGES+1):
         reply = api.request('GET', f'/actions/runs/{producer_id}/artifacts?per_page={p.PAGE_SIZE}&page={page}')
         rows = reply.get('artifacts') if isinstance(reply, dict) else None
@@ -360,8 +426,8 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
 def request_contract(policy, request):
     validate_policy(policy)
     live = policy['schema'] == LIVE_POLICY
-    has_linux = live and 'linux-x86_64' in policy_platforms(policy)
-    expected_fields = REQUEST_V2_LINUX_FIELDS if has_linux else (REQUEST_V2_FIELDS if live else REQUEST_FIELDS)
+    required_pkg_kinds = required_linux_package_artifact_kinds(policy) if live else ()
+    expected_fields = REQUEST_V2_LINUX_FIELDS if required_pkg_kinds else (REQUEST_V2_FIELDS if live else REQUEST_FIELDS)
     n.fields(request, expected_fields, 'release request')
     n.require(request['schema'] == ('craft-nightly-release-request/v2' if live else 'craft-nightly-release-request/v1') and
         request['repository'] == policy['repository'] and request['policy_sha256'] == digest(policy),
@@ -396,10 +462,10 @@ def request_contract(policy, request):
             p.timestamp(producer['run_started_at']) <= p.timestamp(item['created_at']) < p.timestamp(item['expires_at']),
             'artifact request binding differs')
         hash_value(item['wrapper_sha256'])
-    if has_linux:
+    if required_pkg_kinds:
         pkg_items = request['linux_package_artifacts']
-        expected_pkg_names = linux_package_artifact_names(producer)
-        n.require(isinstance(pkg_items, dict) and sorted(pkg_items) == sorted(LINUX_PACKAGE_ARTIFACT_KINDS),
+        expected_pkg_names = linux_package_artifact_names(producer, required_pkg_kinds)
+        n.require(isinstance(pkg_items, dict) and sorted(pkg_items) == sorted(required_pkg_kinds),
             'Linux package artifact kind set differs')
         for kind, item in pkg_items.items():
             n.fields(item, ARTIFACT_FIELDS, 'Linux package artifact binding')

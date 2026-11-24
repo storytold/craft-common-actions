@@ -129,6 +129,32 @@ def verify_layout_config_arch(layout_dir, manifest_path, expected_arch):
               f"OCI config architecture mismatch for {expected_arch}")
 
 
+def _copy_verified_oci(runner, layout, target, auth_file, expected_digest_hex, digest_file):
+    """Push an OCI layout with --preserve-digests and assert the pushed digest equals the signed manifest."""
+    runner(
+        [
+            "skopeo",
+            "copy",
+            "--format",
+            "oci",
+            "--preserve-digests",
+            "--digestfile",
+            str(digest_file),
+            "--authfile",
+            str(auth_file),
+            f"oci:{layout}",
+            target,
+        ],
+        check=True,
+    )
+    n.require(digest_file.is_file() and not digest_file.is_symlink(), "skopeo did not write digestfile")
+    pushed_digest = digest_file.read_text(encoding="utf-8").strip()
+    n.require(
+        pushed_digest == f"sha256:{expected_digest_hex}",
+        f"pushed OCI digest {pushed_digest} differs from signed manifest sha256:{expected_digest_hex}",
+    )
+
+
 def verify_and_push_oci(
     *,
     release,
@@ -136,12 +162,12 @@ def verify_and_push_oci(
     tag,
     version,
     source_commit,
-    release_id,
     sums_bytes,
     package_dir,
     public_key,
     fingerprint,
     environment,
+    release_id=None,
     producer_run_id=None,
     producer_run_attempt=None,
     recent_releases=None,
@@ -194,7 +220,7 @@ def verify_and_push_oci(
             public_key, pkg_root / sig_name, pkg_root / manifest_name, registry, fingerprint, environment
         )
         n.require(signer == fingerprint, "OCI signature signer differs from reviewed trust")
-        verified_layouts.append((arch, layout))
+        verified_layouts.append((arch, layout, manifest_digest))
 
     with tempfile.TemporaryDirectory(prefix="nightly-oci-auth-") as auth_dir:
         auth_file = Path(auth_dir) / "auth.json"
@@ -208,21 +234,17 @@ def verify_and_push_oci(
             json.dump({"auths": auths}, stream)
 
         for tag_kind in ("version", "nightly"):
-            for arch, layout in verified_layouts:
+            for arch, layout, manifest_digest in verified_layouts:
                 oci_tag = f"{version}-{arch}" if tag_kind == "version" else f"nightly-{arch}"
                 target = f"docker://{registry}:{oci_tag}"
-                runner(
-                    ["skopeo", "copy", "--format", "oci", "--authfile", str(auth_file), f"oci:{layout}", target],
-                    check=True,
-                )
+                digest_file = Path(auth_dir) / f"digest-{len(pushed)}.txt"
+                _copy_verified_oci(runner, layout, target, auth_file, manifest_digest, digest_file)
                 pushed.append(target)
                 if dh_user and dh_token:
                     dh_repo = repository.split("/", 1)[1].lower()
                     dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
-                    runner(
-                        ["skopeo", "copy", "--format", "oci", "--authfile", str(auth_file), f"oci:{layout}", dh_target],
-                        check=True,
-                    )
+                    dh_digest_file = Path(auth_dir) / f"digest-{len(pushed)}.txt"
+                    _copy_verified_oci(runner, layout, dh_target, auth_file, manifest_digest, dh_digest_file)
                     pushed.append(dh_target)
 
     return pushed

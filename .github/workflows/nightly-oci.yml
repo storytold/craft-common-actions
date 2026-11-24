@@ -9,7 +9,8 @@ on:
         required: true
       release_id:
         type: string
-        required: true
+        required: false
+        default: ''
       release_tag:
         type: string
         required: true
@@ -69,30 +70,100 @@ jobs:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - name: Resolve verified release target and exact producer package artifact IDs
+        id: target
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import os, sys
+          sys.path.insert(0, ".nightly-tools/scripts")
+          import nightly_feed as n
+          import nightly_release_request as r
+          policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+          r.validate_policy(policy)
+          n.require(policy["signer_tooling_revision"] == os.environ["TOOLING_REVISION"], "policy signer_tooling_revision mismatch")
+          enabled = "oci" in r.policy_linux_package_formats(policy)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"oci-enabled={'true' if enabled else 'false'}\n")
+          PY
+      - name: Fetch release metadata from GitHub REST API
+        id: release-meta
+        if: steps.target.outputs.oci-enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > .release.json
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > .releases.json
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, ".nightly-tools/scripts")
+          import nightly_feed as n
+          import nightly_oci as oci
+          release = n.bounded_json(".release.json")
+          recent = n.bounded_json(".releases.json")
+          rel_id = int(os.environ["RELEASE_ID"]) if os.environ.get("RELEASE_ID") else None
+          oci.verify_release_target(
+              release,
+              repository=os.environ["GITHUB_REPOSITORY"],
+              tag=os.environ["RELEASE_TAG"],
+              source_commit=os.environ["SOURCE_COMMIT"],
+              release_id=rel_id,
+              version=os.environ["RELEASE_VERSION"],
+              producer_run_id=int(os.environ["PRODUCER_RUN_ID"]),
+              producer_run_attempt=int(os.environ["PRODUCER_RUN_ATTEMPT"]),
+              recent_releases=recent,
+          )
+          pub = json.loads(release["body"].split(oci.MARKER_V2, 1)[1])
+          pkg_arts = pub.get("request", {}).get("linux_package_artifacts", {})
+          x86_id = pkg_arts.get("nightly-linux-packages-x86_64", {}).get("id", "")
+          arm_id = pkg_arts.get("nightly-linux-packages-aarch64", {}).get("id", "")
+          n.require(bool(x86_id) and bool(arm_id), "missing authenticated Linux package artifact IDs in release receipt")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"artifact-id-x86_64={x86_id}\n")
+              out.write(f"artifact-id-aarch64={arm_id}\n")
+          PY
       - name: Install skopeo
+        if: steps.target.outputs.oci-enabled == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends skopeo
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Download exact authenticated Linux x86_64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-x86_64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-x86_64 }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - name: Download exact authenticated Linux aarch64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.producer_run_id }}
-          name: nightly-linux-packages-aarch64-${{ inputs.producer_run_id }}-${{ inputs.producer_run_attempt }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-aarch64 }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error
       - name: Verify release target, SHA256SUMS.txt, and .oci.sig before pushing OCI tags
+        if: steps.target.outputs.oci-enabled == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -107,36 +178,27 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json databaseId,tagName,targetCommitish,isDraft,isPrerelease,url,body > .release.json
-          gh release list -R "$GITHUB_REPOSITORY" --limit 20 --json databaseId,tagName,isDraft,isPrerelease,publishedAt > .releases.json
+          mkdir -p .linux-packages
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "NIGHTLY.json" --output .linux-packages/NIGHTLY.json
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --output .linux-packages/SHA256SUMS.txt
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci-manifest.json" --dir .linux-packages --clobber
           gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci.sig" --dir .linux-packages --clobber
           python3 -I -B - <<'PY'
-          import json, os, sys
+          import os, sys
           sys.path.insert(0, ".nightly-tools/scripts")
           import nightly_oci as oci
           import nightly_feed as n
           policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
           fingerprint = policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"]
-          raw_rel = n.bounded_json(".release.json")
-          release = {
-              "id": raw_rel["databaseId"],
-              "tag_name": raw_rel["tagName"],
-              "target_commitish": raw_rel["targetCommitish"],
-              "draft": raw_rel["isDraft"],
-              "prerelease": raw_rel["isPrerelease"],
-              "html_url": raw_rel.get("url", ""),
-              "body": raw_rel.get("body", ""),
-          }
+          release = n.bounded_json(".release.json")
+          rel_id = int(os.environ["RELEASE_ID"]) if os.environ.get("RELEASE_ID") else None
           oci.verify_and_push_oci(
               release=release,
               repository=os.environ["GITHUB_REPOSITORY"],
               tag=os.environ["RELEASE_TAG"],
               version=os.environ["RELEASE_VERSION"],
               source_commit=os.environ["SOURCE_COMMIT"],
-              release_id=int(os.environ["RELEASE_ID"]),
+              release_id=rel_id,
               sums_bytes=open(".linux-packages/SHA256SUMS.txt", "rb").read(),
               package_dir=".linux-packages",
               public_key=".release-source/.github/nightly-linux-signing-key.asc",

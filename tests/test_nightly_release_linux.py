@@ -466,7 +466,7 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(linux_packages=pkg_kind):
                 self.assertEqual(len(matching), 1)
                 step = matching[0]
-                self.assertIn("if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')", step)
+                self.assertIn("if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64') && steps.admit.outputs.artifact-id-"+pkg_kind+" != ''", step)
                 self.assertIn('run-id: ${{ inputs.producer_run_id }}', step)
                 self.assertIn('path: .linux-packages', step)
                 self.assertIn('digest-mismatch: error', step)

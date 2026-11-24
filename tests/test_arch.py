@@ -3,9 +3,11 @@
 import io
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -296,7 +298,7 @@ exit 0
                     (tar_root / f"bin/{b}").write_text("#!/bin/sh\necho ok\n")
                     os.chmod(tar_root / f"bin/{b}", 0o755)
                 (tar_root / "share/applications/ai.storyteller.myapp.desktop").write_text(
-                    "[Desktop Entry]\nName=MyApp\nExec=myapp %F\nIcon=ai.storyteller.myapp\nType=Application\n"
+                    "[Desktop Entry]\nName=MyApp\nExec=myapp %F\nTryExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
                     "\n[Desktop Action new-window]\nName=New Window\nExec=myapp --new-window\n"
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
@@ -364,20 +366,21 @@ exit 0
             _, _, stable_files = run_package(stable_tb, "stable")
             nightly_pkgbuild, nightly_pkgdir, nightly_files = run_package(nightly_tb, "nightly")
 
-            self.assertIn("pkgname=ai.storyteller.myapp-nightly\n", nightly_pkgbuild)
+            self.assertIn("pkgname=ai.storyteller.myapp.nightly\n", nightly_pkgbuild)
             self.assertIn("provides=(myapp-nightly=0.24.0nightly.20261124.100.1.gaaaaaaaaaaaa-1)", nightly_pkgbuild)
             self.assertIn("conflicts=(myapp-nightly myapp-nightly-bin myapp-nightly-git)", nightly_pkgbuild)
             self.assertEqual(stable_files & nightly_files, set(), f"colliding files: {stable_files & nightly_files}")
 
-            desktop_text = (nightly_pkgdir / "usr/share/applications/ai.storyteller.myapp-nightly.desktop").read_text()
+            desktop_text = (nightly_pkgdir / "usr/share/applications/ai.storyteller.myapp.nightly.desktop").read_text()
             self.assertIn("Exec=myapp-nightly %F\n", desktop_text)
-            self.assertIn("Icon=ai.storyteller.myapp-nightly\n", desktop_text)
+            self.assertIn("TryExec=myapp-nightly\n", desktop_text)
+            self.assertIn("Icon=ai.storyteller.myapp.nightly\n", desktop_text)
             desktop_entry_section = desktop_text.split("[Desktop Action", 1)[0]
             self.assertIn("StartupWMClass=ai.storyteller.myapp\n", desktop_entry_section)
 
-            metainfo_text = (nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp-nightly.metainfo.xml").read_text()
-            self.assertIn("<id>ai.storyteller.myapp-nightly</id>", metainfo_text)
-            self.assertIn('<launchable type="desktop-id">ai.storyteller.myapp-nightly.desktop</launchable>', metainfo_text)
+            metainfo_text = (nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.nightly.metainfo.xml").read_text()
+            self.assertIn("<id>ai.storyteller.myapp.nightly</id>", metainfo_text)
+            self.assertIn('<launchable type="desktop-id">ai.storyteller.myapp.nightly.desktop</launchable>', metainfo_text)
 
             bash_comp = (nightly_pkgdir / "usr/share/bash-completion/completions/myapp-nightly-cli").read_text()
             self.assertIn("_myapp-nightly-cli()", bash_comp)
@@ -549,6 +552,80 @@ exit 0
             self.assertEqual(res.returncode, 0, f"arch-package.sh failed: {res.stderr}\n{res.stdout}")
             pkg_file = out_dir / "myapp-1.2.3-linux-x86_64.pkg.tar.zst"
             self.assertTrue(pkg_file.exists())
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and platform.machine() == "x86_64" and shutil.which("docker"),
+        "Linux x86_64 Docker required for pacman side-by-side container smoke test",
+    )
+    def test_stable_and_nightly_arch_packages_install_side_by_side_in_pacman(self):
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            self.skipTest("Docker daemon unavailable")
+        run_sh = ROOT / "actions" / "arch-package" / "run.sh"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            version = "0.24.0-nightly.20261124.100.1.gaaaaaaaaaaaa"
+
+            def make_tarball(filename, greeting):
+                src = tmp_path / f"src-{filename}"
+                for d in ("bin", "share/applications", "share/metainfo", "share/icons/hicolor/256x256/apps", "share/doc/myapp"):
+                    (src / d).mkdir(parents=True)
+                (src / "bin/myapp").write_text(f"#!/bin/sh\necho {greeting}\n")
+                os.chmod(src / "bin/myapp", 0o755)
+                (src / "share/applications/ai.storyteller.myapp.desktop").write_text(
+                    "[Desktop Entry]\nName=MyApp\nExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
+                )
+                (src / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
+                    "<component><id>ai.storyteller.myapp</id>"
+                    "<launchable type=\"desktop-id\">ai.storyteller.myapp.desktop</launchable></component>\n"
+                )
+                (src / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.png").write_bytes(b"png")
+                (src / "share/doc/myapp/LICENSE").write_text("MIT\n")
+                tb = tmp_path / filename
+                with tarfile.open(tb, "w:gz") as tar:
+                    for item in src.iterdir():
+                        tar.add(item, arcname=item.name)
+                return tb
+
+            stable_tb = make_tarball("myapp-1.2.3-linux-x86_64.tar.gz", "stable-ok")
+            nightly_tb = make_tarball(f"myapp-{version}-linux-x86_64.tar.gz", "nightly-ok")
+            dist_dir = tmp_path / "dist"
+            dist_dir.mkdir()
+            for tb in (stable_tb, nightly_tb):
+                res = subprocess.run(
+                    ["bash", str(run_sh)],
+                    cwd=tmp_path,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "GITHUB_WORKSPACE": str(tmp_path),
+                        "GITHUB_ACTION_PATH": str(run_sh.parent),
+                        "TARBALL": tb.name,
+                        "TARGET_ARCH": "x86_64",
+                        "OUTPUT_DIR": "dist",
+                        "PKGREL": "1",
+                        "ARCH_LICENSE": "MIT",
+                        "ARCH_EXTRA_DEPENDS": "",
+                    },
+                )
+                self.assertEqual(res.returncode, 0, f"run.sh failed: {res.stderr}\n{res.stdout}")
+
+            install_res = subprocess.run(
+                [
+                    "docker", "run", "--rm",
+                    "-v", f"{dist_dir}:/dist:ro",
+                    "archlinux:base-devel",
+                    "bash", "-euxc",
+                    "pacman -U --noconfirm --nodeps /dist/myapp-1.2.3-linux-x86_64.pkg.tar.zst "
+                    f"/dist/myapp-{version}-linux-x86_64.pkg.tar.zst && "
+                    "pacman -Qi ai.storyteller.myapp ai.storyteller.myapp.nightly && "
+                    "test \"$(/usr/bin/myapp)\" = 'stable-ok' && "
+                    "test \"$(/usr/bin/myapp-nightly)\" = 'nightly-ok'",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(install_res.returncode, 0, f"pacman side-by-side failed: {install_res.stderr}\n{install_res.stdout}")
 
 
 if __name__ == "__main__":

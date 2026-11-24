@@ -19,6 +19,10 @@ on:
         description: "Reviewed literal JSON list of platforms this caller builds; the release signer still requires every admitted platform"
         type: string
         default: '["windows-x86_64"]'
+      linux-package-formats:
+        description: "Reviewed literal JSON list of Linux distro package formats to build alongside linux-x86_64; default none keeps the tarball path independent"
+        type: string
+        default: '[]'
     outputs:
       unsigned-artifact-id:
         value: ${{ jobs.build.outputs.artifact-id }}
@@ -89,6 +93,7 @@ jobs:
     permissions: {}
     outputs:
       platforms: ${{ steps.select.outputs.platforms }}
+      linux-package-formats: ${{ steps.select-packages.outputs.formats }}
     steps:
       - name: Require a JSON array of distinct supported platform IDs
         id: select
@@ -108,6 +113,27 @@ jobs:
               sys.exit('platforms must not repeat a platform')
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
               stream.write('platforms='+json.dumps(sorted(value), separators=(',', ':'))+'\n')
+          PY
+      - name: Validate optional Linux package formats
+        id: select-packages
+        env:
+          PLATFORMS: ${{ steps.select.outputs.platforms }}
+          LINUX_PACKAGE_FORMATS: ${{ inputs.linux-package-formats }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          supported = {'deb', 'rpm', 'appimage', 'flatpak', 'oci', 'arch'}
+          platforms = json.loads(os.environ['PLATFORMS'])
+          try:
+              fmts = json.loads(os.environ['LINUX_PACKAGE_FORMATS'])
+          except ValueError:
+              sys.exit('linux-package-formats must be a JSON array')
+          if not (isinstance(fmts, list) and len(set(fmts)) == len(fmts) and all(isinstance(f, str) and f in supported for f in fmts)):
+              sys.exit('linux-package-formats must be a JSON array of distinct supported formats')
+          if fmts and 'linux-x86_64' not in platforms:
+              sys.exit('linux-package-formats requires linux-x86_64 in platforms')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('formats='+json.dumps(sorted(fmts), separators=(',', ':'))+'\n')
           PY
 
   build:
@@ -567,7 +593,7 @@ jobs:
   build-linux-packages:
     name: Linux packages ${{ matrix.arch }}
     needs: [git-sources, select-platforms]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && needs.select-platforms.outputs.linux-package-formats != '[]' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -647,23 +673,32 @@ jobs:
           toolchain: ${{ steps.rust.outputs.toolchain }}
           targets: ${{ steps.rust.outputs.targets }}
           components: ${{ steps.rust.outputs.components }}
-      - name: Apply nightly version override
+      - name: Build and package (AppImage, deb, rpm, tar.gz) in isolated nightly mode
         env:
-          VERSION: ${{ steps.plan.outputs.version }}
-        run: cargo xtask version set "$VERSION"
-      - name: Build and package (AppImage, deb, rpm, tar.gz)
-        env:
-          VERSION: ${{ steps.plan.outputs.version }}
-          BUILD_DATE: ${{ steps.plan.outputs.build-date }}
-          BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_OVERRIDE_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: '1'
-        run: packaging/linux/package.sh
+        run: |
+          set -euo pipefail
+          pkg_formats="$(python3 -I -B -c "import json,os; fmts=set(json.loads(os.environ['LINUX_PACKAGE_FORMATS'])); out=[f for f in ('appimage','deb','rpm') if f in fmts]; out.append('tar'); print(' '.join(out))")"
+          packaging/linux/package.sh --formats "$pkg_formats"
       - name: Build Flatpak bundle and OCI layout
+        if: contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'flatpak') || contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'oci')
         env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           VERSION: ${{ steps.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
         run: |
+          set -euo pipefail
           shopt -s nullglob
           tarballs=()
           for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
@@ -673,12 +708,12 @@ jobs:
             echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
             exit 1
           fi
-          packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
-          test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
-          packaging/linux/flatpak-oci.sh "${tarballs[0]}"
-          base="$(basename "${tarballs[0]}" .tar.gz)"
-          test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
-          python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'oci' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
+            packaging/linux/flatpak-oci.sh "${tarballs[0]}"
+            base="$(basename "${tarballs[0]}" .tar.gz)"
+            test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
+            python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
           import hashlib, json, pathlib, shutil, sys
           layout, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
           index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
@@ -689,9 +724,21 @@ jobs:
           blob = layout / "blobs" / "sha256" / digest.split(":", 1)[1]
           shutil.copyfile(blob, out)
           assert hashlib.sha256(out.read_bytes()).hexdigest() == digest.split(":", 1)[1]
+          manifest_obj = json.loads(blob.read_bytes())
+          cfg_hex = manifest_obj["config"]["digest"].split(":", 1)[1]
+          cfg_obj = json.loads((layout / "blobs" / "sha256" / cfg_hex).read_bytes())
+          ref_label = cfg_obj.get("config", {}).get("Labels", {}).get("org.flatpak.ref", "")
+          assert ref_label.startswith("app/ai.storyteller.photocraft.nightly/"), f"expected nightly Flatpak app ID, got {ref_label!r}"
           PY
+            if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' not in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+              rm -f "dist/release/$base.flatpak"
+            fi
+          else
+            packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
+          fi
       - name: Find tarball for Arch package
         id: tarball
+        if: contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch')
         env:
           VERSION: ${{ steps.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -706,19 +753,50 @@ jobs:
             exit 1
           fi
           echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
-      - uses: storytold/craft-common-actions/actions/arch-package@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-        if: matrix.arch == 'x86_64'
-        with:
-          tarball: ${{ steps.tarball.outputs.path }}
-          arch: ${{ matrix.arch }}
+      - name: Build x86_64 Arch package with reviewed tooling revision and smoke-test side-by-side install
+        if: matrix.arch == 'x86_64' && contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch')
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+        run: |
+          set -euo pipefail
+          bash .nightly-tools/actions/arch-package/run.sh
+          smoke_dir="$(mktemp -d .arch-side-by-side.XXXXXX)"
+          trap 'rm -rf "$PWD/$smoke_dir"' EXIT
+          cp "$TARBALL" "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
+          TARBALL="$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz" \
+            TARGET_ARCH="x86_64" \
+            OUTPUT_DIR="$smoke_dir/out" \
+            PKGREL="1" \
+            ARCH_LICENSE="LicenseRef-Proprietary" \
+            bash .nightly-tools/actions/arch-package/run.sh
+          cp "dist/release/photocraft-${VERSION}-linux-x86_64.pkg.tar.zst" "$smoke_dir/out/"
+          docker run --rm -v "$PWD/$smoke_dir/out:/pkgs:ro" \
+            archlinux:base-devel \
+            bash -euxc 'pacman -U --noconfirm --nodeps /pkgs/photocraft-0.0.1-linux-x86_64.pkg.tar.zst /pkgs/photocraft-*-nightly.*-linux-x86_64.pkg.tar.zst && pacman -Qi ai.storyteller.photocraft ai.storyteller.photocraft.nightly && test -x /usr/bin/photocraft && test -x /usr/bin/photocraft-nightly'
+          rm -rf "$smoke_dir"
+          trap - EXIT
       - name: Upload aarch64 tarball handoff for Arch package job
-        if: matrix.arch == 'aarch64'
+        if: matrix.arch == 'aarch64' && contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-linux-arch-aarch64-tarball-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/release/*-${{ steps.plan.outputs.version }}-linux-aarch64.tar.gz
           if-no-files-found: error
           retention-days: 14
+      - name: Smoke-test x86_64 nightly binary channel isolation before removing tarball
+        if: matrix.arch == 'x86_64'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg-smoke"
+          tar -xzf dist/release/photocraft-"${VERSION}"-linux-x86_64.tar.gz -C "$RUNNER_TEMP/pkg-smoke" --strip-components=1
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/pkg-smoke/bin/photocraft" \
+            --profile-root "$RUNNER_TEMP/pkg-smoke-profile" --version "$VERSION"
       - name: Remove duplicate unsigned tarballs after packaging
         env:
           VERSION: ${{ steps.plan.outputs.version }}
@@ -726,7 +804,7 @@ jobs:
         run: |
           shopt -s nullglob
           rm -f dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz
-      - name: Verify built Linux package versions match admitted nightly
+      - name: Verify built Linux package versions and nightly identities
         env:
           VERSION: ${{ steps.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
@@ -736,12 +814,22 @@ jobs:
           for f in dist/release/*; do
             name="$(basename "$f")"
             case "$name" in
+              *-"${VERSION}"-linux-"${ARCH}".deb)
+                test "$(dpkg-deb -f "$f" Package)" = "photocraft-nightly" || { echo "::error::$name is not Package: photocraft-nightly"; exit 1; }
+                ;;
+              *-"${VERSION}"-linux-"${ARCH}".rpm)
+                test "$(rpm -qp --qf '%{NAME}' "$f")" = "photocraft-nightly" || { echo "::error::$name is not Name: photocraft-nightly"; exit 1; }
+                ;;
+              *-"${VERSION}"-linux-"${ARCH}".pkg.tar.zst)
+                tar --zstd -xOf "$f" .PKGINFO | grep -qx 'pkgname = ai.storyteller.photocraft.nightly' || { echo "::error::$name is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+                ;;
               *-"${VERSION}"-linux-"${ARCH}".*) ;;
               *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
               *) echo "::error::unexpected package or version mismatch in $name (expected *-${VERSION}-linux-${ARCH}.*)"; exit 1 ;;
             esac
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.arch == 'x86_64' || needs.select-platforms.outputs.linux-package-formats != '["arch"]'
         with:
           name: nightly-linux-packages-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/release/*
@@ -751,7 +839,7 @@ jobs:
   build-linux-arch-arm:
     name: Arch Linux aarch64
     needs: [select-platforms, build-linux-packages]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -766,14 +854,28 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Bind immutable defining workflow before shared packaging code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: nightly-linux-arch-aarch64-tarball-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/linux
           if-no-files-found: error
+          digest-mismatch: error
       - name: Find aarch64 tarball
         id: tarball
         run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
           shopt -s nullglob
           tarballs=()
           for f in dist/linux/*-linux-aarch64.tar.gz; do
@@ -784,10 +886,16 @@ jobs:
             exit 1
           fi
           echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
-      - uses: storytold/craft-common-actions/actions/arch-package@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-        with:
-          tarball: ${{ steps.tarball.outputs.path }}
-          arch: aarch64
+      - name: Build aarch64 Arch package with reviewed tooling revision
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          TARGET_ARCH: aarch64
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+        run: |
+          bash .nightly-tools/actions/arch-package/run.sh
+          for f in dist/release/*.pkg.tar.zst; do
+            tar --zstd -xOf "$f" .PKGINFO | grep -qx 'pkgname = ai.storyteller.photocraft.nightly' || { echo "::error::$f is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-linux-arch-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
@@ -797,7 +905,12 @@ jobs:
 
   attest-linux-packages:
     needs: [select-platforms, build-linux-packages, build-linux-arch-arm]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: >-
+      !cancelled() && contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') &&
+      needs.select-platforms.outputs.linux-package-formats != '[]' &&
+      needs.build-linux-packages.result == 'success' &&
+      (!contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch') || needs.build-linux-arch-arm.result == 'success') &&
+      inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -826,12 +939,19 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: >-
+          contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'deb') ||
+          contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'rpm') ||
+          contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'appimage') ||
+          contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'flatpak') ||
+          contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'oci')
         with:
           name: nightly-linux-packages-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .linux-packages
           merge-multiple: true
           digest-mismatch: error
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch')
         with:
           name: nightly-linux-arch-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
           path: .linux-packages
@@ -841,9 +961,10 @@ jobs:
         id: subject
         env:
           GH_TOKEN: ${{ github.token }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
         run: |
           test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
-          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-packages-subject --platform linux-x86_64 --directory .linux-packages
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-packages-subject --platform linux-x86_64 --directory .linux-packages --formats "$LINUX_PACKAGE_FORMATS"
       - name: Attest Linux package payloads
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
         with:

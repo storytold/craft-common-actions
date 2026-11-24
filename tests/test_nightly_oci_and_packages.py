@@ -116,11 +116,21 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def _write_skopeo_digest(self, cmd):
+        self.assertIn("--preserve-digests", cmd)
+        self.assertIn("--digestfile", cmd)
+        digest_file = Path(cmd[cmd.index("--digestfile") + 1])
+        oci_arg = next(arg for arg in cmd if arg.startswith("oci:"))
+        layout = Path(oci_arg[len("oci:"):])
+        digest_str = json.loads((layout / "index.json").read_text(encoding="utf-8"))["manifests"][0]["digest"]
+        digest_file.write_text(digest_str + "\n", encoding="utf-8")
+
     def test_valid_release_checksums_and_signature_push_dated_and_nightly_tags(self):
         calls = []
 
         def fake_run(cmd, check=True):
             calls.append(cmd)
+            self._write_skopeo_digest(cmd)
 
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             pushed = oci.verify_and_push_oci(
@@ -129,7 +139,6 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 tag=self.tag,
                 version=self.version,
                 source_commit=self.commit,
-                release_id=42,
                 sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir,
                 public_key=self.pubkey,
@@ -150,6 +159,27 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         ])
         self.assertEqual(len(calls), 8)
         self.assertFalse(any("stable-" in t for t in pushed))
+
+    def test_oci_pushed_digest_mismatch_stops_immediately(self):
+        def bad_digest_run(cmd, check=True):
+            digest_file = Path(cmd[cmd.index("--digestfile") + 1])
+            digest_file.write_text("sha256:" + "0" * 64 + "\n", encoding="utf-8")
+
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "pushed OCI digest .* differs from signed manifest"):
+                oci.verify_and_push_oci(
+                    release=self.release,
+                    repository=self.repo,
+                    tag=self.tag,
+                    version=self.version,
+                    source_commit=self.commit,
+                    sums_bytes=self.sums_bytes,
+                    package_dir=self.pkg_dir,
+                    public_key=self.pubkey,
+                    fingerprint=self.fingerprint,
+                    environment=self.env,
+                    runner=bad_digest_run,
+                )
 
     def test_missing_aarch64_layout_stops_before_push(self):
         import shutil
@@ -362,6 +392,8 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             tar_asc = f"{tar_name}.asc"
             deb_name = f"photocraft-{version}-linux-x86_64.deb"
             deb_asc = f"{deb_name}.asc"
+            deb_arm = f"photocraft-{version}-linux-aarch64.deb"
+            deb_arm_asc = f"{deb_arm}.asc"
             old_policy = {
                 "schema": req.LIVE_POLICY,
                 "repository": self.repo,
@@ -386,6 +418,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     "linux-x86_64": {
                         "unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
                         "trust": {"fingerprint": self.fingerprint},
+                        "package_formats": ["deb"],
                     }
                 },
             }
@@ -422,20 +455,14 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                         "created_at": "2026-11-23T00:05:00Z",
                         "expires_at": "2026-12-23T00:05:00Z",
                     },
-                    "nightly-linux-arch-aarch64": {
-                        "id": 106,
-                        "name": "nightly-linux-arch-aarch64-101-1",
-                        "size_in_bytes": 1000,
-                        "wrapper_sha256": "8" * 64,
-                        "created_at": "2026-11-23T00:05:00Z",
-                        "expires_at": "2026-12-23T00:05:00Z",
-                    },
                 },
             }
             support = {
                 tar_asc: {"size": 100, "sha256": digest_asc},
                 deb_name: {"size": 2000, "sha256": digest_deb},
                 deb_asc: {"size": 100, "sha256": digest_deb_asc},
+                deb_arm: {"size": 2000, "sha256": digest_deb},
+                deb_arm_asc: {"size": 100, "sha256": digest_deb_asc},
             }
             receipt = req.release_receipt_v3(
                 old_policy, prior_request, "linux-x86_64", digest_tar, digest_tar, self.fingerprint, support
@@ -458,6 +485,8 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     {"name": tar_asc, "digest": f"sha256:{digest_asc}"},
                     {"name": deb_name, "digest": f"sha256:{digest_deb}"},
                     {"name": deb_asc, "digest": f"sha256:{digest_deb_asc}"},
+                    {"name": deb_arm, "digest": f"sha256:{digest_deb}"},
+                    {"name": deb_arm_asc, "digest": f"sha256:{digest_deb_asc}"},
                 ],
             }
 
@@ -490,7 +519,10 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         pkg_stage_in = self.root / "pkg_in"
         pkg_stage_in.mkdir()
         deb_name = f"photocraft-{self.version}-linux-x86_64.deb"
+        deb_arm_name = f"photocraft-{self.version}-linux-aarch64.deb"
         (pkg_stage_in / deb_name).write_bytes(b"good-deb-bytes")
+        (pkg_stage_in / deb_arm_name).write_bytes(b"good-deb-arm-bytes")
+        policy = {"schema": "craft-nightly-release-policy/v3", "platforms": {"linux-x86_64": {"package_formats": ["deb"]}}}
 
         plan = {
             "identity": {"version": self.version, "tag": self.tag, "source_commit": self.commit, "published_at": 1795459200},
@@ -505,15 +537,16 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             {"linux-x86_64": {"unsigned_sha256": payload_sha}},
             {"linux-x86_64": {"payload_sha256": payload_sha}},
             linux_packages=pkg_stage_in,
+            policy=policy,
         )
 
         # Unmodified validated bundle passes verify_bundle.
-        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated))
+        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
 
         # Tampering with the staged Linux package breaks bundle verification.
         (validated / deb_name).write_bytes(b"tampered-deb-bytes")
         with self.assertRaises(n.InvalidNightly):
-            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated))
+            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
 
     def test_verify_oci_signature_checks_reference_and_manifest_digest(self):
         import nightly_signing as signing
@@ -624,13 +657,17 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         feed = n.build_feed_v2(self.registry, self.ident, self.version, feed_dir)
         nightly_json = json.dumps(feed).encode("utf-8")
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            def ok_run(c, check=True):
+                calls.append(c)
+                self._write_skopeo_digest(c)
+
             oci.verify_and_push_oci(
                 release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
                 source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
                 environment=self.env, producer_run_id=100, producer_run_attempt=1,
                 recent_releases=newest_only, nightly_json_bytes=nightly_json,
-                runner=lambda c, check=True: calls.append(c),
+                runner=ok_run,
             )
         self.assertEqual(len(calls), 8)
         for cmd in calls:
@@ -672,11 +709,17 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         pkg_dir = self.root / "pkgs"
         pkg_dir.mkdir()
         deb = pkg_dir / f"photocraft-{self.version}-linux-x86_64.deb"
+        deb_arm = pkg_dir / f"photocraft-{self.version}-linux-aarch64.deb"
         rpm = pkg_dir / f"photocraft-{self.version}-linux-x86_64.rpm"
+        rpm_arm = pkg_dir / f"photocraft-{self.version}-linux-aarch64.rpm"
         deb.write_bytes(b"deb-bytes")
+        deb_arm.write_bytes(b"deb-arm-bytes")
         rpm.write_bytes(b"rpm-bytes")
+        rpm_arm.write_bytes(b"rpm-arm-bytes")
         deb_sha = hashlib.sha256(b"deb-bytes").hexdigest()
+        deb_arm_sha = hashlib.sha256(b"deb-arm-bytes").hexdigest()
         rpm_sha = hashlib.sha256(b"rpm-bytes").hexdigest()
+        rpm_arm_sha = hashlib.sha256(b"rpm-arm-bytes").hexdigest()
         policy = {
             "repository": self.repo,
             "repository_id": 123,
@@ -696,6 +739,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 "linux-x86_64": {
                     "unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
                     "trust": {"fingerprint": self.fingerprint},
+                    "package_formats": ["deb", "rpm"],
                 }
             },
             "schema": req.LIVE_POLICY,
@@ -742,7 +786,6 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             "linux_package_artifacts": {
                 "nightly-linux-packages-x86_64": {**base_item, "id": 2, "name": "nightly-linux-packages-x86_64-100-1"},
                 "nightly-linux-packages-aarch64": {**base_item, "id": 3, "name": "nightly-linux-packages-aarch64-100-1"},
-                "nightly-linux-arch-aarch64": {**base_item, "id": 4, "name": "nightly-linux-arch-aarch64-100-1"},
             },
         }
         state = {"plan": {"platforms": {"linux-x86_64": {}}, "identity": {"version": self.version}}, "request": request}
@@ -763,7 +806,9 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     "predicateType": "https://slsa.dev/provenance/v1",
                     "subject": [
                         {"name": deb.name, "digest": {"sha256": deb_sha}},
+                        {"name": deb_arm.name, "digest": {"sha256": deb_arm_sha}},
                         {"name": rpm.name, "digest": {"sha256": rpm_sha}},
+                        {"name": rpm_arm.name, "digest": {"sha256": rpm_arm_sha}},
                     ],
                     "predicate": {
                         "buildDefinition": {
@@ -796,7 +841,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
             claims = rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
-        self.assertEqual(sorted(claims), [deb.name, rpm.name])
+        self.assertEqual(sorted(claims), sorted([deb.name, deb_arm.name, rpm.name, rpm_arm.name]))
         bundle_out = self.root / "staged-bundle"
         unsigned_dir = self.root / "unsigned-tar"
         unsigned_dir.mkdir()
@@ -811,11 +856,26 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         }
         rel.stage_bundle(bundle_out, bundle_state, {"linux-x86_64": unsigned_dir},
                          {"linux-x86_64": {}}, {"linux-x86_64": {"payload_sha256": tar_sha}},
-                         linux_packages=pkg_dir, linux_package_claims=claims)
+                         linux_packages=pkg_dir, linux_package_claims=claims, policy=policy)
         with self.assertRaisesRegex(n.InvalidNightly, "staged Linux package payload changed"):
             rel.stage_bundle(self.root / "staged-bundle-bad", bundle_state, {"linux-x86_64": unsigned_dir},
                              {"linux-x86_64": {}}, {"linux-x86_64": {"payload_sha256": tar_sha}},
-                             linux_packages=pkg_dir, linux_package_claims={**claims, deb.name: {"payload_sha256": "0" * 64}})
+                             linux_packages=pkg_dir, linux_package_claims={**claims, deb.name: {"payload_sha256": "0" * 64}},
+                             policy=policy)
+
+        # Reject missing architecture (e.g. aarch64 rpm missing), missing format, or unrequested extra format.
+        rpm_arm.unlink()
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            with self.assertRaisesRegex(n.InvalidNightly, r"missing expected Linux package"):
+                rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
+        rpm_arm.write_bytes(b"rpm-arm-bytes")
+        extra_appimage = pkg_dir / f"photocraft-{self.version}-linux-x86_64.AppImage"
+        extra_appimage.write_bytes(b"unrequested")
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            with self.assertRaisesRegex(n.InvalidNightly, r"unexpected Linux package"):
+                rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
+        extra_appimage.unlink()
+
         deb.write_bytes(b"tampered")
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
             with self.assertRaisesRegex(n.InvalidNightly, "unsigned payload digest differs"):

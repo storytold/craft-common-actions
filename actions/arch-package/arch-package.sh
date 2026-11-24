@@ -122,7 +122,11 @@ if [[ "$raw_version" == *-nightly* ]]; then
   is_nightly=1
   pkg_alias="$app-nightly"
   if [[ "$pkgname" != *-nightly && "$pkgname" != *.nightly ]]; then
-    pkgname="${pkgname}-nightly"
+    if [[ "$pkgname" == *.* ]]; then
+      pkgname="${pkgname}.nightly"
+    else
+      pkgname="${pkgname}-nightly"
+    fi
   fi
 fi
 app_re="$(printf '%s' "$app" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
@@ -283,6 +287,7 @@ cat <<NIGHTLY_PKG
         print "Exec=" app "-nightly" substr(\$0, 6 + length(app))
         next
       }
+      \$0 == "TryExec=" app { print "TryExec=" app "-nightly"; next }
       \$0 == "Icon=" base { print "Icon=" pkg; next }
       { print }
       END { if (insert_wm == 1 && !inserted) print "StartupWMClass=" base }

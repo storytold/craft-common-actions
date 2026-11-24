@@ -191,8 +191,15 @@ def linux_package_names(directory, plan):
     return names
 
 
-def validated_names(plan, directory=None):
-    return {row["unsigned_asset"] for row in plan["platforms"].values()} | linux_package_names(directory, plan)
+def validated_names(plan, directory=None, *, policy=None):
+    base = {row["unsigned_asset"] for row in plan["platforms"].values()}
+    if policy is not None:
+        formats = r.policy_linux_package_formats(policy)
+        if formats:
+            app = plan["identity"].get("app", "photocraft")
+            return base | r.expected_linux_package_names(app, plan["identity"]["version"], formats)
+        return base
+    return base | linux_package_names(directory, plan)
 
 
 def signed_names(receipt, plan):
@@ -299,18 +306,13 @@ def previous_publication(api, registry, policy, current_request, rows):
                 r.trusted_signer(old_policy, platform), old["support"])
             n.require(old == receipt, "prior two-role receipt differs")
             required = plat.required_support(platform, plan["platforms"][platform]["asset"])
-            support_names = set(receipt["support"])
             if platform == "linux-x86_64":
-                n.require(required <= support_names,
-                    "prior platform support set differs from its required detached signature files")
-                version = plan["identity"]["version"]
-                for extra_name in support_names - required:
-                    n.require(f"-{version}-linux-" in extra_name and
-                        extra_name.endswith(r.SIGNATURE_SUPPORT_SUFFIXES + r.PACKAGE_SUPPORT_SUFFIXES),
-                        "invalid prior Linux package support name")
-            else:
-                n.require(support_names == required,
-                    "prior platform support set differs from its required detached signature files")
+                formats = r.policy_linux_package_formats(old_policy)
+                if formats:
+                    app = plan["identity"].get("app", "photocraft")
+                    required = required | r.expected_signed_linux_support_names(app, plan["identity"]["version"], formats)
+            n.require(set(receipt["support"]) == required,
+                "prior platform support set differs from its required detached signature files")
             expected_assets[plan["platforms"][platform]["asset"]] = receipt["final_sha256"]
             for name, item in receipt["support"].items():
                 expected_assets[name] = item["sha256"]
@@ -389,19 +391,27 @@ def platform_directories(directory, platforms):
     return {platform: directory/platform for platform in sorted(platforms)}
 
 
-def linux_package_paths(pkg_dir, version):
+def linux_package_paths(pkg_dir, version, *, app="photocraft", formats=None):
     """Sorted validated (filename, Path) pairs for Linux packages in a directory."""
     root = n.owned_path(pkg_dir)
     n.require(root.is_dir() and not root.is_symlink(), "Linux packages directory required")
-    items = []
+    present = {}
     for entry in sorted(root.iterdir()):
         if entry.is_dir() and not entry.is_symlink():
             continue
         n.require(n.NAME.fullmatch(entry.name) and f"-{version}-linux-" in entry.name and
             entry.name.endswith(r.PACKAGE_SUPPORT_SUFFIXES), f"invalid Linux package {entry.name}")
-        items.append((entry.name, entry))
-    n.require(bool(items), "no Linux packages found")
-    return items
+        present[entry.name] = entry
+    if formats is not None:
+        n.require(bool(formats), "no Linux package formats configured")
+        expected = r.expected_linux_package_names(app, version, formats)
+        missing = sorted(expected - set(present))
+        n.require(not missing, f"missing expected Linux package(s): {', '.join(missing)}")
+        unexpected = sorted(set(present) - expected)
+        n.require(not unexpected, f"unexpected Linux package(s): {', '.join(unexpected)}")
+        return [(name, present[name]) for name in sorted(expected)]
+    n.require(bool(present), "no Linux packages found")
+    return sorted(present.items())
 
 
 def _gh_attest_verify(policy, request, file_path, payload_sha256, *, multi_subject=False, runner=subprocess.run):
@@ -437,18 +447,24 @@ def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
     """Verify build provenance attestation for every staged Linux package file."""
     plan, request = state["plan"], state["request"]
     n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
+    formats = r.policy_linux_package_formats(policy)
+    n.require(bool(formats), "Linux packages staged when policy package_formats is empty")
+    app = plan["identity"].get("app", "photocraft")
     version = plan["identity"]["version"]
     claims = {}
-    for name, path in linux_package_paths(pkg_dir, version):
+    for name, path in linux_package_paths(pkg_dir, version, app=app, formats=formats):
         _, digest = n.digest_file(pkg_dir, name)
         claims[name] = _gh_attest_verify(policy, request, path, digest, multi_subject=True, runner=runner)
     return claims
 
 
-def stage_bundle(output, state, directories, manifests, claims, linux_packages=None, linux_package_claims=None):
+def stage_bundle(output, state, directories, manifests, claims, linux_packages=None, linux_package_claims=None, *, policy=None):
     """One validated bundle: shared admission JSON plus every platform's unsigned payload."""
     n.fields(state, {"request", "quality", "plan"}, "validator state")
     plan = state["plan"]
+    formats = r.policy_linux_package_formats(policy) if policy is not None else None
+    if formats is not None:
+        n.require(bool(formats) == (linux_packages is not None), "Linux package staging does not match policy package_formats")
     n.require(set(directories) == set(manifests) == set(claims) == set(plan["platforms"]), "platform validation incomplete")
     # Every derived destination name is checked before the output directory exists.
     n.require(all(isinstance(row["unsigned_asset"], str) and n.NAME.fullmatch(row["unsigned_asset"]) for row in plan["platforms"].values()),
@@ -465,8 +481,9 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
         n.require(n.digest_file(output, asset)[1] == claims[platform]["payload_sha256"], "staged payload changed")
     if linux_packages is not None:
         n.require("linux-x86_64" in plan["platforms"], "Linux packages staged without linux-x86_64")
+        app = plan["identity"].get("app", "photocraft")
         version = plan["identity"]["version"]
-        for name, _ in linux_package_paths(linux_packages, version):
+        for name, _ in linux_package_paths(linux_packages, version, app=app, formats=formats):
             stream, _ = n.regular_file(linux_packages, name)
             with stream, (output/name).open("xb") as destination:
                 shutil.copyfileobj(stream, destination, 1024*1024)
@@ -474,7 +491,7 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
                 n.require(name in linux_package_claims and
                     n.digest_file(output, name)[1] == linux_package_claims[name]["payload_sha256"],
                     "staged Linux package payload changed")
-    return bundle_hash(output, validated_names(plan, output))
+    return bundle_hash(output, validated_names(plan, output, policy=policy))
 
 
 def require_unsigned_binding(policy, state, platform, directory):
@@ -505,8 +522,10 @@ def native_sign(policy, state, platform, directory, source, output, environment)
         signed = Path(temporary)/"signed"; signed.mkdir()
         sign_env = environment
         if platform == "linux-x86_64":
-            pkg_names = sorted(linux_package_names(directory, plan))
-            if pkg_names:
+            formats = r.policy_linux_package_formats(policy)
+            if formats:
+                app = plan["identity"].get("app", "photocraft")
+                pkg_names = sorted(r.expected_linux_package_names(app, plan["identity"]["version"], formats))
                 pkg_stage = Path(temporary)/"validated-linux-packages"; pkg_stage.mkdir()
                 for name in pkg_names:
                     stream, _ = n.regular_file(directory, name)
@@ -541,7 +560,13 @@ def expected_platform_receipt(policy, state, platform, directory):
     expected = r.release_receipt_v3(policy, state["request"], platform, unsigned_sha256,
         n.digest_file(directory, plan["platforms"][platform]["asset"])[1], r.trusted_signer(policy, platform), support)
     n.require(receipt == expected, "final two-role receipt differs")
-    n.require(set(support) == plat.required_support(platform, plan["platforms"][platform]["asset"]),
+    required = plat.required_support(platform, plan["platforms"][platform]["asset"])
+    if platform == "linux-x86_64":
+        formats = r.policy_linux_package_formats(policy)
+        if formats:
+            app = plan["identity"].get("app", "photocraft")
+            required = required | r.expected_signed_linux_support_names(app, plan["identity"]["version"], formats)
+    n.require(set(support) == required,
         "platform support set differs from its required detached signature files")
     for name, item in support.items():
         n.require(n.digest_file(directory, name) == (item["size"], item["sha256"]), "signing support differs from receipt")
@@ -694,7 +719,8 @@ def outputs(values):
 
 
 def plan_outputs(plan, platform=None):
-    values = {"version": plan["identity"]["version"], "source-commit": plan["identity"]["source_commit"],
+    values = {"version": plan["identity"]["version"], "tag": plan["identity"]["tag"],
+        "source-commit": plan["identity"]["source_commit"],
         "platforms": ",".join(sorted(plan["platforms"])),
         "build-date": __import__("datetime").datetime.fromtimestamp(plan["identity"]["published_at"],
             __import__("datetime").timezone.utc).strftime("%Y-%m-%d")}
@@ -739,7 +765,7 @@ def main():
     parser.add_argument("mode", choices=("main-plan", "main-seal", "main-subject", "main-packages-subject",
         "admit", "validate", "guard", "sign", "verify-platform", "final", "publish"))
     for name in ("source", "directory", "output", "plan", "state", "platform", "expected-sha256", "producer-run-id",
-            "producer-run-attempt", "packet", "ownership", "combined", "linux-packages"):
+            "producer-run-attempt", "packet", "ownership", "combined", "linux-packages", "formats"):
         parser.add_argument("--"+name)
     args = parser.parse_args()
     try:
@@ -771,7 +797,15 @@ def main():
                 outputs({"unsigned-sha256": digest})
             elif args.mode == "main-packages-subject":
                 n.require(args.directory, "Linux packages directory required")
-                paths = linux_package_paths(args.directory, plan["identity"]["version"])
+                fmts = None
+                if args.formats is not None:
+                    parsed_fmts = loads(args.formats.encode("utf-8"))
+                    n.require(isinstance(parsed_fmts, list) and parsed_fmts and len(parsed_fmts) == len(set(parsed_fmts)) and
+                        all(isinstance(f, str) and f in r.SUPPORTED_LINUX_PACKAGE_FORMATS for f in parsed_fmts),
+                        "invalid Linux package formats")
+                    fmts = tuple(sorted(parsed_fmts))
+                paths = linux_package_paths(args.directory, plan["identity"]["version"],
+                    app=plan["identity"].get("app", "photocraft"), formats=fmts)
                 outputs({"subject-path": ",".join(str(path.resolve()) for _, path in paths)})
             else:
                 n.require(args.directory, "exact compiler artifact directory required")
@@ -807,18 +841,20 @@ def main():
             for platform, directory in directories.items():
                 manifests[platform], claims[platform] = verified_unsigned(policy, state, platform, directory)
             pkg_claims = None
-            if "linux-x86_64" in state["plan"]["platforms"]:
+            linux_pkgs_arg = None
+            if r.policy_linux_package_formats(policy):
                 n.require(args.linux_packages is not None, "Linux packages directory required")
-                pkg_claims = verified_linux_packages(policy, state, args.linux_packages)
+                linux_pkgs_arg = args.linux_packages
+                pkg_claims = verified_linux_packages(policy, state, linux_pkgs_arg)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
             digest = stage_bundle(args.output, state, directories, manifests, claims,
-                linux_packages=args.linux_packages, linux_package_claims=pkg_claims)
+                linux_packages=linux_pkgs_arg, linux_package_claims=pkg_claims, policy=policy)
             outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})
             return
         if args.mode in ("guard", "sign"):
             n.require(args.directory and args.platform and args.expected_sha256, "independent exact trusted-job bundle binding required")
             unverified = n.bounded_json(Path(args.directory)/"plan.json")
-            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified, args.directory))
+            state = verify_bundle(args.directory, args.expected_sha256, validated_names(unverified, args.directory, policy=policy))
             n.require(args.platform in state["plan"]["platforms"], "platform absent from validated bundle")
             require_unsigned_binding(policy, state, args.platform, args.directory)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
@@ -840,8 +876,15 @@ def main():
         revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
         verify_final(policy, state, directories, args.source, env)
         if args.mode == "final":
-            outputs({"subject-path": ",".join(str(Path(directories[platform], state["plan"]["platforms"][platform]["asset"]).resolve())
-                for platform in sorted(directories))}); return
+            subjects = [
+                str(Path(directories[platform], state["plan"]["platforms"][platform]["asset"]).resolve())
+                for platform in sorted(directories)
+            ]
+            for platform in sorted(directories):
+                for support_name in sorted(state["signing"][platform]["support"]):
+                    if support_name.endswith(r.PACKAGE_SUPPORT_SUFFIXES):
+                        subjects.append(str(Path(directories[platform], support_name).resolve()))
+            outputs({"subject-path": ",".join(subjects)}); return
         n.require(args.packet and args.ownership and args.combined, "new combined/packet/ownership paths required")
         combined = combine(state, directories, args.combined)
         guard = lambda: revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
