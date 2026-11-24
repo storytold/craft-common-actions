@@ -105,15 +105,15 @@ jobs:
           PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > .release.json
-          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > .releases.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            --jq '{id,tag_name,target_commitish,draft,prerelease,html_url,body}' > .release.json
           python3 -I -B - <<'PY'
           import json, os, sys
           sys.path.insert(0, ".nightly-tools/scripts")
           import nightly_feed as n
           import nightly_oci as oci
           release = n.bounded_json(".release.json")
-          recent = n.bounded_json(".releases.json")
+          recent = oci.fetch_release_history(os.environ["GITHUB_REPOSITORY"])
           rel_id = int(os.environ["RELEASE_ID"]) if os.environ.get("RELEASE_ID") else None
           oci.verify_release_target(
               release,
@@ -126,6 +126,10 @@ jobs:
               producer_run_attempt=int(os.environ["PRODUCER_RUN_ATTEMPT"]),
               recent_releases=recent,
           )
+          recent_json = json.dumps(recent, separators=(",", ":")).encode("utf-8")
+          n.require(len(recent_json) <= n.MAX_JSON_BYTES, "release index exceeds bound")
+          with open(".releases.json", "wb") as out:
+              out.write(recent_json)
           pub = json.loads(release["body"].split(oci.MARKER_V2, 1)[1])
           pkg_arts = pub.get("request", {}).get("linux_package_artifacts", {})
           x86_id = pkg_arts.get("nightly-linux-packages-x86_64", {}).get("id", "")

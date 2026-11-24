@@ -34,6 +34,31 @@ def parse_sha256sums(raw):
     return sums
 
 
+def fetch_release_history(repository, *, runner=subprocess.run):
+    """Fetch a complete, bounded release index without retaining asset or body data."""
+    rows = []
+    ids = set()
+    projection = "[.[] | {id, tag_name, draft, prerelease}]"
+    for page in range(1, p.MAX_PAGES + 1):
+        endpoint = f"repos/{repository}/releases?per_page={p.PAGE_SIZE}&page={page}"
+        raw = runner(["gh", "api", endpoint, "--jq", projection],
+                     check=True, capture_output=True, timeout=30).stdout
+        n.require(len(raw) <= n.MAX_JSON_BYTES, "release index page exceeds bound")
+        batch = json.loads(raw)
+        n.require(isinstance(batch, list) and len(batch) <= p.PAGE_SIZE, "invalid release index page")
+        for row in batch:
+            n.fields(row, {"id", "tag_name", "draft", "prerelease"}, "release index row")
+            n.positive(row["id"], "release ID")
+            n.require(row["id"] not in ids, "duplicate release index ID")
+            n.require(isinstance(row["tag_name"], str) and type(row["draft"]) is bool
+                      and type(row["prerelease"]) is bool, "invalid release index identity")
+            ids.add(row["id"])
+            rows.append(row)
+        if len(batch) < p.PAGE_SIZE:
+            return rows
+    raise n.InvalidNightly("release index page bound reached")
+
+
 def verify_release_target(
     release,
     *,

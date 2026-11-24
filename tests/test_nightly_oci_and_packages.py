@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -194,6 +196,53 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     environment=self.env, runner=lambda c, check=True: calls.append(c),
                 )
         self.assertEqual(calls, [])
+
+    @unittest.skipUnless(shutil.which("jq"), "jq required for the release REST projection fixture")
+    def test_release_history_projects_large_pages_and_checks_newer_nightly(self):
+        bulky = {
+            "body": "release notes " * 500,
+            "assets": [{"name": f"asset-{index}", "uploader": {"login": "runner", "metadata": "x" * 1800}}
+                       for index in range(30)],
+        }
+        first = [{**self.release, **bulky, "id": 100 + i, "tag_name": f"v0.23.{i}", "prerelease": False}
+                 for i in range(oci.p.PAGE_SIZE - 1)] + [{**self.release, **bulky}]
+        _, newer_version = n.identity(self.registry, "photocraft", self.repo, self.commit,
+                                      "0.24.0", 101, 1, 1795392000)
+        newer = {**self.release, **bulky, "id": 202, "tag_name": f"v{newer_version}"}
+        self.assertGreater(len(json.dumps(first).encode()), 4 * n.MAX_JSON_BYTES)
+        calls = []
+
+        def run(cmd, **kwargs):
+            self.assertEqual(cmd[:2], ["gh", "api"])
+            self.assertEqual(cmd[3], "--jq")
+            self.assertEqual(cmd[2], f"repos/{self.repo}/releases?per_page={oci.p.PAGE_SIZE}&page={len(calls) + 1}")
+            self.assertTrue(kwargs["check"])
+            batch = (first, [newer])[len(calls)]
+            calls.append(cmd[2])
+            return subprocess.run(["jq", "-c", cmd[4]], input=json.dumps(batch).encode(),
+                                  check=True, capture_output=True, timeout=30)
+
+        recent = oci.fetch_release_history(self.repo, runner=run)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(recent), oci.p.PAGE_SIZE + 1)
+        self.assertEqual(set(recent[-1]), {"id", "tag_name", "draft", "prerelease"})
+        self.assertLess(len(json.dumps(recent).encode()), n.MAX_JSON_BYTES)
+        with self.assertRaisesRegex(n.InvalidNightly, "non-newest nightly release"):
+            oci.verify_release_target(self.release, repository=self.repo, tag=self.tag,
+                                      source_commit=self.commit, version=self.version, recent_releases=recent)
+
+    def test_release_history_fails_closed_on_incomplete_or_repeated_page(self):
+        batch = [{"id": i + 1, "tag_name": f"v1.0.{i}", "draft": False, "prerelease": False}
+                 for i in range(oci.p.PAGE_SIZE)]
+
+        def run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(batch).encode())
+
+        with patch.object(oci.p, "MAX_PAGES", 1):
+            with self.assertRaisesRegex(n.InvalidNightly, "page bound reached"):
+                oci.fetch_release_history(self.repo, runner=run)
+        with self.assertRaisesRegex(n.InvalidNightly, "duplicate release index ID"):
+            oci.fetch_release_history(self.repo, runner=run)
 
     def test_mismatched_release_target_stops_before_push(self):
         calls = []
