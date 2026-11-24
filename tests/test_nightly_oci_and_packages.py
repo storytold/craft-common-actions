@@ -15,12 +15,15 @@ import nightly_feed as n
 import nightly_oci as oci
 
 
-def _write_oci_layout(pkg_dir: Path, base_name: str, manifest_bytes: bytes) -> str:
+def _write_oci_layout(pkg_dir: Path, base_name: str, manifest_bytes: bytes, config_bytes: bytes | None = None) -> str:
     manifest_hex = hashlib.sha256(manifest_bytes).hexdigest()
     layout = pkg_dir / f"{base_name}-oci"
     blobs = layout / "blobs" / "sha256"
     blobs.mkdir(parents=True)
     (blobs / manifest_hex).write_bytes(manifest_bytes)
+    if config_bytes is not None:
+        config_hex = hashlib.sha256(config_bytes).hexdigest()
+        (blobs / config_hex).write_bytes(config_bytes)
     (layout / "index.json").write_text(json.dumps({
         "schemaVersion": 2,
         "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json",
@@ -48,11 +51,22 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
         self.base = f"photocraft-{self.version}-linux-x86_64"
         self.base_arm = f"photocraft-{self.version}-linux-aarch64"
-        self.manifest_bytes = b'{"schemaVersion":2,"config":{"digest":"sha256:' + b"b" * 64 + b'"}}\n'
-        self.manifest_bytes_arm = b'{"schemaVersion":2,"config":{"digest":"sha256:' + b"c" * 64 + b'"}}\n'
+        self.config_bytes = json.dumps({"os": "linux", "architecture": "amd64"}).encode("utf-8")
+        self.config_bytes_arm = json.dumps({"os": "linux", "architecture": "arm64"}).encode("utf-8")
+        self.manifest_bytes = json.dumps({
+            "schemaVersion": 2,
+            "config": {"digest": f"sha256:{hashlib.sha256(self.config_bytes).hexdigest()}"},
+        }).encode("utf-8")
+        self.manifest_bytes_arm = json.dumps({
+            "schemaVersion": 2,
+            "config": {"digest": f"sha256:{hashlib.sha256(self.config_bytes_arm).hexdigest()}"},
+        }).encode("utf-8")
         sums_lines = []
-        for base, mbytes in ((self.base, self.manifest_bytes), (self.base_arm, self.manifest_bytes_arm)):
-            _write_oci_layout(self.pkg_dir, base, mbytes)
+        for base, mbytes, cbytes in (
+            (self.base, self.manifest_bytes, self.config_bytes),
+            (self.base_arm, self.manifest_bytes_arm, self.config_bytes_arm),
+        ):
+            _write_oci_layout(self.pkg_dir, base, mbytes, cbytes)
             (self.pkg_dir / f"{base}.oci-manifest.json").write_bytes(mbytes)
             sig_bytes = b"-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n"
             (self.pkg_dir / f"{base}.oci.sig").write_bytes(sig_bytes)
@@ -485,3 +499,31 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             manifest.write_bytes(b'{"tampered":true}')
             with self.assertRaisesRegex(n.InvalidNightly, "manifest digest mismatch"):
                 signing.verify_oci_signature(self.pubkey, sig, manifest, "ghcr.io/storytold/photocraft", self.fingerprint, self.env)
+
+    def test_mismatched_oci_config_arch_stops_before_push(self):
+        import shutil
+        calls = []
+        shutil.rmtree(self.pkg_dir / f"{self.base_arm}-oci")
+        wrong_cfg = json.dumps({"os": "linux", "architecture": "amd64"}).encode("utf-8")
+        wrong_manifest = json.dumps({
+            "schemaVersion": 2,
+            "config": {"digest": f"sha256:{hashlib.sha256(wrong_cfg).hexdigest()}"},
+        }).encode("utf-8")
+        _write_oci_layout(self.pkg_dir, self.base_arm, wrong_manifest, wrong_cfg)
+        (self.pkg_dir / f"{self.base_arm}.oci-manifest.json").write_bytes(wrong_manifest)
+        sig_bytes = (self.pkg_dir / f"{self.base_arm}.oci.sig").read_bytes()
+        sums_lines = [
+            f"{hashlib.sha256(self.manifest_bytes).hexdigest()}  {self.base}.oci-manifest.json\n",
+            f"{hashlib.sha256((self.pkg_dir / f'{self.base}.oci.sig').read_bytes()).hexdigest()}  {self.base}.oci.sig\n",
+            f"{hashlib.sha256(wrong_manifest).hexdigest()}  {self.base_arm}.oci-manifest.json\n",
+            f"{hashlib.sha256(sig_bytes).hexdigest()}  {self.base_arm}.oci.sig\n",
+        ]
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "architecture mismatch for aarch64"):
+                oci.verify_and_push_oci(
+                    release=self.release, repository=self.repo, tag=self.tag, version=self.version,
+                    source_commit=self.commit, release_id=42, sums_bytes="".join(sums_lines).encode("utf-8"),
+                    package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
+                    environment=self.env, runner=lambda c, check=True: calls.append(c),
+                )
+        self.assertEqual(calls, [])

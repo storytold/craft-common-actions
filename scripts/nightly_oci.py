@@ -11,6 +11,7 @@ import nightly_feed as n
 import nightly_signing as signing
 
 ALLOWED_ARCHES = ("x86_64", "aarch64")
+OCI_ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
 SHA256_RE = re.compile(r"^sha256:([a-f0-9]{64})$")
 
 
@@ -61,6 +62,22 @@ def layout_manifest_digest(layout_dir):
     return digest_hex
 
 
+def verify_layout_config_arch(layout_dir, manifest_path, expected_arch):
+    """Verify the signed manifest's config blob matches expected OS and OCI architecture."""
+    manifest = n.bounded_json(manifest_path)
+    config_digest = manifest.get("config", {}).get("digest", "") if isinstance(manifest, dict) else ""
+    match = SHA256_RE.fullmatch(config_digest)
+    n.require(match is not None, "invalid OCI config digest in manifest")
+    config_hex = match.group(1)
+    config_blob = n.owned_path(layout_dir) / "blobs" / "sha256" / config_hex
+    _, actual_hex = n.digest_file(config_blob.parent, config_blob.name)
+    n.require(actual_hex == config_hex, "OCI layout config blob digest mismatch")
+    config = n.bounded_json(config_blob)
+    n.require(isinstance(config, dict) and config.get("os") == "linux", "OCI config OS must be linux")
+    n.require(config.get("architecture") == OCI_ARCH_MAP[expected_arch],
+              f"OCI config architecture mismatch for {expected_arch}")
+
+
 def verify_and_push_oci(
     *,
     release,
@@ -105,6 +122,7 @@ def verify_and_push_oci(
         n.require(sig_digest == sums[sig_name], f"{sig_name} checksum mismatch against SHA256SUMS.txt")
         layout_digest = layout_manifest_digest(layout)
         n.require(layout_digest == manifest_digest, f"{layout.name} manifest digest differs from signed {manifest_name}")
+        verify_layout_config_arch(layout, pkg_root / manifest_name, arch)
 
         signer = signing.verify_oci_signature(
             public_key, pkg_root / sig_name, pkg_root / manifest_name, registry, fingerprint, environment
