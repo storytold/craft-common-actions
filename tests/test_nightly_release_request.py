@@ -422,6 +422,21 @@ class RequestTests(unittest.TestCase):
         results=self.result(); wrong=copy.deepcopy(results[0]); wrong['verificationResult']['statement']['subject'][0]['digest']['sha256']='0'*64
         with self.assertRaises(ValueError): self.verify(results+[wrong])
 
+    def test_multi_subject_package_statement_names_subjects_by_basename(self):
+        # The pinned actions/attest-build-provenance@96278af6 (v3.2.0) runs actions/attest v3.2.0, whose
+        # src/subject.ts names each subject-path file `path.parse(file).base`; gh attestation verify
+        # --format json returns that statement, so package lookup by basename relies on it.
+        paths = {'/home/runner/work/app/app/.linux-packages/photocraft-v-linux-x86_64.deb': 'f'*64,
+                 '/home/runner/work/app/app/.linux-packages/photocraft-v-linux-aarch64.rpm': 'e'*64}
+        results = self.result(); statement = results[0]['verificationResult']['statement']
+        statement['subject'] = [{'name': Path(path).name, 'digest': {'sha256': sha}} for path, sha in paths.items()]
+        for path, sha in paths.items():
+            r.verify_unsigned_attestation(self.policy, self.invoke(), results, sha, subject_name=Path(path).name)
+        statement['subject'][0]['name'] = next(iter(paths))
+        with self.assertRaisesRegex(ValueError, 'attested package basename'):
+            r.verify_unsigned_attestation(self.policy, self.invoke(), results, 'f'*64,
+                subject_name='photocraft-v-linux-x86_64.deb')
+
     def test_every_certificate_identity_source_ref_and_pinned_builder_is_required(self):
         for key in self.result()[0]['verificationResult']['signature']['certificate']:
             result=self.result(); result[0]['verificationResult']['signature']['certificate'][key]='wrong'
