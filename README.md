@@ -1036,6 +1036,8 @@ Individual actions are also available for composing custom pipelines:
 
   The same step fails when a crate's sources name a path into another crate's directory (an `include_str!`/`include_bytes!` path, or a `../` literal in a file that uses `CARGO_MANIFEST_DIR`) that `reads` does not cover, or when a declared path matches no tracked file.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
+- `actions/arch-package`: Builds an Arch package from a release tarball with makepkg (in an `archlinux:base-devel` container when the runner has no makepkg). The package is named after the tarball's `.desktop` file unless `pkgname` names it (the nightly packages are `ai.storyteller.<prefix>-nightly`).
+- `actions/nightly-flatpak`: Builds a Flatpak bundle and OCI layout with app ID `<app-id>.nightly` from an app's stable Linux tarball and its `packaging/linux/flatpak/*.bundle.yml` (or `manifest`), so the nightly installs beside the stable app: `<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>.flatpak` and `...-oci`, for the runner's architecture. The bundle installs the tarball's desktop file, metainfo, MIME file and icons under the nightly ID and adds " (Nightly)" to the menu name; binaries keep their names inside the sandbox. The layout's image is labelled `org.flatpak.ref=app/<app-id>.nightly/<arch>/stable`. It does not push. Outputs: `app-id`, `bundle`, `layout`.
 
 ## Storytold Organization Hosting
 

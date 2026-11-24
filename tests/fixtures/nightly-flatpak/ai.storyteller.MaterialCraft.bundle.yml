@@ -1,0 +1,24 @@
+id: ai.storyteller.materialcraft
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+command: materialcraft
+finish-args:
+  # Release checks and downloads use HTTPS.
+  - --share=network
+  # The shared updater inspects and updates this installation via flatpak-spawn --host.
+modules:
+  - name: materialcraft
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 bin/materialcraft /app/bin/materialcraft
+      - install -Dm755 bin/materialcraft-cli /app/bin/materialcraft-cli
+      - install -Dm644 share/applications/ai.storyteller.materialcraft.desktop /app/share/applications/ai.storyteller.materialcraft.desktop
+      # .mcraft, plus mesh types older shared-mime-info databases lack.
+      - install -Dm644 share/mime/packages/ai.storyteller.materialcraft.xml /app/share/mime/packages/ai.storyteller.materialcraft.xml
+      # Already has the release's version and date substituted by package.sh.
+      - install -Dm644 share/metainfo/ai.storyteller.materialcraft.metainfo.xml /app/share/metainfo/ai.storyteller.materialcraft.metainfo.xml
+      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/materialcraft /app/share/doc/
+    sources:
+      - type: dir
+        path: stage
