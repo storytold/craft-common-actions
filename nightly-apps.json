@@ -86,6 +86,22 @@
     },
     "photocraft": {
       "default_branch": "main",
+      "display_name": "PhotoCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "photocraft",
+          "entrypoint": "photocraft"
+        },
+        "macos-aarch64": {
+          "binary": "PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft",
+          "entrypoint": "PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft"
+        },
+        "windows-x86_64": {
+          "binary": "photocraft.exe",
+          "entrypoint": "photocraft.exe"
+        }
+      },
+      "env_prefix": "PHOTOCRAFT",
       "note": "Photo nightly-v1 Windows x86_64 GUI ZIP, Linux x86_64 GUI tar.gz (OpenPGP detached .asc, stable key) and macOS aarch64 notarized app ZIP, published together in one release. Production signing and publication stay off until the app caller opts in.",
       "repository": "storytold/photocraft",
       "targets": [

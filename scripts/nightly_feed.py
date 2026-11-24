@@ -127,7 +127,10 @@ def app_record(registry, app):
     require(registry["schema"] == "craft-nightly-registry/v1", "unknown registry schema")
     require(isinstance(registry["apps"], dict) and app in registry["apps"], "app is not in public official allowlist")
     record = registry["apps"][app]
-    fields(record, {"repository", "default_branch", "targets", "note"}, "app registry")
+    # display_name, env_prefix and entrypoints are the row's nightly names (scripts/nightly_app.py validates them).
+    require(isinstance(record, dict) and {"repository", "default_branch", "targets", "note"} <= set(record) <=
+            {"repository", "default_branch", "targets", "note", "display_name", "env_prefix", "entrypoints"},
+            "invalid app registry fields")
     require(record["repository"] == "storytold/" + app and NAME.fullmatch(app), "repository must be catalog-bound")
     require(record["default_branch"] == "main", "unreviewed default branch")
     require(isinstance(record["targets"], list) and len(record["targets"]) <= MAX_ARTIFACTS, "too many target entries")

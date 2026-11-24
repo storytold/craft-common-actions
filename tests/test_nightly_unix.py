@@ -196,9 +196,9 @@ class UnixProducerTests(unittest.TestCase):
         for extra,payload in [([('PHOTOCRAFT',b'bad','file')],self.elf),([],b'not elf')]:
             archive=self.tar(extra=extra,payload=payload)
             original=u.member_name
-            def inspect(name):
+            def inspect(name, *app):
                 self.assertFalse(output.exists())
-                return original(name)
+                return original(name, *app)
             with patch.object(u,'member_name',side_effect=inspect),self.assertRaises(n.InvalidNightly):
                 u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
             self.assertFalse(output.exists())

@@ -18,12 +18,19 @@ import re
 import shutil
 import tempfile
 import types
+import nightly_app as apps
 import nightly_feed as n
 import nightly_signing as signing
 
 SUPPORTED = ("linux-x86_64", "macos-aarch64", "windows-x86_64")
-ISOLATION = {"associations": "none", "package_identity": "ai.storyteller.photocraft.nightly",
-             "profile_contract": "nightly", "profile_version": 1}
+def isolation(app=None):
+    """The app's reviewed isolation row (the run's app from NIGHTLY_APP by default)."""
+    return {"associations": "none", "package_identity": (apps.App(app) if app else apps.current()).identity,
+            "profile_contract": "nightly", "profile_version": 1}
+
+
+# PhotoCraft's, as every PhotoCraft fixture records it.
+ISOLATION = isolation("photocraft")
 # Every value any plug-in may receive as a credential. Verification never sees them.
 SECRET_NAMES = frozenset(signing.WINDOWS_SECRETS + signing.AZURE_SECRETS + signing.APPLE_SECRETS +
                          ("LINUX_SIGNING_KEY", "GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN",
@@ -56,7 +63,7 @@ def standard_assets(platform, version, extension):
     n.require(isinstance(version, str) and len(version) <= 128 and
               re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-nightly\.[0-9]{8}\.[1-9][0-9]*\.[1-9][0-9]*\.g[0-9a-f]{12}", version),
               "noncanonical immutable nightly version")
-    asset = "photocraft-"+version+"-"+platform+"-nightly"+extension
+    asset = apps.current_name()+"-"+version+"-"+platform+"-nightly"+extension
     unsigned = asset[:-len(extension)]+".unsigned"+extension
     n.require(n.NAME.fullmatch(asset) and n.NAME.fullmatch(unsigned), "unsafe platform asset name")
     return {"asset": asset, "unsigned_asset": unsigned}
@@ -126,7 +133,7 @@ def _mac_inventory(archive, version, temporary):
     import nightly_unix as u
     copy = Path(temporary)/_mac_assets(version)["asset"]
     shutil.copyfile(archive, copy)
-    u.verify_archive(n.bounded_json(PENDING), "macos-aarch64", copy, version)
+    u.verify_archive(None, "macos-aarch64", copy, version, app=apps.current_name())
     return copy
 
 
@@ -157,7 +164,7 @@ def _mac_verify(trust, directory, asset, support, source, environment, version):
     n.require(support == {} and asset == _mac_assets(version)["asset"], "unexpected Mac signing support")
     env = {**keyless(environment), "NIGHTLY_APPLE_TEAM_ID": trust["apple_team_id"]}
     with tempfile.TemporaryDirectory(prefix="nightly-mac-verify-", dir=n.owned_path(env["RUNNER_TEMP"])) as temporary:
-        team = signing.mac_verify(Path(directory)/asset, version, n.bounded_json(PENDING), env, Path(temporary)/"payload")
+        team = signing.mac_verify(Path(directory)/asset, version, None, env, Path(temporary)/"payload")
     n.require(team == trust["apple_team_id"], "final Mac signer team differs")
     return team
 
@@ -197,19 +204,20 @@ def expected_signer(platform, trust):
     return single_trust(trust, module.TRUST_FIELDS)
 
 
-def registry_platforms(registry):
-    """Admitted photocraft targets as platform keys; every one must have a plug-in."""
+def registry_platforms(registry, app=None):
+    """The run's app's admitted targets as platform keys; every one must have a plug-in."""
+    app = app or apps.current_name()
     result = []
-    for item in n.app_record(registry, "photocraft")["targets"]:
+    for item in n.app_record(registry, app)["targets"]:
         n.fields(item, {"target", "asset_pattern", "isolation"}, "target registry")
         target = item["target"]
         n.require(isinstance(target, dict) and set(target) == {"os", "arch", "format"}, "invalid target registry")
         platform = str(target["os"])+"-"+str(target["arch"])
         module = plugin(platform)
-        names = module.assets("0.0.0-nightly.20260101.1.1.g000000000000")
-        expected_pattern = names["asset"].replace("0.0.0-nightly.20260101.1.1.g000000000000", "{version}")
+        n.require(platform in apps.PLATFORMS, "unsupported release-ref platform")
+        expected_pattern = apps.App(app, registry).asset_pattern(platform)
         n.require(target == module.TARGET and item["asset_pattern"] == expected_pattern and
-                  item["isolation"] == ISOLATION, "registry row differs from reviewed platform plug-in")
+                  item["isolation"] == isolation(app), "registry row differs from reviewed platform plug-in")
         n.require(platform not in result, "duplicate admitted platform")
         result.append(platform)
     n.require(result, "no admitted release-ref platform")

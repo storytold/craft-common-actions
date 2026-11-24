@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import nightly_app as apps
 import nightly_feed as n
 import nightly_signing as signing
 import nightly_unix as u
@@ -26,7 +27,7 @@ PUBLIC_KEY = ".github/nightly-linux-signing-key.asc"
 PUBLIC_EXPORT = "release-signing-key.asc"
 MAX_SIGNATURE_BYTES = 16384
 SECRETS = ("LINUX_SIGNING_KEY",)
-CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE", "GITHUB_REPOSITORY", "NIGHTLY_LINUX_PACKAGES_DIR")
+CONTEXT = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "RUNNER_TEMP", "GITHUB_WORKSPACE", "GITHUB_REPOSITORY", "NIGHTLY_LINUX_PACKAGES_DIR", "NIGHTLY_APP")
 FINGERPRINT = re.compile(r"(?:[A-F0-9]{40}|[A-F0-9]{64})")
 
 
@@ -40,12 +41,13 @@ def validate_trust(trust):
 
 
 def pending():
-    return n.bounded_json(Path(__file__).resolve().parent.parent/"nightly-unix-pending.json")
+    """No pending file: the producer contract is the run's app registry row (nightly_unix.contracts)."""
+    return None
 
 
 def assets(version):
     u.canonical_version(version)
-    row = u.pending_contract(pending(), PLATFORM)
+    row = u.pending_contract(pending(), PLATFORM, apps.current_name())
     n.require(row["target"] == TARGET, "Linux plug-in target differs from the owner contract")
     asset = row["asset_pattern"].replace("{version}", version)
     n.require(n.NAME.fullmatch(asset) and asset.endswith("-linux-x86_64-nightly.tar.gz"), "invalid Linux nightly asset")
@@ -110,7 +112,7 @@ def verify(trust, directory, asset, support, source, environment, version):
     extra_support = set(support) - support_names(asset)
     n.require(support_binding(directory, asset, extra_names=extra_support) == support, "Linux signature support differs from signer binding")
     signing.adapter(PLATFORM, source)
-    u.verify_archive(pending(), PLATFORM, directory/asset, version)
+    u.verify_archive(pending(), PLATFORM, directory/asset, version, app=apps.current_name())
     signer = signing.verify_linux_signature(Path(source)/PUBLIC_KEY, directory/(asset+".asc"), directory/asset,
                                             fingerprint, environment)
     n.require(signer == fingerprint, "verified Linux signer differs from reviewed trust")
@@ -125,7 +127,7 @@ def verify(trust, directory, asset, support, source, environment, version):
         if sig_name.endswith(".oci.sig"):
             target_name = sig_name[:-len(".oci.sig")] + ".oci-manifest.json"
             n.require(target_name in expected, f"missing manifest for {sig_name}")
-            expected_ref = f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"
+            expected_ref = f"ghcr.io/{environment.get('GITHUB_REPOSITORY', apps.current(environment).repository).lower()}"
             sig_signer = signing.verify_oci_signature(
                 Path(source)/PUBLIC_KEY, directory/sig_name, directory/target_name, expected_ref, fingerprint, environment
             )
@@ -171,7 +173,7 @@ def sign(trust, unsigned, output, source, environment, version):
             shutil.copyfileobj(stream, destination, 1024*1024)
         n.require(n.digest_file(staged.parent, staged.name)[1] == before, "unsigned Linux bytes changed while staging")
         # Inventory before any key is imported: links, CLI, install hooks or a non-x86_64 GUI refuse.
-        u.verify_archive(pending(), PLATFORM, staged, version)
+        u.verify_archive(pending(), PLATFORM, staged, version, app=apps.current_name())
         signed = Path(temporary)/"signed"; signed.mkdir()
         signer = signing.sign_linux(source, staged, signed/names["asset"], env)
         n.require(signer == fingerprint, "Linux signer differs from reviewed trust")
@@ -195,7 +197,7 @@ def sign(trust, unsigned, output, source, environment, version):
             sign_home = Path(temporary)/"pkg-gpg"; sign_home.mkdir(mode=0o700)
             try:
                 pkg_env = {**env, "GNUPGHOME": str(sign_home), "SIGNING_FPR": fingerprint,
-                           "OCI_REGISTRY": f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"}
+                           "OCI_REGISTRY": f"ghcr.io/{environment.get('GITHUB_REPOSITORY', apps.current(environment).repository).lower()}"}
                 raw_key = pkg_env.pop("LINUX_SIGNING_KEY")
                 subprocess.run(["gpg", "--batch", "--import"], input=raw_key.encode("utf-8"),
                                env=pkg_env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
