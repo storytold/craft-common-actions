@@ -333,6 +333,7 @@ exit 0
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.tools.metainfo.xml").write_text(
                     '<component><id>ai.storyteller.myapp.tools</id>'
+                    '<developer id="ai.storyteller"><name>Storyteller</name></developer>\n<name>Tools</name>'
                     "<launchable type='desktop-id'>ai.storyteller.myapp.tools.desktop</launchable></component>\n"
                 )
                 (tar_root / "share/mime/packages/ai.storyteller.myapp.tools.xml").write_text("<mime-info>Tools</mime-info>\n")
@@ -456,6 +457,7 @@ exit 0
             tools_meta = nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.tools.nightly.metainfo.xml"
             self.assertIn("<id>ai.storyteller.myapp.tools.nightly</id>", tools_meta.read_text())
             self.assertIn('>ai.storyteller.myapp.tools.nightly.desktop</launchable>', tools_meta.read_text())
+            self.assertIn('<developer id="ai.storyteller"><name>Storyteller</name></developer>\n<name>Tools Nightly</name>', tools_meta.read_text())
             tools_mime = nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.tools.nightly.xml"
             self.assertEqual(tools_mime.read_text(), "<mime-info>Tools</mime-info>\n")
             for n, path in enumerate(("bin/myapp-nightly", "bin/myapp-nightly-cli", "share/doc/myapp-nightly", "share/man/man1/myapp-nightly-cli.1")):

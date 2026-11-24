@@ -432,8 +432,12 @@ class RequestTests(unittest.TestCase):
         statement['subject'] = [{'name': Path(path).name, 'digest': {'sha256': sha}} for path, sha in paths.items()]
         for path, sha in paths.items():
             r.verify_unsigned_attestation(self.policy, self.invoke(), results, sha, subject_name=Path(path).name)
+        # One package's basename never vouches for another package's digest.
+        with self.assertRaisesRegex(r.n.InvalidNightly, 'attested package basename'):
+            r.verify_unsigned_attestation(self.policy, self.invoke(), results, 'e'*64,
+                subject_name='photocraft-v-linux-x86_64.deb')
         statement['subject'][0]['name'] = next(iter(paths))
-        with self.assertRaisesRegex(ValueError, 'attested package basename'):
+        with self.assertRaisesRegex(r.n.InvalidNightly, 'attested package basename'):
             r.verify_unsigned_attestation(self.policy, self.invoke(), results, 'f'*64,
                 subject_name='photocraft-v-linux-x86_64.deb')
 

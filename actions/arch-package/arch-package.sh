@@ -399,13 +399,17 @@ cat <<NIGHTLY_PKG
       }
       {
         # First untranslated <name> outside <developer> is the display name.
-        if (!named) {
-          dev = index(\$0, "<developer")
-          if (match(\$0, /<name>[^<]*<\\/name>/) && (dev == 0 || RSTART < dev)) {
-            named = 1
-            name = substr(\$0, RSTART + 6, RLENGTH - 13)
-            if (name !~ / Nightly\$/) \$0 = substr(\$0, 1, RSTART + 5) name " Nightly" substr(\$0, RSTART + RLENGTH - 7)
-          } else if (dev) named = 1
+        rest = \$0; off = 0
+        while (!named && match(rest, /<developer[ >]|<\\/developer>|<name>[^<]*<\\/name>/)) {
+          tok = substr(rest, RSTART, RLENGTH)
+          if (tok ~ /^<\\/developer/) in_dev = 0
+          else if (tok ~ /^<developer/) in_dev = 1
+          else if (!in_dev) {
+            named = 1; at = off + RSTART
+            name = substr(tok, 7, RLENGTH - 13)
+            if (name !~ / Nightly\$/) \$0 = substr(\$0, 1, at + 5) name " Nightly" substr(\$0, at + RLENGTH - 7)
+          }
+          off += RSTART + RLENGTH - 1; rest = substr(rest, RSTART + RLENGTH)
         }
         if (match(\$0, /<icon type=.stock.>[^<]*<\\/icon>/)) {
           icon = substr(\$0, RSTART + 19, RLENGTH - 26)
