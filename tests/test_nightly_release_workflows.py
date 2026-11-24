@@ -125,12 +125,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("include-hidden-files: true", publisher)
         self.assertNotIn("prune", publisher.lower())
 
-    def test_only_finalized_ownership_upload_is_tolerant_not_verification_or_publication(self):
+    def test_only_post_publication_bookkeeping_is_tolerant_not_verification_or_publication(self):
         publisher = jobs(self.release)["publish"]
         steps = re.findall(r"(?ms)^      - name: ([^\n]+)\n(.*?)(?=^      - |\Z)", publisher)
         tolerant = {name for name, block in steps if "continue-on-error:" in block}
-        self.assertEqual(tolerant, {"Retain only finalized ownership evidence"})
-        self.assertEqual(self.release.count("continue-on-error:"), 1)
+        proof = "Export confirmed immutable publication identity for downstream OCI"
+        self.assertEqual(tolerant, {"Retain only finalized ownership evidence", proof})
+        self.assertEqual(self.release.count("continue-on-error:"), 2)
+        steps_by_name = dict(steps)
+        self.assertIn(".ownership/ownership.json", steps_by_name[proof])
+        self.assertIn('n.digest_file(".packet", "SHA256SUMS.txt")', steps_by_name[proof])
+        self.assertLess(publisher.index("Publish the signed nightly and preserve ownership"), publisher.index(proof))
         upload = dict(steps)["Retain only finalized ownership evidence"]
         self.assertIn("        continue-on-error: true\n", upload)
         self.assertIn("path: .ownership/ownership.json", upload)

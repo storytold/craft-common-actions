@@ -21,6 +21,12 @@ on:
         value: ${{ jobs.publish.result == 'success' && 'true' || 'false' }}
       platforms:
         value: ${{ jobs.validate.outputs.platforms }}
+      release_id:
+        value: ${{ jobs.publish.outputs.release-id }}
+      publication_signing_sha256:
+        value: ${{ jobs.publish.outputs.publication-signing-sha256 }}
+      publication_checksums_sha256:
+        value: ${{ jobs.publish.outputs.publication-checksums-sha256 }}
       release_tag:
         value: ${{ jobs.validate.outputs.tag }}
       version:
@@ -601,6 +607,10 @@ jobs:
       checks: read
       attestations: write
       id-token: write
+    outputs:
+      release-id: ${{ steps.oci-proof.outputs.release-id }}
+      publication-signing-sha256: ${{ steps.oci-proof.outputs.publication-signing-sha256 }}
+      publication-checksums-sha256: ${{ steps.oci-proof.outputs.publication-checksums-sha256 }}
     steps:
       - name: Check out only the actual release execution source
         timeout-minutes: 5
@@ -687,6 +697,30 @@ jobs:
         run: |
           python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --combined .combined --packet .packet --ownership .ownership
           if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
+      - name: Export confirmed immutable publication identity for downstream OCI
+        id: oci-proof
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          @'
+          import os, sys
+          sys.path.insert(0, ".nightly-tools/scripts")
+          import nightly_feed as n
+          import nightly_release_request as r
+          policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+          if "oci" in r.policy_linux_package_formats(policy):
+              receipt = n.bounded_json(".ownership/ownership.json")
+              n.require(receipt["schema"] == "craft-nightly-ownership/v2", "finalized ownership required")
+              n.positive(receipt["release_id"], "publisher release ID")
+              signing = r.hash_value(receipt["signing_receipt_sha256"])
+              _, checksums = n.digest_file(".packet", "SHA256SUMS.txt")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+                  out.write(f"release-id={receipt['release_id']}\n")
+                  out.write(f"publication-signing-sha256={signing}\n")
+                  out.write(f"publication-checksums-sha256={checksums}\n")
+          '@ | python -I -B -
+          if ($LASTEXITCODE -ne 0) { throw 'confirmed publication proof unavailable; downstream OCI must not run' }
       - name: Retain only finalized ownership evidence
         timeout-minutes: 5
         if: always()

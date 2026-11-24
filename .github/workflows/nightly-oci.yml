@@ -9,8 +9,13 @@ on:
         required: true
       release_id:
         type: string
-        required: false
-        default: ''
+        required: true
+      publication_signing_sha256:
+        type: string
+        required: true
+      publication_checksums_sha256:
+        type: string
+        required: true
       release_tag:
         type: string
         required: true
@@ -40,6 +45,12 @@ jobs:
     if: >-
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    # This repository owns one set of floating OCI tags. Never let a second
+    # writer publish while this job is rechecking freshness and copying tags.
+    concurrency:
+      group: craft-nightly-oci-photocraft
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -98,6 +109,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_ID: ${{ inputs.release_id }}
+          RECEIPT_SHA256: ${{ inputs.publication_signing_sha256 }}
+          CHECKSUM_SHA256: ${{ inputs.publication_checksums_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -105,39 +118,39 @@ jobs:
           PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
         run: |
           set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-            --jq '{id,tag_name,target_commitish,draft,prerelease,html_url,body}' > .release.json
           python3 -I -B - <<'PY'
           import json, os, sys
+          from pathlib import Path
+          from urllib.parse import quote
           sys.path.insert(0, ".nightly-tools/scripts")
           import nightly_feed as n
           import nightly_oci as oci
-          release = n.bounded_json(".release.json")
-          recent = oci.fetch_release_history(os.environ["GITHUB_REPOSITORY"])
-          rel_id = int(os.environ["RELEASE_ID"]) if os.environ.get("RELEASE_ID") else None
-          oci.verify_release_target(
-              release,
-              repository=os.environ["GITHUB_REPOSITORY"],
-              tag=os.environ["RELEASE_TAG"],
-              source_commit=os.environ["SOURCE_COMMIT"],
-              release_id=rel_id,
-              version=os.environ["RELEASE_VERSION"],
-              producer_run_id=int(os.environ["PRODUCER_RUN_ID"]),
-              producer_run_attempt=int(os.environ["PRODUCER_RUN_ATTEMPT"]),
-              recent_releases=recent,
+          env = os.environ
+          repo, rel_id, tag = env["GITHUB_REPOSITORY"], int(env["RELEASE_ID"]), env["RELEASE_TAG"]
+          n.positive(rel_id, "publisher release ID")
+          release = oci.gh_json(repo, f"releases/{rel_id}")
+          policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
+          request, support = oci.release_bindings(
+              release, policy, env["RECEIPT_SHA256"], repository=repo, release_id=rel_id, tag=tag,
+              version=env["RELEASE_VERSION"], source_commit=env["SOURCE_COMMIT"],
+              producer_run_id=int(env["PRODUCER_RUN_ID"]), producer_run_attempt=int(env["PRODUCER_RUN_ATTEMPT"]),
+              signer_run_id=int(env["GITHUB_RUN_ID"]), signer_run_attempt=int(env["GITHUB_RUN_ATTEMPT"]),
+              signer_source_commit=env["GITHUB_SHA"],
           )
-          recent_json = json.dumps(recent, separators=(",", ":")).encode("utf-8")
-          n.require(len(recent_json) <= n.MAX_JSON_BYTES, "release index exceeds bound")
-          with open(".releases.json", "wb") as out:
-              out.write(recent_json)
-          pub = json.loads(release["body"].split(oci.MARKER_V2, 1)[1])
-          pkg_arts = pub.get("request", {}).get("linux_package_artifacts", {})
-          x86_id = pkg_arts.get("nightly-linux-packages-x86_64", {}).get("id", "")
-          arm_id = pkg_arts.get("nightly-linux-packages-aarch64", {}).get("id", "")
-          n.require(bool(x86_id) and bool(arm_id), "missing authenticated Linux package artifact IDs in release receipt")
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"artifact-id-x86_64={x86_id}\n")
-              out.write(f"artifact-id-aarch64={arm_id}\n")
+          ref = oci.gh_json(repo, "git/ref/tags/" + quote(tag, safe=""))
+          target = ref.get("object", {})
+          n.require(target.get("type") == "commit" and target.get("sha") == env["SOURCE_COMMIT"],
+                    "immutable release tag commit differs from publisher")
+          bindings = oci.verified_release_assets(release, support, env["CHECKSUM_SHA256"], repository=repo)
+          oci.download_release_evidence(repo, bindings, ".release-evidence")
+          ids = oci.verify_producer_artifacts(repo, request, policy)
+          # Do not retain the full REST asset array, only the needed verified identity.
+          metadata = {k: release[k] for k in ("id", "tag_name", "target_commitish", "draft", "prerelease", "html_url", "body")}
+          with Path(".release.json").open("x", encoding="utf-8") as out:
+              json.dump({"release": metadata, "support": support}, out)
+          with open(env["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              for arch, artifact_id in ids.items():
+                  out.write(f"artifact-id-{arch}={artifact_id}\n")
           PY
       - name: Install skopeo
         if: steps.target.outputs.oci-enabled == 'true'
@@ -173,6 +186,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_ID: ${{ inputs.release_id }}
+          RECEIPT_SHA256: ${{ inputs.publication_signing_sha256 }}
+          CHECKSUM_SHA256: ${{ inputs.publication_checksums_sha256 }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_VERSION: ${{ inputs.version }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -182,11 +197,6 @@ jobs:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p .linux-packages
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "NIGHTLY.json" --output .linux-packages/NIGHTLY.json
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "SHA256SUMS.txt" --output .linux-packages/SHA256SUMS.txt
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci-manifest.json" --dir .linux-packages --clobber
-          gh release download "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --pattern "*.oci.sig" --dir .linux-packages --clobber
           python3 -I -B - <<'PY'
           import os, sys
           sys.path.insert(0, ".nightly-tools/scripts")
@@ -194,23 +204,23 @@ jobs:
           import nightly_feed as n
           policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
           fingerprint = policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"]
-          release = n.bounded_json(".release.json")
-          rel_id = int(os.environ["RELEASE_ID"]) if os.environ.get("RELEASE_ID") else None
+          metadata = n.bounded_json(".release.json")
+          rel_id = int(os.environ["RELEASE_ID"])
           oci.verify_and_push_oci(
-              release=release,
+              release=metadata["release"],
+              release_support=metadata["support"],
+              evidence_dir=".release-evidence",
+              checksum_sha256=os.environ["CHECKSUM_SHA256"],
               repository=os.environ["GITHUB_REPOSITORY"],
               tag=os.environ["RELEASE_TAG"],
               version=os.environ["RELEASE_VERSION"],
               source_commit=os.environ["SOURCE_COMMIT"],
               release_id=rel_id,
-              sums_bytes=open(".linux-packages/SHA256SUMS.txt", "rb").read(),
               package_dir=".linux-packages",
               public_key=".release-source/.github/nightly-linux-signing-key.asc",
               fingerprint=fingerprint,
               environment=os.environ,
               producer_run_id=int(os.environ["PRODUCER_RUN_ID"]),
               producer_run_attempt=int(os.environ["PRODUCER_RUN_ATTEMPT"]),
-              recent_releases=n.bounded_json(".releases.json"),
-              nightly_json_bytes=open(".linux-packages/NIGHTLY.json", "rb").read(),
           )
           PY

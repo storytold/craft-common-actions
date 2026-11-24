@@ -118,6 +118,75 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_publisher_bound_inventory_and_live_floating_gate(self):
+        evidence = self.root / "release-evidence"
+        evidence.mkdir()
+        descriptor = json.dumps({
+            "schema": "craft-nightly/v2", "repository": self.repo,
+            "tag": self.tag, "source_commit": self.commit,
+        }).encode()
+        sums = self.sums_bytes + f"{hashlib.sha256(descriptor).hexdigest()}  NIGHTLY.json\n".encode()
+        (evidence / "SHA256SUMS.txt").write_bytes(sums)
+        (evidence / "NIGHTLY.json").write_bytes(descriptor)
+        support = {}
+        for name in oci.parse_sha256sums(self.sums_bytes):
+            raw = (self.pkg_dir / name).read_bytes()
+            support[name] = {"size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+            (evidence / name).write_bytes(raw)
+            if name.endswith(".oci.sig"):
+                (self.pkg_dir / name).unlink()
+        calls = []
+        newest = [{"id": 42, "tag_name": self.tag, "draft": False, "prerelease": True}]
+
+        def registry(cmd, **kwargs):
+            calls.append(cmd[-1])
+            self._write_skopeo_digest(cmd)
+
+        def history(cmd, **kwargs):
+            calls.append("freshness")
+            return type("Result", (), {"stdout": json.dumps(newest).encode()})()
+
+        bound = dict(
+            release=self.release, repository=self.repo, release_id=42, tag=self.tag,
+            version=self.version, source_commit=self.commit, package_dir=self.pkg_dir,
+            public_key=self.pubkey, fingerprint=self.fingerprint, environment=self.env,
+            release_support=support, evidence_dir=evidence, runner=registry, history_runner=history,
+        )
+        with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
+            with self.assertRaisesRegex(n.InvalidNightly, "inventory differs from publisher"):
+                oci.verify_and_push_oci(checksum_sha256="0" * 64, **bound)
+            self.assertEqual(calls, [])
+            expected = hashlib.sha256(sums).hexdigest()
+            (evidence / "NIGHTLY.json").write_bytes(descriptor + b"\n")
+            with self.assertRaisesRegex(n.InvalidNightly, "descriptor differs"):
+                oci.verify_and_push_oci(checksum_sha256=expected, **bound)
+            self.assertEqual(calls, [])
+            (evidence / "NIGHTLY.json").write_bytes(descriptor)
+            pushed = oci.verify_and_push_oci(checksum_sha256=expected, **bound)
+        self.assertEqual(len(pushed), 8)
+        self.assertEqual(calls[:4], pushed[:4])
+        self.assertEqual(calls[4:], [item for target in pushed[4:] for item in ("freshness", target)])
+
+    def test_immutable_asset_inventory_requires_real_metadata(self):
+        name = self.base + ".oci-manifest.json"
+        manifest = {"size": len(self.manifest_bytes), "sha256": hashlib.sha256(self.manifest_bytes).hexdigest()}
+        sums_sha = hashlib.sha256(self.sums_bytes).hexdigest()
+        rows = [
+            {"id": 9, "name": name, "state": "uploaded", "size": manifest["size"], "digest": "sha256:" + manifest["sha256"]},
+            {"id": 10, "name": "SHA256SUMS.txt", "state": "uploaded", "size": len(self.sums_bytes), "digest": "sha256:" + sums_sha},
+            {"id": 11, "name": "NIGHTLY.json", "state": "uploaded", "size": 10, "digest": "sha256:" + "f" * 64},
+        ]
+
+        def runner(cmd, **kwargs):
+            self.assertIn("releases/42/assets?", cmd[-1])
+            return type("Result", (), {"stdout": json.dumps(rows).encode()})()
+
+        bound = oci.verified_release_assets(self.release, {name: manifest}, sums_sha, repository=self.repo, runner=runner)
+        self.assertEqual(bound[name], {"id": 9, **manifest})
+        rows.pop()
+        with self.assertRaisesRegex(n.InvalidNightly, "incomplete"):
+            oci.verified_release_assets(self.release, {name: manifest}, sums_sha, repository=self.repo, runner=runner)
+
     def _write_skopeo_digest(self, cmd):
         self.assertIn("--preserve-digests", cmd)
         self.assertIn("--digestfile", cmd)
@@ -135,7 +204,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             self._write_skopeo_digest(cmd)
 
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
-            pushed = oci.verify_and_push_oci(
+            pushed = oci._verify_and_push_oci(
                 release=self.release,
                 repository=self.repo,
                 tag=self.tag,
@@ -169,7 +238,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "pushed OCI digest .* differs from signed manifest"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=self.release,
                     repository=self.repo,
                     tag=self.tag,
@@ -189,7 +258,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         shutil.rmtree(self.pkg_dir / f"{self.base_arm}-oci")
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "expected exactly one OCI layout for aarch64"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
                     source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                     package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -248,7 +317,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         calls = []
         bad_release = {**self.release, "tag_name": "nightly-wrong-tag"}
         with self.assertRaisesRegex(n.InvalidNightly, "release tag mismatch"):
-            oci.verify_and_push_oci(
+            oci._verify_and_push_oci(
                 release=bad_release, repository=self.repo, tag=self.tag, version=self.version,
                 source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -258,7 +327,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
         bad_commit = {**self.release, "target_commitish": "f" * 40}
         with self.assertRaisesRegex(n.InvalidNightly, "release source commit mismatch"):
-            oci.verify_and_push_oci(
+            oci._verify_and_push_oci(
                 release=bad_commit, repository=self.repo, tag=self.tag, version=self.version,
                 source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -270,7 +339,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         calls = []
         (self.pkg_dir / f"{self.base}.oci-manifest.json").write_bytes(b'{"tampered":true}')
         with self.assertRaisesRegex(n.InvalidNightly, "checksum mismatch"):
-            oci.verify_and_push_oci(
+            oci._verify_and_push_oci(
                 release=self.release, repository=self.repo, tag=self.tag, version=self.version,
                 source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -282,7 +351,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         calls = []
         with patch.object(oci.signing, "verify_oci_signature", side_effect=n.InvalidNightly("bad signature")):
             with self.assertRaisesRegex(n.InvalidNightly, "bad signature"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
                     source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                     package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -539,6 +608,28 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 ],
             }
 
+            oci_policy = json.loads(json.dumps(old_policy))
+            oci_policy["platforms"]["linux-x86_64"]["package_formats"] = ["oci"]
+            oci_req = {**prior_request, "policy_sha256": req.digest(oci_policy)}
+            oci_support = {name: {"size": 100, "sha256": digest_deb} for name in
+                           req.expected_signed_linux_support_names("photocraft", version, ("oci",))}
+            oci_receipts = {"linux-x86_64": req.release_receipt_v3(
+                oci_policy, oci_req, "linux-x86_64", digest_tar, digest_tar, self.fingerprint,
+                {tar_asc: support[tar_asc], **oci_support})}
+            oci_pub = {"schema": "craft-nightly-release-publication/v2", "request": oci_req,
+                       "plan": plan, "quality": {"ok": True}, "signing": oci_receipts}
+            oci_release = {**prior_release, "immutable": True, "target_commitish": self.commit,
+                           "body": rel.MARKER_V2 + json.dumps(oci_pub)}
+            binds = dict(repository=self.repo, release_id=42, tag=plan["identity"]["tag"], version=version,
+                         source_commit=self.commit, producer_run_id=101, producer_run_attempt=1,
+                         signer_run_id=102, signer_run_attempt=1, signer_source_commit=signer["source_commit"])
+            self.assertEqual(oci.release_bindings(oci_release, oci_policy, req.digest(oci_receipts), **binds),
+                             (oci_req, oci_support))
+            with self.assertRaisesRegex(n.InvalidNightly, "publisher run identity"):
+                oci.release_bindings(oci_release, oci_policy, req.digest(oci_receipts), **{**binds, "signer_run_attempt": 2})
+            with self.assertRaisesRegex(n.InvalidNightly, "immutable"):
+                oci.release_bindings({**oci_release, "immutable": False}, oci_policy, req.digest(oci_receipts), **binds)
+
             class FakeAPI:
                 def request(self, method, path):
                     if path.startswith("/git/ref/tags/"):
@@ -650,7 +741,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         ]
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "architecture mismatch for aarch64"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
                     source_commit=self.commit, release_id=42, sums_bytes="".join(sums_lines).encode("utf-8"),
                     package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -668,7 +759,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         ]
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "non-newest nightly release"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=self.release, repository=self.repo, tag=self.tag, version=self.version,
                     source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                     package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -685,7 +776,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         }
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             with self.assertRaisesRegex(n.InvalidNightly, "producer_run_id mismatch"):
-                oci.verify_and_push_oci(
+                oci._verify_and_push_oci(
                     release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
                     source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                     package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,
@@ -710,7 +801,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 calls.append(c)
                 self._write_skopeo_digest(c)
 
-            oci.verify_and_push_oci(
+            oci._verify_and_push_oci(
                 release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
                 source_commit=self.commit, release_id=42, sums_bytes=self.sums_bytes,
                 package_dir=self.pkg_dir, public_key=self.pubkey, fingerprint=self.fingerprint,

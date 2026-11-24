@@ -9,8 +9,11 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import nightly_feed as n
 import nightly_policy as p
+import nightly_release as release_tools
+import nightly_release_request as request_tools
 import nightly_signing as signing
 
 ALLOWED_ARCHES = ("x86_64", "aarch64")
@@ -121,6 +124,136 @@ def verify_release_target(
     return release["id"]
 
 
+
+def release_bindings(release, policy, receipt_sha256, *, repository, release_id, tag, version,
+                     source_commit, producer_run_id, producer_run_attempt, signer_run_id,
+                     signer_run_attempt, signer_source_commit):
+    """Bind immutable GitHub metadata to the actual protected publisher's receipt digest."""
+    n.positive(release_id, "publisher release ID")
+    n.require(release.get("immutable") is True, "OCI requires an immutable published release")
+    request_tools.hash_value(receipt_sha256)
+    verify_release_target(release, repository=repository, release_id=release_id, tag=tag,
+                          version=version, source_commit=source_commit, producer_run_id=producer_run_id,
+                          producer_run_attempt=producer_run_attempt)
+    pub = release_tools.loads(release["body"].split(MARKER_V2, 1)[1].encode())
+    n.fields(pub, {"schema", "request", "plan", "quality", "signing"}, "OCI publication")
+    n.require(pub["schema"] == "craft-nightly-release-publication/v2", "wrong OCI publication schema")
+    req = pub["request"]
+    request_tools.request_contract(policy, req)
+    n.require(repository == policy["repository"] and req["signer"]["run_id"] == signer_run_id and
+              req["signer"]["run_attempt"] == signer_run_attempt and
+              req["signer"]["source_commit"] == signer_source_commit, "publisher run identity differs")
+    n.require(request_tools.digest(pub["signing"]) == receipt_sha256, "publisher signing receipt digest differs")
+    linux = pub["signing"].get("linux-x86_64")
+    n.fields(linux, request_tools.RECEIPT_V3_FIELDS, "Linux signing receipt")
+    expected = request_tools.release_receipt_v3(
+        policy, req, "linux-x86_64", linux["unsigned_sha256"], linux["final_sha256"],
+        request_tools.trusted_signer(policy, "linux-x86_64"), linux["support"])
+    n.require(linux == expected, "Linux signing receipt differs")
+    formats = request_tools.policy_linux_package_formats(policy)
+    n.require("oci" in formats, "OCI disabled by protected package policy")
+    names = request_tools.expected_signed_linux_support_names("photocraft", version, ("oci",))
+    n.require(names <= set(linux["support"]), "OCI manifest/signature absent from Linux signing receipt")
+    return req, {name: linux["support"][name] for name in names}
+
+
+def gh_json(repository, path, *, runner=subprocess.run):
+    raw = runner(["gh", "api", f"repos/{repository}/{path}"], check=True, capture_output=True, timeout=30).stdout
+    return release_tools.loads(raw)
+
+
+def verified_release_assets(release, support, checksum_sha256, *, repository, runner=subprocess.run):
+    """Resolve exact immutable asset IDs and compare support bytes to protected receipt."""
+    request_tools.hash_value(checksum_sha256)
+    assets = gh_json(repository, f"releases/{release['id']}/assets?per_page=100", runner=runner)
+    n.require(isinstance(assets, list) and 0 < len(assets) < 100, "bounded release assets required")
+    required = set(support) | {"SHA256SUMS.txt", "NIGHTLY.json"}
+    bindings = {}
+    for asset in assets:
+        n.require(isinstance(asset, dict), "invalid release asset")
+        name = asset.get("name")
+        if name not in required:
+            continue
+        n.require(name not in bindings and asset.get("state") == "uploaded", "ambiguous/unuploaded release asset")
+        n.positive(asset.get("id"), "release asset ID")
+        n.positive(asset.get("size"), "release asset size")
+        n.require(asset["size"] <= (65536 if name == "SHA256SUMS.txt" else n.MAX_JSON_BYTES), "OCI release asset too large")
+        digest = asset.get("digest")
+        n.require(isinstance(digest, str) and SHA256_RE.fullmatch(digest), "release asset digest required")
+        if name in support:
+            n.require((asset["size"], digest[7:]) == (support[name]["size"], support[name]["sha256"]),
+                      "immutable OCI release asset differs from publisher receipt")
+        if name == "SHA256SUMS.txt":
+            n.require(digest[7:] == checksum_sha256, "immutable checksum inventory differs from publisher")
+        bindings[name] = {"id": asset["id"], "size": asset["size"], "sha256": digest[7:]}
+    n.require(set(bindings) == required and len({b["id"] for b in bindings.values()}) == len(bindings),
+              "incomplete/duplicate OCI release assets")
+    return bindings
+
+
+def verify_producer_artifacts(repository, req, policy, *, runner=subprocess.run):
+    """Rebind action-verified archive digests before downloading either architecture."""
+    kinds = tuple("nightly-linux-packages-" + arch for arch in ALLOWED_ARCHES)
+    names = request_tools.linux_package_artifact_names(req["producer"], kinds)
+    ids = {}
+    for arch, kind in zip(ALLOWED_ARCHES, kinds):
+        expected = req["linux_package_artifacts"][kind]
+        row = gh_json(repository, f"actions/artifacts/{expected['id']}", runner=runner)
+        actual = request_tools.artifact(policy, row, req["producer"], int(time.time()), expected_name=names[kind])
+        n.require(actual == expected, "producer artifact metadata differs from publisher request")
+        ids[arch] = expected["id"]
+    return ids
+
+
+def download_release_evidence(repository, bindings, directory, *, runner=subprocess.run):
+    """Take binary bytes only from authenticated numeric asset IDs; never clobber."""
+    root = n.owned_path(directory)
+    root.mkdir(exist_ok=False)
+    for name, bound in bindings.items():
+        path = root / name
+        with path.open("xb") as dst:
+            runner(["gh", "api", "-H", "Accept: application/octet-stream",
+                    f"repos/{repository}/releases/assets/{bound['id']}"], stdout=dst, check=True, timeout=60)
+        n.require(n.digest_file(root, name) == (bound["size"], bound["sha256"]),
+                  "downloaded OCI publication file differs from immutable API bytes")
+
+
+def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, history_runner=subprocess.run, **kwargs):
+    """Only this bound publisher entry point may push; private verifier is testable offline."""
+    directory = n.owned_path(evidence_dir)
+    sums = directory / "SHA256SUMS.txt"
+    n.require(n.digest_file(directory, sums.name)[1] == request_tools.hash_value(checksum_sha256),
+              "checksum inventory differs from publisher")
+    for name, bound in release_support.items():
+        n.require(n.digest_file(directory, name) == (bound["size"], bound["sha256"]),
+                  "downloaded OCI support differs from publisher receipt")
+    sums_bytes = sums.read_bytes()
+    checksums = parse_sha256sums(sums_bytes)
+    descriptor = n.bounded_bytes(directory / "NIGHTLY.json", n.MAX_JSON_BYTES, "OCI descriptor")
+    n.require(checksums.get("NIGHTLY.json") == hashlib.sha256(descriptor).hexdigest(),
+              "descriptor differs from authenticated checksum inventory")
+    required = request_tools.expected_signed_linux_support_names("photocraft", kwargs["version"], ("oci",))
+    n.require(set(release_support) == required, "complete OCI manifest and signature receipts required")
+    for name, bound in release_support.items():
+        n.require(checksums.get(name) == bound["sha256"], "OCI support missing from authenticated inventory")
+    repository = kwargs["repository"]
+    source = kwargs.pop("package_dir")
+    root = n.owned_path(source)
+    for name, bound in release_support.items():
+        if name.endswith(".oci-manifest.json"):
+            n.require(n.digest_file(root, name) == (bound["size"], bound["sha256"]),
+                      "producer manifest differs from publisher receipt")
+        else:
+            with (root / name).open("xb") as out:
+                out.write((directory / name).read_bytes())
+    def freshness():
+        newest = p.newest_nightly(fetch_release_history(repository, runner=history_runner))
+        n.require(newest is not None and newest["id"] == kwargs["release_id"] and newest["tag_name"] == kwargs["tag"],
+                  "refusing to push floating OCI tags for non-newest nightly release")
+    return _verify_and_push_oci(sums_bytes=sums_bytes, package_dir=root, nightly_json_bytes=descriptor,
+                                freshness=freshness, **kwargs)
+
+
 def layout_manifest_digest(layout_dir):
     """Read the manifest digest from an OCI layout's index.json and verify its blob bytes."""
     layout = n.owned_path(layout_dir)
@@ -180,7 +313,7 @@ def _copy_verified_oci(runner, layout, target, auth_file, expected_digest_hex, d
     )
 
 
-def verify_and_push_oci(
+def _verify_and_push_oci(
     *,
     release,
     repository,
@@ -197,6 +330,7 @@ def verify_and_push_oci(
     producer_run_attempt=None,
     recent_releases=None,
     nightly_json_bytes=None,
+    freshness=None,
     runner=subprocess.run,
 ):
     """Verify release target, SHA256SUMS, .oci.sig, and OCI layout digest before pushing tags."""
@@ -263,12 +397,16 @@ def verify_and_push_oci(
                 oci_tag = f"{version}-{arch}" if tag_kind == "version" else f"nightly-{arch}"
                 target = f"docker://{registry}:{oci_tag}"
                 digest_file = Path(auth_dir) / f"digest-{len(pushed)}.txt"
+                if tag_kind == "nightly" and freshness is not None:
+                    freshness()
                 _copy_verified_oci(runner, layout, target, auth_file, manifest_digest, digest_file)
                 pushed.append(target)
                 if dh_user and dh_token:
                     dh_repo = repository.split("/", 1)[1].lower()
                     dh_target = f"docker://docker.io/storytold/{dh_repo}:{oci_tag}"
                     dh_digest_file = Path(auth_dir) / f"digest-{len(pushed)}.txt"
+                    if tag_kind == "nightly" and freshness is not None:
+                        freshness()
                     _copy_verified_oci(runner, layout, dh_target, auth_file, manifest_digest, dh_digest_file)
                     pushed.append(dh_target)
 
