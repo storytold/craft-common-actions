@@ -586,7 +586,8 @@ class CandidateTests(unittest.TestCase):
 
     def test_lineage_page_with_files_or_missing_lineage_fields_refuses(self):
         good = {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0, 'base_commit': {'sha': C}, 'merge_base_commit': {'sha': C}, 'commits': []}
-        for change in ({'files': []}, {'commits': [{}, {}]}, {'commits': None}, {'merge_base_commit': None}, {'base_commit': None}, {'behind_by': None}):
+        for change in ({'files': []}, {'commits': [{}, {}]}, {'commits': None}, {'merge_base_commit': None}, {'base_commit': None}, {'behind_by': None},
+                       {'status': None}, {'ahead_by': None}):
             data = {**good, **change}
             data = {key: value for key, value in data.items() if value is not None}
             self.f.compare_override = data
@@ -611,6 +612,44 @@ class CandidateTests(unittest.TestCase):
                         self.revalidate(receipt) if revalidate else self.admit()
                     self.assertTrue(changed[0])
 
+
+    def test_issue_change_during_final_workflow_freshness_reads_refuses(self):
+        # The Sonar issue reread must come after the final freshness pass, or a change made
+        # while those last GitHub reads run would go unnoticed.
+        def severity(issues): issues[0]['severity'] = 'CRITICAL'
+        def resolved(issues): issues.pop(0)
+        for revalidate in (False, True):
+            for label, mutate in (('severity', severity), ('resolved', resolved)):
+                with self.subTest(revalidate=revalidate, change=label):
+                    self.f = Fixture()
+                    receipt = self.admit() if revalidate else None
+                    original = c._fresh_workflows
+                    def fresh(*args, **kwargs):
+                        mutate(self.f.issues)  # Sonar changes while the final freshness reads run.
+                        return original(*args, **kwargs)
+                    with patch.object(c, '_fresh_workflows', side_effect=fresh) as called, \
+                            self.assertRaisesRegex(ValueError, 'Sonar issue inventory changed'):
+                        self.revalidate(receipt) if revalidate else self.admit()
+                    called.assert_called_once()
+
+    def test_read_budget_leaves_room_for_the_fixed_reads(self):
+        # minimum_reads = FIXED_READS + per-workflow reads, admitted only when <= MAX_READS.
+        def shape(extra_jobs):
+            # 32 manual-input workflows, 14 + 2*jobs reads each; spread the extra jobs.
+            return [{'workflow_id': 100+i, 'workflow_path': f'.github/workflows/ci-{i}.yml', 'workflow_blob': 'e'*40,
+                'jobs': [{'name': f'job-{k}', 'app_id': 15368, 'applicability': 'manual-input-only' if k == 0 else 'required'}
+                         for k in range(1 + extra_jobs // 32 + (i < extra_jobs % 32))]} for i in range(32)]
+        per_workflow = lambda workflows: c.minimum_reads(workflows) - c.FIXED_READS
+        fits = shape(54)  # 32*14 + 2*(32+54) = 620 = MAX_READS - FIXED_READS
+        self.assertEqual((per_workflow(fits), c.minimum_reads(fits)), (c.MAX_READS - c.FIXED_READS, c.MAX_READS))
+        self.f.policy['required_workflows'] = fits
+        c.contract(self.f.policy, self.f.producer)  # exactly at the budget: accepted
+        for extra in (55, 64):  # one job over the room left, and workflow reads alone of exactly 640
+            workflows = shape(extra)
+            self.f.policy['required_workflows'] = workflows
+            with self.subTest(per_workflow=per_workflow(workflows)), self.assertRaisesRegex(ValueError, 'read budget'):
+                c.contract(self.f.policy, self.f.producer)
+        self.assertEqual(per_workflow(shape(64)), c.MAX_READS)  # workflow reads of exactly 640 refuse once fixed reads are added
 
 if __name__ == '__main__':
     unittest.main()
