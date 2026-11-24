@@ -1,0 +1,864 @@
+name: Nightly signer
+# Called only by an app's own nightly-sign.yml on its `release` branch, which the producer run
+# (release.yml on main, nightly mode) dispatches with producer_run_id and producer_run_attempt.
+# admit authenticates that producer attempt without keys; each key job then exposes its secrets
+# to one step; every public write happens in publish, after keyless verification of everything.
+on:
+  workflow_call:
+    inputs:
+      app-name:
+        description: "App name as in release.yml (registry key for launcher apps)"
+        type: string
+        required: true
+      app-title:
+        description: "Human-readable app name, used in the release title"
+        type: string
+        required: true
+      producer-workflow:
+        description: "The app's producer workflow path, e.g. .github/workflows/release.yml"
+        type: string
+        default: .github/workflows/release.yml
+      producer_run_id:
+        description: "Run ID of the producer run to sign"
+        type: string
+        required: true
+      producer_run_attempt:
+        description: "Attempt of the producer run to sign"
+        type: string
+        required: true
+      manual-actors:
+        description: "JSON array of logins allowed to start or re-run nightlies by hand"
+        type: string
+        default: "[]"
+    # The caller lists these by name; the values come from its `release` environment.
+    secrets:
+      LINUX_SIGNING_KEY:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERT_PROFILE:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+      ARTCRAFT_SERVICES_DISPATCH_TOKEN:
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: nightly-sign-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  admit:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      attestations: read
+    outputs:
+      admission-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      admission-sha256: ${{ steps.files.outputs.admission-sha256 }}
+      platforms: ${{ steps.files.outputs.platforms }}
+      tag: ${{ steps.files.outputs.tag }}
+      nv: ${{ steps.files.outputs.nv }}
+      identity: ${{ steps.files.outputs.identity }}
+      payload-artifact-ids: ${{ steps.attest.outputs.payload-artifact-ids }}
+      flatpak-artifact-ids: ${{ steps.attest.outputs.flatpak-artifact-ids }}
+      launcher-artifact-windows: ${{ steps.attest.outputs.launcher-artifact-windows }}
+      launcher-artifact-macos: ${{ steps.attest.outputs.launcher-artifact-macos }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Install package inspection tools
+        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: zstd
+      - name: Admit the producer run and select its artifacts
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+          APP_NAME: ${{ inputs.app-name }}
+          PRODUCER_WORKFLOW: ${{ inputs.producer-workflow }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+          MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: >-
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit request
+          --app "$APP_NAME" --producer-workflow "$PRODUCER_WORKFLOW"
+          --producer-run-id "$PRODUCER_RUN_ID" --producer-run-attempt "$PRODUCER_RUN_ATTEMPT"
+          --manual-actors "$MANUAL_ACTORS" --state "$RUNNER_TEMP/admit"
+      - name: Download the handoff manifest
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.request.outputs.manifest-artifact-id }}
+          path: .handoff
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify the manifest attestation and contents
+        id: attest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py admit attest --state "$RUNNER_TEMP/admit" --manifest .handoff
+      - name: Download the producer payloads
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.attest.outputs.payload-artifact-ids }}
+          path: .producer
+          digest-mismatch: error
+      - name: Check the payloads and write the admission
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit files --state "$RUNNER_TEMP/admit"
+          --manifest .handoff --directory .producer --output .admission
+      - name: Check the Linux packages before any key exists
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py linux precheck --admission .admission --directory .producer
+      - name: Check the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py publish preflight --admission .admission
+      - name: Upload the admission
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .admission/*
+          if-no-files-found: error
+          retention-days: 14
+
+  sign-windows:
+    needs: admit
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && contains(fromJSON(needs.admit.outputs.platforms), 'windows')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      signed-sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - name: Check out the release branch at the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind the release source and the defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from the dispatched commit' }
+          if ($env:GITHUB_REF -cne 'refs/heads/release') { throw 'not the release branch' }
+          if ($env:DEFINING_REPOSITORY -cne 'storytold/craft-common-actions') { throw 'signer workflow from another repository' }
+          if ($env:DEFINING_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'defining workflow SHA missing' }
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the unsigned Windows payload
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ needs.admit.outputs.launcher-artifact-windows }}
+          path: .producer/nightly-launcher-windows-${{ inputs.producer_run_attempt }}
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the payload
+        shell: pwsh
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          PAYLOAD: nightly-launcher-windows-${{ inputs.producer_run_attempt }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$env:ADMISSION_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'admission differs from the admit job' }
+          python -I -B .nightly-tools/scripts/nightly/run.py admit payloads --admission .admission --directory .producer --artifact "$env:PAYLOAD"
+          if ($LASTEXITCODE -ne 0) { throw 'payload differs from the admitted manifest' }
+      - name: Sign the Windows payload
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly/run.py platforms sign --platform windows --admission .admission --input .producer --source .release-source --output .signed
+          if ($LASTEXITCODE -ne 0) { throw 'Windows signing refused' }
+      - name: Seal the signed output
+        id: seal
+        shell: pwsh
+        run: |
+          python -I -B .nightly-tools/scripts/nightly/run.py admit seal --directory .signed
+          if ($LASTEXITCODE -ne 0) { throw 'signed output refused' }
+      - name: Upload the signed output
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-signed-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-windows:
+    needs: [admit, sign-windows]
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && contains(fromJSON(needs.admit.outputs.platforms), 'windows')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Bind the defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ($env:DEFINING_REPOSITORY -cne 'storytold/craft-common-actions') { throw 'signer workflow from another repository' }
+          if ($env:DEFINING_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'defining workflow SHA missing' }
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the signed Windows output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-windows.outputs.artifact-id }}
+          path: .signed
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the signed output
+        shell: pwsh
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          SIGNED_SHA256: ${{ needs.sign-windows.outputs.signed-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$env:ADMISSION_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'admission differs from the admit job' }
+          python -I -B .nightly-tools/scripts/nightly/run.py admit unseal --directory .signed --sha256 "$env:SIGNED_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'signed output differs from the sign job' }
+      - name: Verify the Windows signature without keys
+        shell: pwsh
+        run: |
+          python -I -B .nightly-tools/scripts/nightly/run.py platforms verify --platform windows --admission .admission --input .signed --output "$env:RUNNER_TEMP/verify"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows signature verification refused' }
+
+  sign-macos:
+    needs: admit
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && contains(fromJSON(needs.admit.outputs.platforms), 'macos')
+    # Same Apple route and `release` environment as the stable macOS job.
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      signed-sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - name: Select Python for the signer tools
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out the release branch at the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind the release source and the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = refs/heads/release
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the unsigned macOS payload
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ needs.admit.outputs.launcher-artifact-macos }}
+          path: .producer/nightly-launcher-macos-${{ inputs.producer_run_attempt }}
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the payload
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          PAYLOAD: nightly-launcher-macos-${{ inputs.producer_run_attempt }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit payloads --admission .admission --directory .producer --artifact "$PAYLOAD"
+      - name: Sign, notarize and staple the macOS payload
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py platforms sign --platform macos --admission .admission --input .producer --source .release-source --output .signed
+      - name: Seal the signed output
+        id: seal
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py admit seal --directory .signed
+      - name: Upload the signed output
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-signed-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-macos:
+    needs: [admit, sign-macos]
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && contains(fromJSON(needs.admit.outputs.platforms), 'macos')
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Select Python for the signer tools
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the signed macOS output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-macos.outputs.artifact-id }}
+          path: .signed
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the signed output
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          SIGNED_SHA256: ${{ needs.sign-macos.outputs.signed-sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit unseal --directory .signed --sha256 "$SIGNED_SHA256"
+      - name: Verify Developer ID, team, runtime, timestamp, staple and Gatekeeper without keys
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py platforms verify --platform macos --admission .admission --input .signed --output "$RUNNER_TEMP/verify"
+
+  smoke-macos:
+    needs: [admit, sign-macos, verify-macos]
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && contains(fromJSON(needs.admit.outputs.platforms), 'macos')
+    # The one job that runs signed app code: no environment, secrets or producer access, and
+    # nothing it writes reaches the publisher. Hardened runtime only applies once signed.
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Select Python for the signer tools
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out the release branch at the dispatched commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind the release source and the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = refs/heads/release
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the signed macOS output
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-macos.outputs.artifact-id }}
+          path: .signed
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the signed output
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          SIGNED_SHA256: ${{ needs.sign-macos.outputs.signed-sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit unseal --directory .signed --sha256 "$SIGNED_SHA256"
+      - name: Launch the signed app once
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py platforms smoke --platform macos --admission .admission --input .signed --source .release-source --output "$RUNNER_TEMP/smoke"
+
+  sign-linux:
+    # Skipped platforms are fine; every admitted platform's jobs must have succeeded. !cancelled()
+    # rather than always(), so a cancelled run still stops before the key.
+    needs: [admit, sign-windows, verify-windows, sign-macos, verify-macos, smoke-macos]
+    if: >-
+      !cancelled() && needs.admit.result == 'success'
+      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+      && (!contains(fromJSON(needs.admit.outputs.platforms), 'windows')
+          || (needs.sign-windows.result == 'success' && needs.verify-windows.result == 'success'))
+      && (!contains(fromJSON(needs.admit.outputs.platforms), 'macos')
+          || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success'
+              && needs.smoke-macos.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      final-sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/release
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the producer payloads
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ needs.admit.outputs.payload-artifact-ids }}
+          path: .producer
+          digest-mismatch: error
+      - name: Download the signed Windows output
+        if: contains(fromJSON(needs.admit.outputs.platforms), 'windows')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-windows.outputs.artifact-id }}
+          path: .signed/windows
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the signed macOS output
+        if: contains(fromJSON(needs.admit.outputs.platforms), 'macos')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-macos.outputs.artifact-id }}
+          path: .signed/macos
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission, the payloads and the signed outputs
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          PLATFORMS: ${{ needs.admit.outputs.platforms }}
+          WINDOWS_SHA256: ${{ needs.sign-windows.outputs.signed-sha256 }}
+          MACOS_SHA256: ${{ needs.sign-macos.outputs.signed-sha256 }}
+        run: |
+          set -euo pipefail
+          tools=.nightly-tools/scripts/nightly/run.py
+          python3 -I -B "$tools" admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B "$tools" admit payloads --admission .admission --directory .producer
+          if [[ "$PLATFORMS" == *'"windows"'* ]]; then python3 -I -B "$tools" admit unseal --directory .signed/windows --sha256 "$WINDOWS_SHA256"; fi
+          if [[ "$PLATFORMS" == *'"macos"'* ]]; then python3 -I -B "$tools" admit unseal --directory .signed/macos --sha256 "$MACOS_SHA256"; fi
+      - name: Install the signing tools
+        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: rpm debsigs skopeo binutils zstd
+      - name: Sign the Linux packages, NIGHTLY.json and SHA256SUMS.txt
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          signed=()
+          for platform in windows macos; do
+            if [ -d ".signed/$platform" ]; then signed+=(".signed/$platform"); fi
+          done
+          python3 -I -B .nightly-tools/scripts/nightly/run.py linux sign --admission .admission --directory .producer --signed "${signed[@]}" --output .final
+      - name: Seal the final assets
+        id: seal
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py admit seal --directory .final
+      - name: Upload the final assets
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-final-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .final/*
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-final:
+    needs: [admit, sign-linux]
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.sign-linux.result == 'success'
+      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Install signature verification tools
+        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: rpm skopeo zstd
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the final assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-linux.outputs.artifact-id }}
+          path: .final
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission and the final assets
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          FINAL_SHA256: ${{ needs.sign-linux.outputs.final-sha256 }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B .nightly-tools/scripts/nightly/run.py admit unseal --directory .final --sha256 "$FINAL_SHA256"
+      - name: Verify every signature, the asset set and NIGHTLY.json without keys
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py linux verify-final --admission .admission --directory .final
+
+  publish:
+    needs: [admit, sign-linux, verify-final]
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.sign-linux.result == 'success'
+      && needs.verify-final.result == 'success'
+      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Install skopeo
+        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: skopeo
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the final assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.sign-linux.outputs.artifact-id }}
+          path: .final
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download the Flatpak OCI layouts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ needs.admit.outputs.flatpak-artifact-ids }}
+          path: .producer
+          digest-mismatch: error
+      - name: Check the admission, the final assets and the layouts
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+          FINAL_SHA256: ${{ needs.sign-linux.outputs.final-sha256 }}
+        run: |
+          set -euo pipefail
+          tools=.nightly-tools/scripts/nightly/run.py
+          python3 -I -B "$tools" admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+          python3 -I -B "$tools" admit unseal --directory .final --sha256 "$FINAL_SHA256"
+          artifacts=()
+          for folder in .producer/*/; do artifacts+=(--artifact "$(basename "$folder")"); done
+          python3 -I -B "$tools" admit payloads --admission .admission --directory .producer "${artifacts[@]}"
+          # publish oci reads each <base>.oci.tar beside its signed .oci-manifest.json; the
+          # release upload takes only the exact final asset set.
+          cp -n .producer/*/*.oci.tar .final/
+      - name: Push the Flatpak images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py publish oci --admission .admission --directory .final
+      - name: Publish the prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_TITLE: ${{ inputs.app-title }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py publish release --admission .admission --directory .final --title "$APP_TITLE"
+      - name: Move the nightly-<arch> image tags
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py publish move-tags --admission .admission
+
+  retain:
+    needs: [admit, publish]
+    if: >-
+      !cancelled() && needs.admit.result == 'success' && needs.publish.result == 'success'
+      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release'
+    # Warn-only: pruning or the website dispatch never fails a published nightly.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind the defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$DEFINING_REPOSITORY" = storytold/craft-common-actions
+          [[ "$DEFINING_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Check out the signer tools at the defining commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download the admission
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.admit.outputs.admission-artifact-id }}
+          path: .admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Check the admission
+        env:
+          ADMISSION_SHA256: ${{ needs.admit.outputs.admission-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py admit admission --admission .admission --sha256 "$ADMISSION_SHA256"
+      - name: Keep the newest 3 nightlies and dispatch the website update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTCRAFT_SERVICES_DISPATCH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
+        run: python3 -I -B .nightly-tools/scripts/nightly/run.py retain --admission .admission --keep 3
