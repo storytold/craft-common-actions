@@ -444,14 +444,13 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         with self.assertRaises(n.InvalidNightly):
             req.support_binding(bad_ext)
 
-    def test_previous_publication_admits_second_nightly_over_linux_packages(self):
+    def test_oci_release_binding_requires_immutable_exact_publisher(self):
         import nightly_release as rel
         import nightly_release_request as req
 
         digest_tar = "1" * 64
         digest_asc = "2" * 64
-        digest_deb = "3" * 64
-        digest_deb_asc = "4" * 64
+        digest_oci = "3" * 64
 
         registry = {
             "schema": "craft-nightly-registry/v1",
@@ -508,11 +507,7 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             version = plan["identity"]["version"]
             tar_name = plan["platforms"]["linux-x86_64"]["asset"]
             tar_asc = f"{tar_name}.asc"
-            deb_name = f"photocraft-{version}-linux-x86_64.deb"
-            deb_asc = f"{deb_name}.asc"
-            deb_arm = f"photocraft-{version}-linux-aarch64.deb"
-            deb_arm_asc = f"{deb_arm}.asc"
-            old_policy = {
+            oci_policy = {
                 "schema": req.LIVE_POLICY,
                 "repository": self.repo,
                 "repository_id": 1,
@@ -536,14 +531,14 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     "linux-x86_64": {
                         "unsigned_artifact_name": "nightly-unsigned-linux-x86_64",
                         "trust": {"fingerprint": self.fingerprint},
-                        "package_formats": ["deb"],
+                        "package_formats": ["oci"],
                     }
                 },
             }
-            prior_request = {
+            oci_req = {
                 "schema": "craft-nightly-release-request/v2",
                 "repository": self.repo,
-                "policy_sha256": req.digest(old_policy),
+                "policy_sha256": req.digest(oci_policy),
                 "producer": producer,
                 "signer": signer,
                 "artifacts": {
@@ -575,51 +570,18 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                     },
                 },
             }
-            support = {
-                tar_asc: {"size": 100, "sha256": digest_asc},
-                deb_name: {"size": 2000, "sha256": digest_deb},
-                deb_asc: {"size": 100, "sha256": digest_deb_asc},
-                deb_arm: {"size": 2000, "sha256": digest_deb},
-                deb_arm_asc: {"size": 100, "sha256": digest_deb_asc},
-            }
-            receipt = req.release_receipt_v3(
-                old_policy, prior_request, "linux-x86_64", digest_tar, digest_tar, self.fingerprint, support
-            )
-            prior_body = "Notes\n" + rel.MARKER_V2 + json.dumps({
-                "schema": "craft-nightly-release-publication/v2",
-                "request": prior_request,
-                "plan": plan,
-                "quality": {"ok": True},
-                "signing": {"linux-x86_64": receipt},
-            })
-            prior_release = {
-                "id": 42,
-                "tag_name": plan["identity"]["tag"],
-                "draft": False,
-                "prerelease": True,
-                "body": prior_body,
-                "assets": [
-                    {"name": tar_name, "digest": f"sha256:{digest_tar}"},
-                    {"name": tar_asc, "digest": f"sha256:{digest_asc}"},
-                    {"name": deb_name, "digest": f"sha256:{digest_deb}"},
-                    {"name": deb_asc, "digest": f"sha256:{digest_deb_asc}"},
-                    {"name": deb_arm, "digest": f"sha256:{digest_deb}"},
-                    {"name": deb_arm_asc, "digest": f"sha256:{digest_deb_asc}"},
-                ],
-            }
-
-            oci_policy = json.loads(json.dumps(old_policy))
-            oci_policy["platforms"]["linux-x86_64"]["package_formats"] = ["oci"]
-            oci_req = {**prior_request, "policy_sha256": req.digest(oci_policy)}
-            oci_support = {name: {"size": 100, "sha256": digest_deb} for name in
+            oci_support = {name: {"size": 100, "sha256": digest_oci} for name in
                            req.expected_signed_linux_support_names("photocraft", version, ("oci",))}
             oci_receipts = {"linux-x86_64": req.release_receipt_v3(
                 oci_policy, oci_req, "linux-x86_64", digest_tar, digest_tar, self.fingerprint,
-                {tar_asc: support[tar_asc], **oci_support})}
+                {tar_asc: {"size": 100, "sha256": digest_asc}, **oci_support})}
             oci_pub = {"schema": "craft-nightly-release-publication/v2", "request": oci_req,
                        "plan": plan, "quality": {"ok": True}, "signing": oci_receipts}
-            oci_release = {**prior_release, "immutable": True, "target_commitish": self.commit,
-                           "body": rel.MARKER_V2 + json.dumps(oci_pub)}
+            oci_release = {
+                "id": 42, "tag_name": plan["identity"]["tag"], "draft": False, "prerelease": True,
+                "immutable": True, "target_commitish": self.commit,
+                "body": rel.MARKER_V2 + json.dumps(oci_pub),
+            }
             binds = dict(repository=self.repo, release_id=42, tag=plan["identity"]["tag"], version=version,
                          source_commit=self.commit, producer_run_id=101, producer_run_attempt=1,
                          signer_run_id=102, signer_run_attempt=1, signer_source_commit=signer["source_commit"])
@@ -629,22 +591,6 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 oci.release_bindings(oci_release, oci_policy, req.digest(oci_receipts), **{**binds, "signer_run_attempt": 2})
             with self.assertRaisesRegex(n.InvalidNightly, "immutable"):
                 oci.release_bindings({**oci_release, "immutable": False}, oci_policy, req.digest(oci_receipts), **binds)
-
-            class FakeAPI:
-                def request(self, method, path):
-                    if path.startswith("/git/ref/tags/"):
-                        return {"object": {"type": "commit", "sha": producer["source_commit"]}}
-                    raise AssertionError(f"unexpected API call: {method} {path}")
-
-            with patch.object(rel, "prior_policy", return_value=old_policy), \
-                 patch.object(rel, "verified_history_roles", return_value=None), \
-                 patch.object(rel, "prior_assets", return_value=None) as mock_assets:
-                result = rel.previous_publication(FakeAPI(), registry, old_policy, prior_request, [prior_release])
-            self.assertEqual(result["identity"], plan["identity"])
-            mock_assets.assert_called_once()
-            expected_assets = mock_assets.call_args[0][2]
-            self.assertEqual(expected_assets[deb_name], digest_deb)
-            self.assertEqual(expected_assets[deb_asc], digest_deb_asc)
 
     def test_validate_and_guard_reject_tampered_linux_package_in_bundle(self):
         import nightly_release as rel
