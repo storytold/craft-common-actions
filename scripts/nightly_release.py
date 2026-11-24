@@ -445,7 +445,7 @@ def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
     return claims
 
 
-def stage_bundle(output, state, directories, manifests, claims, linux_packages=None):
+def stage_bundle(output, state, directories, manifests, claims, linux_packages=None, linux_package_claims=None):
     """One validated bundle: shared admission JSON plus every platform's unsigned payload."""
     n.fields(state, {"request", "quality", "plan"}, "validator state")
     plan = state["plan"]
@@ -470,6 +470,10 @@ def stage_bundle(output, state, directories, manifests, claims, linux_packages=N
             stream, _ = n.regular_file(linux_packages, name)
             with stream, (output/name).open("xb") as destination:
                 shutil.copyfileobj(stream, destination, 1024*1024)
+            if linux_package_claims is not None:
+                n.require(name in linux_package_claims and
+                    n.digest_file(output, name)[1] == linux_package_claims[name]["payload_sha256"],
+                    "staged Linux package payload changed")
     return bundle_hash(output, validated_names(plan, output))
 
 
@@ -802,11 +806,13 @@ def main():
             manifests, claims = {}, {}
             for platform, directory in directories.items():
                 manifests[platform], claims[platform] = verified_unsigned(policy, state, platform, directory)
+            pkg_claims = None
             if "linux-x86_64" in state["plan"]["platforms"]:
                 n.require(args.linux_packages is not None, "Linux packages directory required")
-                verified_linux_packages(policy, state, args.linux_packages)
+                pkg_claims = verified_linux_packages(policy, state, args.linux_packages)
             revalidate(policy, state, env, api, sonar, registry, now=int(time.time()))
-            digest = stage_bundle(args.output, state, directories, manifests, claims, linux_packages=args.linux_packages)
+            digest = stage_bundle(args.output, state, directories, manifests, claims,
+                linux_packages=args.linux_packages, linux_package_claims=pkg_claims)
             outputs({**plan_outputs(state["plan"]), "bundle-sha256": digest})
             return
         if args.mode in ("guard", "sign"):

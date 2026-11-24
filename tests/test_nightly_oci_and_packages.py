@@ -41,10 +41,32 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         self.addCleanup(self.env_patch.stop)
         self.pkg_dir = self.root / "packages"
         self.pkg_dir.mkdir()
-        self.version = "0.24.0-nightly.20261123.1.1.gabcdef123456"
-        self.tag = "nightly-20261123-abcdef123456"
         self.commit = "a" * 40
         self.repo = "storytold/photocraft"
+        self.registry = {
+            "schema": "craft-nightly-registry/v1",
+            "apps": {
+                "photocraft": {
+                    "repository": self.repo,
+                    "default_branch": "main",
+                    "note": "test",
+                    "targets": [
+                        {
+                            "target": {"os": "linux", "arch": "x86_64", "format": "tar_gz"},
+                            "asset_pattern": "photocraft-{version}-linux-x86_64-nightly.tar.gz",
+                            "isolation": {
+                                "package_identity": "ai.storyteller.photocraft.nightly",
+                                "profile_contract": "nightly-v1",
+                                "profile_version": 1,
+                                "associations": "none",
+                            },
+                        }
+                    ],
+                }
+            },
+        }
+        self.ident, self.version = n.identity(self.registry, "photocraft", self.repo, self.commit, "0.24.0", 100, 1, 1795392000)
+        self.tag = self.ident["tag"]
         self.fingerprint = "A" * 40
         self.pubkey = self.root / "key.asc"
         self.pubkey.write_text("-----BEGIN PGP PUBLIC KEY BLOCK-----\ntest\n-----END PGP PUBLIC KEY BLOCK-----\n")
@@ -556,8 +578,10 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
     def test_oci_rollback_and_producer_binding_and_no_argv_tokens(self):
         calls = []
+        _, newer_ver = n.identity(self.registry, "photocraft", self.repo, self.commit, "0.24.0", 101, 1, 1795478400)
+        _, older_ver = n.identity(self.registry, "photocraft", self.repo, self.commit, "0.24.0", 99, 1, 1795305600)
         recent = [
-            {"databaseId": 99, "tagName": "nightly-2026-11-24", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-24T00:00:00Z"},
+            {"databaseId": 99, "tagName": f"v{newer_ver}", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-24T00:00:00Z"},
             {"databaseId": 42, "tagName": self.tag, "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-23T00:00:00Z"},
         ]
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
@@ -590,9 +614,15 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
 
         newest_only = [
             {"databaseId": 42, "tagName": self.tag, "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-23T00:00:00Z"},
-            {"databaseId": 40, "tagName": "nightly-2026-11-22", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-22T00:00:00Z"},
+            {"databaseId": 40, "tagName": f"v{older_ver}", "isDraft": False, "isPrerelease": True, "publishedAt": "2026-11-22T00:00:00Z"},
         ]
-        nightly_json = json.dumps({"tag": self.tag, "commit": self.commit, "version": self.version}).encode("utf-8")
+        feed_dir = self.root / "feed-artifacts"
+        feed_dir.mkdir()
+        tar_name = f"photocraft-{self.version}-linux-x86_64-nightly.tar.gz"
+        (feed_dir / tar_name).write_bytes(b"tar-bytes")
+        (feed_dir / f"{tar_name}.asc").write_text("-----BEGIN PGP SIGNATURE-----\nfake\n-----END PGP SIGNATURE-----\n", encoding="utf-8")
+        feed = n.build_feed_v2(self.registry, self.ident, self.version, feed_dir)
+        nightly_json = json.dumps(feed).encode("utf-8")
         with patch.object(oci.signing, "verify_oci_signature", return_value=self.fingerprint):
             oci.verify_and_push_oci(
                 release=rel_with_body, repository=self.repo, tag=self.tag, version=self.version,
@@ -767,6 +797,25 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
             claims = rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
         self.assertEqual(sorted(claims), [deb.name, rpm.name])
+        bundle_out = self.root / "staged-bundle"
+        unsigned_dir = self.root / "unsigned-tar"
+        unsigned_dir.mkdir()
+        tar_asset = f"photocraft-{self.version}-linux-x86_64-nightly.unsigned.tar.gz"
+        (unsigned_dir / tar_asset).write_bytes(b"tar-bytes")
+        tar_sha = hashlib.sha256(b"tar-bytes").hexdigest()
+        bundle_state = {
+            "request": request,
+            "quality": {"ok": True},
+            "plan": {"platforms": {"linux-x86_64": {"asset": f"photocraft-{self.version}-linux-x86_64-nightly.tar.gz", "unsigned_asset": tar_asset}},
+                     "identity": {"version": self.version}},
+        }
+        rel.stage_bundle(bundle_out, bundle_state, {"linux-x86_64": unsigned_dir},
+                         {"linux-x86_64": {}}, {"linux-x86_64": {"payload_sha256": tar_sha}},
+                         linux_packages=pkg_dir, linux_package_claims=claims)
+        with self.assertRaisesRegex(n.InvalidNightly, "staged Linux package payload changed"):
+            rel.stage_bundle(self.root / "staged-bundle-bad", bundle_state, {"linux-x86_64": unsigned_dir},
+                             {"linux-x86_64": {}}, {"linux-x86_64": {"payload_sha256": tar_sha}},
+                             linux_packages=pkg_dir, linux_package_claims={**claims, deb.name: {"payload_sha256": "0" * 64}})
         deb.write_bytes(b"tampered")
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
             with self.assertRaisesRegex(n.InvalidNightly, "unsigned payload digest differs"):

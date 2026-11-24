@@ -10,12 +10,12 @@ import re
 import subprocess
 import tempfile
 import nightly_feed as n
+import nightly_policy as p
 import nightly_signing as signing
 
 ALLOWED_ARCHES = ("x86_64", "aarch64")
 OCI_ARCH_MAP = {"x86_64": "amd64", "aarch64": "arm64"}
 SHA256_RE = re.compile(r"^sha256:([a-f0-9]{64})$")
-VERSION_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+-[A-Za-z0-9._-]+$")
 MARKER_V2 = "craft-nightly-release-publication/v2:"
 
 
@@ -59,8 +59,8 @@ def verify_release_target(
     if html_url:
         n.require(html_url.startswith(expected_prefix), "release repository URL mismatch")
     if version is not None:
-        n.require(isinstance(version, str) and VERSION_RE.fullmatch(version) is not None, "invalid nightly version")
-        n.require(tag.startswith("nightly-"), "release tag must be a nightly tag")
+        n.require(isinstance(version, str) and p.NIGHTLY.fullmatch(version) is not None, "invalid nightly version")
+        n.require(tag == f"v{version}", "release tag does not match version")
     if producer_run_id is not None:
         body = release.get("body", "")
         n.require(isinstance(body, str) and body.count(MARKER_V2) == 1, "missing or ambiguous release publication marker")
@@ -75,23 +75,24 @@ def verify_release_target(
                   "release publication identity mismatch")
     if nightly_json_bytes is not None:
         feed = json.loads(nightly_json_bytes.decode("utf-8"))
-        n.require(feed.get("tag") == tag and feed.get("commit") == source_commit and
-                  (version is None or feed.get("version") == version), "NIGHTLY.json identity mismatch")
+        n.require(feed.get("schema") == "craft-nightly/v2" and feed.get("repository") == repository and
+                  feed.get("tag") == tag and feed.get("source_commit") == source_commit,
+                  "NIGHTLY.json identity mismatch")
     if recent_releases is not None:
-        published_nightlies = [
-            rel for rel in recent_releases
+        normalized = [
+            {
+                "id": rel.get("databaseId", rel.get("id")),
+                "tag_name": rel.get("tagName", rel.get("tag_name")),
+                "draft": rel.get("isDraft", rel.get("draft", False)),
+                "prerelease": rel.get("isPrerelease", rel.get("prerelease", False)),
+            }
+            for rel in recent_releases
             if isinstance(rel, dict)
-            and not rel.get("isDraft", rel.get("draft", False))
-            and rel.get("isPrerelease", rel.get("prerelease", False))
-            and str(rel.get("tagName", rel.get("tag_name", ""))).startswith("nightly-")
         ]
-        n.require(bool(published_nightlies), "no published nightly releases found")
-        newest = max(
-            published_nightlies,
-            key=lambda rel: (rel.get("publishedAt", rel.get("published_at", "")), rel.get("databaseId", rel.get("id", 0))),
-        )
-        newest_id = newest.get("databaseId", newest.get("id"))
-        n.require(newest_id == release["id"], "refusing to push floating OCI tags for non-newest nightly release")
+        newest = p.newest_nightly(normalized)
+        n.require(newest is not None, "no published nightly releases found")
+        n.require(newest["id"] == release["id"] and newest["tag_name"] == tag,
+                  "refusing to push floating OCI tags for non-newest nightly release")
     return release["id"]
 
 
