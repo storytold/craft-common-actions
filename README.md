@@ -151,12 +151,14 @@ Linux builds into packages that install beside the stable app and publishes them
 - Flatpak OCI images in `ghcr.io/<repo>` tagged `<nv>-nightly-<arch>`, and in
   `docker.io/storytold/<app>` when the Docker Hub secrets are set. `nightly-<arch>` moves to the new
   image only after the prerelease is published.
-- Only the newest 3 nightly prereleases (with their tags) and the newest 3 nightly-only image
-  versions per architecture are kept. A failed cleanup only warns.
+- Only the newest 3 nightly prereleases (with their tags) are kept, and in GHCR only the nightly
+  images of those prereleases plus the one `nightly-<arch>` names. Docker Hub tags are not pruned.
+  A failed cleanup only warns.
 - `storytold/artcraft-services` is dispatched as after a stable release.
 
-Nothing is published if any nightly build fails or is cancelled. With `dry-run` also set, the
-nightly packages are built but not published. Nightly mode refuses to run on the `release` branch.
+Nothing is published if any nightly build fails or is cancelled, riscv64 included. With `dry-run`
+also set, the nightly packages are built but not published. Nightly mode runs only on the default
+branch.
 
 To opt in, replace the nightly dry run in the caller with:
 
@@ -169,10 +171,12 @@ To opt in, replace the nightly dry run in the caller with:
 
 The caller's `permissions` must grant `contents: write` and `packages: write` (as in the caller
 example above). One-time repo setup: create a `nightly-signing` environment whose deployment
-branches are limited to `main`, holding `LINUX_NIGHTLY_SIGNING_KEY` (it may be the same key as the
-`release` environment's `LINUX_SIGNING_KEY`), and list `LINUX_NIGHTLY_SIGNING_KEY` in the caller's
-`secrets:` block. Without the secret, the nightly is published unsigned with a warning, and the
-website withholds its rpm and Arch packages.
+branches are limited to `main`, holding `LINUX_NIGHTLY_SIGNING_KEY`, and list
+`LINUX_NIGHTLY_SIGNING_KEY` in the caller's `secrets:` block. A key separate from the `release`
+environment's `LINUX_SIGNING_KEY` keeps the stable key out of reach of code merged to main, but
+artcraft-services must publish its public key next to the stable one first: dnf and pacman reject
+packages signed by a key they haven't imported. Without the secret, the nightly is published
+unsigned with a warning, and the website withholds its rpm and Arch packages.
 
 An app with a compile-time build channel passes it as `build-channel` (PhotoCraft:
 `build-channel: nightly-v1`). Its Linux nightly binaries then report the nightly identity: the

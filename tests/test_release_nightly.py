@@ -50,6 +50,8 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 case "$*" in
   "api users/"*) jq -r "$jq_filter" <<<'{"type": "Organization"}' ;;
+  "api repos/"*) jq -r "$jq_filter" <<<'{"default_branch": "main"}' ;;
+  "release list"*) jq -r "$jq_filter" "${FAKE_RELEASES:-$FAKE_FIXTURE}" ;;
   *-X\\ DELETE*|"release delete"*) ;;
   *) jq -r "$jq_filter" "$FAKE_FIXTURE" ;;
 esac
@@ -88,7 +90,9 @@ class NightlyVersionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             out.touch()
-            result = run(self.STEP["run"], tmp, tmp, VERSION="0.24.1-rc.2", GITHUB_REF=ref, GITHUB_OUTPUT=str(out),
+            executable(Path(tmp) / "bin/gh", FAKE_GH)
+            result = run(self.STEP["run"], tmp, Path(tmp) / "bin", VERSION="0.24.1-rc.2", GITHUB_REF=ref,
+                         GITHUB_OUTPUT=str(out), GITHUB_REPOSITORY="storytold/democraft", FAKE_LOG=os.devnull,
                          BUILD_CHANNEL=channel, GITHUB_RUN_NUMBER="57", GITHUB_RUN_ATTEMPT="2",
                          GITHUB_SHA="0123456789abcdef0123456789abcdef01234567")
             return result, out.read_text()
@@ -111,11 +115,13 @@ class NightlyVersionTests(unittest.TestCase):
         self.assertIn(f"linux-version={identity}\n", output)
         self.assertNotIn("linux-version=", self.resolve("refs/heads/main")[1])
 
-    def test_the_release_branch_is_refused(self):
-        result, output = self.resolve("refs/heads/release")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("::error::nightly mode refuses to run on refs/heads/release", result.stdout)
-        self.assertEqual(output, "")
+    def test_only_the_default_branch_may_run_a_nightly(self):
+        for ref in ("refs/heads/release", "refs/heads/feature", "refs/tags/v1.0.0"):
+            with self.subTest(ref=ref):
+                result, output = self.resolve(ref)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"::error::nightly mode runs only on the default branch (main), not {ref}", result.stdout)
+                self.assertEqual(output, "")
 
 
 @unittest.skipUnless(BASH, "needs bash")
@@ -240,9 +246,13 @@ class NightlyRetentionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_step(self, name, fixture):
+    def run_step(self, name, fixture, releases=None):
         (self.root / "fixture.json").write_text(json.dumps(fixture))
-        result = run(step("nightly-release", name)["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log),
+        extra = {}
+        if releases is not None:
+            (self.root / "releases.json").write_text(json.dumps(releases))
+            extra["FAKE_RELEASES"] = str(self.root / "releases.json")
+        result = run(step("nightly-release", name)["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log), **extra,
                      FAKE_FIXTURE=str(self.root / "fixture.json"), GITHUB_REPOSITORY="storytold/DemoCraft",
                      GITHUB_REPOSITORY_OWNER="storytold")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -257,7 +267,7 @@ class NightlyRetentionTests(unittest.TestCase):
         self.assertEqual(deleted, ["gh release delete nightly-1.0.0.202610210000 --yes --cleanup-tag",
                                    "gh release delete nightly-1.0.0.202610200000 --yes --cleanup-tag"])
 
-    def test_only_old_nightly_only_images_are_deleted(self):
+    def test_only_nightly_images_of_unkept_or_unpublished_runs_are_deleted(self):
         def version(id, day, *tags):
             return {"id": id, "created_at": f"2026-11-{day:02d}T00:00:00Z", "metadata": {"container": {"tags": list(tags)}}}
         versions = [
@@ -269,9 +279,16 @@ class NightlyRetentionTests(unittest.TestCase):
             version(6, 19, "1.0.0.202611190000-nightly-x86_64", "1.0.0-x86_64"),
             version(7, 18),
             version(8, 17, "1.0.0.202611170000-nightly-aarch64"),
+            # Pushed by a run whose prerelease was never published.
+            version(9, 25, "1.0.0.202611250000-nightly-x86_64"),
         ]
-        deleted = self.run_step("Keep the newest 3 nightly Flatpak images per architecture", versions)
-        self.assertEqual(deleted, ["gh api -X DELETE orgs/storytold/packages/container/democraft/versions/4"])
+        releases = [{"tagName": f"nightly-1.0.0.202611{day}0000", "isPrerelease": True,
+                     "publishedAt": f"2026-11-{day}T00:00:00Z"} for day in (21, 22, 23, 24)]
+        releases.append({"tagName": "v1.0.0", "isPrerelease": False, "publishedAt": "2026-11-26T00:00:00Z"})
+        deleted = self.run_step("Keep the Flatpak images of the kept nightly prereleases", versions, releases)
+        # Kept: 1 (nightly-x86_64, also the newest release), 2, 3; stable-tagged 5 and 6 and untagged 7 never.
+        self.assertEqual(sorted(deleted), [f"gh api -X DELETE orgs/storytold/packages/container/democraft/versions/{i}"
+                                           for i in (4, 8, 9)])
 
 
 @unittest.skipUnless(BASH, "needs bash")

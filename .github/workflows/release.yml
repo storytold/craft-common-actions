@@ -106,7 +106,7 @@ on:
           Build everything as a dry run does, then publish the Linux packages as a nightly
           prerelease that installs beside the stable app: <prefix>-nightly-<version> deb, rpm, Arch
           and Flatpak packages under the tag nightly-<version>, and the Flatpak OCI tags
-          <version>-nightly-<arch> and nightly-<arch>. Keeps the newest 3 nightlies. Main only;
+          <version>-nightly-<arch> and nightly-<arch>. Keeps the newest 3 nightlies. Default branch only;
           with dry-run set too, the nightly packages are built but nothing is published.
         type: boolean
         required: false
@@ -271,11 +271,16 @@ jobs:
         env:
           VERSION: ${{ steps.v.outputs.version }}
           BUILD_CHANNEL: ${{ inputs.build-channel }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # A nightly is a prerelease of main; the release branch only ships stable releases.
-          if [ "$GITHUB_REF" = refs/heads/release ]; then
-            echo "::error::nightly mode refuses to run on refs/heads/release: call it from main"
+          # A nightly is a prerelease of the default branch. Any other ref (the release branch, a
+          # feature branch, a tag) would push images and, where the nightly-signing environment
+          # has no branch rule yet, sign and publish too. Scheduled events carry no repository
+          # payload, so the default branch is read from the API.
+          default="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+          if [ -z "$default" ] || [ "$GITHUB_REF" != "refs/heads/$default" ]; then
+            echo "::error::nightly mode runs only on the default branch (${default:-unknown}), not $GITHUB_REF"
             exit 1
           fi
           # Computed once so every job agrees. The package version and the app identity share the
@@ -1538,6 +1543,7 @@ jobs:
           output-dir: dist/nightly
           version: ${{ needs.version.outputs.linux-version }}
           nightly-version: ${{ needs.version.outputs.nightly-version }}
+          nfpm-version: ${{ inputs.nfpm-version }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-linux-${{ matrix.arch }}
@@ -1801,11 +1807,17 @@ jobs:
             echo "Deleting $tag"
             gh release delete "$tag" --yes --cleanup-tag || echo "::warning::Could not delete the nightly prerelease $tag."
           done
-      - name: Keep the newest 3 nightly Flatpak images per architecture
+      - name: Keep the Flatpak images of the kept nightly prereleases
         run: |
           # A failed cleanup only warns. Only versions whose every tag is <version>-nightly-<arch> or
           # nightly-<arch> are candidates, so stable images and untagged manifests are never deleted.
+          # A candidate stays when it carries nightly-<arch> or belongs to a kept prerelease; images
+          # pushed by runs that never published are deleted.
           warn() { echo "::warning::$1"; exit 0; }
+          kept="$(gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,publishedAt \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly-")))] | sort_by(.publishedAt) | reverse | .[:3] | map(.tagName | ltrimstr("nightly-"))')" \
+            || warn "Could not list the nightly prereleases; no nightly images deleted."
+          [ "$kept" != "[]" ] || warn "No published nightly prerelease found; no nightly images deleted."
           owner="$GITHUB_REPOSITORY_OWNER"
           package="${GITHUB_REPOSITORY#*/}"
           package="${package,,}"
@@ -1814,10 +1826,11 @@ jobs:
           versions="$(gh api --paginate "$scope/packages/container/$package/versions" --jq '.[]')" \
             || warn "Could not list the versions of ghcr.io/$owner/$package; no nightly images deleted."
           for arch in x86_64 aarch64; do
-            ids="$(jq -rs --arg arch "$arch" '
+            ids="$(jq -rs --arg arch "$arch" --argjson kept "$kept" '
               [.[] | (.metadata.container.tags // []) as $tags
-               | select(($tags | length) > 0 and all($tags[]; test("(^|-)nightly-" + $arch + "$")))]
-              | sort_by(.created_at) | reverse | .[3:] | .[].id' <<<"$versions")" \
+               | select(($tags | length) > 0 and all($tags[]; test("(^|-)nightly-" + $arch + "$")))
+               | select(any($tags[]; . == "nightly-" + $arch or (rtrimstr("-nightly-" + $arch) as $v | $kept | index($v))) | not)]
+              | .[].id' <<<"$versions")" \
               || warn "Could not read the versions of ghcr.io/$owner/$package; no nightly images deleted."
             for id in $ids; do
               echo "Deleting ghcr.io/$owner/$package version $id ($arch)"
