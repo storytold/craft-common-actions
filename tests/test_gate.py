@@ -28,8 +28,9 @@ UNREACHED_RS_REV = '8830c54c077af2c6bf20833eb46252d775f7b35e'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
 CACHE = 'storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
-WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
-          " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
+WRITES = ("(github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
+          " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))"
+          " || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name)))")
 
 
 def step(name):
@@ -155,6 +156,8 @@ class Expression:
             return re.sub(r'\{(\d+)\}', lambda m: self.string(args[int(m.group(1)) + 1]), args[0])
         if name == 'fromJSON':
             return json.loads(args[0])
+        if name == 'contains':
+            return args[1] in args[0] if isinstance(args[0], list) else self.string(args[1]) in self.string(args[0])
         if name == 'cancelled':
             return self.context.get('cancelled', False)
         if name == 'always':
@@ -797,10 +800,12 @@ class ResultTests(unittest.TestCase):
 
 # The approved cache-write condition, operator by operator: a run saves only on the default branch,
 # or on a manual dispatch whose caller opted in, and never on a pull request.
+# Pushes to a branch listed in cache-save-branches save as well.
 APPROVED_CONDITION = (
-    "github.event_name != 'pull_request' && ("
+    "(github.event_name != 'pull_request' && ("
     "github.ref_name == github.event.repository.default_branch || "
     "(inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))"
+    " || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name)))"
 )
 
 # event_name, ref_name, the repository's default branch, cache-save-on-dispatch -> saves the cache
@@ -823,7 +828,7 @@ SAVE_CONDITIONS = [
     ('workflow_dispatch', 'feature', 'main', True, True),
 ]
 
-TOKEN = re.compile(r"\s*(?:('[^']*')|(==|!=|<=|>=|&&|\|\||!|<|>|\(|\))|([A-Za-z_][A-Za-z0-9_.-]*)|(-?\d+))")
+TOKEN = re.compile(r"\s*(?:('[^']*')|(==|!=|<=|>=|&&|\|\||!|<|>|\(|\)|,)|([A-Za-z_][A-Za-z0-9_.-]*)|(-?\d+))")
 
 
 def tokens(expression):
@@ -928,6 +933,19 @@ class BoundedExpression:
             value = self.expression(context)
             self.take(')')
             return value
+        if found in ('contains', 'fromJSON') and self.tokens[self.position + 1:self.position + 2] == ['(']:
+            self.take()
+            self.take('(')
+            arguments = [self.operand(context)]
+            while found == 'contains' and self.peek() == ',':
+                self.take(',')
+                arguments.append(self.operand(context))
+            self.take(')')
+            if found == 'fromJSON':
+                return json.loads(arguments[0])
+            if len(arguments) != 2 or not isinstance(arguments[0], list):
+                raise AssertionError('contains takes an array and an item in a cache condition')
+            return arguments[1] in arguments[0]
         self.take()
         if found.startswith("'"):
             return found[1:-1]
@@ -947,13 +965,14 @@ LEGS = [{'matrix.part': part, 'matrix.shard': shard, 'inputs.warm-command': warm
         for part in ('test', 'shard', 'warm') for shard in (0, 1, 2) for warm in ('', 'cargo test --no-run')]
 
 
-def evaluates(expression, event, ref, default_branch, optin, leg=SAVING_LEG):
+def evaluates(expression, event, ref, default_branch, optin, leg=SAVING_LEG, branches='[]'):
     """What the workflow engine would hand the action as the save-if input, as the action sees it."""
     return str(BoundedExpression(expression).evaluate({
         'github.event_name': event,
         'github.ref_name': ref,
         'github.event.repository.default_branch': default_branch,
         'inputs.cache-save-on-dispatch': optin,
+        'inputs.cache-save-branches': branches,
         **leg,
     })).lower()
 
@@ -966,6 +985,19 @@ class SaveConditionTests(unittest.TestCase):
                 with self.subTest(job=job, event=event, ref=ref, default_branch=default_branch, optin=optin):
                     self.assertEqual(evaluates(cache_condition(job), event, ref, default_branch, optin),
                                      'true' if saves else 'false')
+
+    def test_a_push_to_a_listed_branch_saves_and_nothing_else_does(self):
+        for job in SAVING_JOBS:
+            condition = cache_condition(job)
+            for event, ref, saves in (('push', 'next', True), ('push', 'other', False),
+                                      ('workflow_dispatch', 'next', False), ('pull_request', 'next', False)):
+                with self.subTest(job=job, event=event, ref=ref):
+                    self.assertEqual(evaluates(condition, event, ref, 'main', False, branches='["next", "dev"]'),
+                                     'true' if saves else 'false')
+            self.assertEqual(evaluates(condition, 'push', 'next', 'main', False), 'false')
+
+    def test_the_branch_list_defaults_to_empty(self):
+        self.assertEqual(INPUTS['cache-save-branches']['default'], '[]')
 
     def test_a_pull_request_run_never_saves(self):
         # The default-branch clause is what a rewrite can accidentally reorder, so a pull request
@@ -999,7 +1031,7 @@ class SaveConditionShapeTests(unittest.TestCase):
         self.assertEqual(evaluates(mutated, 'pull_request', 'feature', 'main', False), 'true')
 
     def test_unsupported_syntax_is_an_error_not_a_guess(self):
-        for expression in ('fromJSON(inputs.os)', "contains(github.ref_name, 'main')",
+        for expression in ('fromJSON(inputs.os)', "startsWith(github.ref_name, 'main')",
                            "github.head_ref == 'main'", "github.event_name != 'pull_request' &&"):
             with self.subTest(expression=expression):
                 with self.assertRaises(AssertionError):

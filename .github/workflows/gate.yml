@@ -228,6 +228,11 @@ on:
         type: boolean
         required: false
         default: false
+      cache-save-branches:
+        description: "JSON array of branch names whose push runs also save the caches (for example '[\"next\"]'); the default branch saves as before"
+        type: string
+        required: false
+        default: '[]'
       timeout-minutes:
         description: "Timeout of each leg"
         type: number
@@ -396,11 +401,11 @@ jobs:
           tools: ${{ inputs.tools }}
           cache-version: ${{ inputs.cache-version }}
           cache-job: ${{ inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || 'gate' }}
-          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          cache-save: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) }}
           cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
           cold-build: ${{ inputs.cold-build }}
           sccache: ${{ inputs.sccache }}
-          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          writes: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) }}
           cache-paths: ${{ inputs.cache-paths }}
           cache-key: ${{ inputs.cache-key }}
           cache-key-files: ${{ inputs.cache-key-files }}
@@ -651,9 +656,9 @@ jobs:
           cache-version: ${{ inputs.cache-version }}
           rust-cache: ${{ inputs.lint-cache }}
           cache-job: lint
-          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          cache-save: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) }}
           sccache: ${{ inputs.sccache }}
-          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          writes: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) }}
           caller-setup: "false"
 
       - name: Gate
@@ -682,7 +687,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
         # One job definition for every part, so the shared setup is written once.
-        part: ${{ fromJSON(format('["{0}"{1}]', inputs.test-shards != 0 && 'shard' || 'test', inputs.warm-command != '' && inputs.archive-command == '' && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && ',"warm"' || '')) }}
+        part: ${{ fromJSON(format('["{0}"{1}]', inputs.test-shards != 0 && 'shard' || 'test', inputs.warm-command != '' && inputs.archive-command == '' && (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) && ',"warm"' || '')) }}
         # With test-shards, 1..N for the shard part; the warm leg runs once, as shard 1. Otherwise 0.
         shard: ${{ fromJSON(needs.select.outputs.shards || '[0]') }}
         exclude: ${{ fromJSON(needs.select.outputs.exclude || '[]') }}
@@ -716,11 +721,11 @@ jobs:
           rust-cache: ${{ !(matrix.part == 'shard' && inputs.archive-command != '') }}
           cache-version: ${{ inputs.cache-version }}
           cache-job: ${{ inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || 'gate' }}
-          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && (matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1) }}
+          cache-save: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) && (matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1) }}
           cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
           cold-build: ${{ inputs.cold-build }}
           sccache: ${{ inputs.sccache }}
-          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          writes: ${{ (github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) || (github.event_name == 'push' && contains(fromJSON(inputs.cache-save-branches), github.ref_name))) }}
           cache-paths: ${{ inputs.cache-paths }}
           cache-key: ${{ inputs.cache-key }}
           cache-key-files: ${{ inputs.cache-key-files }}
