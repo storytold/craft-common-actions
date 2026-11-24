@@ -157,6 +157,22 @@ class FreeBSDReleaseMemoryTests(unittest.TestCase):
         self.assertEqual(arc_block(prepare), arc_block(CI_VM['with']['prepare']))
         self.assertLess(prepare.index('vfs.zfs.arc_max'), prepare.index('pkg install'))
 
+    def test_only_freebsd_codegen_units_override_reaches_the_guest(self):
+        # The one release-profile change: 16 codegen units for the FreeBSD guest's lower link memory.
+        env = DATA['jobs']['freebsd']['env']
+        overrides = {key: value for key, value in env.items() if key.startswith('CARGO_PROFILE_')}
+        self.assertEqual(overrides, {'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '16'})
+        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', VM['with']['envs'].split())
+        self.assertEqual([name for name in VM['with']['envs'].split() if name.startswith('CARGO_PROFILE_')],
+                         ['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'])
+        # No other job sets a profile override, and the FreeBSD job has no LTO override.
+        for name, job in DATA['jobs'].items():
+            keys = [key for key in (job.get('env') or {}) if key.startswith('CARGO_PROFILE_')]
+            self.assertEqual(keys, ['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'] if name == 'freebsd' else [], name)
+            for step in job.get('steps', []):
+                self.assertFalse([key for key in (step.get('env') or {}) if key.startswith('CARGO_PROFILE_')], name)
+        self.assertNotIn('LTO', ' '.join(env))
+
     def test_vm_size_build_jobs_and_release_profile_are_unchanged(self):
         self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '12288'))  # Host runner keeps its headroom.
         self.assertEqual(DATA['jobs']['freebsd']['env']['CARGO_BUILD_JOBS'], '4')

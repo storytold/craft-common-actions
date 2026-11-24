@@ -799,6 +799,11 @@ jobs:
       CARGO_HOME: /var/tmp/craft-cargo
       CARGO_TARGET_DIR: /var/tmp/craft-target
       CARGO_BUILD_JOBS: 4
+      # FreeBSD only: the 12 GB guest OOM-kills the final ThinLTO link of large apps at the
+      # apps' codegen-units=1 (photocraft: ARC 0.4 GB, "failed to reclaim memory"). 16 codegen
+      # units keeps LTO thin and cuts peak link memory; it overrides [profile.release] for
+      # every crate unless an app sets a per-package release override.
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       RUST_BACKTRACE: 1
@@ -859,7 +864,7 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
-          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ARCH ${{ steps.app-env.outputs.names }}"
+          envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ARCH ${{ steps.app-env.outputs.names }}"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.
             unset CARGO_HOME CARGO_TARGET_DIR
