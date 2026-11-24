@@ -254,6 +254,35 @@ class InputTests(unittest.TestCase):
             prefix, arch, inputs = nr.find_inputs(Path(tmp), '1.2.0')
         self.assertEqual((prefix, arch, sorted(inputs)), ('pdfcraft', 'x86_64', ['deb', 'tar.gz']))
 
+    def test_nightly_channel_version_in_names(self):
+        version = '0.24.1-nightly.20261124.153.1.gabcdef012345'
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in (f'photocraft-{version}-linux-aarch64.deb', f'photocraft-{version}-linux-aarch64.rpm',
+                         f'photocraft-{version}-linux-aarch64.tar.gz', 'photocraft-0.24.1-linux-aarch64.deb'):
+                (Path(tmp) / name).write_bytes(b'')
+            prefix, arch, inputs = nr.find_inputs(Path(tmp), version)
+        self.assertEqual((prefix, arch), ('photocraft', 'aarch64'))
+        self.assertEqual({ext: p.name for ext, p in inputs.items()}, {
+            'deb': f'photocraft-{version}-linux-aarch64.deb', 'rpm': f'photocraft-{version}-linux-aarch64.rpm',
+            'tar.gz': f'photocraft-{version}-linux-aarch64.tar.gz'})
+
+    def test_refuses_files_already_named_nightly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            version = '0.24.1-nightly.20261124.153.1.gabcdef012345'
+            (Path(tmp) / f'photocraft-nightly-{version}-linux-x86_64.deb').write_bytes(b'')
+            with self.assertRaisesRegex(nr.RebrandError, 'photocraft-nightly-.*already produced nightly packages'):
+                nr.rebrand(Path(tmp), Path(tmp) / 'out', version, '0.24.1.202611240228')
+
+    def test_refuses_tree_already_nightly(self):
+        renamed = [e if not e.path.startswith('/usr/share/applications/') else
+                   Entry(e.path.replace(APP_ID, APP_ID + '.nightly'), e.kind, e.mode, e.data)
+                   for e in fixture_entries()]
+        with self.assertRaisesRegex(nr.RebrandError, f'{APP_ID}.nightly already ends in .nightly'):
+            nr.Names.from_entries('photocraft', renamed)
+        with_bin = fixture_entries() + [Entry('/usr/bin/photocraft-nightly', 'file', 0o755, b'x')]
+        with self.assertRaisesRegex(nr.RebrandError, 'already produced nightly packages'):
+            nr.Names.from_entries('photocraft', with_bin)
+
     def test_nightly_version_must_be_numeric(self):
         with self.assertRaisesRegex(nr.RebrandError, 'digits and dots'):
             nr.rebrand(Path('.'), Path('.'), '0.24.1', '0.24.1~nightly')
@@ -291,16 +320,21 @@ POSTINST = '#!/bin/sh\nupdate-desktop-database -q /usr/share/applications || tru
 @unittest.skipUnless(shutil.which('dpkg-deb'), 'needs dpkg-deb')
 class DebAndTarballRoundTripTests(unittest.TestCase):
     def test_round_trip(self):
+        self.round_trip('0.24.1', '0.24.1-1')
+
+    def test_round_trip_nightly_channel_version(self):
+        # An app built on its nightly channel names artifacts after its identity version; nfpm's
+        # semver schema turns the deb version into 0.24.1~nightly....
+        self.round_trip('0.24.1-nightly.20261124.153.1.gabcdef012345',
+                        '0.24.1~nightly.20261124.153.1.gabcdef012345-1')
+
+    def build_stable_deb(self, path, package='photocraft', version='0.24.1-1', entries=None):
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            inputs, out = tmp / 'in', tmp / 'out'
-            inputs.mkdir()
-            stage = tmp / 'stage'
-            entries = fixture_entries()
-            write_stable_tree(stage, entries)
+            stage = Path(tmp)
+            write_stable_tree(stage, fixture_entries() if entries is None else entries)
             (stage / 'DEBIAN').mkdir()
             (stage / 'DEBIAN/control').write_text(
-                'Package: photocraft\nVersion: 0.24.1-1\nSection: graphics\nPriority: optional\n'
+                f'Package: {package}\nVersion: {version}\nSection: graphics\nPriority: optional\n'
                 'Architecture: amd64\nMaintainer: PhotoCraft maintainers <photocraft@example.com>\n'
                 'Installed-Size: 10\nDepends: libc6 (>= 2.35), libvulkan1 | libegl1\n'
                 'Recommends: mesa-vulkan-drivers\nConflicts: photocraft-old, photocraft\n'
@@ -308,13 +342,31 @@ class DebAndTarballRoundTripTests(unittest.TestCase):
                 'Description: Open-source, native image editor\n Layers, masks and brushes.\n')
             (stage / 'DEBIAN/postinst').write_text(POSTINST)
             os.chmod(stage / 'DEBIAN/postinst', 0o755)
-            subprocess.run(['dpkg-deb', '--root-owner-group', '-b', str(stage),
-                            str(inputs / 'photocraft-0.24.1-linux-x86_64.deb')], check=True, capture_output=True)
-            make_tarball(inputs / 'photocraft-0.24.1-linux-x86_64.tar.gz', 'photocraft-0.24.1-linux-x86_64',
-                         [e for e in entries if e.kind != 'symlink'])
-            (inputs / 'photocraft-0.24.1-linux-x86_64.AppImage').write_bytes(b'')
+            subprocess.run(['dpkg-deb', '--root-owner-group', '-b', str(stage), str(path)],
+                           check=True, capture_output=True)
 
-            result = nr.rebrand(inputs, out, '0.24.1', '0.24.1.202611240228')
+    def test_refuses_deb_already_named_nightly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs = Path(tmp) / 'in'
+            inputs.mkdir()
+            self.build_stable_deb(inputs / 'photocraft-0.24.1-linux-x86_64.deb', package='photocraft-nightly')
+            with self.assertRaisesRegex(nr.RebrandError, 'already produced nightly packages'):
+                nr.rebrand(inputs, Path(tmp) / 'out', '0.24.1', '0.24.1.202611240228')
+            self.assertFalse((Path(tmp) / 'out' / 'photocraft-nightly-0.24.1.202611240228-linux-x86_64.deb').exists())
+
+    def round_trip(self, version, deb_version):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            inputs, out = tmp / 'in', tmp / 'out'
+            inputs.mkdir()
+            entries = fixture_entries()
+            stable_base = f'photocraft-{version}-linux-x86_64'
+            self.build_stable_deb(inputs / f'{stable_base}.deb', version=deb_version)
+            make_tarball(inputs / f'{stable_base}.tar.gz', stable_base,
+                         [e for e in entries if e.kind != 'symlink'])
+            (inputs / f'{stable_base}.AppImage').write_bytes(b'')
+
+            result = nr.rebrand(inputs, out, version, '0.24.1.202611240228')
 
             base = out / 'photocraft-nightly-0.24.1.202611240228-linux-x86_64'
             self.assertEqual(result, {'prefix': 'photocraft', 'tarball': f'{base}.tar.gz',
@@ -342,7 +394,7 @@ class DebAndTarballRoundTripTests(unittest.TestCase):
             self.assertEqual(files['./usr/share/zsh/vendor-completions/_photocraft-cli-nightly'][-1],
                              '/usr/share/zsh/site-functions/_photocraft-cli-nightly')
             stable = {line.split()[5] for line in subprocess.run(
-                ['dpkg-deb', '-c', str(inputs / 'photocraft-0.24.1-linux-x86_64.deb')],
+                ['dpkg-deb', '-c', str(inputs / f'{stable_base}.deb')],
                 check=True, capture_output=True, text=True).stdout.splitlines()}
             shared = {p for p, cols in files.items() if not cols[0].startswith('d')} & stable
             self.assertEqual(shared, set())

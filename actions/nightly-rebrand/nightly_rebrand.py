@@ -47,6 +47,11 @@ class RebrandError(Exception):
     pass
 
 
+def refuse_nightly_input(what: str) -> None:
+    raise RebrandError(f"{what}: the app's packaging already produced nightly packages, and the "
+                       "nightly conversion cannot also apply to them")
+
+
 @dataclass(frozen=True)
 class Entry:
     path: str           # absolute install path, e.g. /usr/bin/photocraft
@@ -73,6 +78,11 @@ class Names:
         ids = {posixpath.basename(e.path)[:-len('.desktop')] for e in entries
                if posixpath.dirname(e.path) == '/usr/share/applications'
                and e.path.endswith('.desktop') and e.kind != 'dir'}
+        if prefix + SUFFIX in bins:
+            refuse_nightly_input(f'/usr/bin/{prefix}{SUFFIX} is already in the package')
+        for app_id in ids:
+            if app_id.endswith(ID_SUFFIX):
+                refuse_nightly_input(f'the desktop ID {app_id} already ends in {ID_SUFFIX}')
         def longest_first(names):
             return tuple(sorted(names, key=lambda n: (-len(n), n)))
         return cls(longest_first(bins), longest_first(ids))
@@ -399,6 +409,9 @@ def rebrand_control(text: str, nightly_name: str, version: str) -> str:
 
 
 def convert_deb(src: Path, out: Path, prefix: str, nightly_version: str, work: Path) -> None:
+    package = run(['dpkg-deb', '--field', src, 'Package']).stdout.decode().strip()
+    if package.endswith(SUFFIX):
+        refuse_nightly_input(f'{src.name} is package {package}')
     data = run(['dpkg-deb', '--fsys-tarfile', src]).stdout
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         entries = entries_from_tar(tar, '', '/')
@@ -522,11 +535,13 @@ def convert_rpm(src: Path, out: Path, prefix: str, nightly_version: str, work: P
         path, _, flag = line.rpartition('\t')
         if int(flag or 0) & 1:  # RPMFILE_CONFIG
             config_paths.add(path)
+    stable = rpm_tag(src, 'NAME')
+    if stable.endswith(SUFFIX):
+        refuse_nightly_input(f'{src.name} is package {stable}')
     entries = entries_from_cpio(rpm_payload(src, rpm_tag(src, 'PAYLOADCOMPRESSOR') or 'gzip'), config_paths)
     names = Names.from_entries(prefix, entries)
     entries, path_map = convert(entries, names)
 
-    stable = rpm_tag(src, 'NAME')
     summary = rpm_tag(src, 'SUMMARY')
     description = rpm_tag(src, 'DESCRIPTION')
     first, _, rest = description.partition('\n')
@@ -624,6 +639,8 @@ def rebrand(input_dir: Path, output_dir: Path, version: str, nightly_version: st
     if not re.fullmatch(r'[0-9]+(\.[0-9]+)*', nightly_version):
         raise RebrandError(f'nightly version {nightly_version!r} must be digits and dots')
     prefix, arch, inputs = find_inputs(input_dir, version)
+    if prefix.endswith(SUFFIX):
+        refuse_nightly_input(f'the input files are named {prefix}-{version}-linux-{arch}.*')
     output_dir.mkdir(parents=True, exist_ok=True)
     stable_base = f'{prefix}-{version}-linux-{arch}'
     nightly_base = f'{prefix}{SUFFIX}-{nightly_version}-linux-{arch}'
