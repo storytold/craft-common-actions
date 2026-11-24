@@ -5,7 +5,8 @@
 #   2. otherwise the X in `VERSION="${X_VERSION:-...` in packaging/env.sh (or packaging/common.sh);
 #   3. otherwise APP_NAME in capitals, with each run of other characters as `_`
 #      (craft-anything: CRAFT_ANYTHING).
-# Writes the three variables, and <PREFIX>_BUILD_CHANNEL when BUILD_CHANNEL_VALUE is set, to
+# Writes the three variables, and <PREFIX>_BUILD_CHANNEL and <PREFIX>_OVERRIDE_VERSION (the name
+# some apps' library crates read at compile time) when BUILD_CHANNEL_VALUE is set, to
 # $GITHUB_ENV, and `prefix` and `names` to $GITHUB_OUTPUT.
 set -euo pipefail
 
@@ -46,9 +47,12 @@ names="${prefix}_VERSION ${prefix}_BUILD_DATE ${prefix}_BUILD_SHA"
   echo "${prefix}_VERSION=$BUILD_VERSION"
   echo "${prefix}_BUILD_DATE=$BUILD_DATE_VALUE"
   echo "${prefix}_BUILD_SHA=$BUILD_SHA_VALUE"
-  if [[ -n "$channel" ]]; then echo "${prefix}_BUILD_CHANNEL=$channel"; fi
+  if [[ -n "$channel" ]]; then
+    echo "${prefix}_BUILD_CHANNEL=$channel"
+    echo "${prefix}_OVERRIDE_VERSION=$BUILD_VERSION"
+  fi
 } >>"$GITHUB_ENV"
-[[ -z "$channel" ]] || names="$names ${prefix}_BUILD_CHANNEL"
+[[ -z "$channel" ]] || names="$names ${prefix}_BUILD_CHANNEL ${prefix}_OVERRIDE_VERSION"
 {
   echo "prefix=$prefix"
   echo "names=$names"

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Builds a nightly Flatpak bundle and OCI layout, app ID <app-id>.nightly, from a Craft app's
+# Builds a nightly Flatpak bundle, OCI layout and OCI archive, app ID <app-id>.nightly, from a Craft app's
 # stable Linux tarball and the app's own bundle manifest:
 #
 #   <output dir>/<prefix>-nightly-<nightly version>-linux-<arch>.flatpak
 #   <output dir>/<prefix>-nightly-<nightly version>-linux-<arch>-oci/
+#   <output dir>/<prefix>-nightly-<nightly version>-linux-<arch>.oci-manifest.json
+#   <output dir>/<prefix>-nightly-<nightly version>-linux-<arch>.oci.tar
 #
 # Usage: nightly-flatpak.sh <tarball> <nightly version> <prefix> [<output dir>] [<manifest>]
 #
 # The manifest defaults to the single packaging/linux/flatpak/*.bundle.yml. The bundle is built
-# for the host architecture (x86_64 or aarch64), which must match the tarball's. Writes
-# app-id=, bundle= and layout= lines to $GITHUB_OUTPUT when it is set.
+# for the host architecture (x86_64 or aarch64), which must match the tarball's. The manifest
+# file is the blob the layout's index.json points at, byte for byte; the tar is a deterministic
+# archive of the layout. Nothing is pushed. Writes app-id=, bundle=, layout=, oci-manifest= and
+# oci-archive= lines to $GITHUB_OUTPUT when it is set.
 set -euo pipefail
 
 tarball="${1:?usage: nightly-flatpak.sh <tarball> <nightly version> <prefix> [<output dir>] [<manifest>]}"
@@ -73,17 +77,23 @@ base="$prefix-nightly-$nightly_version-linux-$arch"
 bundle="$out_dir/$base.flatpak"
 layout="$out_dir/$base-oci"
 mkdir -p "$out_dir"
-rm -rf "$bundle" "$layout"
+oci_manifest="$out_dir/$base.oci-manifest.json"
+oci_archive="$out_dir/$base.oci.tar"
+rm -rf "$bundle" "$layout" "$oci_manifest" "$oci_archive"
 # --runtime-repo lets `flatpak install` fetch the freedesktop runtime from Flathub if missing.
 flatpak build-bundle --runtime-repo="$FLATHUB" "$work/repo" "$bundle" "$app_id" stable
 flatpak build-bundle --oci "$work/repo" "$layout" "$app_id" stable
 python3 "$HERE/nightly_flatpak.py" check-oci "$layout" "app/$app_id/$arch/stable"
-echo "==> Wrote $bundle and the OCI layout $layout"
+python3 "$HERE/nightly_flatpak.py" oci-manifest "$layout" "$oci_manifest"
+python3 "$HERE/nightly_flatpak.py" oci-archive "$layout" "$oci_archive"
+echo "==> Wrote $bundle, the OCI layout $layout, $oci_manifest and $oci_archive"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
     echo "app-id=$app_id"
     echo "bundle=$bundle"
     echo "layout=$layout"
+    echo "oci-manifest=$oci_manifest"
+    echo "oci-archive=$oci_archive"
   } >>"$GITHUB_OUTPUT"
 fi

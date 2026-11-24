@@ -1,6 +1,6 @@
 name: "Nightly Flatpak"
 description: >-
-  Builds a Flatpak bundle and OCI layout with app ID <app-id>.nightly from a Craft app's stable
+  Builds a Flatpak bundle, OCI layout, OCI manifest and OCI archive with app ID <app-id>.nightly from a Craft app's stable
   Linux tarball and its packaging/linux/flatpak/*.bundle.yml, so the nightly installs beside the
   stable app. Does not push.
 
@@ -33,18 +33,32 @@ outputs:
   layout:
     description: "<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>-oci, labelled org.flatpak.ref=app/<app-id>/<arch>/stable"
     value: ${{ steps.build.outputs.layout }}
+  oci-manifest:
+    description: "<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>.oci-manifest.json: the manifest blob the layout's index.json points at, byte for byte"
+    value: ${{ steps.build.outputs.oci-manifest }}
+  oci-archive:
+    description: "<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>.oci.tar: a deterministic tar of the OCI layout (sorted entries, fixed mtime, uid and gid)"
+    value: ${{ steps.build.outputs.oci-archive }}
 
 runs:
   using: "composite"
   steps:
-    - name: Install flatpak-builder
+    - name: Check flatpak-builder tools
+      id: tools
       shell: bash
       run: |
         if ! command -v flatpak-builder >/dev/null || ! command -v eu-strip >/dev/null; then
-          sudo apt-get update
-          # flatpak-builder runs eu-strip on every module it builds with debuginfo.
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common
+          echo "missing=true" >>"$GITHUB_OUTPUT"
         fi
+    - name: Install flatpak-builder
+      if: steps.tools.outputs.missing == 'true'
+      # flatpak-builder runs eu-strip (elfutils) on every module it builds with debuginfo.
+      uses: storytold/craft-common-actions/actions/install-apt-packages@main
+      with:
+        packages: flatpak flatpak-builder elfutils librsvg2-common
+    - name: Allow unprivileged user namespaces
+      shell: bash
+      run: |
         # Ubuntu 24.04's AppArmor blocks the unprivileged user namespaces bubblewrap needs.
         userns=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
         if [ -r "$userns" ] && [ "$(cat "$userns")" = 1 ]; then

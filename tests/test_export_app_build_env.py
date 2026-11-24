@@ -94,7 +94,8 @@ class ExportAppBuildEnvTests(unittest.TestCase):
         result = self.run_script(BUILD_CHANNEL_VALUE="nightly-v1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.exported()["PHOTOCRAFT_BUILD_CHANNEL"], "nightly-v1")
-        self.assertTrue(self.outputs()["names"].endswith(" PHOTOCRAFT_BUILD_CHANNEL"))
+        self.assertTrue(self.outputs()["names"].endswith(" PHOTOCRAFT_BUILD_CHANNEL PHOTOCRAFT_OVERRIDE_VERSION"))
+        self.assertEqual(self.exported()["PHOTOCRAFT_OVERRIDE_VERSION"], self.exported()["PHOTOCRAFT_VERSION"])
         result = self.run_script(BUILD_CHANNEL_VALUE="nightly-v1\nEVIL=1")
         self.assertIn("BUILD_CHANNEL_VALUE must be one line", result.stderr)
 
