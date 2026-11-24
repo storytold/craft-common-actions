@@ -1,0 +1,40 @@
+name: "Nightly launcher payload check"
+description: >-
+  Checks a craft-launcher nightly payload before it leaves the build job: the archive inventory
+  from the nightly registry (exact name, no links, CLI or install hooks, a GUI for the target
+  architecture, macOS bundle identity), then, when the runner can execute the payload, the
+  launcher's version query against a fresh profile root. Needs no secrets.
+
+inputs:
+  app-name:
+    description: "App name in the nightly registry (actions/nightly-feed/apps.json)"
+    required: true
+  platform:
+    description: "Launcher platform: linux, macos or windows"
+    required: true
+  version:
+    description: "The nightly identity (X.Y.Z-nightly.<date>.<run>.<attempt>.g<sha12>)"
+    required: true
+  archive:
+    description: "Path to the payload under the workspace or runner temp (Windows: the .unsigned.zip)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check the launcher payload
+      shell: bash
+      env:
+        APP: ${{ inputs.app-name }}
+        PLATFORM: ${{ inputs.platform }}
+        VERSION: ${{ inputs.version }}
+        ARCHIVE: ${{ inputs.archive }}
+        SCRIPT: ${{ github.action_path }}/../../scripts/nightly/inventory.py
+      run: |
+        set -euo pipefail
+        python="$(command -v python3 || command -v python)"
+        root="$RUNNER_TEMP/nightly-launcher-check-$PLATFORM"
+        rm -rf -- "$root"
+        "$python" -I -B "$SCRIPT" --app "$APP" --platform "$PLATFORM" --version "$VERSION" \
+          --archive "$ARCHIVE" --smoke-root "$root"
+        rm -rf -- "$root"
