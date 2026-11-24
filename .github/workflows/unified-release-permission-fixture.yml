@@ -18,6 +18,6 @@ jobs:
     if: inputs.phase == 'oci'
     runs-on: ubuntu-latest
     permissions:
-      packages: write
+      packages: none
     steps:
       - run: exit 1
