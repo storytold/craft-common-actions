@@ -312,7 +312,7 @@ exit 0
                 (tar_root / "share/man/man1/myapp-cli.1").write_text(".TH MYAPP-CLI 1\n")
                 (tar_root / "share/man/man1/myapp-cli-convert.1").write_text(".TH MYAPP-CLI-CONVERT 1\n")
                 (tar_root / "share/bash-completion/completions/myapp-cli").write_text(
-                    "_myapp-cli() { :; }\ncomplete -F _myapp-cli myapp-cli\n"
+                    "_myapp-cli() { :; }\n_myapp_cli() { :; }\ncomplete -F _myapp_cli myapp-cli\n"
                 )
                 (tar_root / "share/zsh/site-functions/_myapp-cli").write_text(
                     "#compdef myapp-cli\n_myapp-cli() { :; }\nif [ \"$funcstack[1]\" = \"_myapp-cli\" ]; then _myapp-cli; fi\n"
@@ -328,11 +328,14 @@ exit 0
                 )
                 (tar_root / "share/metainfo/ai.storyteller.myapp.tools.metainfo.xml").write_text(
                     '<component><id>ai.storyteller.myapp.tools</id>'
-                    '<launchable type="desktop-id">ai.storyteller.myapp.tools.desktop</launchable></component>\n'
+                    "<launchable type='desktop-id'>ai.storyteller.myapp.tools.desktop</launchable></component>\n"
                 )
                 (tar_root / "share/mime/packages/ai.storyteller.myapp.tools.xml").write_text("<mime-info>Tools</mime-info>\n")
                 (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.tools.png").write_bytes(b"tools icon")
                 (tar_root / "share/icons/hicolor/256x256/apps/myapp-custom.png").write_bytes(b"custom icon")
+                (tar_root / "share/applications/aaa.myapp.tools.desktop").write_text(
+                    "[Desktop Entry]\nName=More Tools\nExec=myapp-cli --help\n"
+                )
                 if conflict:
                     extra = tar_root / conflict
                     if conflict.startswith("share/doc/"):
@@ -417,7 +420,7 @@ exit 0
 
             bash_comp = (nightly_pkgdir / "usr/share/bash-completion/completions/myapp-nightly-cli").read_text()
             self.assertIn("_myapp-nightly-cli()", bash_comp)
-            self.assertIn("complete -F _myapp-nightly-cli myapp-nightly-cli", bash_comp)
+            self.assertIn("complete -F _myapp_nightly_cli myapp-nightly-cli", bash_comp)
             zsh_comp = (nightly_pkgdir / "usr/share/zsh/site-functions/_myapp-nightly-cli").read_text()
             self.assertIn("#compdef myapp-nightly-cli", zsh_comp)
             self.assertIn('"_myapp-nightly-cli"', zsh_comp)
@@ -442,11 +445,12 @@ exit 0
             self.assertIn('>ai.storyteller.myapp.tools.nightly.desktop</launchable>', tools_meta.read_text())
             tools_mime = nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.tools.nightly.xml"
             self.assertEqual(tools_mime.read_text(), "<mime-info>Tools</mime-info>\n")
-            for n, path in enumerate(("bin/myapp-nightly", "bin/myapp-nightly-cli", "share/doc/myapp-nightly")):
+            for n, path in enumerate(("bin/myapp-nightly", "bin/myapp-nightly-cli", "share/doc/myapp-nightly", "share/man/man1/myapp-nightly-cli.1")):
                 tarball = build_full_tarball(f"myapp-{version}.{n}-linux-x86_64.tar.gz", conflict=path)
                 run_package(tarball, f"collision-{n}", reject=True)
             packaged = build_full_tarball(f"myapp-{version}.4-linux-x86_64.tar.gz", prepackaged=True)
-            _, _, packaged_files = run_package(packaged, "already-nightly")
+            packaged_pkgbuild, _, packaged_files = run_package(packaged, "already-nightly")
+            self.assertIn("pkgname=ai.storyteller.myapp.nightly\n", packaged_pkgbuild)
             self.assertIn("usr/share/icons/hicolor/256x256/apps/ai.storyteller.myapp.nightly.png", packaged_files)
             mixed = build_full_tarball(f"myapp-{version}.5-linux-x86_64.tar.gz", prepackaged="stable-icon")
             _, mixed_dir, mixed_files = run_package(mixed, "already-nightly-stable-icon")

@@ -110,7 +110,12 @@ pkgver="${pkgver//-/}"
 shopt -s nullglob
 desktops=("$stage"/share/applications/*.desktop)
 shopt -u nullglob
-if [[ "${#desktops[@]}" -gt 0 ]]; then
+canonical="ai.storyteller.$app"
+if [[ -f "$stage/share/applications/$canonical.desktop" ]]; then
+  base_pkgname="$canonical"
+elif [[ -f "$stage/share/applications/$canonical.nightly.desktop" ]]; then
+  base_pkgname="$canonical.nightly"
+elif [[ "${#desktops[@]}" -gt 0 ]]; then
   base_pkgname="$(basename "${desktops[0]}" .desktop)"
 else
   base_pkgname="ai.storyteller.$app"
@@ -390,8 +395,12 @@ cat <<NIGHTLY_PKG
           id = substr(\$0, RSTART + 4, RLENGTH - 9)
           \$0 = substr(\$0, 1, RSTART + 3) nightly(id) substr(\$0, RSTART + RLENGTH - 5)
         }
-        for (old in desktop)
+        for (old in desktop) {
+          single = sprintf("%c", 39)
+          tag = "<launchable type=" single "desktop-id" single ">"
+          \$0 = replace_all(\$0, tag old "</launchable>", tag desktop[old] "</launchable>")
           \$0 = replace_all(\$0, "<launchable type=\\"desktop-id\\">" old "</launchable>", "<launchable type=\\"desktop-id\\">" desktop[old] "</launchable>")
+        }
         print
       }
     ' "\$desktop_map" "\$metainfo_file" > "\$metainfo_file.tmp" && mv -- "\$metainfo_file.tmp" "\$metainfo_file" || { rm -f -- "\$desktop_map"; return 1; }
@@ -431,14 +440,15 @@ cat <<NIGHTLY_PKG
         "$app.1"*) new_base="$app-nightly\${man_base#"$app"}" ;;
         *) continue ;;
       esac
-      mv "\$man_path" "\${man_path%/*}/\$new_base"
-    done
+      move_nightly "\$man_path" "\${man_path%/*}/\$new_base" || exit 1
+    done || return 1
   fi
   for comp in "\$pkgdir/usr/share/bash-completion/completions/$app-cli" "\$pkgdir/usr/share/bash-completion/completions/$app"; do
     [ -f "\$comp" ] || continue
     comp_base="\$(basename "\$comp")"
     new_comp="\${comp_base/#$app/$app-nightly}"
     sed -E \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(_cli)([^[:alnum:]_-]|\$)#\\1_${app}_nightly\\2\\3#g" \
       -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
       -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
       "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
@@ -449,6 +459,7 @@ cat <<NIGHTLY_PKG
     comp_base="\$(basename "\$comp")"
     new_comp="_$app-nightly\${comp_base#_$app}"
     sed -E \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(_cli)([^[:alnum:]_-]|\$)#\\1_${app}_nightly\\2\\3#g" \
       -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
       -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
       "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
