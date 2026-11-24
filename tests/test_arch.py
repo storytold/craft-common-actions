@@ -630,10 +630,21 @@ exit 0
             )
             stable_pkg = dist_dir / "myapp-1.2.3-linux-x86_64.pkg.tar.zst"
             nightly_pkg = dist_dir / f"myapp-{version}-linux-x86_64.pkg.tar.zst"
+            assumed_deps = []
+            for dep in (
+                "glibc=2.39",
+                "gcc-libs=14.1",
+                "hicolor-icon-theme=0.18",
+                "libxkbcommon=1.7",
+                "libxkbcommon-x11=1.7",
+                "vulkan-icd-loader=1.3",
+            ):
+                assumed_deps.extend(["--assume-installed", dep])
             install_res = subprocess.run(
                 [
                     "fakeroot", "pacman", "--config", str(pacman_conf),
-                    "-U", "--noconfirm", "--nodeps", "--noscriptlet",
+                    "-U", "--noconfirm", "--noscriptlet",
+                    *assumed_deps,
                     str(stable_pkg), str(nightly_pkg),
                 ],
                 capture_output=True,
