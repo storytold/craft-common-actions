@@ -686,7 +686,12 @@ jobs:
         run: |
           set -euo pipefail
           pkg_formats="$(python3 -I -B -c "import json,os; fmts=set(json.loads(os.environ['LINUX_PACKAGE_FORMATS'])); out=[f for f in ('appimage','deb','rpm') if f in fmts]; out.append('tar'); print(' '.join(out))")"
-          packaging/linux/package.sh --formats "$pkg_formats"
+          arch_tar_args=()
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'arch' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            # This private handoff contains the Arch-only launcher; other formats use dist/release.
+            arch_tar_args=(--arch-tar-dir dist/arch-nightly)
+          fi
+          packaging/linux/package.sh --formats "$pkg_formats" "${arch_tar_args[@]}"
       - name: Build Flatpak bundle and OCI layout
         if: contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'flatpak') || contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'oci')
         env:
@@ -745,11 +750,11 @@ jobs:
         run: |
           shopt -s nullglob
           tarballs=()
-          for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
+          for f in dist/arch-nightly/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
             case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
           done
           if [ "${#tarballs[@]}" -ne 1 ]; then
-            echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
+            echo "::error::expected one app tarball for ${VERSION} in dist/arch-nightly, found ${#tarballs[@]}: ${tarballs[*]}"
             exit 1
           fi
           echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
@@ -767,7 +772,8 @@ jobs:
           trap 'rm -rf "$PWD/$smoke_dir"' EXIT
           # The container's non-root builder has a different UID from the runner.
           chmod 0755 "$smoke_dir"
-          cp "$TARBALL" "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
+          # The stable fixture must use the ordinary payload, not the Arch nightly launcher.
+          cp "dist/release/photocraft-${VERSION}-linux-x86_64.tar.gz" "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
           chmod 0644 "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
           TARBALL="$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz" \
             TARGET_ARCH="x86_64" \
@@ -786,7 +792,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nightly-linux-arch-aarch64-tarball-${{ github.run_id }}-${{ github.run_attempt }}
-          path: dist/release/*-${{ steps.plan.outputs.version }}-linux-aarch64.tar.gz
+          path: ${{ steps.tarball.outputs.path }}
           if-no-files-found: error
           retention-days: 14
       - name: Smoke-test x86_64 nightly binary channel isolation before removing tarball
