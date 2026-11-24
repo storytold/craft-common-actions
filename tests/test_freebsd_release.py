@@ -173,7 +173,7 @@ class FreeBSDReleaseMemoryTests(unittest.TestCase):
                 self.assertFalse([key for key in (step.get('env') or {}) if key.startswith('CARGO_PROFILE_')], name)
         self.assertNotIn('LTO', ' '.join(env))
 
-    def test_vm_size_build_jobs_and_release_profile_are_unchanged(self):
+    def test_vm_size_and_build_jobs_are_unchanged_and_scripts_add_no_swap_or_lto_settings(self):
         self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '12288'))  # Host runner keeps its headroom.
         self.assertEqual(DATA['jobs']['freebsd']['env']['CARGO_BUILD_JOBS'], '4')
         for text in (VM['with']['prepare'], BUILD):

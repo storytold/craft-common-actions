@@ -255,7 +255,8 @@ jobs:
       # from the repo's `release` environment. An unlisted name is empty, and the app's packaging
       # would then warn and ship unsigned, so on the release branch fail here instead.
       - name: Require signing secrets on the release branch
-        if: github.ref == 'refs/heads/release'
+        # Dry runs never sign, on any ref: their environment is '', so these secrets are absent.
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -390,7 +391,8 @@ jobs:
       # See the macOS job: unlisted secrets are empty, and the build would ship unsigned.
       # Signing needs either the PFX pair or all six Azure Trusted Signing values.
       - name: Require signing secrets on the release branch
-        if: github.ref == 'refs/heads/release'
+        # Dry runs never sign, on any ref: their environment is '', so these secrets are absent.
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}
         shell: bash
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -461,15 +463,16 @@ jobs:
           wix-version: ${{ inputs.wix-version }}
       - name: Build, sign, package
         shell: pwsh
+        # Dry runs build and package unsigned on any ref: no signing secret reaches package.ps1.
         env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
-          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+          WINDOWS_CERTIFICATE: ${{ !inputs.dry-run && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ !inputs.dry-run && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          AZURE_TENANT_ID: ${{ !inputs.dry-run && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ !inputs.dry-run && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ !inputs.dry-run && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_SIGNING_ENDPOINT: ${{ !inputs.dry-run && secrets.AZURE_SIGNING_ENDPOINT || '' }}
+          AZURE_SIGNING_ACCOUNT: ${{ !inputs.dry-run && secrets.AZURE_SIGNING_ACCOUNT || '' }}
+          AZURE_CERT_PROFILE: ${{ !inputs.dry-run && secrets.AZURE_CERT_PROFILE || '' }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: "1"
         run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
@@ -557,7 +560,8 @@ jobs:
           CRAFT_FONTS_REQUIRED: "1"
         run: packaging/linux/package.sh
       - name: Import the Linux signing key
-        if: github.ref == 'refs/heads/release'
+        # Dry runs never sign, on any ref. Later signing steps key off this step's outputs.
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}
         id: linux_signing
         uses: storytold/craft-common-actions/actions/import-signing-key@main
         with:
@@ -638,7 +642,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Import the Linux signing key
-        if: github.ref == 'refs/heads/release'
+        # Dry runs never sign, on any ref. Later signing steps key off this step's outputs.
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}
         # flatpak-bundle.sh signs the commit and embeds the public key when SIGNING_FPR is set.
         uses: storytold/craft-common-actions/actions/import-signing-key@main
         with:
@@ -1305,7 +1310,8 @@ jobs:
           QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
         run: packaging/linux/package.sh --formats "deb rpm tar"
       - name: Import the Linux signing key
-        if: github.ref == 'refs/heads/release'
+        # Dry runs never sign, on any ref. Later signing steps key off this step's outputs.
+        if: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}
         id: linux_signing
         uses: storytold/craft-common-actions/actions/import-signing-key@main
         with:
