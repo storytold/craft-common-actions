@@ -33,7 +33,7 @@ class ArchWorkflowTests(unittest.TestCase):
         jobs = self.data["jobs"]
         self.assertIn("arch", jobs)
         arch_job = jobs["arch"]
-        self.assertEqual(arch_job["if"], "inputs.has-arch")
+        self.assertEqual(arch_job["if"], "inputs.has-arch && !inputs.nightly")
         self.assertEqual(arch_job["needs"], ["version", "linux"])
         self.assertEqual(arch_job["runs-on"], "ubuntu-24.04")
         self.assertEqual(arch_job["strategy"]["matrix"]["arch"], ["x86_64", "aarch64"])

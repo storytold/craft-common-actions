@@ -17,6 +17,14 @@ DATA = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=ya
 JOBS = DATA["jobs"]
 DRAFT = yaml.load((ROOT / "actions/draft-release/action.yml").read_text(), Loader=yaml.BaseLoader)
 NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak", "nightly-release")
+LAUNCHER = {
+    "linux": ("ubuntu-22.04", "packaging/linux/nightly.sh --arch x86_64"),
+    "windows": ("windows-latest", "./packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly"),
+    "macos": ("macos-15", "packaging/macos/nightly.sh --arch aarch64"),
+}
+LAUNCHER_JOBS = tuple(f"nightly-launcher-{platform}" for platform in LAUNCHER)
+DISTRO_NIGHTLY_JOBS = ("nightly-linux", "nightly-arch", "nightly-flatpak")
+EXPORT_ENV = "storytold/craft-common-actions/actions/export-app-build-env@"
 BASH = shutil.which("bash")
 JQ = shutil.which("jq")
 
@@ -27,6 +35,18 @@ def step(job, name):
 
 def uses(job, action):
     return next(s for s in JOBS[job]["steps"] if s.get("uses", "").startswith(action))
+
+
+def upstream(*names):
+    """The named jobs and every job they need, directly or not."""
+    seen, todo = set(), list(names)
+    while todo:
+        name = todo.pop()
+        if name not in seen:
+            seen.add(name)
+            needs = JOBS[name].get("needs", [])
+            todo.extend([needs] if isinstance(needs, str) else needs)
+    return seen
 
 
 def executable(path, text):
@@ -76,52 +96,128 @@ class NightlyModeTests(unittest.TestCase):
         self.assertIn("!inputs.nightly", step("flatpak", "Publish Flatpak OCI layout to GHCR and Docker Hub")["if"])
 
     def test_only_nightly_mode_runs_the_nightly_jobs(self):
-        for name in NIGHTLY_JOBS:
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS:
             self.assertTrue(JOBS[name]["if"].startswith("inputs.nightly && "), name)
+        # The nightly-flatpak and nightly-arch jobs build those packages in nightly mode.
+        self.assertEqual(JOBS["flatpak"]["if"], "${{ !inputs.nightly }}")
+        self.assertEqual(JOBS["arch"]["if"], "inputs.has-arch && !inputs.nightly")
         self.assertIn("inputs.has-arch", JOBS["nightly-arch"]["if"])
         self.assertIn("inputs.has-riscv64", JOBS["nightly-linux"]["strategy"]["matrix"]["arch"])
 
 
-@unittest.skipUnless(BASH, "needs bash")
-class NightlyVersionTests(unittest.TestCase):
-    STEP = step("version", "Resolve the nightly version")
-
-    def resolve(self, ref, channel=""):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "out"
-            out.touch()
-            executable(Path(tmp) / "bin/gh", FAKE_GH)
-            result = run(self.STEP["run"], tmp, Path(tmp) / "bin", VERSION="0.24.1-rc.2", GITHUB_REF=ref,
-                         GITHUB_OUTPUT=str(out), GITHUB_REPOSITORY="storytold/democraft", FAKE_LOG=os.devnull,
-                         BUILD_CHANNEL=channel, GITHUB_RUN_NUMBER="57", GITHUB_RUN_ATTEMPT="2",
-                         GITHUB_SHA="0123456789abcdef0123456789abcdef01234567")
-            return result, out.read_text()
-
-    def test_package_version_and_app_identity_share_the_date_and_run(self):
-        self.assertEqual(self.STEP["if"], "inputs.nightly")
-        result, output = self.resolve("refs/heads/main")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        # The identity is the form PhotoCraft's build_channel.rs is_nightly_version accepts.
-        self.assertRegex(output, r"^version=0\.24\.1\.(20\d{6})\.57\.2\n"
-                                 r"identity=0\.24\.1-nightly\.\1\.57\.2\.g0123456789ab\n$")
+class NightlyPlanTests(unittest.TestCase):
+    def test_the_version_job_plans_the_nightly_with_nightly_feed(self):
+        plan = step("version", "Plan the nightly")
+        self.assertEqual(plan["if"], "inputs.nightly")
+        self.assertTrue(plan["uses"].startswith("storytold/craft-common-actions/actions/nightly-feed@"))
+        self.assertEqual(plan["with"], {"mode": "plan", "app-name": "${{ inputs.app-name }}",
+                                        "version": "${{ steps.v.outputs.version }}", "nightly": "${{ inputs.nightly }}"})
         outputs = JOBS["version"]["outputs"]
-        self.assertEqual(outputs["nightly-version"], "${{ steps.nightly.outputs.version }}")
-        self.assertEqual(outputs["linux-version"], "${{ steps.nightly.outputs.linux-version || steps.v.outputs.version }}")
+        for output, source in (("nightly-version", "nightly-version"), ("nightly-identity", "identity"),
+                               ("nightly-tag", "tag"), ("nightly-tag-family", "tag-family"), ("nightly-date", "date"),
+                               ("nightly-published-at", "published-at"), ("build-channel", "build-channel"),
+                               ("skip", "skip")):
+            self.assertEqual(outputs[output], f"${{{{ steps.nightly.outputs.{source} }}}}", output)
+        self.assertEqual(outputs["launcher-platforms"], "${{ steps.nightly.outputs.launcher-platforms || '[]' }}")
+        self.assertNotIn("linux-version", outputs)
+        self.assertNotIn("build-channel", DATA["on"]["workflow_call"]["inputs"])
 
-    def test_the_linux_artifacts_carry_the_identity_only_with_a_build_channel(self):
-        result, output = self.resolve("refs/heads/main", channel="nightly-v1")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        identity = re.search(r"^identity=(.*)$", output, re.M).group(1)
-        self.assertIn(f"linux-version={identity}\n", output)
-        self.assertNotIn("linux-version=", self.resolve("refs/heads/main")[1])
+    @unittest.skipUnless(BASH, "needs bash")
+    def test_nightly_mode_refuses_a_version_override(self):
+        refuse = step("version", "Nightly mode takes no version override")
+        self.assertEqual(refuse["if"], "inputs.nightly && inputs.version != ''")
+        names = [s.get("name") or s.get("uses") for s in JOBS["version"]["steps"]]
+        self.assertLess(names.index("Nightly mode takes no version override"), names.index("Resolve version"))
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run(refuse["run"], tmp, tmp, INPUT_VERSION="9.9.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("::error::nightly mode refuses the version input (9.9.9)", result.stdout)
 
-    def test_only_the_default_branch_may_run_a_nightly(self):
-        for ref in ("refs/heads/release", "refs/heads/feature", "refs/tags/v1.0.0"):
-            with self.subTest(ref=ref):
-                result, output = self.resolve(ref)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"::error::nightly mode runs only on the default branch (main), not {ref}", result.stdout)
-                self.assertEqual(output, "")
+    def test_every_nightly_job_stops_on_an_unchanged_source_and_names_what_it_needs(self):
+        for name in NIGHTLY_JOBS + LAUNCHER_JOBS:
+            with self.subTest(job=name):
+                condition = JOBS[name]["if"]
+                self.assertIn("needs.version.outputs.skip != 'true'", condition)
+                self.assertIn("needs.version.result == 'success'", condition)
+                self.assertNotIn("contains(needs.*.result", condition)
+        for name, required in (("nightly-linux", "linux"), ("nightly-arch", "nightly-linux"),
+                               ("nightly-flatpak", "linux"), ("nightly-release", "nightly-linux"),
+                               ("nightly-release", "nightly-flatpak")):
+            self.assertIn(f"needs.{required}.result == 'success'", JOBS[name]["if"], name)
+        # A job the caller turned off may be skipped; one that should have run may not.
+        self.assertIn("(needs.linux-riscv64.result == 'success' || (!inputs.has-riscv64 && needs.linux-riscv64.result == 'skipped'))",
+                      JOBS["nightly-linux"]["if"])
+        self.assertIn("(needs.nightly-arch.result == 'success' || (!inputs.has-arch && needs.nightly-arch.result == 'skipped'))",
+                      JOBS["nightly-release"]["if"])
+
+
+class LauncherJobTests(unittest.TestCase):
+    def test_each_platform_builds_only_for_a_registry_app(self):
+        for platform, (runner, command) in LAUNCHER.items():
+            job = JOBS[f"nightly-launcher-{platform}"]
+            with self.subTest(platform=platform):
+                self.assertEqual(job["needs"], ["version"])
+                self.assertEqual(job["runs-on"], runner)
+                self.assertIn(f"contains(fromJSON(needs.version.outputs.launcher-platforms), '{platform}')", job["if"])
+                self.assertNotIn("environment", job)
+                self.assertEqual(step(f"nightly-launcher-{platform}", "Build the launcher payload")["run"], command)
+
+    def test_the_payload_is_built_from_the_clean_exact_commit(self):
+        for name in LAUNCHER_JOBS:
+            steps = JOBS[name]["steps"]
+            with self.subTest(job=name):
+                checkout = uses(name, "actions/checkout@")
+                self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
+                for s in steps:
+                    # The contributor snapshot rewrites a tracked file, and the scripts refuse a dirty tree.
+                    self.assertFalse(s.get("uses", "").startswith(("actions/download-artifact@", "Swatinem/rust-cache@")), s)
+                    self.assertNotIn("xtask version", s.get("run", ""))
+                self.assertFalse(any("secrets." in str(s) for s in steps))
+                build = step(name, "Build the launcher payload")["env"]
+                self.assertEqual(build["CARGO_TARGET_DIR"], "${{ runner.temp }}/nightly-target")
+                self.assertEqual(build["DIST"], "${{ runner.temp }}/nightly-dist")
+                self.assertEqual(step(name, "Find the launcher payload")["env"]["DIST"], build["DIST"])
+
+    def test_the_payload_carries_the_identity_and_the_registry_channel(self):
+        for platform in LAUNCHER:
+            name = f"nightly-launcher-{platform}"
+            with self.subTest(job=name):
+                self.assertEqual(uses(name, EXPORT_ENV)["with"], {
+                    "app-name": "${{ inputs.app-name }}",
+                    "version": "${{ needs.version.outputs.nightly-identity }}",
+                    "date": "${{ needs.version.outputs.nightly-date }}",
+                    "sha": "${{ github.sha }}",
+                    "channel": "${{ needs.version.outputs.build-channel }}",
+                })
+                names = [s.get("name") or s.get("uses") for s in JOBS[name]["steps"]]
+                check = uses(name, "storytold/craft-common-actions/actions/nightly-launcher-check@")
+                self.assertEqual(check["with"], {
+                    "app-name": "${{ inputs.app-name }}", "platform": platform,
+                    "version": "${{ needs.version.outputs.nightly-identity }}",
+                    "archive": "${{ steps.payload.outputs.path }}",
+                })
+                upload = uses(name, "actions/upload-artifact@")
+                self.assertEqual(upload["with"]["name"], name)
+                self.assertEqual(upload["with"]["path"], "${{ steps.payload.outputs.path }}")
+                # Checked before it is uploaded.
+                self.assertLess(names.index("Build the launcher payload"), names.index(check["uses"]))
+                self.assertLess(names.index(check["uses"]), names.index(upload["uses"]))
+
+    @unittest.skipUnless(BASH, "needs bash")
+    def test_the_payload_lookup_wants_exactly_one_file(self):
+        script = step("nightly-launcher-linux", "Find the launcher payload")["run"]
+        for files, ok in (([], False), (["a.tar.gz"], True), (["a.tar.gz", "b.tar.gz"], False)):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as tmp:
+                dist = Path(tmp) / "dist"
+                dist.mkdir()
+                for f in files:
+                    (dist / f).write_text("x")
+                out = Path(tmp) / "out"
+                out.touch()
+                result = run(script, tmp, tmp, DIST=str(dist), GITHUB_OUTPUT=str(out))
+                self.assertEqual(result.returncode == 0, ok, result.stdout)
+                self.assertEqual(out.read_text(), f"path={dist}/a.tar.gz\n" if ok else "")
+        self.assertEqual(script, step("nightly-launcher-macos", "Find the launcher payload")["run"])
 
 
 @unittest.skipUnless(BASH, "needs bash")
@@ -171,25 +267,61 @@ class NightlyFlatpakPushTests(unittest.TestCase):
 
 
 class BuildChannelTests(unittest.TestCase):
-    def test_only_the_linux_builds_take_the_channel_and_identity(self):
-        for name, job in JOBS.items():
-            for s in job.get("steps", []):
-                if not s.get("uses", "").startswith("storytold/craft-common-actions/actions/export-app-build-env@"):
-                    continue
-                with self.subTest(job=name):
-                    if name in ("linux", "linux-riscv64"):
-                        self.assertEqual(s["with"]["version"], "${{ needs.version.outputs.linux-version }}")
-                        self.assertEqual(s["with"]["channel"], "${{ inputs.nightly && inputs.build-channel || '' }}")
-                    else:
-                        self.assertEqual(s["with"]["version"], "${{ needs.version.outputs.version }}")
-                        self.assertNotIn("channel", s["with"])
+    GUARD = "Distro builds take no build channel"
 
-    def test_jobs_find_the_linux_artifacts_by_their_file_version(self):
+    def test_no_distro_package_is_built_with_a_build_channel(self):
+        # A channel build refuses bare launches and Flatpak (PhotoCraft's nightly-v1), so nothing the
+        # nightly deb, rpm, Arch and Flatpak packages are made from may take one.
+        for name in sorted(upstream(*DISTRO_NIGHTLY_JOBS)):
+            job = JOBS[name]
+            with self.subTest(job=name):
+                self.assertFalse([k for k in job.get("env", {}) if k.endswith("_BUILD_CHANNEL")])
+                for s in job.get("steps", []):
+                    self.assertNotIn("channel", s.get("with", {}), s)
+                    self.assertFalse([k for k in s.get("env", {}) if k.endswith("_BUILD_CHANNEL")], s)
+                    self.assertNotIn("build-channel", str(s.get("with", {})) + str(s.get("env", {})), s)
+                    self.assertNotRegex(s.get("run", ""), r"_BUILD_CHANNEL\s*=", s)
+
+    def test_only_the_launcher_jobs_pass_the_channel(self):
+        passing = {name for name, job in JOBS.items() for s in job.get("steps", []) if "channel" in s.get("with", {})}
+        self.assertEqual(passing, set(LAUNCHER_JOBS))
+        readers = {name for name, job in JOBS.items() if name != "version" and "outputs.build-channel" in str(job)}
+        self.assertEqual(readers, set(LAUNCHER_JOBS))
+
+    def test_the_distro_builds_take_the_release_version(self):
+        for name, job in JOBS.items():
+            if name in LAUNCHER_JOBS:
+                continue
+            for s in job.get("steps", []):
+                if s.get("uses", "").startswith(EXPORT_ENV):
+                    self.assertEqual(s["with"]["version"], "${{ needs.version.outputs.version }}", name)
         for name in ("flatpak", "arch", "nightly-flatpak"):
             lookup = next(s for s in JOBS[name]["steps"] if '-linux-"${ARCH}".tar.gz' in s.get("run", ""))
-            self.assertEqual(lookup["env"]["RELEASE_VERSION"], "${{ needs.version.outputs.linux-version }}", name)
+            self.assertEqual(lookup["env"]["RELEASE_VERSION"], "${{ needs.version.outputs.version }}", name)
         rebrand = uses("nightly-linux", "storytold/craft-common-actions/actions/nightly-rebrand@")
-        self.assertEqual(rebrand["with"]["version"], "${{ needs.version.outputs.linux-version }}")
+        self.assertEqual(rebrand["with"]["version"], "${{ needs.version.outputs.version }}")
+
+    def test_the_guard_runs_right_before_each_distro_build(self):
+        for name, build in (("linux", "Build and package (AppImage, deb, rpm, tar.gz)"),
+                            ("linux-riscv64", "Build and package (deb, rpm, tar.gz)")):
+            names = [s.get("name") for s in JOBS[name]["steps"]]
+            self.assertEqual(names.index(self.GUARD) + 1, names.index(build), name)
+            self.assertEqual(step(name, self.GUARD)["run"], step("linux", self.GUARD)["run"])
+
+    @unittest.skipUnless(BASH, "needs bash")
+    def test_the_guard_refuses_any_build_channel_variable(self):
+        script = step("linux", self.GUARD)["run"]
+        clean = {k: v for k, v in os.environ.items() if not k.endswith("_BUILD_CHANNEL")}
+        with tempfile.TemporaryDirectory() as tmp:
+            for extra, ok in (({}, True), ({"PHOTOCRAFT_VERSION": "1.0.0"}, True),
+                              ({"PHOTOCRAFT_BUILD_CHANNEL": "nightly-v1"}, False), ({"X_BUILD_CHANNEL": ""}, False)):
+                with self.subTest(env=extra):
+                    result = subprocess.run([BASH, "-c", script], cwd=tmp, env=dict(clean, **extra),
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, ok, result.stdout)
+                    if not ok:
+                        self.assertIn(f"::error::distro packages must not be built with a build channel, but these are set: {next(iter(extra))}",
+                                      result.stdout)
 
 
 class NightlyReleaseTests(unittest.TestCase):
@@ -197,7 +329,7 @@ class NightlyReleaseTests(unittest.TestCase):
         job = JOBS["nightly-release"]
         self.assertEqual(job["needs"], ["version", "nightly-linux", "nightly-arch", "nightly-flatpak"])
         for clause in ("!inputs.dry-run", "!cancelled()", "needs.nightly-linux.result == 'success'",
-                       "!contains(needs.*.result, 'failure')", "!contains(needs.*.result, 'cancelled')"):
+                       "needs.nightly-flatpak.result == 'success'"):
             self.assertIn(clause, job["if"])
         self.assertEqual(job["environment"], "nightly-signing")
         self.assertEqual(job["permissions"], {"contents": "write", "packages": "write"})
@@ -205,7 +337,9 @@ class NightlyReleaseTests(unittest.TestCase):
     def test_the_prerelease_collects_exactly_the_nightly_artifacts(self):
         draft = uses("nightly-release", "storytold/craft-common-actions/actions/draft-release@")["with"]
         self.assertEqual((draft["tag-prefix"], draft["prerelease"], draft["artifact-pattern"]),
-                         ("nightly_", "true", "nightly-*"))
+                         ("nightly_", "true", "nightly-{linux,arch,flatpak}-*"))
+        # fnmatch has no brace expansion; download-artifact's minimatch does.
+        prerelease = [f"nightly-{kind}-*" for kind in ("linux", "arch", "flatpak")]
         self.assertEqual(draft["version"], "${{ needs.version.outputs.nightly-version }}")
         self.assertEqual(draft["signing-key"], "${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}")
         self.assertIn("LINUX_NIGHTLY_SIGNING_KEY", DATA["on"]["workflow_call"]["secrets"])
@@ -214,10 +348,14 @@ class NightlyReleaseTests(unittest.TestCase):
         stable = DRAFT["inputs"]["artifact-pattern"]["default"]
         for job, artifact in uploads:
             with self.subTest(job=job):
-                # Each release collects its own artifacts and none of the other's.
-                self.assertEqual(fnmatch.fnmatchcase(artifact, "nightly-*"), job in NIGHTLY_JOBS)
-                if job in NIGHTLY_JOBS:
+                # Each release collects its own artifacts and none of the other's; the unsigned
+                # launcher payloads go into neither.
+                collected = any(fnmatch.fnmatchcase(artifact, p) for p in prerelease)
+                self.assertEqual(collected, job in NIGHTLY_JOBS)
+                self.assertEqual(fnmatch.fnmatchcase(artifact, "nightly-*"), job in NIGHTLY_JOBS + LAUNCHER_JOBS)
+                if job in NIGHTLY_JOBS + LAUNCHER_JOBS:
                     self.assertFalse(fnmatch.fnmatchcase(artifact, stable))
+                if job in NIGHTLY_JOBS:
                     self.assertTrue(artifact.endswith("-${{ matrix.arch }}"))
 
     def test_it_is_published_as_a_prerelease_that_never_becomes_latest(self):

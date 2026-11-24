@@ -107,20 +107,12 @@ on:
           prerelease that installs beside the stable app: <prefix>-nightly-<version> deb, rpm, Arch
           and Flatpak packages under the tag nightly_<version>, and the Flatpak OCI tags
           <version>-nightly-<arch> and nightly-<arch>. Keeps the newest 3 nightlies. Default branch only;
-          with dry-run set too, the nightly packages are built but nothing is published.
+          with dry-run set too, the nightly packages are built but nothing is published. An app in the
+          nightly-feed registry also gets its launcher payloads, built with the registry's build
+          channel; the distro packages never take a build channel. Refuses a version override.
         type: boolean
         required: false
         default: false
-      build-channel:
-        description: >-
-          The app's compile-time build channel for nightly Linux builds (e.g. nightly-v1). With
-          nightly set, the linux and linux-riscv64 jobs build with <PREFIX>_BUILD_CHANNEL set to it
-          and <PREFIX>_VERSION set to the nightly identity
-          (<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<12-digit sha>). Empty: the
-          nightly packages are the stable build renamed.
-        type: string
-        required: false
-        default: ""
 
     secrets:
       APPLE_CERTIFICATE:
@@ -177,10 +169,10 @@ on:
         description: "Whether the resolved version is a prerelease"
         value: ${{ jobs.version.outputs.prerelease }}
       nightly-version:
-        description: "Nightly package version (<X.Y.Z>.<UTC YYYYMMDD>.<run number>.<run attempt>) in nightly mode, else empty"
+        description: "Nightly package version (<X.Y.Z>.<YYYYMMDD>.<run ID>.<run attempt>) in nightly mode, else empty"
         value: ${{ jobs.version.outputs.nightly-version }}
       nightly-identity:
-        description: "Nightly app identity (<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<12-digit sha>) in nightly mode, else empty"
+        description: "Nightly app identity (<X.Y.Z>-nightly.<YYYYMMDD>.<run ID>.<run attempt>.g<12-digit sha>) in nightly mode, else empty"
         value: ${{ jobs.version.outputs.nightly-identity }}
 
 permissions:
@@ -246,16 +238,33 @@ jobs:
       version: ${{ steps.v.outputs.version }}
       date: ${{ steps.v.outputs.date }}
       prerelease: ${{ steps.v.outputs.prerelease }}
-      nightly-version: ${{ steps.nightly.outputs.version }}
+      # Nightly mode only (actions/nightly-feed, mode plan); empty otherwise. The date is the UTC
+      # date of the run's created_at, which every nightly artifact and the identity share.
+      nightly-version: ${{ steps.nightly.outputs.nightly-version }}
       nightly-identity: ${{ steps.nightly.outputs.identity }}
-      # The version in the Linux artifacts' file names: the nightly identity when the build
-      # channel applies, else the release version.
-      linux-version: ${{ steps.nightly.outputs.linux-version || steps.v.outputs.version }}
+      nightly-tag: ${{ steps.nightly.outputs.tag }}
+      nightly-tag-family: ${{ steps.nightly.outputs.tag-family }}
+      nightly-date: ${{ steps.nightly.outputs.date }}
+      nightly-published-at: ${{ steps.nightly.outputs.published-at }}
+      # Only the nightly-launcher-* jobs read build-channel.
+      build-channel: ${{ steps.nightly.outputs.build-channel }}
+      # '[]' outside nightly mode, so the launcher jobs' fromJSON always has an array to read.
+      launcher-platforms: ${{ steps.nightly.outputs.launcher-platforms || '[]' }}
+      skip: ${{ steps.nightly.outputs.skip }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      # `cargo xtask version set` would dirty the tree the launcher builds require clean, and the
+      # identity's base must follow from the source commit.
+      - name: Nightly mode takes no version override
+        if: inputs.nightly && inputs.version != ''
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          echo "::error::nightly mode refuses the version input ($INPUT_VERSION): the nightly identity comes from Cargo.toml"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -266,33 +275,15 @@ jobs:
           input-version: ${{ inputs.version }}
           app-title: ${{ inputs.app-title }}
       - id: nightly
-        name: Resolve the nightly version
+        name: Plan the nightly
+        # Also refuses any ref but the default branch.
         if: inputs.nightly
-        env:
-          VERSION: ${{ steps.v.outputs.version }}
-          BUILD_CHANNEL: ${{ inputs.build-channel }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # A nightly is a prerelease of the default branch. Any other ref (the release branch, a
-          # feature branch, a tag) would push images and, where the nightly-signing environment
-          # has no branch rule yet, sign and publish too. Scheduled events carry no repository
-          # payload, so the default branch is read from the API.
-          default="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
-          if [ -z "$default" ] || [ "$GITHUB_REF" != "refs/heads/$default" ]; then
-            echo "::error::nightly mode runs only on the default branch (${default:-unknown}), not $GITHUB_REF"
-            exit 1
-          fi
-          # Computed once so every job agrees. The package version and the app identity share the
-          # date and run counter; the identity is the form the apps' build channel accepts.
-          base="${VERSION%%-*}"
-          run="$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
-          identity="$base-nightly.$run.g${GITHUB_SHA::12}"
-          {
-            echo "version=$base.$run"
-            echo "identity=$identity"
-            if [ -n "$BUILD_CHANNEL" ]; then echo "linux-version=$identity"; fi
-          } >>"$GITHUB_OUTPUT"
+        uses: storytold/craft-common-actions/actions/nightly-feed@main
+        with:
+          mode: plan
+          app-name: ${{ inputs.app-name }}
+          version: ${{ steps.v.outputs.version }}
+          nightly: ${{ inputs.nightly }}
 
   macos:
     timeout-minutes: 90
@@ -585,9 +576,7 @@ jobs:
         uses: storytold/craft-common-actions/actions/export-app-build-env@main
         with:
           app-name: ${{ inputs.app-name }}
-          # The nightly identity and compile-time channel, for an app that passes build-channel.
-          version: ${{ needs.version.outputs.linux-version }}
-          channel: ${{ inputs.nightly && inputs.build-channel || '' }}
+          version: ${{ needs.version.outputs.version }}
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
@@ -616,6 +605,20 @@ jobs:
       - name: Apply version override
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
+      # The nightly distro packages are these builds renamed. A build channel would make the
+      # binaries refuse bare launches and Flatpak, so only the nightly-launcher-* jobs take one.
+      - name: Distro builds take no build channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=""
+          for name in $(compgen -e); do
+            case "$name" in *_BUILD_CHANNEL) found="$found $name" ;; esac
+          done
+          if [ -n "$found" ]; then
+            echo "::error::distro packages must not be built with a build channel, but these are set:$found"
+            exit 1
+          fi
       - name: Build and package (AppImage, deb, rpm, tar.gz)
         env:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
@@ -651,6 +654,8 @@ jobs:
   flatpak:
     timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
+    # nightly-flatpak builds the nightly bundle; this one would only repeat the stable build.
+    if: ${{ !inputs.nightly }}
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
@@ -711,7 +716,7 @@ jobs:
       - name: Build the Flatpak bundle
         id: flatpak_bundle
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -791,7 +796,7 @@ jobs:
 
   arch:
     name: Arch Linux ${{ matrix.arch }}
-    if: inputs.has-arch
+    if: inputs.has-arch && !inputs.nightly
     needs: [version, linux]
     runs-on: ubuntu-24.04
     strategy:
@@ -813,7 +818,7 @@ jobs:
       - name: Find the release tarball
         id: tarball
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -1309,9 +1314,7 @@ jobs:
         uses: storytold/craft-common-actions/actions/export-app-build-env@main
         with:
           app-name: ${{ inputs.app-name }}
-          # The nightly identity and compile-time channel, for an app that passes build-channel.
-          version: ${{ needs.version.outputs.linux-version }}
-          channel: ${{ inputs.nightly && inputs.build-channel || '' }}
+          version: ${{ needs.version.outputs.version }}
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
@@ -1344,6 +1347,20 @@ jobs:
         with:
           nfpm-version: ${{ inputs.nfpm-version }}
           deb-arch: amd64
+      # The nightly distro packages are these builds renamed. A build channel would make the
+      # binaries refuse bare launches and Flatpak, so only the nightly-launcher-* jobs take one.
+      - name: Distro builds take no build channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=""
+          for name in $(compgen -e); do
+            case "$name" in *_BUILD_CHANNEL) found="$found $name" ;; esac
+          done
+          if [ -n "$found" ]; then
+            echo "::error::distro packages must not be built with a build channel, but these are set:$found"
+            exit 1
+          fi
       - name: Build and package (deb, rpm, tar.gz)
         env:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
@@ -1521,7 +1538,11 @@ jobs:
   nightly-linux:
     timeout-minutes: 30
     name: Nightly Linux ${{ matrix.arch }}
-    if: inputs.nightly && !cancelled() && needs.linux.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    # linux-riscv64 may be skipped only when the caller turned it off.
+    if: >-
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && needs.linux.result == 'success'
+      && (needs.linux-riscv64.result == 'success' || (!inputs.has-riscv64 && needs.linux-riscv64.result == 'skipped'))
     needs: [version, linux, linux-riscv64]
     runs-on: ubuntu-24.04
     strategy:
@@ -1541,7 +1562,7 @@ jobs:
         with:
           input-dir: dist/linux
           output-dir: dist/nightly
-          version: ${{ needs.version.outputs.linux-version }}
+          version: ${{ needs.version.outputs.version }}
           nightly-version: ${{ needs.version.outputs.nightly-version }}
           nfpm-version: ${{ inputs.nfpm-version }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -1553,7 +1574,9 @@ jobs:
   nightly-arch:
     timeout-minutes: 30
     name: Nightly Arch Linux ${{ matrix.arch }}
-    if: inputs.nightly && inputs.has-arch && !cancelled() && needs.nightly-linux.result == 'success'
+    if: >-
+      inputs.nightly && inputs.has-arch && !cancelled() && needs.version.result == 'success'
+      && needs.version.outputs.skip != 'true' && needs.nightly-linux.result == 'success'
     needs: [version, nightly-linux]
     runs-on: ubuntu-24.04
     strategy:
@@ -1607,7 +1630,9 @@ jobs:
   nightly-flatpak:
     timeout-minutes: 90
     name: Nightly Flatpak ${{ matrix.arch }}
-    if: inputs.nightly && !cancelled() && needs.linux.result == 'success'
+    if: >-
+      inputs.nightly && !cancelled() && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && needs.linux.result == 'success'
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -1655,7 +1680,7 @@ jobs:
       - name: Find the release tarball
         id: tarball
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -1730,11 +1755,263 @@ jobs:
             dist/nightly/*.oci-manifest.json
           if-no-files-found: error
 
+  # Launcher payloads, for apps in the nightly-feed registry: the app's own nightly script builds a
+  # GUI-only archive with the registry's build channel, which craft-launcher installs. Built from a
+  # clean checkout of the exact commit (the scripts refuse a dirty tree or another HEAD), without
+  # contributor credits, cache or version override; target dir and output stay out of the tree.
+  nightly-launcher-linux:
+    timeout-minutes: 90
+    name: Nightly launcher Linux x86_64
+    if: >-
+      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && contains(fromJSON(needs.version.outputs.launcher-platforms), 'linux')
+    needs: [version]
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # One Python for the app's nightly helpers on every runner image.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Export the app's build variables
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.nightly-identity }}
+          date: ${{ needs.version.outputs.nightly-date }}
+          sha: ${{ github.sha }}
+          channel: ${{ needs.version.outputs.build-channel }}
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@main
+        with:
+          deb-arch: amd64
+          nfpm-version: ${{ inputs.nfpm-version }}
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Build the launcher payload
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-target
+          DIST: ${{ runner.temp }}/nightly-dist
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: packaging/linux/nightly.sh --arch x86_64
+      - name: Find the launcher payload
+        id: payload
+        env:
+          DIST: ${{ runner.temp }}/nightly-dist
+        run: |
+          shopt -s nullglob
+          files=("$DIST"/*)
+          if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+            echo "::error::expected one launcher payload in $DIST, found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
+          echo "path=${files[0]}" >>"$GITHUB_OUTPUT"
+      - uses: storytold/craft-common-actions/actions/nightly-launcher-check@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          platform: linux
+          version: ${{ needs.version.outputs.nightly-identity }}
+          archive: ${{ steps.payload.outputs.path }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-launcher-linux
+          path: ${{ steps.payload.outputs.path }}
+          if-no-files-found: error
+
+  nightly-launcher-windows:
+    timeout-minutes: 90
+    name: Nightly launcher Windows x64
+    if: >-
+      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && contains(fromJSON(needs.version.outputs.launcher-platforms), 'windows')
+    needs: [version]
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Export the app's build variables
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.nightly-identity }}
+          date: ${{ needs.version.outputs.nightly-date }}
+          sha: ${{ github.sha }}
+          channel: ${{ needs.version.outputs.build-channel }}
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # -BuildOnly: an unsigned intermediate; signing happens in the signer workflow.
+      - name: Build the launcher payload
+        shell: pwsh
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-target
+          DIST: ${{ runner.temp }}/nightly-dist
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: ./packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly
+      - name: Find the launcher payload
+        id: payload
+        shell: pwsh
+        env:
+          DIST: ${{ runner.temp }}/nightly-dist
+        run: |
+          $files = @(Get-ChildItem -LiteralPath $env:DIST -Force)
+          if ($files.Count -ne 1 -or $files[0].PSIsContainer) {
+            Write-Output "::error::expected one launcher payload in $env:DIST, found $($files.Count): $($files.Name -join ' ')"
+            exit 1
+          }
+          "path=$($files[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: storytold/craft-common-actions/actions/nightly-launcher-check@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          platform: windows
+          version: ${{ needs.version.outputs.nightly-identity }}
+          archive: ${{ steps.payload.outputs.path }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-launcher-windows
+          path: ${{ steps.payload.outputs.path }}
+          if-no-files-found: error
+
+  nightly-launcher-macos:
+    timeout-minutes: 90
+    name: Nightly launcher macOS aarch64
+    if: >-
+      inputs.nightly && needs.version.result == 'success' && needs.version.outputs.skip != 'true'
+      && contains(fromJSON(needs.version.outputs.launcher-platforms), 'macos')
+    needs: [version]
+    # The free Arm runner: an unsigned build needs no larger runner.
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # One Python for the app's nightly helpers on every runner image.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Export the app's build variables
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ needs.version.outputs.nightly-identity }}
+          date: ${{ needs.version.outputs.nightly-date }}
+          sha: ${{ github.sha }}
+          channel: ${{ needs.version.outputs.build-channel }}
+      - name: Check out craft-fonts
+        if: inputs.craft-fonts-ref != ''
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - name: Check out craft-i18n
+        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@main
+        with:
+          targets: aarch64-apple-darwin
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # An unsigned app bundle; signing and notarization happen in the signer workflow.
+      - name: Build the launcher payload
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-target
+          DIST: ${{ runner.temp }}/nightly-dist
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: "1"
+        run: packaging/macos/nightly.sh --arch aarch64
+      - name: Find the launcher payload
+        id: payload
+        env:
+          DIST: ${{ runner.temp }}/nightly-dist
+        run: |
+          shopt -s nullglob
+          files=("$DIST"/*)
+          if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+            echo "::error::expected one launcher payload in $DIST, found ${#files[@]}: ${files[*]}"
+            exit 1
+          fi
+          echo "path=${files[0]}" >>"$GITHUB_OUTPUT"
+      - uses: storytold/craft-common-actions/actions/nightly-launcher-check@main
+        with:
+          app-name: ${{ inputs.app-name }}
+          platform: macos
+          version: ${{ needs.version.outputs.nightly-identity }}
+          archive: ${{ steps.payload.outputs.path }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-launcher-macos
+          path: ${{ steps.payload.outputs.path }}
+          if-no-files-found: error
+
   nightly-release:
     timeout-minutes: 15
     name: Publish the nightly prerelease
-    # A skipped nightly-arch (has-arch off) is fine; any failure or cancellation publishes nothing.
-    if: inputs.nightly && !inputs.dry-run && !cancelled() && needs.nightly-linux.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    # nightly-arch may be skipped only when the caller turned Arch off.
+    if: >-
+      inputs.nightly && !inputs.dry-run && !cancelled() && needs.version.result == 'success'
+      && needs.version.outputs.skip != 'true' && needs.nightly-linux.result == 'success'
+      && (needs.nightly-arch.result == 'success' || (!inputs.has-arch && needs.nightly-arch.result == 'skipped'))
+      && needs.nightly-flatpak.result == 'success'
     needs: [version, nightly-linux, nightly-arch, nightly-flatpak]
     runs-on: ubuntu-24.04
     # Holds LINUX_NIGHTLY_SIGNING_KEY and admits main only.
@@ -1761,7 +2038,8 @@ jobs:
           title: ${{ inputs.app-title }} Nightly ${{ needs.version.outputs.nightly-version }}
           tag-prefix: nightly_
           prerelease: "true"
-          artifact-pattern: nightly-*
+          # Not nightly-*: that would also take the unsigned nightly-launcher-* payloads.
+          artifact-pattern: nightly-{linux,arch,flatpak}-*
           github-token: ${{ secrets.GITHUB_TOKEN }}
           signing-key: ${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}
       - name: Publish the prerelease
