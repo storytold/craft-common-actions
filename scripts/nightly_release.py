@@ -246,15 +246,19 @@ def verified_history_roles(api, policy, request):
     n.require(len(publishers) == 1, "prior successful publication step absent/ambiguous")
 
 
+def require_release_lineage(api, ancestor, live):
+    ancestor, live = r.commit(ancestor), r.commit(live)
+    # Bounded file-free compare page: a long gap between syncs stays within the reply limit.
+    lineage = p.compare_page(api.request("GET", p.compare_path(ancestor, live)))
+    n.require(lineage.get("status") in ("ahead", "identical") and type(lineage.get("behind_by")) is int and
+        lineage["behind_by"] == 0 and lineage.get("merge_base_commit", {}).get("sha") == ancestor and
+        lineage.get("base_commit", {}).get("sha") == ancestor and
+        (lineage["status"] == "identical") == (ancestor == live), "prior signer is not in trusted release history")
+
+
 def prior_policy(api, policy, request, current_request):
     old_sha = r.commit(request["signer"]["source_commit"])
-    current_sha = current_request["signer"]["source_commit"]
-    # Bounded file-free compare page: a long gap between syncs stays within the reply limit.
-    lineage = p.compare_page(api.request("GET", p.compare_path(old_sha, r.commit(current_sha))))
-    n.require(lineage.get("status") in ("ahead", "identical") and type(lineage.get("behind_by")) is int and
-        lineage["behind_by"] == 0 and lineage.get("merge_base_commit", {}).get("sha") == old_sha and
-        lineage.get("base_commit", {}).get("sha") == old_sha and
-        (lineage["status"] == "identical") == (old_sha == current_sha), "prior signer is not in trusted release history")
+    require_release_lineage(api, old_sha, current_request["signer"]["source_commit"])
     blob = api.request("GET", "/contents/.github/nightly-signing-policy.json?ref="+old_sha)
     n.require(blob.get("encoding") == "base64" and type(blob.get("size")) is int and
         0 < blob["size"] <= n.MAX_JSON_BYTES and isinstance(blob.get("content"), str), "missing bounded prior protected policy")

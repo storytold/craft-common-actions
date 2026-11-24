@@ -268,9 +268,12 @@ def recheck_publication(api, request):
         request_tools.active(api, request[name])
     ref = api.request("GET", "/git/ref/heads/release")
     live = ref.get("object", {})
-    n.require(ref.get("ref") == "refs/heads/release" and live.get("type") == "commit" and
-              live.get("sha") == request["signer"]["source_commit"],
-              "protected release ref advanced during OCI publication")
+    n.require(ref.get("ref") == "refs/heads/release" and live.get("type") == "commit",
+              "protected release ref is missing or is not a commit")
+    live_sha = request_tools.commit(live.get("sha"))
+    signer_sha = request_tools.commit(request["signer"]["source_commit"])
+    if live_sha != signer_sha:
+        release_tools.require_release_lineage(api, signer_sha, live_sha)
 
 
 def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, publication_guard=None, history_runner=subprocess.run, **kwargs):

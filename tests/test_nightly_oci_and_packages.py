@@ -266,6 +266,37 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
                 )
         self.assertEqual(calls, [])
 
+    def test_oci_publish_accepts_advancing_protected_release_but_refuses_rewrites(self):
+        from unittest.mock import Mock
+
+        signer = "a" * 40
+        advanced = "b" * 40
+        roles = {"producer": {"run_id": 1}, "signer": {"run_id": 2, "source_commit": signer}}
+        for live, status, behind, base, permitted in (
+            (signer, None, 0, signer, True),
+            (advanced, "ahead", 0, signer, True),
+            (advanced, "diverged", 1, "c" * 40, False),
+            (advanced, "behind", 1, advanced, False),
+            (advanced, "ahead", 0, "c" * 40, False),
+        ):
+            with self.subTest(status=status, base=base):
+                api = Mock()
+                api.request.side_effect = [
+                    {"ref": "refs/heads/release", "object": {"type": "commit", "sha": live}},
+                    {"commits": [], "status": status, "ahead_by": int(status == "ahead"), "behind_by": behind,
+                     "base_commit": {"sha": signer}, "merge_base_commit": {"sha": base}},
+                ]
+                with patch.object(oci.request_tools, "active") as active:
+                    if permitted:
+                        oci.recheck_publication(api, roles)
+                    else:
+                        with self.assertRaisesRegex(n.InvalidNightly, "not in trusted release history"):
+                            oci.recheck_publication(api, roles)
+                self.assertEqual(active.call_count, 2)
+                self.assertEqual(api.request.call_count, 1 if live == signer else 2)
+                if live != signer:
+                    api.request.assert_called_with("GET", f"/compare/{signer}...{live}?per_page=1&page=2")
+
     @unittest.skipUnless(shutil.which("jq"), "jq required for the release REST projection fixture")
     def test_release_history_projects_large_pages_and_checks_newer_nightly(self):
         bulky = {
