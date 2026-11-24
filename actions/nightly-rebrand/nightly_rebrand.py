@@ -127,10 +127,14 @@ def sub(pattern: str, replacement: str, text: str) -> str:
 
 
 def rewrite_tokens(text: str, names: Names, path_map: dict[str, str]) -> str:
-    """Rewrite installed paths, app IDs and command names in a maintainer script."""
+    """Rewrite paths, app IDs and command names in a script.
+
+    path_map keys are absolute install paths, or paths relative to the tarball's top directory
+    (bin/<cmd>), which may follow a directory variable such as "$dir/bin/<cmd>"."""
     for old, new in sorted(path_map.items(), key=lambda kv: -len(kv[0])):
         if old != new:
-            text = sub(r'(?<![\w./-])' + re.escape(old) + r'(?![\w.-])', new, text)
+            before = r'(?<![\w./-])' if old.startswith('/') else r'(?<![\w.-])'
+            text = sub(before + re.escape(old) + r'(?![\w.-])', new, text)
     for app_id in names.app_ids:
         text = sub(exact(app_id) + r'(?!' + re.escape(ID_SUFFIX) + r'(?![\w-]))', app_id + ID_SUFFIX, text)
     for token in names.tokens:
@@ -264,17 +268,38 @@ def rewrite_link(entry: Entry, path_map: dict[str, str]) -> str:
     return posixpath.relpath(new, posixpath.dirname(path_map[entry.path]))
 
 
-def convert(entries: list[Entry], names: Names) -> tuple[list[Entry], dict[str, str]]:
+def rewrite_tarball_extra(entry: Entry, names: Names, path_map: dict[str, str]) -> bytes:
+    """Rewrite a text file the tarball carries outside bin/ and share/, such as filmcraft's
+    install.sh, which names files relative to the top directory."""
+    try:
+        text = entry.data.decode('utf-8')
+    except UnicodeDecodeError:
+        return entry.data
+    if '\0' in text:
+        return entry.data
+    relative = {old[len('/usr/'):]: new[len('/usr/'):] for old, new in path_map.items()
+                if old.startswith('/usr/')}
+    return rewrite_tokens(text, names, relative).encode('utf-8')
+
+
+def convert(entries: list[Entry], names: Names, tarball: bool = False) -> tuple[list[Entry], dict[str, str]]:
     path_map = {e.path: names.path(e.path) for e in entries}
     stable = set(path_map)
-    shared = sorted(path_map[e.path] for e in entries if e.kind != 'dir' and path_map[e.path] in stable)
+    # A tarball's files outside bin/ and share/ (install.sh) sit beside the tree, not in it.
+    def installed(e: Entry) -> bool:
+        return not tarball or e.path.startswith(('/usr/bin/', '/usr/share/'))
+    shared = sorted(path_map[e.path] for e in entries
+                    if e.kind != 'dir' and installed(e) and path_map[e.path] in stable)
     if shared:
         raise RebrandError('nightly paths would be shared with the stable package: ' + ', '.join(shared))
     clashes = [p for p, n in collections.Counter(path_map.values()).items() if n > 1]
     if clashes:
         raise RebrandError('several stable paths map to the same nightly path: ' + ', '.join(sorted(clashes)))
-    out = [replace(e, path=path_map[e.path], data=rewrite_content(e, names, path_map),
-                   link=rewrite_link(e, path_map)) for e in entries]
+    def data(e: Entry) -> bytes:
+        if e.kind == 'file' and not installed(e):
+            return rewrite_tarball_extra(e, names, path_map)
+        return rewrite_content(e, names, path_map)
+    out = [replace(e, path=path_map[e.path], data=data(e), link=rewrite_link(e, path_map)) for e in entries]
     return out, path_map
 
 
@@ -359,7 +384,7 @@ def run(cmd: list, **kwargs) -> subprocess.CompletedProcess:
 def convert_tarball(src: Path, out: Path, prefix: str, stable_top: str, nightly_top: str) -> None:
     with tarfile.open(src, 'r:gz') as tar:
         entries = entries_from_tar(tar, stable_top + '/', '/usr')
-    entries, _ = convert(entries, Names.from_entries(prefix, entries))
+    entries, _ = convert(entries, Names.from_entries(prefix, entries), tarball=True)
     write_tarball(out, nightly_top, entries)
 
 

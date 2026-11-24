@@ -15,6 +15,10 @@ inputs:
   nightly-version:
     description: "Version of the nightly packages, digits and dots only (e.g. 0.24.1.202611240228)"
     required: true
+  nfpm-version:
+    description: "nfpm version to install when an .rpm is converted and nfpm is not on PATH; empty uses install-nfpm's default. Pass the version the stable build used."
+    required: false
+    default: ""
 
 outputs:
   prefix:
@@ -55,10 +59,19 @@ runs:
       with:
         packages: rpm
 
+    # Two steps, because an empty nfpm-version passed through `with` would replace install-nfpm's
+    # default instead of falling back to it.
     - name: Install nfpm
-      if: steps.tools.outputs.nfpm == 'true'
+      if: steps.tools.outputs.nfpm == 'true' && inputs.nfpm-version == ''
       uses: storytold/craft-common-actions/actions/install-nfpm@main
       with:
+        deb-arch: ${{ steps.tools.outputs.deb-arch }}
+
+    - name: Install nfpm ${{ inputs.nfpm-version }}
+      if: steps.tools.outputs.nfpm == 'true' && inputs.nfpm-version != ''
+      uses: storytold/craft-common-actions/actions/install-nfpm@main
+      with:
+        nfpm-version: ${{ inputs.nfpm-version }}
         deb-arch: ${{ steps.tools.outputs.deb-arch }}
 
     - name: Convert to nightly packages

@@ -244,6 +244,65 @@ class CpioTests(unittest.TestCase):
         ])
 
 
+# filmcraft's packaging/linux/install.sh, trimmed to the parts that name packaged files.
+FILMCRAFT_INSTALL = r"""#!/usr/bin/env bash
+set -euo pipefail
+fail() { echo "error: $*" >&2; exit 1; }
+prefix="$2"
+source_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+app_id=ai.storyteller.filmcraft
+for binary in filmcraft filmcraft-cli; do
+  [[ -f "$source_dir/bin/$binary" ]] || fail "missing bin/$binary; extract the complete tarball first"
+done
+[[ -f "$source_dir/share/applications/$app_id.desktop" ]] || fail 'missing desktop entry; extract the complete tarball first'
+
+mkdir -p -- "$prefix/bin" "$prefix/share"
+install -m755 -- "$source_dir/bin/filmcraft" "$prefix/bin/filmcraft"
+install -m755 -- "$source_dir/bin/filmcraft-cli" "$prefix/bin/filmcraft-cli"
+cp -R -- "$source_dir/share/." "$prefix/share/"
+exec_path="$(printf '%s' "$prefix/bin/filmcraft" | sed 's/[\\"`$]/\\&/g; s/\\/\\\\/g')"
+while IFS= read -r line || [[ -n "$line" ]]; do
+  case "$line" in
+    Exec=*) printf 'Exec="%s" %%F\n' "$exec_path" ;;
+    *) printf '%s\n' "$line" ;;
+  esac
+done <"$source_dir/share/applications/$app_id.desktop" >"$prefix/share/applications/$app_id.desktop"
+printf 'Installed FilmCraft in %s\nLaunch it from the application menu or run "%s/bin/filmcraft".\n' "$prefix" "$prefix"
+"""
+
+
+class TarballExtraFileTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('bash'), 'needs bash')
+    def test_root_install_script_installs_the_nightly(self):
+        filmcraft_id = 'ai.storyteller.filmcraft'
+        entries = [
+            Entry('/usr/bin/filmcraft', 'file', 0o755, b'#!/bin/sh\n'),
+            Entry('/usr/bin/filmcraft-cli', 'file', 0o755, b'#!/bin/sh\n'),
+            Entry(f'/usr/share/applications/{filmcraft_id}.desktop', 'file', 0o644,
+                  b'[Desktop Entry]\nName=FilmCraft\nExec=filmcraft %F\n'),
+            Entry('/usr/install.sh', 'file', 0o755, FILMCRAFT_INSTALL.encode()),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            stable_top, nightly_top = 'filmcraft-0.9.0-linux-x86_64', 'filmcraft-nightly-0.9.0.1-linux-x86_64'
+            make_tarball(tmp / 'stable.tar.gz', stable_top, entries)
+            nr.convert_tarball(tmp / 'stable.tar.gz', tmp / 'nightly.tar.gz', 'filmcraft', stable_top, nightly_top)
+            with tarfile.open(tmp / 'nightly.tar.gz') as tar:
+                tar.extractall(tmp / 'x', **({'filter': 'tar'} if hasattr(tarfile, 'tar_filter') else {}))
+            script = (tmp / 'x' / nightly_top / 'install.sh').read_text()
+            self.assertIn('app_id=ai.storyteller.filmcraft.nightly\n', script)
+            self.assertIn('for binary in filmcraft-nightly filmcraft-cli-nightly; do', script)
+            self.assertIn("printf 'Installed FilmCraft in %s", script)
+            result = subprocess.run(['bash', str(tmp / 'x' / nightly_top / 'install.sh'), '--prefix',
+                                     str(tmp / 'prefix')], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((tmp / 'prefix/bin/filmcraft-nightly').is_file())
+            self.assertTrue((tmp / 'prefix/bin/filmcraft-cli-nightly').is_file())
+            desktop = (tmp / f'prefix/share/applications/{filmcraft_id}.nightly.desktop').read_text()
+            self.assertIn(f'Exec="{tmp}/prefix/bin/filmcraft-nightly" %F', desktop)
+            self.assertIn('Name=FilmCraft (Nightly)', desktop)
+
+
 class InputTests(unittest.TestCase):
     def test_app_prefix_beside_cli_tarball(self):
         with tempfile.TemporaryDirectory() as tmp:
