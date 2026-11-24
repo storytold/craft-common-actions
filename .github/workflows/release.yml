@@ -105,7 +105,7 @@ on:
         description: >-
           Build everything as a dry run does, then publish the Linux packages as a nightly
           prerelease that installs beside the stable app: <prefix>-nightly-<version> deb, rpm, Arch
-          and Flatpak packages under the tag nightly-<version>, and the Flatpak OCI tags
+          and Flatpak packages under the tag nightly_<version>, and the Flatpak OCI tags
           <version>-nightly-<arch> and nightly-<arch>. Keeps the newest 3 nightlies. Default branch only;
           with dry-run set too, the nightly packages are built but nothing is published.
         type: boolean
@@ -1745,7 +1745,10 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      TAG: nightly-${{ needs.version.outputs.nightly-version }}
+      # Not nightly-<nv>: craft-launcher's Nightly track treats any prerelease whose tag has a
+      # `nightly` part between `.` or `-` as its own candidate and fails the lookup when it is not
+      # SemVer with a NIGHTLY.json descriptor.
+      TAG: nightly_${{ needs.version.outputs.nightly-version }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -1756,7 +1759,7 @@ jobs:
           version: ${{ needs.version.outputs.nightly-version }}
           app-title: ${{ inputs.app-title }}
           title: ${{ inputs.app-title }} Nightly ${{ needs.version.outputs.nightly-version }}
-          tag-prefix: nightly-
+          tag-prefix: nightly_
           prerelease: "true"
           artifact-pattern: nightly-*
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -1799,7 +1802,7 @@ jobs:
         run: |
           # gh lists by creation; sort by publication. A failed cleanup only warns.
           if ! old="$(gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,publishedAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly-")))] | sort_by(.publishedAt) | reverse | .[3:] | .[].tagName')"; then
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly_")))] | sort_by(.publishedAt) | reverse | .[3:] | .[].tagName')"; then
             echo "::warning::Could not list the nightly prereleases; none deleted."
             exit 0
           fi
@@ -1815,7 +1818,7 @@ jobs:
           # pushed by runs that never published are deleted.
           warn() { echo "::warning::$1"; exit 0; }
           kept="$(gh release list --exclude-drafts --limit 200 --json tagName,isPrerelease,publishedAt \
-            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly-")))] | sort_by(.publishedAt) | reverse | .[:3] | map(.tagName | ltrimstr("nightly-"))')" \
+            --jq '[.[] | select(.isPrerelease and (.tagName | startswith("nightly_")))] | sort_by(.publishedAt) | reverse | .[:3] | map(.tagName | ltrimstr("nightly_"))')" \
             || warn "Could not list the nightly prereleases; no nightly images deleted."
           [ "$kept" != "[]" ] || warn "No published nightly prerelease found; no nightly images deleted."
           owner="$GITHUB_REPOSITORY_OWNER"

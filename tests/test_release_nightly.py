@@ -205,7 +205,7 @@ class NightlyReleaseTests(unittest.TestCase):
     def test_the_prerelease_collects_exactly_the_nightly_artifacts(self):
         draft = uses("nightly-release", "storytold/craft-common-actions/actions/draft-release@")["with"]
         self.assertEqual((draft["tag-prefix"], draft["prerelease"], draft["artifact-pattern"]),
-                         ("nightly-", "true", "nightly-*"))
+                         ("nightly_", "true", "nightly-*"))
         self.assertEqual(draft["version"], "${{ needs.version.outputs.nightly-version }}")
         self.assertEqual(draft["signing-key"], "${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}")
         self.assertIn("LINUX_NIGHTLY_SIGNING_KEY", DATA["on"]["workflow_call"]["secrets"])
@@ -223,7 +223,13 @@ class NightlyReleaseTests(unittest.TestCase):
     def test_it_is_published_as_a_prerelease_that_never_becomes_latest(self):
         self.assertIn('gh release edit "$TAG" --draft=false --prerelease --latest=false',
                       step("nightly-release", "Publish the prerelease")["run"])
-        self.assertEqual(JOBS["nightly-release"]["env"]["TAG"], "nightly-${{ needs.version.outputs.nightly-version }}")
+        self.assertEqual(JOBS["nightly-release"]["env"]["TAG"], "nightly_${{ needs.version.outputs.nightly-version }}")
+
+    def test_the_tag_is_not_a_craft_launcher_nightly_candidate(self):
+        # craft-launcher crates/native/src/nightly_lookup.rs: a prerelease whose tag has a part
+        # equal to "nightly" (split on . and -) must be canonical SemVer with NIGHTLY.json.
+        tag = JOBS["nightly-release"]["env"]["TAG"].replace("${{ needs.version.outputs.nightly-version }}", "0.24.1.20261124.57.2")
+        self.assertNotIn("nightly", [part.lower() for part in re.split(r"[.-]", tag)])
 
     def test_nightly_tags_move_only_after_publishing_and_keep_the_signed_digest(self):
         names = [s.get("name") for s in JOBS["nightly-release"]["steps"]]
@@ -259,13 +265,13 @@ class NightlyRetentionTests(unittest.TestCase):
         return [line for line in self.log.read_text().splitlines() if "DELETE" in line or "release delete" in line]
 
     def test_older_nightly_prereleases_are_deleted_with_their_tags(self):
-        releases = [{"tagName": f"nightly-1.0.0.20261{day:03d}0000", "isPrerelease": True,
+        releases = [{"tagName": f"nightly_1.0.0.20261{day:03d}0000", "isPrerelease": True,
                      "publishedAt": f"2026-11-{day:02d}T00:00:00Z"} for day in (20, 24, 21, 23, 22)]
         releases += [{"tagName": "v1.0.0", "isPrerelease": False, "publishedAt": "2026-11-01T00:00:00Z"},
                      {"tagName": "v1.1.0-rc.1", "isPrerelease": True, "publishedAt": "2026-10-01T00:00:00Z"}]
         deleted = self.run_step("Keep the newest 3 nightly prereleases", releases)
-        self.assertEqual(deleted, ["gh release delete nightly-1.0.0.202610210000 --yes --cleanup-tag",
-                                   "gh release delete nightly-1.0.0.202610200000 --yes --cleanup-tag"])
+        self.assertEqual(deleted, ["gh release delete nightly_1.0.0.202610210000 --yes --cleanup-tag",
+                                   "gh release delete nightly_1.0.0.202610200000 --yes --cleanup-tag"])
 
     def test_only_nightly_images_of_unkept_or_unpublished_runs_are_deleted(self):
         def version(id, day, *tags):
@@ -282,7 +288,7 @@ class NightlyRetentionTests(unittest.TestCase):
             # Pushed by a run whose prerelease was never published.
             version(9, 25, "1.0.0.202611250000-nightly-x86_64"),
         ]
-        releases = [{"tagName": f"nightly-1.0.0.202611{day}0000", "isPrerelease": True,
+        releases = [{"tagName": f"nightly_1.0.0.202611{day}0000", "isPrerelease": True,
                      "publishedAt": f"2026-11-{day}T00:00:00Z"} for day in (21, 22, 23, 24)]
         releases.append({"tagName": "v1.0.0", "isPrerelease": False, "publishedAt": "2026-11-26T00:00:00Z"})
         deleted = self.run_step("Keep the Flatpak images of the kept nightly prereleases", versions, releases)

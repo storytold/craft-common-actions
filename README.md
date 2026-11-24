@@ -143,7 +143,7 @@ Linux builds into packages that install beside the stable app and publishes them
   without its prerelease, the UTC date and the workflow run counter (`0.24.1.20261124.57.1`). The
   `nightly-version` output carries it. The app identity, `nightly-identity`, uses the same date and
   run: `<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<first 12 of the commit sha>`.
-- A GitHub prerelease `nightly-<nv>` titled `<App> Nightly <nv>`, never marked latest, with
+- A GitHub prerelease `nightly_<nv>` titled `<App> Nightly <nv>`, never marked latest, with
   `<prefix>-nightly-<nv>-linux-<arch>.deb` and `.rpm` (x86_64, aarch64, riscv64), `.pkg.tar.zst`
   (Arch package `ai.storyteller.<prefix>-nightly`) and `.flatpak` (x86_64, aarch64; app ID with a
   `.nightly` suffix), signed as in [Linux package signing](#linux-package-signing), with
