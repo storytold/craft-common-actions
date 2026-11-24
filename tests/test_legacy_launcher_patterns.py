@@ -54,10 +54,8 @@ class ReleasedPatternTests(unittest.TestCase):
         self.assertEqual(DEFAULTS['MacOs'],['Dmg']); self.assertIn('linux-x86_64',TOKENS['Linux','X64'])
     def names(self):
         version='0.23.1-nightly.20261120.1234.1.g'+'a'*12
-        active=json.loads((ROOT/'nightly-apps.json').read_text())['apps']['photocraft']['targets']
-        pending=json.loads((ROOT/'nightly-unix-pending.json').read_text())['capabilities']
-        names=[row['asset_pattern'].replace('{version}',version) for row in active]+[row['asset_pattern'].replace('{version}',version) for row in pending.values()]
-        return sorted(set(names)) # Admitted Linux is in both the registry and its capability row.
+        targets=json.loads((ROOT/'actions'/'nightly-feed'/'apps.json').read_text())['apps']['photocraft']['targets']
+        return sorted({row['asset_pattern'].replace('{version}',version) for row in targets.values()})
     def test_current_windows_nightly_does_not_match_old_installer_or_zip(self):
         names=self.names(); self.assertEqual(len(names),3)
         for arch in ('X64','X86','Arm64'): self.assertIsNone(pick(names,'Windows',arch))
