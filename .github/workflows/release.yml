@@ -1727,6 +1727,7 @@ jobs:
           gh release edit "$TAG" --draft=false --prerelease --latest=false
           echo "Published $TAG." >>"$GITHUB_STEP_SUMMARY"
       - name: Move the nightly-<arch> Flatpak tags
+        if: ${{ !inputs.dry-run }}
         env:
           NIGHTLY_VERSION: ${{ needs.version.outputs.nightly-version }}
           REGISTRY: ghcr.io/${{ github.repository }}
