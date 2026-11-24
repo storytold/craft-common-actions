@@ -10,7 +10,7 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 
 ### 1. `release.yml`
 Full multi-platform release pipeline for Craft apps:
-- **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
+- **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization). The job defaults to the paid-plan `macos-15-xlarge` runner; pass `macos-runner: macos-15` to use the free runner available to public repositories in a free organisation.
 - **Windows** (x64, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)

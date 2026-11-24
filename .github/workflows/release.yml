@@ -11,6 +11,11 @@ on:
         description: "Application display name (e.g. PhotoCraft, CADCraft)"
         type: string
         required: true
+      macos-runner:
+        description: "Runner for the macOS universal build. The default needs a paid plan's larger runners; a public repository in a free organisation can pass macos-15."
+        type: string
+        required: false
+        default: "macos-15-xlarge"
       craft-fonts-ref:
         # The suite's craft-fonts pin. Bump it here, in freebsd.yml and in gate.yml together.
         description: "Git ref for storytold/craft-fonts embedded font assets. Defaults to the suite's pin; override it only for an app that needs another commit. Desktop builds run with CRAFT_FONTS_DIR and CRAFT_FONTS_REQUIRED=1 either way"
@@ -236,7 +241,7 @@ jobs:
     name: macOS universal
     if: ${{ !inputs.dry-run }}
     needs: [version]
-    runs-on: macos-15-xlarge
+    runs-on: ${{ inputs.macos-runner }}
     environment: ${{ !inputs.dry-run && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
