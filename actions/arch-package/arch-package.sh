@@ -111,10 +111,11 @@ shopt -s nullglob
 desktops=("$stage"/share/applications/*.desktop)
 shopt -u nullglob
 if [[ "${#desktops[@]}" -gt 0 ]]; then
-  pkgname="$(basename "${desktops[0]}" .desktop)"
+  base_pkgname="$(basename "${desktops[0]}" .desktop)"
 else
-  pkgname="ai.storyteller.$app"
+  base_pkgname="ai.storyteller.$app"
 fi
+pkgname="$base_pkgname"
 is_nightly=0
 pkg_alias="$app"
 if [[ "$raw_version" == *-nightly* ]]; then
@@ -124,6 +125,8 @@ if [[ "$raw_version" == *-nightly* ]]; then
     pkgname="${pkgname}-nightly"
   fi
 fi
+app_re="$(printf '%s' "$app" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
+base_pkgname_re="$(printf '%s' "$base_pkgname" | sed 's/[.[\*^$()+?{|\\]/\\&/g')"
 
 # The package name is derived from an archive-controlled .desktop basename and is
 # written into PKGBUILD (evaluated by makepkg as Bash). Validate it against a safe
@@ -265,11 +268,73 @@ cat <<NIGHTLY_PKG
   fi
   for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
     [ -f "\$desktop_file" ] || continue
-    sed -i -E "s|^Exec=$app([[:space:]]|$)|Exec=$app-nightly\\1|" "\$desktop_file"
+    sed -i -E \
+      -e "s|^Exec=${app_re}([[:space:]]|$)|Exec=$app-nightly\\1|" \
+      -e "s|^Icon=${base_pkgname_re}$|Icon=$pkgname|" \
+      "\$desktop_file"
+    if ! grep -q '^StartupWMClass=' "\$desktop_file"; then
+      printf 'StartupWMClass=%s\n' "$base_pkgname" >> "\$desktop_file"
+    fi
     case "\$desktop_file" in
       *-nightly.desktop | *.nightly.desktop) ;;
-      *) mv "\$desktop_file" "\${desktop_file%.desktop}-nightly.desktop" ;;
+      *) mv "\$desktop_file" "\$pkgdir/usr/share/applications/$pkgname.desktop" ;;
     esac
+  done
+  for metainfo_file in "\$pkgdir/usr/share/metainfo/"*.metainfo.xml; do
+    [ -f "\$metainfo_file" ] || continue
+    sed -i -E \
+      -e "s|<id>${base_pkgname_re}</id>|<id>$pkgname</id>|g" \
+      -e "s|<launchable type=\"desktop-id\">${base_pkgname_re}\\.desktop</launchable>|<launchable type=\"desktop-id\">$pkgname.desktop</launchable>|g" \
+      "\$metainfo_file"
+    case "\$metainfo_file" in
+      *-nightly.metainfo.xml | *.nightly.metainfo.xml) ;;
+      *) mv "\$metainfo_file" "\$pkgdir/usr/share/metainfo/$pkgname.metainfo.xml" ;;
+    esac
+  done
+  for mime_file in "\$pkgdir/usr/share/mime/packages/"*.xml; do
+    [ -f "\$mime_file" ] || continue
+    case "\$mime_file" in
+      *-nightly.xml | *.nightly.xml) ;;
+      *) mv "\$mime_file" "\$pkgdir/usr/share/mime/packages/$pkgname.xml" ;;
+    esac
+  done
+  if [ -d "\$pkgdir/usr/share/icons" ]; then
+    find "\$pkgdir/usr/share/icons" -type f -name "$base_pkgname.*" | while IFS= read -r icon_path; do
+      ext="\${icon_path##*.}"
+      mv "\$icon_path" "\${icon_path%/*}/$pkgname.\$ext"
+    done
+  fi
+  if [ -d "\$pkgdir/usr/share/man" ]; then
+    find "\$pkgdir/usr/share/man" -type f \( -name "$app.1*" -o -name "$app-cli.1*" \) | while IFS= read -r man_path; do
+      man_base="\$(basename "\$man_path")"
+      case "\$man_base" in
+        "$app-cli.1"*) new_base="$app-nightly-cli\${man_base#"$app-cli"}" ;;
+        "$app.1"*) new_base="$app-nightly\${man_base#"$app"}" ;;
+        *) continue ;;
+      esac
+      mv "\$man_path" "\${man_path%/*}/\$new_base"
+    done
+  fi
+  for comp in "\$pkgdir/usr/share/bash-completion/completions/$app-cli" "\$pkgdir/usr/share/bash-completion/completions/$app"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="\${comp_base/#$app/$app-nightly}"
+    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
+  done
+  for comp in "\$pkgdir/usr/share/zsh/site-functions/_$app-cli" "\$pkgdir/usr/share/zsh/site-functions/_$app"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="_$app-nightly\${comp_base#_$app}"
+    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
+  done
+  for comp in "\$pkgdir/usr/share/fish/vendor_completions.d/$app-cli.fish" "\$pkgdir/usr/share/fish/vendor_completions.d/$app.fish"; do
+    [ -f "\$comp" ] || continue
+    comp_base="\$(basename "\$comp")"
+    new_comp="\${comp_base/#$app/$app-nightly}"
+    sed -i -E "s|\\b${app_re}(-cli)?\\b|$app-nightly\\1|g" "\$comp"
+    mv "\$comp" "\${comp%/*}/\$new_comp"
   done
 NIGHTLY_PKG
 fi)

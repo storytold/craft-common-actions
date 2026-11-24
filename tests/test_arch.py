@@ -292,7 +292,21 @@ exit 0
             self.assertIn("pkgname=ai.storyteller.myapp-nightly\n", pkgbuild)
             self.assertIn("provides=(myapp-nightly=0.24.0nightly.20261124.100.1.gaaaaaaaaaaaa-1)", pkgbuild)
             self.assertIn("conflicts=(myapp-nightly myapp-nightly-bin myapp-nightly-git)", pkgbuild)
-            self.assertIn("/usr/bin/myapp-nightly", pkgbuild)
+            for expected in (
+                "/usr/bin/myapp-nightly",
+                "/usr/bin/myapp-nightly-cli",
+                "/usr/share/doc/myapp-nightly",
+                "/usr/share/applications/ai.storyteller.myapp-nightly.desktop",
+                "StartupWMClass=",
+                "/usr/share/metainfo/ai.storyteller.myapp-nightly.metainfo.xml",
+                "/usr/share/mime/packages/ai.storyteller.myapp-nightly.xml",
+                "/usr/share/icons",
+                "/usr/share/man",
+                "/usr/share/bash-completion/completions/",
+                "/usr/share/zsh/site-functions/_",
+                "/usr/share/fish/vendor_completions.d/",
+            ):
+                self.assertIn(expected, pkgbuild)
 
     def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
         """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
