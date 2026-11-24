@@ -135,54 +135,185 @@ Without the secret the release is published unsigned, with a warning.
 
 #### Nightly releases
 
-With `nightly: true`, a run on `main` builds everything a `dry-run` builds and releases nothing
-stable (no macOS, no `release` environment, no draft, no `stable-<arch>` push). It then turns the
-Linux builds into packages that install beside the stable app and publishes them:
+A scheduled `release.yml` run with `nightly: true` publishes one prerelease per app, built from the
+tip of `main`. It builds what a `dry-run` builds and releases nothing stable (no `release`
+environment, no macOS bundle, no draft, no `stable-<arch>` push). Nightly mode runs only on the
+default branch and refuses the `version` input. When the source commit equals the newest published
+nightly's, a scheduled run skips every nightly job.
 
-- Package version `<nv>` = `<X.Y.Z>.<YYYYMMDD>.<run number>.<run attempt>`: the Cargo version
-  without its prerelease, the UTC date and the workflow run counter (`0.24.1.20261124.57.1`). The
-  `nightly-version` output carries it. The app identity, `nightly-identity`, uses the same date and
-  run: `<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<first 12 of the commit sha>`.
-- A GitHub prerelease `nightly_<nv>` titled `<App> Nightly <nv>`, never marked latest, with
+**What one run publishes**
+
+- A GitHub prerelease, never marked latest, with the Linux packages `artcraft-services` reads:
   `<prefix>-nightly-<nv>-linux-<arch>.deb` and `.rpm` (x86_64, aarch64, riscv64), `.pkg.tar.zst`
   (Arch package `ai.storyteller.<prefix>-nightly`) and `.flatpak` (x86_64, aarch64; app ID with a
-  `.nightly` suffix), signed as in [Linux package signing](#linux-package-signing), with
-  `SHA256SUMS.txt`.
+  `.nightly` suffix), each with its signature, plus `SHA256SUMS.txt` and its signature. Every
+  package installs beside the stable app and shares no file with it.
+- For an app in the launcher registry (`actions/nightly-feed/apps.json`, PhotoCraft today), the
+  launcher payloads for Linux, Windows and macOS and the `NIGHTLY.json` descriptor that lists them.
+  The launcher reads only what `NIGHTLY.json` lists, so distro files never appear in it.
 - Flatpak OCI images in `ghcr.io/<repo>` tagged `<nv>-nightly-<arch>`, and in
-  `docker.io/storytold/<app>` when the Docker Hub secrets are set. `nightly-<arch>` moves to the new
-  image only after the prerelease is published.
-- Only the newest 3 nightly prereleases (with their tags) are kept, and in GHCR only the nightly
-  images of those prereleases plus the one `nightly-<arch>` names. Docker Hub tags are not pruned.
-  A failed cleanup only warns.
-- `storytold/artcraft-services` is dispatched as after a stable release.
+  `docker.io/storytold/<app>` when the Docker Hub secrets are set. `nightly-<arch>` moves to the
+  new image (by digest) only after the prerelease is published.
+- Only the newest 3 nightly prereleases of the app's tag family (with their tags) are kept, and in
+  GHCR only their nightly images plus the one `nightly-<arch>` names. Docker Hub tags are not
+  pruned. A failed cleanup only warns. `storytold/artcraft-services` is then dispatched, as after a
+  stable release.
 
-Nothing is published if any nightly build fails or is cancelled, riscv64 included. With `dry-run`
-also set, the nightly packages are built but not published. Nightly mode runs only on the default
-branch.
+**Identity, package version and tag**
 
-To opt in, replace the nightly dry run in the caller with:
+| | Format |
+|---|---|
+| Identity (what the app and the launcher report) | `<X.Y.Z>-nightly.<YYYYMMDD>.<run ID>.<run attempt>.g<first 12 of the commit sha>` |
+| Package version `<nv>` (deb, rpm, pacman) | `<X.Y.Z>.<YYYYMMDD>.<run ID>.<run attempt>` |
+| Tag, launcher registry app | `v<identity>` |
+| Tag, any other app | `nightly_<nv>` |
 
-```yaml
-    with:
-      nightly: ${{ github.event_name == 'schedule' }}
-    secrets:
-      LINUX_NIGHTLY_SIGNING_KEY: ${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}
-```
+- `<X.Y.Z>` is the Cargo version with its prerelease stripped. It comes from the source commit, so
+  the version job needs no API call and nothing can race. `cut_release.py` sends every release bump
+  back to `main`, so the base equals the newest stable release or lags it until the bump merges.
+- The run ID, not the run number, is used because it is unique across workflows, while run numbers
+  restart per workflow file. The signer can also read the producer run straight from the tag.
+- The date is the UTC date of the producer run's creation, so the signer can recompute it from API
+  metadata.
+- A `nightly_<nv>` tag has no `nightly` part when split on `.` and `-`, so it never enters the
+  launcher's release scan. The publisher refuses an identity that does not sort above every
+  existing nightly of its family, and a tag that already exists as a release or git tag.
 
-The caller's `permissions` must grant `contents: write` and `packages: write` (as in the caller
-example above). One-time repo setup: create a `nightly-signing` environment whose deployment
-branches are limited to `main`, holding `LINUX_NIGHTLY_SIGNING_KEY`, and list
-`LINUX_NIGHTLY_SIGNING_KEY` in the caller's `secrets:` block. A key separate from the `release`
-environment's `LINUX_SIGNING_KEY` keeps the stable key out of reach of code merged to main, but
-artcraft-services must publish its public key next to the stable one first: dnf and pacman reject
-packages signed by a key they haven't imported. Without the secret, the nightly is published
-unsigned with a warning, and the website withholds its rpm and Arch packages.
+**How a run flows**
 
-An app with a compile-time build channel passes it as `build-channel` (PhotoCraft:
-`build-channel: nightly-v1`). Its Linux nightly binaries then report the nightly identity: the
-`linux` and `linux-riscv64` jobs build with `<PREFIX>_BUILD_CHANNEL` set to the channel and
-`<PREFIX>_VERSION` set to the identity. Apps without a channel build as today, and the nightly
-packages are the stable build renamed.
+1. The producer, `release.yml` on `main`, builds the Linux, Flatpak and (for registry apps)
+   launcher payloads with no secrets. `nightly-attest` writes `nightly-manifest.json` (every
+   file's name, size and sha256, the identity, the commit and the run) and attests it.
+   `nightly-dispatch` then starts the app's signer workflow on the `release` branch with
+   `producer_run_id` and `producer_run_attempt`.
+2. The signer, `.github/workflows/nightly-sign.yml` here, called from the app's own
+   `nightly-sign.yml` on `release`:
+   - `admit` (no keys) checks the dispatch context and the producer run, downloads the manifest,
+     verifies its attestation with `gh attestation verify` (builder workflow `release.yml`, ref
+     `refs/heads/main`, the producer's commit and run), recomputes the identity, hashes every
+     payload against the manifest, and checks package identity, the OCI layout's Flatpak ref, the
+     launcher archive contents, the exact asset set and the tag rules.
+   - `sign-windows` and `sign-macos` (environment `release`) sign the launcher payloads, and
+     `verify-windows`, `verify-macos` and `smoke-macos` check the result without keys.
+   - `sign-linux` (environment `release`) signs with the stable `LINUX_SIGNING_KEY` and refuses any
+     other key fingerprint than the registry pin. It writes `NIGHTLY.json`, `SHA256SUMS.txt` and
+     its signature last, so the checksums cover every asset.
+   - `verify-final` (no keys) checks the exact asset set, every signature against the pinned public
+     key, and the descriptor against the launcher's own rules.
+   - `publish` (no environment) pushes the OCI images, creates a draft release, compares what was
+     uploaded with what was verified, publishes it, re-checks the descriptor against the published
+     release and deletes the release if that fails.
+   - `retain` prunes to 3 and dispatches the website.
+
+   Signer runs of one repository queue; none is cancelled. The producer run does not have to be
+   finished or green when the signer starts (Windows or FreeBSD may still be running): the attested
+   manifest is what the signer trusts.
+
+All Linux packages are signed with the one stable `LINUX_SIGNING_KEY`, which artcraft-services
+already serves, so no separate nightly key exists. Because that key signs code from `main`, the
+signer rejects any package whose name is not `-nightly` / `.nightly` or whose version is not `<nv>`
+before the key is used. No build job on `main` holds a secret.
+
+**Opting an app in**
+
+1. In the app's `release.yml` caller, replace the scheduled `dry-run` expression and grant the
+   dispatch and attestation permissions:
+
+   ```yaml
+   permissions:
+     contents: write
+     packages: write
+     actions: write        # nightly-dispatch
+     id-token: write       # nightly-attest
+     attestations: write   # nightly-attest
+   jobs:
+     release:
+       uses: storytold/craft-common-actions/.github/workflows/release.yml@main
+       with:
+         nightly: ${{ github.event_name == 'schedule' }}
+   ```
+
+   Set `nightly-signer-workflow` (a file name, default `nightly-sign.yml`) if the signer caller has
+   another name.
+
+2. Add the signer caller `.github/workflows/nightly-sign.yml` on `main` and on `release`. GitHub
+   dispatches only workflows that exist on the default branch, and the signer runs from `release`.
+   Without it on `release`, `nightly-dispatch` fails with a message saying so.
+
+   ```yaml
+   name: Nightly signer
+   on:
+     workflow_dispatch:
+       inputs:
+         producer_run_id: { required: true, type: string }
+         producer_run_attempt: { required: true, type: string }
+   permissions: {}
+   jobs:
+     sign:
+       uses: storytold/craft-common-actions/.github/workflows/nightly-sign.yml@main
+       with:
+         app-name: photocraft            # as in the release.yml caller
+         app-title: PhotoCraft           # release title: "<app-title> Nightly <nv>"
+         producer-workflow: .github/workflows/release.yml
+         manual-actors: '["some-maintainer"]'
+         producer_run_id: ${{ inputs.producer_run_id }}
+         producer_run_attempt: ${{ inputs.producer_run_attempt }}
+       permissions:
+         contents: write
+         packages: write
+         actions: read
+         attestations: read
+       secrets:
+         LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+         WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+         WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+         AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+         AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+         AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+         AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+         AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+         AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+         APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+         APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+         KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+         APPLE_ID: ${{ secrets.APPLE_ID }}
+         APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+         APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+         DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+         DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+         ARTCRAFT_SERVICES_DISPATCH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
+   ```
+
+   A distro-only app lists only `LINUX_SIGNING_KEY` and the publishing secrets. The signing jobs
+   run in the `release` environment, which supplies the values; the environment has no reviewers
+   in the current setup, so a nightly signs without waiting for approval. `manual-actors` lists the
+   logins that may start or re-run a nightly by hand. The scheduled run's attempt 1 needs no entry.
+
+3. For an app that is not in the registry, nothing else changes: it gets `nightly_<nv>` releases of
+   the distro packages. A registry entry (`actions/nightly-feed/apps.json`) adds the launcher part.
+
+**Re-runs.** Use "Re-run all jobs". A partial re-run ("Re-run failed jobs") reuses the version
+job's identity from attempt 1 while new artifacts carry attempt 2, so `nightly-attest` fails early
+with that hint and nothing publishes.
+
+**Build channel.** The distro packages are the stable Linux builds renamed, built without a build
+channel. PhotoCraft's deb, rpm, Arch and Flatpak nightlies therefore report the stable version and
+share the stable settings folders until PhotoCraft supports the nightly menu and Flatpak launches.
+Only the launcher payloads (`nightly-launcher-*` jobs) build with the registry's channel
+(`nightly-v1`). The workflow fails a distro build that has a `*_BUILD_CHANNEL` variable set. It
+cannot stop an app's own `package.sh` from setting the channel, so apps must not.
+
+**Known limits**
+
+- The inner OSTree commit of a nightly `.flatpak` bundle is unsigned. The bundle has a detached
+  `.asc` signature and the OCI image has an `.oci.sig` signature; verify those.
+- Nightly desktop entries and metainfo register no file associations, so a nightly never takes
+  files from the stable app.
+- A failed riscv64, Arch or Flatpak build blocks the whole nightly, launcher assets included. With
+  `dry-run` also set, nightly payloads are built and attested but not dispatched.
+- No AppImage nightlies.
+- pdfcraft looks for OCR models at `<exe>/../share/pdfcraft/models`; the nightly package installs
+  them under `share/pdfcraft-nightly`, so pdfcraft-nightly needs that lookup to follow its own name.
 
 #### Automatic contributor credits (opt-in)
 
@@ -1055,6 +1186,8 @@ Individual actions are also available for composing custom pipelines:
 - `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
+- `actions/nightly-feed`: The nightly planning and handoff library. In `mode: plan` it outputs the identity, `nightly-version`, tag, tag family, run-created date, `published-at`, `launcher-platforms`, `build-channel` and `skip` for an app (launcher registry in `apps.json`, identity and tag rules in `nightly_identity.py`, the handoff manifest format in `nightly_handoff.py`). The signer imports the same modules.
+- `actions/nightly-launcher-check`: Checks a launcher payload built by an app's nightly script (archive inventory and a secret-free smoke test) before it is uploaded for attestation.
 - `actions/nightly-rebrand`: Converts one architecture's stable Linux `tar.gz`, `.deb` and `.rpm` from `packaging/linux/package.sh` into `<prefix>-nightly-<nightly-version>-linux-<arch>.<ext>` packages that install beside the stable app: package `<prefix>-nightly`, every binary with a `-nightly` suffix, the desktop ID `<id>.nightly`, and every other file named after a binary, the prefix or the app ID renamed to match. It fails when a nightly file path would equal a stable one. Outputs `prefix`, `tarball` and `files`; installs `rpm` and `nfpm` when an `.rpm` is to be converted.
 - `actions/draft-release`: Collects the run's artifacts matching `artifact-pattern` (default `release-*`), signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release titled `title` (default `<app-title> v<version>`).
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
