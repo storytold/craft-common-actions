@@ -1662,7 +1662,8 @@ jobs:
           REGISTRY="${REGISTRY,,}"
           creds="${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN"
           # Same repository as the stable images, other tags: stable-<arch> is never touched here.
-          tags=("$NIGHTLY_VERSION-nightly-$ARCH" "nightly-$ARCH")
+          # nightly-<arch> moves in nightly-release, once the prerelease is published.
+          tags=("$NIGHTLY_VERSION-nightly-$ARCH")
           for tag in "${tags[@]}"; do
             echo "==> Pushing to $REGISTRY:$tag"
             skopeo copy --format oci --dest-creds "$creds" "oci:$LAYOUT" "docker://$REGISTRY:$tag"
@@ -1725,6 +1726,34 @@ jobs:
           set -euo pipefail
           gh release edit "$TAG" --draft=false --prerelease --latest=false
           echo "Published $TAG." >>"$GITHUB_STEP_SUMMARY"
+      - name: Move the nightly-<arch> Flatpak tags
+        env:
+          NIGHTLY_VERSION: ${{ needs.version.outputs.nightly-version }}
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          # Only after publishing, so nightly-<arch> never names an image without a release.
+          # --preserve-digests keeps the digest the release's .oci.sig covers. A failure only warns:
+          # the website resolves the versioned tags.
+          set -uo pipefail
+          command -v skopeo >/dev/null || sudo apt-get install -y --no-install-recommends skopeo
+          REGISTRY="${REGISTRY,,}"
+          move() { # <registry> <creds> <arch>
+            if skopeo copy --preserve-digests --src-creds "$2" --dest-creds "$2" \
+              "docker://$1:$NIGHTLY_VERSION-nightly-$3" "docker://$1:nightly-$3"; then
+              echo "Moved $1:nightly-$3 to $NIGHTLY_VERSION." >>"$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::Could not move $1:nightly-$3 to $NIGHTLY_VERSION-nightly-$3."
+            fi
+          }
+          for arch in x86_64 aarch64; do
+            move "$REGISTRY" "${GITHUB_ACTOR:-storytold}:$GITHUB_TOKEN" "$arch"
+            if [ -n "${DOCKERHUB_USERNAME:-}" ] && [ -n "${DOCKERHUB_TOKEN:-}" ]; then
+              move "docker.io/storytold/${REGISTRY##*/}" "$DOCKERHUB_USERNAME:$DOCKERHUB_TOKEN" "$arch"
+            fi
+          done
       - name: Keep the newest 3 nightly prereleases
         run: |
           # gh lists by creation; sort by publication. A failed cleanup only warns.

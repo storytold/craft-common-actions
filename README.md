@@ -146,8 +146,9 @@ Linux builds into packages that install beside the stable app and publishes them
   (Arch package `ai.storyteller.<prefix>-nightly`) and `.flatpak` (x86_64, aarch64; app ID with a
   `.nightly` suffix), signed as in [Linux package signing](#linux-package-signing), with
   `SHA256SUMS.txt`.
-- Flatpak OCI images in `ghcr.io/<repo>` tagged `<nv>-nightly-<arch>` and `nightly-<arch>`, and in
-  `docker.io/storytold/<app>` when the Docker Hub secrets are set.
+- Flatpak OCI images in `ghcr.io/<repo>` tagged `<nv>-nightly-<arch>`, and in
+  `docker.io/storytold/<app>` when the Docker Hub secrets are set. `nightly-<arch>` moves to the new
+  image only after the prerelease is published.
 - Only the newest 3 nightly prereleases (with their tags) and the newest 3 nightly-only image
   versions per architecture are kept. A failed cleanup only warns.
 - `storytold/artcraft-services` is dispatched as after a stable release.

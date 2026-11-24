@@ -132,15 +132,13 @@ class NightlyFlatpakPushTests(unittest.TestCase):
         return [line.rsplit("docker://", 1)[1] for line in self.log.read_text().splitlines()
                 if line.startswith("skopeo copy")]
 
-    def test_it_pushes_the_nightly_tags_and_never_stable(self):
+    def test_it_pushes_only_the_versioned_tag(self):
         self.assertEqual(self.STEP["if"], "github.event_name != 'pull_request' && !inputs.dry-run")
         result = self.publish(DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.pushed(), [
             "ghcr.io/storytold/democraft:1.2.0.202611240228-nightly-x86_64",
-            "ghcr.io/storytold/democraft:nightly-x86_64",
             "docker.io/storytold/democraft:1.2.0.202611240228-nightly-x86_64",
-            "docker.io/storytold/democraft:nightly-x86_64",
         ])
         manifest = self.root / "dist/nightly" / f"{self.base}.oci-manifest.json"
         self.assertEqual(manifest.read_text().strip(), '{"schemaVersion":2}')
