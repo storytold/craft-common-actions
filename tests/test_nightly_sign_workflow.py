@@ -25,6 +25,8 @@ SIGN_JOBS = {"sign-windows", "sign-macos", "sign-linux"}
 PLATFORM_JOBS = {"sign-windows": "windows", "verify-windows": "windows", "sign-macos": "macos",
                  "verify-macos": "macos", "smoke-macos": "macos"}
 RELEASE_CHECKOUT_JOBS = {"sign-windows", "sign-macos", "smoke-macos"}
+# The Docker Hub and website secrets live in `release` too; these jobs run only signer tools.
+ENVIRONMENT_JOBS = SIGN_JOBS | {"publish", "retain"}
 
 
 def flat(value):
@@ -46,7 +48,10 @@ class SignWorkflowTests(unittest.TestCase):
         self.assertEqual(set(on), {"workflow_call"})
         call = on["workflow_call"]
         self.assertEqual(set(call["inputs"]), {"app-name", "app-title", "producer-workflow", "producer_run_id",
-                                               "producer_run_attempt", "manual-actors"})
+                                               "producer_run_attempt", "manual-actors", "package-prefix",
+                                               "flatpak-id"})
+        self.assertIs(call["inputs"]["package-prefix"]["required"], True)
+        self.assertIs(call["inputs"]["flatpak-id"]["required"], True)
         self.assertEqual(set(call["secrets"]), set(SECRET_STEPS))
         self.assertNotIn("inherit", self.text)
         self.assertEqual(self.workflow["permissions"], {})
@@ -89,9 +94,9 @@ class SignWorkflowTests(unittest.TestCase):
                     self.assertNotIn("github.token", env, job)
                     self.assertNotIn("GH_TOKEN", env, job)
 
-    def test_environment_only_on_sign_jobs(self):
+    def test_environment_only_on_secret_jobs(self):
         for name, job in self.jobs.items():
-            if name in SIGN_JOBS:
+            if name in ENVIRONMENT_JOBS:
                 self.assertEqual(job.get("environment"), "release", name)
             else:
                 self.assertNotIn("environment", job, name)
@@ -211,8 +216,35 @@ class SignWorkflowTests(unittest.TestCase):
                  for marker in ("publish oci", "publish release", "publish move-tags")]
         self.assertEqual(order, sorted(order))
         install = next(s for s in self.steps("publish") if "install-apt-packages" in str(s.get("uses", "")))
-        self.assertEqual(install["uses"], "storytold/craft-common-actions/actions/install-apt-packages@main")
         self.assertIn("skopeo", install["with"]["packages"])
+
+    def test_publish_takes_the_layouts_from_the_sealed_final_set(self):
+        # sign-linux stages the .oci.tar layouts into the sealed final set that verify-final checks.
+        for step in self.steps("publish"):
+            self.assertNotIn("run-id", step.get("with", {}), step.get("name"))
+            self.assertNotIn("cp ", step.get("run", ""), step.get("name"))
+        self.assertNotIn("actions", self.jobs["publish"]["permissions"])
+
+    def test_apt_packages_come_from_the_tools_checkout(self):
+        # An action ref like @main would run later main code on the key runners.
+        for name, job in self.jobs.items():
+            uses = [str(s.get("uses", "")) for s in job["steps"]]
+            for ref in filter(None, uses):
+                self.assertTrue(ref.startswith(("actions/", "step-security/", "./.nightly-tools/")), (name, ref))
+            installs = [i for i, ref in enumerate(uses) if "install-apt-packages" in ref]
+            tools = next((i for i, s in enumerate(job["steps"]) if s.get("with", {}).get("path") == ".nightly-tools"),
+                         None)
+            for index in installs:
+                self.assertEqual(uses[index], "./.nightly-tools/actions/install-apt-packages", name)
+                self.assertLess(tools, index, name)
+
+    def test_linux_checks_get_the_caller_pins(self):
+        for job, mode in (("admit", "linux precheck"), ("sign-linux", "linux sign"), ("verify-final", "linux verify-final")):
+            step = next(s for s in self.steps(job) if mode in flat(s.get("run", "")))
+            self.assertEqual({k: v for k, v in step["env"].items() if k in ("PACKAGE_PREFIX", "FLATPAK_ID")},
+                             {"PACKAGE_PREFIX": "${{ inputs.package-prefix }}", "FLATPAK_ID": "${{ inputs.flatpak-id }}"},
+                             job)
+            self.assertIn('--prefix "$PACKAGE_PREFIX" --flatpak-id "$FLATPAK_ID"', flat(step["run"]), job)
 
 
 if __name__ == "__main__":

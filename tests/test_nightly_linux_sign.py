@@ -30,6 +30,8 @@ NV = "0.24.1.20261124.19876543210.1"
 PUBLISHED = 1795487280
 GPG = shutil.which("gpg")
 REAL_PINNED_KEY = linux.pinned_key
+PINS = ("photocraft", "ai.storyteller.photocraft")
+PIN_ARGS = ["--prefix", PINS[0], "--flatpak-id", PINS[1]]
 
 FAKES = {
     "rpmsign": "exit 0\n",
@@ -72,17 +74,18 @@ def tar_bytes(files, mode="w:gz"):
     return buffer.getvalue()
 
 
-def deb(package, version, arch, provides=None):
+def deb(package, version, arch, **relations):
     control = f"Package: {package}\nVersion: {version}\nArchitecture: {arch}\nDescription: test\n"
-    if provides:
-        control += f"Provides: {provides}\n"
+    for field, value in relations.items():
+        control += f"{field.capitalize()}: {value}\n"
     return ar_archive([("debian-binary", b"2.0\n"), ("control.tar.gz", tar_bytes([("./control", control.encode())])),
                        ("data.tar.gz", tar_bytes([("./usr/bin/x", b"x")]))])
 
 
-def rpm(name, version, arch, obsoletes=()):
+def rpm(name, version, arch, obsoletes=(), conflicts=()):
     tags = [(1000, 6, [name]), (1001, 6, [version]), (1002, 6, ["1"]), (1022, 6, [arch]),
-            (1047, 8, [name, f"{name}({arch})"])] + ([(1090, 8, list(obsoletes))] if obsoletes else [])
+            (1047, 8, [name, f"{name}({arch})"])] + ([(1054, 8, list(conflicts))] if conflicts else []) \
+        + ([(1090, 8, list(obsoletes))] if obsoletes else [])
     index, store = b"", b""
     for tag, kind, values in tags:
         index += b"".join(v.to_bytes(4, "big") for v in (tag, kind, len(store), len(values)))
@@ -94,8 +97,12 @@ def rpm(name, version, arch, obsoletes=()):
     return b"\xed\xab\xee\xdb" + b"\0" * 92 + header(b"", b"") + header(index, store) + b"payload"
 
 
-def pacman(pkgname, pkgver, arch):
-    info = f"# test\npkgname = {pkgname}\npkgver = {pkgver}-1\narch = {arch}\n"
+def pacman(pkgname, pkgver, arch, relations=None):
+    # arch-package's own relations for a nightly tarball, whose app name is <P>-nightly.
+    if relations is None:
+        relations = [f"provides = photocraft-nightly={pkgver}-1", "conflicts = photocraft-nightly",
+                     "conflicts = photocraft-nightly-bin", "conflicts = photocraft-nightly-git"]
+    info = f"# test\npkgname = {pkgname}\npkgver = {pkgver}-1\narch = {arch}\n" + "".join(r + "\n" for r in relations)
     raw = tar_bytes([(".PKGINFO", info.encode()), ("usr/bin/x", b"x")], mode="w")
     return subprocess.run(["zstd", "-q", "-c"], input=raw, stdout=subprocess.PIPE, check=True).stdout
 
@@ -250,7 +257,8 @@ class LinuxSigningTests(unittest.TestCase):
 
     def sign(self):
         write_producer(self.root)
-        return linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs(), self.root / "final", self.env)
+        return linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs(), self.root / "final", self.env,
+                          PINS)
 
     def test_shipped_key_is_the_registry_pin(self):
         path, primary, subkey = REAL_PINNED_KEY("photocraft", feed.load_registry())
@@ -264,7 +272,28 @@ class LinuxSigningTests(unittest.TestCase):
     def test_precheck_passes_the_nightly_identities(self):
         write_producer(self.root)
         self.assertEqual(linux.main(["precheck", "--admission", str(self.root / "admission"),
-                                     "--directory", str(self.root / "artifacts")]), 0)
+                                     "--directory", str(self.root / "artifacts"), *PIN_ARGS]), 0)
+
+    def test_pins_come_from_the_caller_and_the_registry(self):
+        registry = feed.load_registry()
+        self.assertEqual(linux.check_pins({"app": "photocraft", "prefix": "photocraft"}, PINS, registry), PINS[1])
+        self.assertEqual(linux.check_pins({"app": "designcraft", "prefix": "designcraft"},
+                                          ("designcraft", "ai.storyteller.designcraft"), registry),
+                         "ai.storyteller.designcraft")
+        cases = {
+            "is not the pinned": ({"app": "photocraft", "prefix": "photocraftx"}, PINS),
+            "prefix 'photocraftx' differs from the registry": ({"app": "photocraft", "prefix": "photocraftx"},
+                                                               ("photocraftx", PINS[1])),
+            "Flatpak ID .* differs from the registry": ({"app": "photocraft", "prefix": "photocraft"},
+                                                        ("photocraft", "ai.storyteller.other")),
+            "invalid stable Flatpak ID": ({"app": "designcraft", "prefix": "designcraft"},
+                                          ("designcraft", "ai.storyteller.designcraft.nightly")),
+            "invalid package prefix": ({"app": "designcraft", "prefix": "designcraft-nightly"},
+                                       ("designcraft-nightly", "ai.storyteller.designcraft")),
+        }
+        for message, (manifest, pins) in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(c.InvalidNightly, message):
+                linux.check_pins(manifest, pins, registry)
 
     def test_precheck_refuses_stable_identities(self):
         stem = f"photocraft-nightly-{NV}-linux-x86_64"
@@ -273,9 +302,20 @@ class LinuxSigningTests(unittest.TestCase):
         cases = {
             "deb Package": {f"{stem}.deb": deb("photocraft", f"{NV}-1", "amd64")},
             "deb Provides": {f"{stem}.deb": deb("photocraft-nightly", f"{NV}-1", "amd64", provides="photocraft")},
+            "deb Breaks": {f"{stem}.deb": deb("photocraft-nightly", f"{NV}-1", "amd64",
+                                              breaks="photocraft-nightly-bin, designcraft")},
+            "deb Conflicts": {f"{stem}.deb": deb("photocraft-nightly", f"{NV}-1", "amd64",
+                                                 conflicts="photocraftx-nightly")},
+            "rpm Conflicts": {f"{stem}.rpm": rpm("photocraft-nightly", NV, "x86_64", conflicts=["photocraft"])},
+            "pacman provides": {f"{stem}.pkg.tar.zst": pacman("ai.storyteller.photocraft-nightly", NV, "x86_64",
+                                                              ["provides = ai.storyteller.photocraft=1"])},
+            "pacman replaces": {f"{stem}.pkg.tar.zst": pacman("ai.storyteller.photocraft-nightly", NV, "x86_64",
+                                                              ["replaces = photocraft"])},
+            "is not app/ai.storyteller.photocraft.nightly/x86_64/stable": {
+                f"{stem}.flatpak": flatpak_bundle("app/ai.storyteller.other.nightly/x86_64/stable")},
             "deb Version": {f"{stem}.deb": deb("photocraft-nightly", "0.24.1", "amd64")},
             "rpm Name": {f"{stem}.rpm": rpm("photocraft", NV, "x86_64")},
-            "obsoletes": {f"{stem}.rpm": rpm("photocraft-nightly", NV, "x86_64", obsoletes=["photocraft"])},
+            "rpm Obsoletes": {f"{stem}.rpm": rpm("photocraft-nightly", NV, "x86_64", obsoletes=["photocraft"])},
             "pkgname": {f"{stem}.pkg.tar.zst": pacman("ai.storyteller.photocraft", NV, "x86_64")},
             "Flatpak ref": {f"{stem}.flatpak": flatpak_bundle(stable_ref)},
             "index.json points": {f"{stem}.oci-manifest.json": manifest, f"{stem}.oci.tar": layout},
@@ -286,7 +326,7 @@ class LinuxSigningTests(unittest.TestCase):
                 root = Path(tempfile.mkdtemp(dir=self.root))
                 write_producer(root, overrides)
                 with self.assertRaisesRegex(c.InvalidNightly, message):
-                    linux.precheck(root / "admission", root / "artifacts", self.env)
+                    linux.precheck(root / "admission", root / "artifacts", self.env, PINS)
 
     def test_sign_writes_the_final_set_and_verifies(self):
         result = self.sign()
@@ -302,15 +342,16 @@ class LinuxSigningTests(unittest.TestCase):
         self.assertIn("NIGHTLY.json", listed)
         self.assertIn("release-signing-key.asc", listed)
         self.assertTrue(result["descriptor"])
-        self.assertEqual(linux.main(["verify-final", "--admission", str(self.root / "admission"),
-                                     "--directory", str(final)]), 0)
+        with patch.dict(os.environ, {"PATH": self.env["PATH"]}):
+            self.assertEqual(linux.main(["verify-final", "--admission", str(self.root / "admission"),
+                                         "--directory", str(final), *PIN_ARGS]), 0)
 
         # A signature by the right key over other bytes, and changed producer bytes, both refuse.
         other = self.root / "other.txt"
         other.write_text("other")
         gpg(self.home, "--yes", "--armor", "--local-user", self.subkey, "--detach-sign", "-o", str(final / "SHA256SUMS.txt.asc"), str(other))
         with self.assertRaisesRegex(c.InvalidNightly, "SHA256SUMS.txt.asc does not verify"):
-            linux.verify_final(self.root / "admission", final, self.env)
+            linux.verify_final(self.root / "admission", final, self.env, PINS)
 
     def test_verify_final_refuses_changed_producer_bytes(self):
         self.sign()
@@ -318,19 +359,30 @@ class LinuxSigningTests(unittest.TestCase):
         flatpak = next(final.glob("*-x86_64.flatpak"))
         flatpak.write_bytes(flatpak.read_bytes() + b"\0")
         with self.assertRaisesRegex(c.InvalidNightly, "differs from the producer"):
-            linux.verify_final(self.root / "admission", final, self.env)
+            linux.verify_final(self.root / "admission", final, self.env, PINS)
+
+    def test_verify_final_requires_skopeo_and_rpmkeys(self):
+        self.sign()
+        which = shutil.which
+        for missing in ("skopeo", "rpmkeys"):
+            with self.subTest(missing), \
+                    patch.object(linux.shutil, "which", lambda name, path=None: None if name == missing else which(name, path=path)), \
+                    self.assertRaisesRegex(c.InvalidNightly, f"{missing} is not installed"):
+                linux.verify_final(self.root / "admission", self.root / "final", self.env, PINS)
 
     def test_sign_refuses_a_key_other_than_the_pin(self):
         write_producer(self.root)
         with patch.object(linux, "pinned_key", lambda app, registry: (self.root / "pinned.asc", "2B76741B414AAD6CD33E631213A005C0B9D7C3ED", self.subkey)), \
                 patch.object(linux, "SIGN_LINUX", self.root / "must-not-run.sh"):
             with self.assertRaisesRegex(c.InvalidNightly, "not the registry's pinned key"):
-                linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs(), self.root / "final", self.env)
+                linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs(), self.root / "final", self.env,
+                           PINS)
 
     def test_sign_refuses_a_missing_signed_platform(self):
         write_producer(self.root)
         with self.assertRaisesRegex(c.InvalidNightly, "signed launcher assets missing"):
-            linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs()[:1], self.root / "final", self.env)
+            linux.sign(self.root / "admission", self.root / "artifacts", self.signed_dirs()[:1], self.root / "final", self.env,
+                       PINS)
 
 
 class FlatpakBundleTests(unittest.TestCase):

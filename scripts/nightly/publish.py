@@ -346,6 +346,8 @@ def registries(nightly, environ):
     if user and secret:
         # Same repository name as the stable images on Docker Hub.
         result.append((f"docker.io/storytold/{nightly.repository.split('/', 1)[1].lower()}", "docker.io", user, secret))
+    else:
+        warn("DOCKERHUB_USERNAME or DOCKERHUB_TOKEN is not set; the nightly images go to GHCR only.")
     return result
 
 

@@ -462,12 +462,13 @@ class ImageTests(Fixture, unittest.TestCase):
         run = FakeSkopeo()
         code, output = self.run_cli(publish, "move-tags", "--admission", str(self.admission), run=run)
         self.assertEqual(code, 0, output)
+        self.assertIn("::warning::DOCKERHUB_USERNAME or DOCKERHUB_TOKEN is not set", output)
         digest = hashlib.sha256(self.manifests["aarch64"]).hexdigest()
         self.assertIn(f"docker://ghcr.io/storytold/photocraft@sha256:{digest}", run.calls[1])
         self.assertEqual(run.calls[1][-1], "docker://ghcr.io/storytold/photocraft:nightly-aarch64")
         code, output = self.run_cli(publish, "move-tags", "--admission", str(self.admission), run=FakeSkopeo(fail=True))
         self.assertEqual(code, 0)
-        self.assertEqual(output.count("::warning::"), 2)
+        self.assertEqual(output.count("::warning::Could not move"), 2)
 
 
 if __name__ == "__main__":
