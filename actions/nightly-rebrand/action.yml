@@ -41,7 +41,7 @@ runs:
         rpms=("$INPUT_DIR"/*.rpm)
         missing() { if command -v "$1" >/dev/null; then echo false; else echo true; fi; }
         if [ "${#rpms[@]}" -gt 0 ]; then
-          echo "rpm-tools=$(if command -v rpm >/dev/null && command -v rpm2cpio >/dev/null; then echo false; else echo true; fi)" >> "$GITHUB_OUTPUT"
+          echo "rpm=$(missing rpm)" >> "$GITHUB_OUTPUT"
           echo "nfpm=$(missing nfpm)" >> "$GITHUB_OUTPUT"
         fi
         case "$RUNNER_ARCH" in
@@ -49,11 +49,11 @@ runs:
           ARM64) echo "deb-arch=arm64" >> "$GITHUB_OUTPUT" ;;
         esac
 
-    - name: Install the rpm tools
-      if: steps.tools.outputs.rpm-tools == 'true'
+    - name: Install rpm
+      if: steps.tools.outputs.rpm == 'true'
       uses: storytold/craft-common-actions/actions/install-apt-packages@main
       with:
-        packages: rpm rpm2cpio
+        packages: rpm
 
     - name: Install nfpm
       if: steps.tools.outputs.nfpm == 'true'
