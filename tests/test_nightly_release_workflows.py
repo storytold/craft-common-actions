@@ -133,8 +133,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(tolerant, {"Retain only finalized ownership evidence", "Retain finalized OCI publication proof", proof})
         self.assertEqual(self.release.count("continue-on-error:"), 3)
         steps_by_name = dict(steps)
-        self.assertIn(".ownership/ownership.json", steps_by_name[proof])
-        self.assertIn('n.digest_file(".packet", "SHA256SUMS.txt")', steps_by_name[proof])
+        self.assertIn("nightly_oci.py stage-proof", steps_by_name[proof])
+        helper = (ROOT/"scripts/nightly_oci.py").read_text().split("def stage_proof():", 1)[1]
+        helper = helper.split("def resolve_completed_publication():", 1)[0]
+        self.assertIn(".ownership/ownership.json", helper)
+        self.assertIn('n.digest_file(".packet", "SHA256SUMS.txt")', helper)
         self.assertLess(publisher.index("Publish the signed nightly and preserve ownership"), publisher.index(proof))
         upload = dict(steps)["Retain only finalized ownership evidence"]
         self.assertIn("        continue-on-error: true\n", upload)
@@ -247,7 +250,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         oci = workflow("nightly-oci.yml")
         self.assertIn("packages: write", oci)
         self.assertNotIn("packages: write", self.release)
-        self.assertIn("push_completed_publication", oci)
+        self.assertIn("nightly_oci.py push", jobs(oci)["push-oci"])
 
         unsigned_pkg = jobs(self.unsigned)["build-linux-packages"]
         self.assertNotIn("publish-linux-packages", self.unsigned.split("\njobs:\n", 1)[0])
