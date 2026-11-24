@@ -201,11 +201,12 @@ nightly's, a scheduled run skips every nightly job.
      other key fingerprint than the registry pin. It writes `NIGHTLY.json`, `SHA256SUMS.txt` and
      its signature last, so the checksums cover every asset.
    - `verify-final` (no keys) checks the exact asset set, every signature against the pinned public
-     key, and the descriptor against the launcher's own rules.
-   - `publish` (no environment) pushes the OCI images, creates a draft release, compares what was
-     uploaded with what was verified, publishes it, re-checks the descriptor against the published
-     release and deletes the release if that fails.
-   - `retain` prunes to 3 and dispatches the website.
+     key, and the descriptor against the launcher's own rules. It needs `skopeo` and `rpmkeys`.
+   - `publish` (environment `release`, for the Docker Hub secrets) pushes the OCI images, creates a
+     draft release, compares what was uploaded with what was verified, publishes it, re-checks the
+     descriptor against the published release and deletes the release if that fails.
+   - `retain` (environment `release`, for the website dispatch token) prunes to 3 and dispatches
+     the website.
 
    Signer runs of one repository queue; none is cancelled. The handoff waits for the whole
    `release` job, but it does not need it green: a failed stable-only job (Windows, FreeBSD, web)
@@ -273,6 +274,8 @@ before the key is used. No build job on `main` holds a secret.
        with:
          app-name: photocraft            # as in the release.yml caller
          app-title: PhotoCraft           # release title: "<app-title> Nightly <nv>"
+         package-prefix: photocraft      # stable package name; nightlies are <prefix>-nightly
+         flatpak-id: ai.storyteller.photocraft  # stable Flatpak app ID; the nightly is <id>.nightly
          producer-workflow: .github/workflows/release.yml
          manual-actors: '["some-maintainer"]'
          producer_run_id: ${{ inputs.producer_run_id }}
@@ -303,9 +306,17 @@ before the key is used. No build job on `main` holds a secret.
          ARTCRAFT_SERVICES_DISPATCH_TOKEN: ${{ secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN }}
    ```
 
-   A distro-only app lists only `LINUX_SIGNING_KEY` and the publishing secrets. The signing jobs
-   run in the `release` environment, which supplies the values; the environment has no reviewers
-   in the current setup, so a nightly signs without waiting for approval. `manual-actors` lists the
+   `package-prefix` and `flatpak-id` pin the nightly's names on the signer side: the producer on
+   `main` names its own files, so the signer refuses a manifest whose prefix differs, any Flatpak
+   ref other than `app/<flatpak-id>.nightly/<arch>/stable`, and any package
+   Provides/Replaces/Obsoletes/Conflicts/Breaks that names something other than the app's own
+   `<prefix>-nightly` packages. A registry app's entry pins the same two values, and both must
+   agree.
+
+   A distro-only app lists only `LINUX_SIGNING_KEY` and the publishing secrets. The signing,
+   publish and retain jobs run in the `release` environment, which supplies the values; the
+   environment has no reviewers in the current setup, so a nightly signs without waiting for
+   approval. `manual-actors` lists the
    logins that may start or re-run a nightly by hand. The scheduled run's attempt 1 needs no entry.
 
 3. For an app that is not in the registry, nothing else changes: it gets `nightly_<nv>` releases of

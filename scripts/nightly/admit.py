@@ -591,10 +591,8 @@ def payload_outputs(state):
         match = re.fullmatch(r"nightly-launcher-(linux|macos|windows)-[1-9][0-9]*", name)
         if match:
             launcher[match[1]] = item["id"]
-    flatpak = [str(item["id"]) for name, item in payloads.items() if name.startswith("nightly-flatpak-")]
     return {
         "payload_artifact_ids": ",".join(str(item["id"]) for item in payloads.values()),
-        "flatpak_artifact_ids": ",".join(flatpak),
         "launcher_artifact_linux": launcher.get("linux", ""),
         "launcher_artifact_macos": launcher.get("macos", ""),
         "launcher_artifact_windows": launcher.get("windows", ""),
