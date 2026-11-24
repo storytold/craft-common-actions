@@ -138,5 +138,32 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                     self.assertIn('must honor CARGO_BUILD_TARGET', result[4])
 
 
+
+VM = next(step for step in STEPS if str(step.get('uses', '')).startswith('step-security/freebsd-vm@'))
+CI = yaml.load((ROOT / '.github/workflows/freebsd.yml').read_text(), Loader=yaml.BaseLoader)
+CI_VM = next(step for step in CI['jobs']['freebsd']['steps'] if str(step.get('uses', '')).startswith('step-security/freebsd-vm@'))
+
+
+def arc_block(prepare):
+    """The guest memory guard: from the ARC comment through its closing fi."""
+    start = prepare.index('if [ "$(uname -s)" = FreeBSD ]; then')
+    return prepare[start:prepare.index('\nfi\n', start)+4]
+
+
+class FreeBSDReleaseMemoryTests(unittest.TestCase):
+    def test_release_guest_caps_the_zfs_arc_like_ci_before_any_build(self):
+        prepare = VM['with']['prepare']
+        self.assertIn('sysctl vfs.zfs.arc_max=2147483648', prepare)
+        self.assertEqual(arc_block(prepare), arc_block(CI_VM['with']['prepare']))
+        self.assertLess(prepare.index('vfs.zfs.arc_max'), prepare.index('pkg install'))
+
+    def test_vm_size_build_jobs_and_release_profile_are_unchanged(self):
+        self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '12288'))  # Host runner keeps its headroom.
+        self.assertEqual(DATA['jobs']['freebsd']['env']['CARGO_BUILD_JOBS'], '4')
+        for text in (VM['with']['prepare'], BUILD):
+            text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+            for forbidden in ('mdconfig', 'swapon', 'CARGO_PROFILE_RELEASE', 'codegen-units', 'lto', 'thinlto'):
+                self.assertNotIn(forbidden, text)  # No ZFS-backed swap file; LTO settings stay the app's.
+
 if __name__ == '__main__':
     unittest.main()

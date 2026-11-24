@@ -587,6 +587,27 @@ class RequestTests(unittest.TestCase):
         self.api.rows[last]['artifacts'] = self.api.rows[last]['artifacts'][:-1]
         with self.assertRaisesRegex(ValueError, 'incomplete'): self.invoke()
 
+    def test_publisher_subject_bound_matches_the_native_signer(self):
+        import nightly_signing as signing
+        azure = {key: 'synthetic' for key in signing.AZURE_SECRETS}
+        for length, accepted in ((1024, True), (1025, False)):
+            subject = 'CN=' + 'x'*(length-3)
+            with self.subTest(length=length):
+                native = {**azure, 'NIGHTLY_WINDOWS_PUBLISHER_SUBJECT': subject}
+                # Live v3 trust entry and frozen v2 history field share the native signer's bound.
+                policy = copy.deepcopy(self.policy); policy['platforms']['windows-x86_64']['trust']['publisher_subject'] = subject
+                legacy = {**self.legacy_policy(), 'windows_publisher_subject': subject}
+                if accepted:
+                    signing.require_config('windows-x86_64', native); r.validate_policy(policy); r.validate_policy(legacy)
+                else:
+                    with self.assertRaises(ValueError): signing.require_config('windows-x86_64', native)
+                    # Refused at policy validation, before any provider read or artifact work.
+                    with self.assertRaisesRegex(ValueError, 'publisher subject'): r.validate_policy(policy)
+                    with self.assertRaisesRegex(ValueError, 'publisher subject'): r.validate_policy(legacy)
+                    self.api.calls.clear()
+                    with self.assertRaises(ValueError): r.validate_request(policy, self.env, '100', '1', self.api, now=self.now)
+                    self.assertEqual(self.api.calls, [])
+
 
     def test_v3_policy_requires_exact_platform_map_kinds_and_single_trust_values(self):
         r.validate_policy(self.policy)

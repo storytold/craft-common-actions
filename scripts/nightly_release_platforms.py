@@ -64,7 +64,9 @@ def standard_assets(platform, version, extension):
 
 # ---------------------------------------------------------------- Windows
 def _windows_trust(trust):
-    single_trust(trust, {"publisher_subject"})
+    subject = single_trust(trust, {"publisher_subject"})
+    # Same bound as the native signer, so a bad subject refuses at policy validation, before artifact work.
+    n.require(len(subject) <= signing.WINDOWS_PUBLISHER_SUBJECT_MAX, "Windows publisher subject exceeds the native signer bound")
     return trust
 
 

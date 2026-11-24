@@ -349,7 +349,8 @@ class BridgeTests(unittest.TestCase):
             assets = [{"name": plan["asset"], "digest": "sha256:"+"2"*64}]
         release = {"id": 7, "tag_name": self.plan["identity"]["tag"], "target_commitish": "a"*40,
             "draft": False, "prerelease": True, "body": body}
-        rows = {"/compare/"+"d"*40+"..."+"d"*40: {"status": "identical", "behind_by": 0, "merge_base_commit": {"sha": "d"*40}}}
+        rows = {"/compare/"+"d"*40+"..."+"d"*40+"?per_page=1&page=2": {"status": "identical", "ahead_by": 0, "behind_by": 0,
+            "base_commit": {"sha": "d"*40}, "merge_base_commit": {"sha": "d"*40}, "commits": []}}
         raw = json.dumps(policy).encode()
         rows["/contents/.github/nightly-signing-policy.json?ref="+"d"*40] = {
             "encoding": "base64", "size": len(raw), "content": b.base64.b64encode(raw).decode()}
@@ -408,7 +409,7 @@ class BridgeTests(unittest.TestCase):
 
     def test_previous_publication_refuses_history_run_step_tag_digest_and_pagination_substitution(self):
         mutations = [
-            lambda rows: rows["/compare/"+"d"*40+"..."+"d"*40].update(behind_by=1),
+            lambda rows: rows["/compare/"+"d"*40+"..."+"d"*40+"?per_page=1&page=2"].update(behind_by=1),
             lambda rows: rows["/actions/runs/200/attempts/1"].update(conclusion="failure"),
             lambda rows: rows["/actions/runs/100/attempts/1"].update(head_sha="f"*40),
             lambda rows: rows["/actions/runs/200/attempts/1/jobs?filter=all&per_page=20&page=1"]["jobs"][0]["steps"][0].update(conclusion="skipped"),
@@ -492,8 +493,8 @@ class BridgeTests(unittest.TestCase):
         newer["signer"].update(run_id=201, run_number=21)
         api.rows["/git/ref/heads/main"] = {"ref":"refs/heads/main", "object":{"type":"commit", "sha":"f"*40}}
         for base in ("a"*40, "f"*40):
-            api.rows["/compare/"+base+"..."+"f"*40] = {"status":"identical" if base == "f"*40 else "ahead",
-                "behind_by":0,"ahead_by":int(base != "f"*40),"base_commit":{"sha":base},"merge_base_commit":{"sha":base}}
+            api.rows["/compare/"+base+"..."+"f"*40+"?per_page=1&page=2"] = {"status":"identical" if base == "f"*40 else "ahead",
+                "behind_by":0,"ahead_by":int(base != "f"*40),"base_commit":{"sha":base},"merge_base_commit":{"sha":base},"commits":[]}
         self.assertEqual(b.publication_state(api, self.registry, self.policy, newer)["identity"]["source_commit"], "f"*40)
         self.assertEqual(api.writes, writes)
 
@@ -609,12 +610,7 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "before publication"):
                 b.publish(self.policy, state, self.root/"combined", packet, self.root/"ownership", None, lambda: True, self.registry)
 
-    def test_postpublication_GITHUB_OUTPUT_IO_warns_but_non_IO_errors_still_fail(self):
-        with patch.object(b, "outputs", side_effect=OSError("synthetic output failed")), patch.object(b, "bookkeeping_warning") as warning:
-            b.publication_outputs({"id": 7})
-        warning.assert_called_once()
-        with patch.object(b, "outputs", side_effect=ValueError("synthetic programming bug")), self.assertRaises(ValueError):
-            b.publication_outputs({"id": 7})
+    def test_broken_diagnostic_stream_is_bookkeeping_only(self):
         with patch.object(b, "print", side_effect=OSError("synthetic diagnostic stream failed"), create=True):
             b.bookkeeping_warning({"id": 7}, "synthetic warning", OSError("synthetic output failure"))
 
@@ -654,6 +650,49 @@ class BridgeTests(unittest.TestCase):
         for path in (".github/workflows/nightly.yml@release", ".github/workflows/other.yml@main",
                      ".github/workflows/nightly.yml@refs/heads/main"):
             with self.subTest(path=path), self.assertRaises(ValueError): plan(path)
+
+    def test_previous_publication_lineage_after_a_long_gap_uses_the_bounded_compare_page(self):
+        api, release = self.history()
+        current = copy.deepcopy(self.request); current["signer"]["source_commit"] = "e"*40
+        # GitHub's first compare page carries every changed file and patch; after a long
+        # gap it exceeds HTTPTransport's 256 KiB bound, which raises before any field is read.
+        api.rows["/compare/"+"d"*40+"..."+"e"*40] = ValueError("API reply exceeds bound")
+        page = {"status": "ahead", "ahead_by": 4000, "behind_by": 0, "total_commits": 4000,
+            "base_commit": {"sha": "d"*40}, "merge_base_commit": {"sha": "d"*40}, "commits": [{"sha": "f"*40}]}
+        api.rows["/compare/"+"d"*40+"..."+"e"*40+"?per_page=1&page=2"] = page
+        previous = b.previous_publication(api, self.registry, self.policy, current, [release])
+        self.assertEqual(previous["identity"], self.plan["identity"])
+        self.assertIn(("GET", "/compare/"+"d"*40+"..."+"e"*40+"?per_page=1&page=2"), api.calls)
+        for change in ({"files": [{"filename": "x", "patch": "@@"}]}, {"status": "diverged"}, {"behind_by": 1},
+                       {"merge_base_commit": {"sha": "f"*40}}, {"base_commit": {"sha": "f"*40}}, {"status": "identical"},
+                       {"commits": [{"sha": "f"*40}, {"sha": "a"*40}]}):
+            with self.subTest(change=change):
+                api, release = self.history()
+                api.rows["/compare/"+"d"*40+"..."+"e"*40+"?per_page=1&page=2"] = {**page, **change}
+                with self.assertRaises(ValueError):
+                    b.previous_publication(api, self.registry, self.policy, current, [release])
+        for key in ("merge_base_commit", "behind_by", "status"):
+            with self.subTest(missing=key):
+                api, release = self.history()
+                api.rows["/compare/"+"d"*40+"..."+"e"*40+"?per_page=1&page=2"] = {k: v for k, v in page.items() if k != key}
+                with self.assertRaises(ValueError):
+                    b.previous_publication(api, self.registry, self.policy, current, [release])
+
+    def test_publish_mode_writes_no_output_after_the_release_is_public(self):
+        # No step reads a release-id output; a partial GITHUB_OUTPUT line would fail a published step.
+        output = self.root/"github-output"; output.touch()
+        argv = ["nightly_release.py", "publish", "--source", "src", "--directory", "signed",
+            "--combined", "combined", "--packet", "packet", "--ownership", "ownership"]
+        with patch.object(sys, "argv", argv), patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}), \
+             patch.object(b, "source_policy", return_value=self.policy), patch.object(b.pub, "HTTPTransport"), \
+             patch.object(b, "SonarTransport"), patch.object(b, "signed_states", return_value=(self.state, {})), \
+             patch.object(b, "revalidate", return_value=True), patch.object(b, "verify_final", return_value=True), \
+             patch.object(b, "combine", return_value=self.root/"combined"), \
+             patch.object(b, "publish", return_value={"id": 7}) as published, \
+             patch.object(b.n, "bounded_json", return_value=self.registry):
+            b.main()
+        published.assert_called_once()
+        self.assertEqual(output.read_text(), "")
 
 
     # ---- policy v3 / one release for every admitted platform -------------------------

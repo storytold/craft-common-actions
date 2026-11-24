@@ -7,11 +7,24 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 DATA = yaml.load((ROOT / ".github/workflows/freebsd.yml").read_text(), Loader=yaml.BaseLoader)
 STEPS = DATA["jobs"]["freebsd"]["steps"]
+RELEASE = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+RELEASE_STEPS = RELEASE["jobs"]["freebsd"]["steps"]
+
+
+def diagnostics(steps):
+    return next(s for s in steps if s.get("name") == "Report final host and guest resources")
 
 
 class FreeBSDResourceDiagnosticsTests(unittest.TestCase):
     def setUp(self):
-        self.step = next(s for s in STEPS if s.get("name") == "Report final host and guest resources")
+        self.step = diagnostics(STEPS)
+
+    def test_release_build_reports_the_same_resources_last(self):
+        # The release FreeBSD job gets the same bounded, read-only report, as its final step.
+        step = diagnostics(RELEASE_STEPS)
+        self.assertIs(step, RELEASE_STEPS[-1])
+        self.assertEqual(step, self.step)
+        self.assertNotIn("continue-on-error", next(s for s in RELEASE_STEPS if s.get("name") == "Build and package"))
 
     def test_diagnostics_run_after_all_work_even_on_failure(self):
         self.assertIs(self.step, STEPS[-1])
