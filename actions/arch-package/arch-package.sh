@@ -268,18 +268,25 @@ cat <<NIGHTLY_PKG
   fi
   for desktop_file in "\$pkgdir/usr/share/applications/"*.desktop; do
     [ -f "\$desktop_file" ] || continue
-    sed -E \
-      -e "s@^Exec=${app_re}([[:space:]]|\$)@Exec=$app-nightly\\1@" \
-      -e "s@^Icon=${base_pkgname_re}\$@Icon=$pkgname@" \
-      "\$desktop_file" > "\$desktop_file.tmp" && mv "\$desktop_file.tmp" "\$desktop_file"
-    if ! grep -q '^StartupWMClass=' "\$desktop_file"; then
-      awk -v wm="$base_pkgname" '
-        BEGIN { inserted = 0 }
-        /^\[Desktop Entry\]$/ && !inserted { print; print "StartupWMClass=" wm; inserted = 1; next }
-        { print }
-        END { if (!inserted) print "StartupWMClass=" wm }
-      ' "\$desktop_file" > "\$desktop_file.tmp" && mv "\$desktop_file.tmp" "\$desktop_file"
+    insert_wm=1
+    if grep -q '^StartupWMClass=' "\$desktop_file"; then
+      insert_wm=0
     fi
+    awk -v app="$app" -v base="$base_pkgname" -v pkg="$pkgname" -v insert_wm="\$insert_wm" '
+      BEGIN { inserted = 0 }
+      /^\[Desktop Entry\]$/ {
+        print
+        if (insert_wm == 1 && !inserted) { print "StartupWMClass=" base; inserted = 1 }
+        next
+      }
+      index(\$0, "Exec=" app) == 1 && (length(\$0) == 5 + length(app) || substr(\$0, 6 + length(app), 1) ~ /[ \t]/) {
+        print "Exec=" app "-nightly" substr(\$0, 6 + length(app))
+        next
+      }
+      \$0 == "Icon=" base { print "Icon=" pkg; next }
+      { print }
+      END { if (insert_wm == 1 && !inserted) print "StartupWMClass=" base }
+    ' "\$desktop_file" > "\$desktop_file.tmp" && mv "\$desktop_file.tmp" "\$desktop_file"
     case "\$desktop_file" in
       *-nightly.desktop | *.nightly.desktop) ;;
       *) mv "\$desktop_file" "\$pkgdir/usr/share/applications/$pkgname.desktop" ;;
@@ -287,10 +294,21 @@ cat <<NIGHTLY_PKG
   done
   for metainfo_file in "\$pkgdir/usr/share/metainfo/"*.metainfo.xml; do
     [ -f "\$metainfo_file" ] || continue
-    sed -E \
-      -e "s@<id>${base_pkgname_re}</id>@<id>$pkgname</id>@g" \
-      -e "s@<launchable type=\"desktop-id\">${base_pkgname_re}\\.desktop</launchable>@<launchable type=\"desktop-id\">$pkgname.desktop</launchable>@g" \
-      "\$metainfo_file" > "\$metainfo_file.tmp" && mv "\$metainfo_file.tmp" "\$metainfo_file"
+    awk -v base="$base_pkgname" -v pkg="$pkgname" '
+      function replace_all(s, old, new,    i, out) {
+        out = ""
+        while ((i = index(s, old)) > 0) {
+          out = out substr(s, 1, i - 1) new
+          s = substr(s, i + length(old))
+        }
+        return out s
+      }
+      {
+        \$0 = replace_all(\$0, "<id>" base "</id>", "<id>" pkg "</id>")
+        \$0 = replace_all(\$0, "<launchable type=\"desktop-id\">" base ".desktop</launchable>", "<launchable type=\"desktop-id\">" pkg ".desktop</launchable>")
+        print
+      }
+    ' "\$metainfo_file" > "\$metainfo_file.tmp" && mv "\$metainfo_file.tmp" "\$metainfo_file"
     case "\$metainfo_file" in
       *-nightly.metainfo.xml | *.nightly.metainfo.xml) ;;
       *) mv "\$metainfo_file" "\$pkgdir/usr/share/metainfo/$pkgname.metainfo.xml" ;;
@@ -325,8 +343,8 @@ cat <<NIGHTLY_PKG
     comp_base="\$(basename "\$comp")"
     new_comp="\${comp_base/#$app/$app-nightly}"
     sed -E \
-      -e "s@(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1_$app-nightly\\2\\3@g" \
-      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
       "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
@@ -335,8 +353,8 @@ cat <<NIGHTLY_PKG
     comp_base="\$(basename "\$comp")"
     new_comp="_$app-nightly\${comp_base#_$app}"
     sed -E \
-      -e "s@(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1_$app-nightly\\2\\3@g" \
-      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      -e "s#(^|[^[:alnum:]_-])_${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1_$app-nightly\\2\\3#g" \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
       "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
@@ -345,7 +363,7 @@ cat <<NIGHTLY_PKG
     comp_base="\$(basename "\$comp")"
     new_comp="\${comp_base/#$app/$app-nightly}"
     sed -E \
-      -e "s@(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)@\\1$app-nightly\\2\\3@g" \
+      -e "s#(^|[^[:alnum:]_-])${app_re}(-cli)?([^[:alnum:]_-]|\$)#\\1$app-nightly\\2\\3#g" \
       "\$comp" > "\$comp.tmp" && mv "\$comp.tmp" "\$comp"
     mv "\$comp" "\${comp%/*}/\$new_comp"
   done
