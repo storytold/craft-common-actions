@@ -1,5 +1,6 @@
 """Tests for the nightly-flatpak action's manifest and metainfo rewrite."""
 
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -92,6 +93,7 @@ class MetainfoRewriteTests(unittest.TestCase):
         # with the ID already rewritten the stable ID is never claimed.
         self.assertIsNone(root.find("provides/id"))
         self.assertEqual(root.findtext("provides/binary"), "photocraft")
+        self.assertEqual(root.findall("provides/mediatype"), [])
 
     def test_refuses_a_metainfo_for_another_app(self):
         text = (FIXTURES / "ai.storyteller.photocraft.metainfo.xml").read_text()
@@ -110,7 +112,14 @@ class PrepareAndOciTests(unittest.TestCase):
             desktop = stage / "applications/ai.storyteller.photocraft.desktop"
             desktop.parent.mkdir(parents=True)
             desktop.write_text("[Desktop Entry]\nName=PhotoCraft\nIcon=ai.storyteller.photocraft\n"
-                               "Icon[de]=ai.storyteller.photocraft\nStartupWMClass=ai.storyteller.photocraft\n")
+                               "Icon[de]=ai.storyteller.photocraft\nMimeType=image/png;\nMimeType[de]=image/png;\n"
+                               "StartupWMClass=ai.storyteller.photocraft\n")
+            mime = stage / "mime/packages/ai.storyteller.photocraft.xml"
+            mime.parent.mkdir(parents=True)
+            mime.write_text('<mime-info><mime-type type="application/x-photocraft">'
+                            '<icon name="ai.storyteller.photocraft"/>'
+                            "<generic-icon name='ai.storyteller.photocraft'/>"
+                            '<icon name="other"/></mime-type></mime-info>')
             icons = ["hicolor/16x16/apps/ai.storyteller.photocraft.png",
                      "hicolor/scalable/apps/ai.storyteller.photocraft.svg",
                      "hicolor/symbolic/apps/ai.storyteller.photocraft-symbolic.svg",
@@ -136,6 +145,10 @@ class PrepareAndOciTests(unittest.TestCase):
             self.assertEqual(desktop.read_text(), "[Desktop Entry]\nName=PhotoCraft\n"
                              "Icon=ai.storyteller.photocraft.nightly\nIcon[de]=ai.storyteller.photocraft.nightly\n"
                              "StartupWMClass=ai.storyteller.photocraft\n")
+            self.assertEqual(mime.read_text(), '<mime-info><mime-type type="application/x-photocraft">'
+                             '<icon name="ai.storyteller.photocraft.nightly"/>'
+                             "<generic-icon name='ai.storyteller.photocraft.nightly'/>"
+                             '<icon name="other"/></mime-type></mime-info>')
             self.assertEqual(sorted(str(p.relative_to(stage / "icons")) for p in (stage / "icons").rglob("*.*")), [
                 "hicolor/16x16/apps/ai.storyteller.photocraft.nightly.png",
                 "hicolor/scalable/apps/ai.storyteller.photocraft.nightly.svg",
@@ -158,6 +171,46 @@ class PrepareAndOciTests(unittest.TestCase):
             stable = ref.replace(".nightly", "")
             bad = subprocess.run(["python3", script, "check-oci", str(layout), stable], capture_output=True, text=True)
             self.assertEqual(bad.returncode, 1)
+
+    def make_layout(self, root):
+        blobs = root / "blobs/sha256"
+        blobs.mkdir(parents=True)
+        manifest = b'{"config": {"digest": "sha256:c0"},\n "layers": []}\n'
+        digest = hashlib.sha256(manifest).hexdigest()
+        (blobs / digest).write_bytes(manifest)
+        (blobs / "other").write_bytes(b"x")
+        (root / "index.json").write_text(json.dumps({"manifests": [{"digest": f"sha256:{digest}"}]}))
+        (root / "oci-layout").write_text('{"imageLayoutVersion": "1.0.0"}')
+        return manifest
+
+    def test_oci_manifest_is_the_indexed_blob_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = Path(tmp) / "layout"
+            layout.mkdir()
+            manifest = self.make_layout(layout)
+            out = Path(tmp) / "m.json"
+            self.assertEqual(nf.main(["oci-manifest", str(layout), str(out)]), 0)
+            self.assertEqual(out.read_bytes(), manifest)
+
+    def test_oci_archive_is_deterministic(self):
+        import os
+        import tarfile
+        with tempfile.TemporaryDirectory() as tmp:
+            layout = Path(tmp) / "layout"
+            layout.mkdir()
+            self.make_layout(layout)
+            first, second = Path(tmp) / "a.tar", Path(tmp) / "b.tar"
+            self.assertEqual(nf.main(["oci-archive", str(layout), str(first)]), 0)
+            for path in layout.rglob("*"):
+                os.utime(path, (12345, 12345))
+            self.assertEqual(nf.main(["oci-archive", str(layout), str(second)]), 0)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with tarfile.open(first) as tar:
+                members = tar.getmembers()
+            names = [m.name for m in members]
+            self.assertEqual(names, sorted(names))
+            self.assertEqual({(m.mtime, m.uid, m.gid, m.uname) for m in members}, {(0, 0, 0, "")})
+            self.assertIn("index.json", names)
 
 
 if __name__ == "__main__":

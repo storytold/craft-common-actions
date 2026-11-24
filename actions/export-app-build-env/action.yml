@@ -24,7 +24,7 @@ inputs:
     required: false
     default: ${{ github.sha }}
   channel:
-    description: "The app's compile-time build channel (e.g. nightly-v1), exported as <PREFIX>_BUILD_CHANNEL; empty exports none"
+    description: "The app's compile-time build channel (e.g. nightly-v1), exported as <PREFIX>_BUILD_CHANNEL with <PREFIX>_OVERRIDE_VERSION; empty exports none"
     required: false
     default: ""
 

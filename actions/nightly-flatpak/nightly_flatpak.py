@@ -5,10 +5,15 @@
                              rewrite WORKDIR/stage (the unpacked stable tarball) for the nightly
                              ID. Prints stable-id=, app-id=, command= and manifest= lines.
   check-oci LAYOUT REF       Fail unless the OCI layout's image config labels org.flatpak.ref=REF.
+  oci-manifest LAYOUT OUT    Copy the manifest blob that LAYOUT/index.json points at to OUT, byte
+                             for byte (its sha256 is the digest the image is published under).
+  oci-archive LAYOUT OUT     Write a deterministic tar of the OCI layout to OUT: sorted entries,
+                             mtime 0, uid/gid 0, fixed modes.
 
 The manifest installs the stage's desktop file, metainfo and MIME file under the nightly ID, and
 desktop-file-name-suffix marks the menu entry. The stage's icons are renamed, and its desktop
-file and metainfo point at the nightly ID, before the build. flatpak-builder's own rename keys
+file and metainfo point at the nightly ID, before the build. The nightly claims no file
+associations: its desktop file loses MimeType= and its metainfo loses <provides><mediatype>. flatpak-builder's own rename keys
 are not used: rename-desktop-file adds X-Flatpak-RenamedFrom=<stable>.desktop (desktop shells
 then treat the nightly as the stable app's successor), rename-appdata-file adds
 <provides><id>STABLE</id></provides> to the metainfo (software centres read it the same way),
@@ -18,10 +23,13 @@ starts with the old ID can be renamed again.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import sys
+import tarfile
 import xml.etree.ElementTree as ET
 
 NIGHTLY_SUFFIX = ".nightly"
@@ -108,6 +116,11 @@ def rewrite_metainfo(text: str, stable_id: str, app_id: str) -> str:
     for node in root.findall("icon"):
         if node.get("type") == "stock" and (node.text or "").strip() == stable_id:
             node.text = app_id
+    for provides in root.findall("provides"):
+        for node in provides.findall("mediatype"):
+            provides.remove(node)
+        if len(provides) == 0:
+            root.remove(provides)
     for node in root.findall("name"):
         if node.text and not node.text.endswith(NAME_SUFFIX):
             node.text = node.text.rstrip() + NAME_SUFFIX
@@ -115,9 +128,18 @@ def rewrite_metainfo(text: str, stable_id: str, app_id: str) -> str:
 
 
 def rewrite_desktop(text: str, stable_id: str, app_id: str) -> str:
-    """Point the desktop entry's Icon= keys that name the stable icon at the nightly one."""
-    return re.sub(rf"^(Icon(\[[^\]]*\])?[ \t]*=[ \t]*){re.escape(stable_id)}[ \t]*$",
+    """Point the desktop entry's Icon= keys that name the stable icon at the nightly one and drop
+    MimeType=, so the nightly takes no file associations from the stable app."""
+    text = re.sub(rf"^(Icon(\[[^\]]*\])?[ \t]*=[ \t]*){re.escape(stable_id)}[ \t]*$",
                   rf"\g<1>{app_id}", text, flags=re.MULTILINE)
+    return re.sub(r"^MimeType(\[[^\]]*\])?[ \t]*=.*\n?", "", text, flags=re.MULTILINE)
+
+
+def rewrite_mime_icons(text: str, stable_id: str, app_id: str) -> str:
+    """Rename <icon>/<generic-icon> elements naming the stable ID in a shared-mime-info file.
+    flatpak-builder would otherwise prefix the stale name with the app ID on export."""
+    return re.sub(rf"(<(?:generic-)?icon\s+name\s*=\s*)([\"']){re.escape(stable_id)}\2",
+                  rf"\g<1>\g<2>{app_id}\g<2>", text)
 
 
 def rename_icons(icons: Path, stable_id: str, app_id: str) -> int:
@@ -151,12 +173,57 @@ def prepare(manifest: Path, work: Path) -> dict[str, str]:
     desktop = _stage_file(stage, f"share/applications/{stable_id}.desktop")
     desktop.write_text(rewrite_desktop(desktop.read_text(encoding="utf-8"), stable_id, app_id),
                        encoding="utf-8")
+    mime = stage / "share" / "mime" / "packages" / f"{stable_id}.xml"
+    if mime.is_symlink():
+        raise PrepareError(f"the tarball's share/mime/packages/{stable_id}.xml is a symlink")
+    if mime.is_file():
+        mime.write_text(rewrite_mime_icons(mime.read_text(encoding="utf-8"), stable_id, app_id),
+                        encoding="utf-8")
     if not rename_icons(stage / "share" / "icons", stable_id, app_id):
         raise PrepareError(f"the tarball has no share/icons/**/{stable_id}.* icon")
     out = work / f"{app_id}.yml"
     out.write_text(text, encoding="utf-8")
     info["manifest"] = str(out)
     return info
+
+
+def oci_manifest_path(layout: Path) -> Path:
+    manifests = json.loads((layout / "index.json").read_text(encoding="utf-8")).get("manifests", [])
+    if len(manifests) != 1:
+        raise PrepareError(f"expected one image in {layout}, found {len(manifests)}")
+    algorithm, _, value = manifests[0]["digest"].partition(":")
+    if algorithm != "sha256" or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise PrepareError(f"unsupported manifest digest {manifests[0]['digest']!r}")
+    return layout / "blobs" / algorithm / value
+
+
+def write_oci_manifest(layout: Path, out: Path) -> None:
+    source = oci_manifest_path(layout)
+    shutil.copyfile(source, out)
+    if hashlib.sha256(out.read_bytes()).hexdigest() != source.name:
+        raise PrepareError(f"the manifest blob {source.name} does not match its digest")
+
+
+def write_oci_archive(layout: Path, out: Path) -> None:
+    """Tar the layout's files and directories, with no owner, time or mode that varies by run."""
+    def normalize(info: tarfile.TarInfo) -> tarfile.TarInfo:
+        info.uid = info.gid = 0
+        info.uname = info.gname = ""
+        info.mtime = 0
+        info.mode = 0o755 if info.isdir() else 0o644
+        return info
+
+    paths = sorted(layout.rglob("*"), key=lambda p: p.relative_to(layout).as_posix())
+    with tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as tar:
+        for path in paths:
+            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+                raise PrepareError(f"{path} is not a regular file or directory")
+            info = normalize(tar.gettarinfo(str(path), arcname=path.relative_to(layout).as_posix()))
+            if info.isdir():
+                tar.addfile(info)
+            else:
+                with path.open("rb") as handle:
+                    tar.addfile(info, handle)
 
 
 def oci_flatpak_ref(layout: Path) -> str | None:
@@ -182,6 +249,12 @@ def main(argv: list[str]) -> int:
             ref = oci_flatpak_ref(Path(argv[1]))
             if ref != argv[2]:
                 raise PrepareError(f"OCI image label org.flatpak.ref is {ref!r}, expected {argv[2]!r}")
+            return 0
+        if len(argv) == 3 and argv[0] == "oci-manifest":
+            write_oci_manifest(Path(argv[1]), Path(argv[2]))
+            return 0
+        if len(argv) == 3 and argv[0] == "oci-archive":
+            write_oci_archive(Path(argv[1]), Path(argv[2]))
             return 0
     except (PrepareError, ET.ParseError, OSError, KeyError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
