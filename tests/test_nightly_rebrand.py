@@ -85,7 +85,15 @@ else
 fi
 """
 
-FISH = """complete -c photocraft-cli -n "__fish_photocraft_cli_needs_command" -s h -l help
+THUMBNAILER = """[Thumbnailer Entry]
+TryExec=photocraft-cli
+Exec=photocraft-cli thumbnail %i %o %s
+MimeType=application/x-photocraft;
+"""
+
+FISH = """function __fish_photocraft_cli_needs_command
+end
+complete -c photocraft-cli -n "__fish_photocraft_cli_needs_command" -s h -l help
 """
 
 
@@ -95,7 +103,8 @@ def fixture_entries():
         return Entry(path, 'file', mode, data.encode() if isinstance(data, str) else data, mtime=1700000000)
     dirs = ['/usr', '/usr/bin', '/usr/share', '/usr/share/applications', '/usr/share/metainfo',
             '/usr/share/mime/packages', '/usr/share/icons/hicolor/256x256/apps',
-            '/usr/share/doc/photocraft', '/usr/share/man/man1',
+            '/usr/share/doc/photocraft', '/usr/share/man/man1', '/usr/share/thumbnailers',
+            '/usr/share/icons/hicolor/symbolic/apps',
             '/usr/share/bash-completion/completions', '/usr/share/zsh/site-functions',
             '/usr/share/zsh/vendor-completions', '/usr/share/fish/vendor_completions.d']
     return [Entry(d, 'dir', 0o755, mtime=1700000000) for d in dirs] + [
@@ -106,6 +115,8 @@ def fixture_entries():
         f(f'/usr/share/mime/packages/{APP_ID}.xml', MIME),
         f(f'/usr/share/icons/hicolor/256x256/apps/{APP_ID}.png'),
         f(f'/usr/share/icons/hicolor/256x256/apps/{APP_ID}.png.attribution'),
+        f(f'/usr/share/icons/hicolor/symbolic/apps/{APP_ID}-symbolic.svg'),
+        f('/usr/share/thumbnailers/photocraft.thumbnailer', THUMBNAILER),
         f('/usr/share/doc/photocraft/README.md'),
         f('/usr/share/man/man1/photocraft-cli.1'),
         f('/usr/share/man/man1/photocraft-cli-convert.1'),
@@ -140,6 +151,9 @@ class RenameRuleTests(unittest.TestCase):
                 f'/usr/share/icons/hicolor/256x256/apps/{APP_ID}.nightly.png',
             f'/usr/share/icons/hicolor/256x256/apps/{APP_ID}.png.attribution':
                 f'/usr/share/icons/hicolor/256x256/apps/{APP_ID}.nightly.png.attribution',
+            f'/usr/share/icons/hicolor/symbolic/apps/{APP_ID}-symbolic.svg':
+                f'/usr/share/icons/hicolor/symbolic/apps/{APP_ID}.nightly-symbolic.svg',
+            '/usr/share/thumbnailers/photocraft.thumbnailer': '/usr/share/thumbnailers/photocraft-nightly.thumbnailer',
             '/usr/share/doc/photocraft': '/usr/share/doc/photocraft-nightly',
             '/usr/share/doc/photocraft/README.md': '/usr/share/doc/photocraft-nightly/README.md',
             '/usr/share/man/man1/photocraft-cli.1': '/usr/share/man/man1/photocraft-cli-nightly.1',
@@ -160,9 +174,18 @@ class RenameRuleTests(unittest.TestCase):
         lines = self.text(f'/usr/share/applications/{APP_ID}.nightly.desktop').splitlines()
         for line in ('Name=PhotoCraft (Nightly)', 'Name[de]=PhotoCraft (Nightly)', 'GenericName=Image Editor',
                      'Exec=photocraft-nightly %F', 'TryExec=photocraft-nightly', f'Icon={APP_ID}.nightly',
-                     f'StartupWMClass={APP_ID}', 'MimeType=application/x-photocraft;image/png;',
-                     'Name=New Window', 'Exec=/usr/bin/photocraft-nightly --new'):
+                     f'StartupWMClass={APP_ID}', 'Name=New Window', 'Exec=/usr/bin/photocraft-nightly --new'):
             self.assertIn(line, lines)
+        self.assertFalse([line for line in lines if line.startswith('MimeType')])
+
+    def test_symbolic_icon_names(self):
+        self.assertEqual(self.names.rename_id(f'{APP_ID}-symbolic'), f'{APP_ID}.nightly-symbolic')
+        self.assertEqual(self.names.rename_id(f'{APP_ID}-symbolic.svg'), f'{APP_ID}.nightly-symbolic.svg')
+        self.assertEqual(self.names.rename_id(f'{APP_ID}-other'), f'{APP_ID}-other')
+
+    def test_thumbnailer(self):
+        text = self.text('/usr/share/thumbnailers/photocraft-nightly.thumbnailer')
+        self.assertEqual(text, THUMBNAILER.replace('photocraft-cli', 'photocraft-cli-nightly'))
 
     def test_metainfo(self):
         text = self.text(f'/usr/share/metainfo/{APP_ID}.nightly.metainfo.xml')
@@ -173,8 +196,12 @@ class RenameRuleTests(unittest.TestCase):
                         f'<icon type="stock">{APP_ID}.nightly</icon>',
                         '<url type="homepage">https://getartcraft.com/apps/photocraft</url>',
                         '<keyword>photocraft</keyword>', '<binary>photocraft-nightly</binary>',
-                        '<mediatype>application/x-photocraft</mediatype>', '<!-- AppStream metadata -->'):
+                        '<!-- AppStream metadata -->'):
             self.assertIn(snippet, text)
+        self.assertNotIn('mediatype', text)
+        self.assertIn('<provides>\n    <binary>photocraft-nightly</binary>\n  </provides>', text)
+        only_mime = '<component><provides>\n  <mediatype>a/b</mediatype>\n</provides></component>'
+        self.assertEqual(nr.rewrite_metainfo(only_mime, self.names, {}), '<component></component>')
 
     def test_mime_types_unchanged(self):
         text = self.text(f'/usr/share/mime/packages/{APP_ID}.nightly.xml')
@@ -182,7 +209,8 @@ class RenameRuleTests(unittest.TestCase):
 
     def test_completions(self):
         bash = self.text('/usr/share/bash-completion/completions/photocraft-cli-nightly')
-        self.assertIn('complete -F _photocraft-cli -o nosort -o bashdefault -o default photocraft-cli-nightly', bash)
+        self.assertIn('_photocraft-cli-nightly() {', bash)
+        self.assertIn('complete -F _photocraft-cli-nightly -o nosort -o bashdefault -o default photocraft-cli-nightly', bash)
         self.assertIn('cmd="photocraft__cli"', bash)
         zsh = self.text('/usr/share/zsh/site-functions/_photocraft-cli-nightly')
         self.assertTrue(zsh.startswith('#compdef photocraft-cli-nightly\n'))
@@ -190,7 +218,8 @@ class RenameRuleTests(unittest.TestCase):
         self.assertIn('"$funcstack[1]" = "_photocraft-cli-nightly"', zsh)
         self.assertIn('compdef _photocraft-cli-nightly photocraft-cli-nightly', zsh)
         fish = self.text('/usr/share/fish/vendor_completions.d/photocraft-cli-nightly.fish')
-        self.assertIn('complete -c photocraft-cli-nightly -n "__fish_photocraft_cli_needs_command"', fish)
+        self.assertIn('function __fish_photocraft_cli_nightly_needs_command\n', fish)
+        self.assertIn('complete -c photocraft-cli-nightly -n "__fish_photocraft_cli_nightly_needs_command"', fish)
 
     def test_script_rewrite(self):
         script = (f'update-desktop-database -q /usr/share/applications\n'
@@ -206,6 +235,17 @@ class RenameRuleTests(unittest.TestCase):
         with self.assertRaisesRegex(nr.RebrandError, '/usr/share/pixmaps/craft.png'):
             nr.convert(entries, nr.Names.from_entries('photocraft', entries))
 
+    def test_tarball_lib_is_checked_but_top_files_are_not(self):
+        entries = fixture_entries() + [Entry('/usr/lib/craft/plugin.so', 'file', 0o644, b'x')]
+        with self.assertRaisesRegex(nr.RebrandError, '/usr/lib/craft/plugin.so'):
+            nr.convert(entries, nr.Names.from_entries('photocraft', entries), tarball=True)
+        entries = fixture_entries() + [Entry('/usr/install.sh', 'file', 0o755, b'x')]
+        nr.convert(entries, nr.Names.from_entries('photocraft', entries), tarball=True)
+
+    def test_control_comments_are_skipped(self):
+        self.assertEqual(nr.parse_control('# note\nPackage: a\n# inner\nDescription: d\n more\n'),
+                         [['Package', 'a'], ['Description', 'd\n more']])
+
     def test_control_drops_stable_relations(self):
         control = ('Package: photocraft\nVersion: 0.24.1-1\nConflicts: photocraft, oldcraft\n'
                    'Provides: photocraft (= 0.24.1)\nReplaces: photocraft-legacy | photocraft\n'
@@ -218,9 +258,11 @@ class RenameRuleTests(unittest.TestCase):
 def newc(members):
     """A newc cpio archive, the rpm payload format: (name, mode, body) members."""
     out = b''
-    for index, (name, mode, body) in enumerate(members + [('TRAILER!!!', 0, b'')]):
+    for index, member in enumerate(members + [('TRAILER!!!', 0, b'')]):
+        name, mode, body = member[:3]
+        ino, nlink = member[3:5] if len(member) > 3 else (index, 1)
         encoded = name.encode() + b'\0'
-        fields = [index, mode, 0, 0, 1, 1700000000, len(body), 0, 0, 0, 0, len(encoded), 0]
+        fields = [ino, mode, 0, 0, nlink, 1700000000, len(body), 0, 0, 0, 0, len(encoded), 0]
         out += b'070701' + b''.join(b'%08X' % f for f in fields) + encoded
         out += b'\0' * (-len(out) % 4) + body
         out += b'\0' * (-len(out) % 4)
@@ -242,6 +284,44 @@ class CpioTests(unittest.TestCase):
             Entry('/usr/share/zsh/vendor-completions/_photocraft', 'symlink', 0o777,
                   link='../site-functions/_photocraft', mtime=1700000000),
         ])
+
+
+class CpioHardlinkTests(unittest.TestCase):
+    def test_every_link_gets_the_payload(self):
+        entries = nr.entries_from_cpio(newc([
+            ('./usr/bin/photocraft', 0o100755, b'', 7, 2),
+            ('./usr/bin/photocraft-cli', 0o100755, b'ELF', 7, 2),
+        ]), set())
+        self.assertEqual([e.data for e in entries], [b'ELF', b'ELF'])
+
+    def test_conflicting_link_data_is_refused(self):
+        with self.assertRaises(nr.RebrandError):
+            nr.entries_from_cpio(newc([('./a', 0o100644, b'x', 7, 2), ('./b', 0o100644, b'y', 7, 2)]), set())
+
+
+class ConfinementTests(unittest.TestCase):
+    def tar_with(self, *names):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            for name in names:
+                info = tarfile.TarInfo(name)
+                info.size = 1
+                tar.addfile(info, io.BytesIO(b'x'))
+        buf.seek(0)
+        return tarfile.open(fileobj=buf)
+
+    def test_dotdot_member_is_refused(self):
+        with self.assertRaisesRegex(nr.RebrandError, 'escapes'):
+            nr.entries_from_tar(self.tar_with('top/../../etc/passwd'), 'top/', '/usr')
+
+    def test_absolute_member_is_refused(self):
+        with self.assertRaisesRegex(nr.RebrandError, 'outside /usr'):
+            nr.entries_from_tar(self.tar_with('top//etc/passwd'), 'top/', '/usr')
+
+    def test_write_tarball_refuses_entries_outside_usr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(nr.RebrandError, 'outside /usr'):
+                nr.write_tarball(Path(tmp) / 'x.tar.gz', 'top', [Entry('/etc/x', 'file', 0o644, b'x')])
 
 
 # filmcraft's packaging/linux/install.sh, trimmed to the parts that name packaged files.
@@ -313,21 +393,16 @@ class InputTests(unittest.TestCase):
             prefix, arch, inputs = nr.find_inputs(Path(tmp), '1.2.0')
         self.assertEqual((prefix, arch, sorted(inputs)), ('pdfcraft', 'x86_64', ['deb', 'tar.gz']))
 
-    def test_nightly_channel_version_in_names(self):
-        version = '0.24.1-nightly.20261124.153.1.gabcdef012345'
+    def test_refuses_nightly_channel_version(self):
         with tempfile.TemporaryDirectory() as tmp:
-            for name in (f'photocraft-{version}-linux-aarch64.deb', f'photocraft-{version}-linux-aarch64.rpm',
-                         f'photocraft-{version}-linux-aarch64.tar.gz', 'photocraft-0.24.1-linux-aarch64.deb'):
-                (Path(tmp) / name).write_bytes(b'')
-            prefix, arch, inputs = nr.find_inputs(Path(tmp), version)
-        self.assertEqual((prefix, arch), ('photocraft', 'aarch64'))
-        self.assertEqual({ext: p.name for ext, p in inputs.items()}, {
-            'deb': f'photocraft-{version}-linux-aarch64.deb', 'rpm': f'photocraft-{version}-linux-aarch64.rpm',
-            'tar.gz': f'photocraft-{version}-linux-aarch64.tar.gz'})
+            version = '0.24.1-nightly.20261124.153.1.gabcdef012345'
+            (Path(tmp) / f'photocraft-{version}-linux-x86_64.deb').write_bytes(b'')
+            with self.assertRaisesRegex(nr.RebrandError, 'nightly channel version'):
+                nr.rebrand(Path(tmp), Path(tmp) / 'out', version, '0.24.1.202611240228')
 
     def test_refuses_files_already_named_nightly(self):
         with tempfile.TemporaryDirectory() as tmp:
-            version = '0.24.1-nightly.20261124.153.1.gabcdef012345'
+            version = '0.24.1'
             (Path(tmp) / f'photocraft-nightly-{version}-linux-x86_64.deb').write_bytes(b'')
             with self.assertRaisesRegex(nr.RebrandError, 'photocraft-nightly-.*already produced nightly packages'):
                 nr.rebrand(Path(tmp), Path(tmp) / 'out', version, '0.24.1.202611240228')
@@ -380,12 +455,6 @@ POSTINST = '#!/bin/sh\nupdate-desktop-database -q /usr/share/applications || tru
 class DebAndTarballRoundTripTests(unittest.TestCase):
     def test_round_trip(self):
         self.round_trip('0.24.1', '0.24.1-1')
-
-    def test_round_trip_nightly_channel_version(self):
-        # An app built on its nightly channel names artifacts after its identity version; nfpm's
-        # semver schema turns the deb version into 0.24.1~nightly....
-        self.round_trip('0.24.1-nightly.20261124.153.1.gabcdef012345',
-                        '0.24.1~nightly.20261124.153.1.gabcdef012345-1')
 
     def build_stable_deb(self, path, package='photocraft', version='0.24.1-1', entries=None):
         with tempfile.TemporaryDirectory() as tmp:
