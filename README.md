@@ -139,8 +139,10 @@ With `nightly: true`, a run on `main` builds everything a `dry-run` builds and r
 stable (no macOS, no `release` environment, no draft, no `stable-<arch>` push). It then turns the
 Linux builds into packages that install beside the stable app and publishes them:
 
-- Version `<nv>` = the Cargo version without its prerelease, plus the UTC minute:
-  `0.24.1.202611240228`. The `nightly-version` output carries it.
+- Package version `<nv>` = `<X.Y.Z>.<YYYYMMDD>.<run number>.<run attempt>`: the Cargo version
+  without its prerelease, the UTC date and the workflow run counter (`0.24.1.20261124.57.1`). The
+  `nightly-version` output carries it. The app identity, `nightly-identity`, uses the same date and
+  run: `<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<first 12 of the commit sha>`.
 - A GitHub prerelease `nightly-<nv>` titled `<App> Nightly <nv>`, never marked latest, with
   `<prefix>-nightly-<nv>-linux-<arch>.deb` and `.rpm` (x86_64, aarch64, riscv64), `.pkg.tar.zst`
   (Arch package `ai.storyteller.<prefix>-nightly`) and `.flatpak` (x86_64, aarch64; app ID with a
@@ -161,13 +163,22 @@ To opt in, replace the nightly dry run in the caller with:
 ```yaml
     with:
       nightly: ${{ github.event_name == 'schedule' }}
+    secrets:
+      LINUX_NIGHTLY_SIGNING_KEY: ${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}
 ```
 
 The caller's `permissions` must grant `contents: write` and `packages: write` (as in the caller
 example above). One-time repo setup: create a `nightly-signing` environment whose deployment
-branches are limited to `main`, holding `LINUX_SIGNING_KEY` (the same key as the `release`
-environment). Without the secret, the nightly is published unsigned with a warning, and the website
-withholds its rpm and Arch packages.
+branches are limited to `main`, holding `LINUX_NIGHTLY_SIGNING_KEY` (it may be the same key as the
+`release` environment's `LINUX_SIGNING_KEY`), and list `LINUX_NIGHTLY_SIGNING_KEY` in the caller's
+`secrets:` block. Without the secret, the nightly is published unsigned with a warning, and the
+website withholds its rpm and Arch packages.
+
+An app with a compile-time build channel passes it as `build-channel` (PhotoCraft:
+`build-channel: nightly-v1`). Its Linux nightly binaries then report the nightly identity: the
+`linux` and `linux-riscv64` jobs build with `<PREFIX>_BUILD_CHANNEL` set to the channel and
+`<PREFIX>_VERSION` set to the identity. Apps without a channel build as today, and the nightly
+packages are the stable build renamed.
 
 #### Automatic contributor credits (opt-in)
 

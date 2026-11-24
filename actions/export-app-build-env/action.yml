@@ -1,7 +1,8 @@
 name: Export app build variables
 description: >-
-  Set the app's own <PREFIX>_VERSION, <PREFIX>_BUILD_DATE and <PREFIX>_BUILD_SHA for the steps that
-  follow, with the prefix the app's packaging/env.sh reads, so no workflow here lists the apps
+  Set the app's own <PREFIX>_VERSION, <PREFIX>_BUILD_DATE and <PREFIX>_BUILD_SHA (and
+  <PREFIX>_BUILD_CHANNEL when given a channel) for the steps that follow, with the prefix the app's
+  packaging/env.sh reads, so no workflow here lists the apps
 
 inputs:
   app-name:
@@ -22,6 +23,10 @@ inputs:
     description: "The commit the build is from"
     required: false
     default: ${{ github.sha }}
+  channel:
+    description: "The app's compile-time build channel (e.g. nightly-v1), exported as <PREFIX>_BUILD_CHANNEL; empty exports none"
+    required: false
+    default: ""
 
 outputs:
   prefix:
@@ -44,4 +49,5 @@ runs:
         BUILD_VERSION: ${{ inputs.version }}
         BUILD_DATE_VALUE: ${{ inputs.date }}
         BUILD_SHA_VALUE: ${{ inputs.sha }}
+        BUILD_CHANNEL_VALUE: ${{ inputs.channel }}
       run: bash "$SCRIPT"

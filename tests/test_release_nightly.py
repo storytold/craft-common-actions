@@ -3,6 +3,7 @@ from pathlib import Path
 import fnmatch
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -83,19 +84,32 @@ class NightlyModeTests(unittest.TestCase):
 class NightlyVersionTests(unittest.TestCase):
     STEP = step("version", "Resolve the nightly version")
 
-    def resolve(self, ref):
+    def resolve(self, ref, channel=""):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out"
             out.touch()
-            result = run(self.STEP["run"], tmp, tmp, VERSION="0.24.1-rc.2", GITHUB_REF=ref, GITHUB_OUTPUT=str(out))
+            result = run(self.STEP["run"], tmp, tmp, VERSION="0.24.1-rc.2", GITHUB_REF=ref, GITHUB_OUTPUT=str(out),
+                         BUILD_CHANNEL=channel, GITHUB_RUN_NUMBER="57", GITHUB_RUN_ATTEMPT="2",
+                         GITHUB_SHA="0123456789abcdef0123456789abcdef01234567")
             return result, out.read_text()
 
-    def test_main_gets_the_version_with_a_utc_minute_stamp(self):
+    def test_package_version_and_app_identity_share_the_date_and_run(self):
         self.assertEqual(self.STEP["if"], "inputs.nightly")
         result, output = self.resolve("refs/heads/main")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(output, r"^version=0\.24\.1\.20\d{10}\n$")
-        self.assertEqual(JOBS["version"]["outputs"]["nightly-version"], "${{ steps.nightly.outputs.version }}")
+        # The identity is the form PhotoCraft's build_channel.rs is_nightly_version accepts.
+        self.assertRegex(output, r"^version=0\.24\.1\.(20\d{6})\.57\.2\n"
+                                 r"identity=0\.24\.1-nightly\.\1\.57\.2\.g0123456789ab\n$")
+        outputs = JOBS["version"]["outputs"]
+        self.assertEqual(outputs["nightly-version"], "${{ steps.nightly.outputs.version }}")
+        self.assertEqual(outputs["linux-version"], "${{ steps.nightly.outputs.linux-version || steps.v.outputs.version }}")
+
+    def test_the_linux_artifacts_carry_the_identity_only_with_a_build_channel(self):
+        result, output = self.resolve("refs/heads/main", channel="nightly-v1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = re.search(r"^identity=(.*)$", output, re.M).group(1)
+        self.assertIn(f"linux-version={identity}\n", output)
+        self.assertNotIn("linux-version=", self.resolve("refs/heads/main")[1])
 
     def test_the_release_branch_is_refused(self):
         result, output = self.resolve("refs/heads/release")
@@ -116,7 +130,7 @@ class NightlyFlatpakPushTests(unittest.TestCase):
         executable(self.root / "bin/skopeo",
                    '#!/usr/bin/env bash\necho "skopeo $*" >>"$FAKE_LOG"\n'
                    'if [[ "$1" == inspect ]]; then echo \'{"schemaVersion":2}\'; fi\n')
-        self.base = "democraft-nightly-1.2.0.202611240228-linux-x86_64"
+        self.base = "democraft-nightly-1.2.0.20261124.57.1-linux-x86_64"
         (self.root / "dist/nightly" / f"{self.base}-oci").mkdir(parents=True)
 
     def tearDown(self):
@@ -124,7 +138,7 @@ class NightlyFlatpakPushTests(unittest.TestCase):
 
     def publish(self, **extra):
         return run(self.STEP["run"], self.root, self.root / "bin", FAKE_LOG=str(self.log),
-                   NIGHTLY_VERSION="1.2.0.202611240228", ARCH="x86_64", REGISTRY="ghcr.io/storytold/DemoCraft",
+                   NIGHTLY_VERSION="1.2.0.20261124.57.1", ARCH="x86_64", REGISTRY="ghcr.io/storytold/DemoCraft",
                    GITHUB_TOKEN="token", GITHUB_ACTOR="bot", BUNDLE=f"dist/nightly/{self.base}.flatpak",
                    LAYOUT=f"dist/nightly/{self.base}-oci", **extra)
 
@@ -137,8 +151,8 @@ class NightlyFlatpakPushTests(unittest.TestCase):
         result = self.publish(DOCKERHUB_USERNAME="user", DOCKERHUB_TOKEN="secret")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.pushed(), [
-            "ghcr.io/storytold/democraft:1.2.0.202611240228-nightly-x86_64",
-            "docker.io/storytold/democraft:1.2.0.202611240228-nightly-x86_64",
+            "ghcr.io/storytold/democraft:1.2.0.20261124.57.1-nightly-x86_64",
+            "docker.io/storytold/democraft:1.2.0.20261124.57.1-nightly-x86_64",
         ])
         manifest = self.root / "dist/nightly" / f"{self.base}.oci-manifest.json"
         self.assertEqual(manifest.read_text().strip(), '{"schemaVersion":2}')
@@ -148,6 +162,28 @@ class NightlyFlatpakPushTests(unittest.TestCase):
         result = self.publish()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.pushed(), [])
+
+
+class BuildChannelTests(unittest.TestCase):
+    def test_only_the_linux_builds_take_the_channel_and_identity(self):
+        for name, job in JOBS.items():
+            for s in job.get("steps", []):
+                if not s.get("uses", "").startswith("storytold/craft-common-actions/actions/export-app-build-env@"):
+                    continue
+                with self.subTest(job=name):
+                    if name in ("linux", "linux-riscv64"):
+                        self.assertEqual(s["with"]["version"], "${{ needs.version.outputs.linux-version }}")
+                        self.assertEqual(s["with"]["channel"], "${{ inputs.nightly && inputs.build-channel || '' }}")
+                    else:
+                        self.assertEqual(s["with"]["version"], "${{ needs.version.outputs.version }}")
+                        self.assertNotIn("channel", s["with"])
+
+    def test_jobs_find_the_linux_artifacts_by_their_file_version(self):
+        for name in ("flatpak", "arch", "nightly-flatpak"):
+            lookup = next(s for s in JOBS[name]["steps"] if '-linux-"${ARCH}".tar.gz' in s.get("run", ""))
+            self.assertEqual(lookup["env"]["RELEASE_VERSION"], "${{ needs.version.outputs.linux-version }}", name)
+        rebrand = uses("nightly-linux", "storytold/craft-common-actions/actions/nightly-rebrand@")
+        self.assertEqual(rebrand["with"]["version"], "${{ needs.version.outputs.linux-version }}")
 
 
 class NightlyReleaseTests(unittest.TestCase):
@@ -165,7 +201,8 @@ class NightlyReleaseTests(unittest.TestCase):
         self.assertEqual((draft["tag-prefix"], draft["prerelease"], draft["artifact-pattern"]),
                          ("nightly-", "true", "nightly-*"))
         self.assertEqual(draft["version"], "${{ needs.version.outputs.nightly-version }}")
-        self.assertEqual(draft["signing-key"], "${{ secrets.LINUX_SIGNING_KEY }}")
+        self.assertEqual(draft["signing-key"], "${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}")
+        self.assertIn("LINUX_NIGHTLY_SIGNING_KEY", DATA["on"]["workflow_call"]["secrets"])
         uploads = [(name, s["with"]["name"]) for name, job in JOBS.items() for s in job.get("steps", [])
                    if s.get("uses", "").startswith("actions/upload-artifact@")]
         stable = DRAFT["inputs"]["artifact-pattern"]["default"]
@@ -242,7 +279,7 @@ class DraftTitleTests(unittest.TestCase):
     def test_a_title_replaces_the_default(self):
         create = next(s for s in DRAFT["runs"]["steps"] if s["name"] == "Create or update draft release")
         self.assertEqual(create["env"]["TITLE"], "${{ inputs.title }}")
-        for title, expected in (("", "Studio v0.42.0"), ("Studio Nightly 0.42.0.202611240228", None)):
+        for title, expected in (("", "Studio v0.42.0"), ("Studio Nightly 0.42.0.20261124.57.1", None)):
             with self.subTest(title=title), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 executable(root / "gh", '#!/usr/bin/env bash\necho "$*" >>calls\n[[ "$1 $2" != "release view" ]]\n')

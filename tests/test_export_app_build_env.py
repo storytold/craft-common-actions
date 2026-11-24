@@ -33,7 +33,8 @@ class ExportAppBuildEnvTests(unittest.TestCase):
         self.temp.cleanup()
 
     def run_script(self, **extra):
-        env = {key: value for key, value in os.environ.items() if key not in ("ENV_PREFIX", "APP_NAME")}
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("ENV_PREFIX", "APP_NAME", "BUILD_CHANNEL_VALUE")}
         env.update(GITHUB_ENV=str(self.github_env), GITHUB_OUTPUT=str(self.github_output),
                    BUILD_VERSION="1.2.0-rc.1", BUILD_DATE_VALUE="2026-11-05", BUILD_SHA_VALUE="0123abcd")
         env.update(extra)
@@ -88,6 +89,15 @@ class ExportAppBuildEnvTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("app-name is empty", result.stderr)
 
+    def test_a_channel_exports_the_apps_build_channel(self):
+        (self.app / "packaging/env.sh").write_text('VERSION="${PHOTOCRAFT_VERSION:-0.1.0}"\n')
+        result = self.run_script(BUILD_CHANNEL_VALUE="nightly-v1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.exported()["PHOTOCRAFT_BUILD_CHANNEL"], "nightly-v1")
+        self.assertTrue(self.outputs()["names"].endswith(" PHOTOCRAFT_BUILD_CHANNEL"))
+        result = self.run_script(BUILD_CHANNEL_VALUE="nightly-v1\nEVIL=1")
+        self.assertIn("BUILD_CHANNEL_VALUE must be one line", result.stderr)
+
     def test_a_value_with_a_line_break_cannot_add_variables(self):
         (self.app / "packaging/env.sh").write_text('VERSION="${DEMOCRAFT_VERSION:-0.1.0}"\n')
         for name in ("BUILD_VERSION", "BUILD_DATE_VALUE", "BUILD_SHA_VALUE"):
@@ -126,7 +136,9 @@ class ReleaseWorkflowListsNoAppsTests(unittest.TestCase):
                 self.assertEqual(export.get("id"), "app-env")
                 self.assertEqual(export["uses"], "storytold/craft-common-actions/actions/export-app-build-env@main")
                 self.assertEqual(export["with"]["app-name"], "${{ inputs.app-name }}")
-                self.assertEqual(export["with"]["version"], "${{ needs.version.outputs.version }}")
+                # The Linux builds carry the nightly identity when the app passes build-channel.
+                version = "linux-version" if name in ("linux", "linux-riscv64") else "version"
+                self.assertEqual(export["with"]["version"], f"${{{{ needs.version.outputs.{version} }}}}")
                 self.assertEqual(export["with"]["date"], "${{ needs.version.outputs.date }}")
 
     def test_the_freebsd_vm_receives_the_exported_names(self):

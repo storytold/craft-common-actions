@@ -111,6 +111,16 @@ on:
         type: boolean
         required: false
         default: false
+      build-channel:
+        description: >-
+          The app's compile-time build channel for nightly Linux builds (e.g. nightly-v1). With
+          nightly set, the linux and linux-riscv64 jobs build with <PREFIX>_BUILD_CHANNEL set to it
+          and <PREFIX>_VERSION set to the nightly identity
+          (<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<12-digit sha>). Empty: the
+          nightly packages are the stable build renamed.
+        type: string
+        required: false
+        default: ""
 
     secrets:
       APPLE_CERTIFICATE:
@@ -145,6 +155,10 @@ on:
       # every Linux package format, the Flatpak bundle's commit and OCI image, and SHA256SUMS.txt.
       LINUX_SIGNING_KEY:
         required: false
+      # Signs the nightly prerelease like LINUX_SIGNING_KEY signs a release; kept in the repo's
+      # nightly-signing environment. It may hold the same key.
+      LINUX_NIGHTLY_SIGNING_KEY:
+        required: false
       DOCKERHUB_USERNAME:
         description: "Username for publishing Flatpak OCI layouts to Docker Hub"
         required: false
@@ -163,8 +177,11 @@ on:
         description: "Whether the resolved version is a prerelease"
         value: ${{ jobs.version.outputs.prerelease }}
       nightly-version:
-        description: "Nightly version (<major.minor.patch>.<UTC yyyymmddHHMM>) in nightly mode, else empty"
+        description: "Nightly package version (<X.Y.Z>.<UTC YYYYMMDD>.<run number>.<run attempt>) in nightly mode, else empty"
         value: ${{ jobs.version.outputs.nightly-version }}
+      nightly-identity:
+        description: "Nightly app identity (<X.Y.Z>-nightly.<YYYYMMDD>.<run number>.<run attempt>.g<12-digit sha>) in nightly mode, else empty"
+        value: ${{ jobs.version.outputs.nightly-identity }}
 
 permissions:
   contents: read
@@ -230,6 +247,10 @@ jobs:
       date: ${{ steps.v.outputs.date }}
       prerelease: ${{ steps.v.outputs.prerelease }}
       nightly-version: ${{ steps.nightly.outputs.version }}
+      nightly-identity: ${{ steps.nightly.outputs.identity }}
+      # The version in the Linux artifacts' file names: the nightly identity when the build
+      # channel applies, else the release version.
+      linux-version: ${{ steps.nightly.outputs.linux-version || steps.v.outputs.version }}
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
@@ -249,6 +270,7 @@ jobs:
         if: inputs.nightly
         env:
           VERSION: ${{ steps.v.outputs.version }}
+          BUILD_CHANNEL: ${{ inputs.build-channel }}
         run: |
           set -euo pipefail
           # A nightly is a prerelease of main; the release branch only ships stable releases.
@@ -256,8 +278,16 @@ jobs:
             echo "::error::nightly mode refuses to run on refs/heads/release: call it from main"
             exit 1
           fi
-          # One value for every job: each job computing its own would differ by the minute.
-          echo "version=${VERSION%%-*}.$(date -u +%Y%m%d%H%M)" >>"$GITHUB_OUTPUT"
+          # Computed once so every job agrees. The package version and the app identity share the
+          # date and run counter; the identity is the form the apps' build channel accepts.
+          base="${VERSION%%-*}"
+          run="$(date -u +%Y%m%d).$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+          identity="$base-nightly.$run.g${GITHUB_SHA::12}"
+          {
+            echo "version=$base.$run"
+            echo "identity=$identity"
+            if [ -n "$BUILD_CHANNEL" ]; then echo "linux-version=$identity"; fi
+          } >>"$GITHUB_OUTPUT"
 
   macos:
     timeout-minutes: 90
@@ -550,7 +580,9 @@ jobs:
         uses: storytold/craft-common-actions/actions/export-app-build-env@main
         with:
           app-name: ${{ inputs.app-name }}
-          version: ${{ needs.version.outputs.version }}
+          # The nightly identity and compile-time channel, for an app that passes build-channel.
+          version: ${{ needs.version.outputs.linux-version }}
+          channel: ${{ inputs.nightly && inputs.build-channel || '' }}
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
@@ -674,7 +706,7 @@ jobs:
       - name: Build the Flatpak bundle
         id: flatpak_bundle
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -776,7 +808,7 @@ jobs:
       - name: Find the release tarball
         id: tarball
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -1272,7 +1304,9 @@ jobs:
         uses: storytold/craft-common-actions/actions/export-app-build-env@main
         with:
           app-name: ${{ inputs.app-name }}
-          version: ${{ needs.version.outputs.version }}
+          # The nightly identity and compile-time channel, for an app that passes build-channel.
+          version: ${{ needs.version.outputs.linux-version }}
+          channel: ${{ inputs.nightly && inputs.build-channel || '' }}
           date: ${{ needs.version.outputs.date }}
       - name: Check out craft-fonts
         if: inputs.craft-fonts-ref != ''
@@ -1502,7 +1536,7 @@ jobs:
         with:
           input-dir: dist/linux
           output-dir: dist/nightly
-          version: ${{ needs.version.outputs.version }}
+          version: ${{ needs.version.outputs.linux-version }}
           nightly-version: ${{ needs.version.outputs.nightly-version }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -1615,7 +1649,7 @@ jobs:
       - name: Find the release tarball
         id: tarball
         env:
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          RELEASE_VERSION: ${{ needs.version.outputs.linux-version }}
           ARCH: ${{ matrix.arch }}
         run: |
           shopt -s nullglob
@@ -1697,7 +1731,7 @@ jobs:
     if: inputs.nightly && !inputs.dry-run && !cancelled() && needs.nightly-linux.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     needs: [version, nightly-linux, nightly-arch, nightly-flatpak]
     runs-on: ubuntu-24.04
-    # Holds LINUX_SIGNING_KEY (the release environment's key) and admits main only.
+    # Holds LINUX_NIGHTLY_SIGNING_KEY and admits main only.
     environment: nightly-signing
     permissions:
       contents: write
@@ -1720,7 +1754,7 @@ jobs:
           prerelease: "true"
           artifact-pattern: nightly-*
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          signing-key: ${{ secrets.LINUX_SIGNING_KEY }}
+          signing-key: ${{ secrets.LINUX_NIGHTLY_SIGNING_KEY }}
       - name: Publish the prerelease
         run: |
           set -euo pipefail

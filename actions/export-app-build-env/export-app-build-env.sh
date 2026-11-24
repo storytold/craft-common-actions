@@ -5,7 +5,8 @@
 #   2. otherwise the X in `VERSION="${X_VERSION:-...` in packaging/env.sh (or packaging/common.sh);
 #   3. otherwise APP_NAME in capitals, with each run of other characters as `_`
 #      (craft-anything: CRAFT_ANYTHING).
-# Writes the three variables to $GITHUB_ENV, and `prefix` and `names` to $GITHUB_OUTPUT.
+# Writes the three variables, and <PREFIX>_BUILD_CHANNEL when BUILD_CHANNEL_VALUE is set, to
+# $GITHUB_ENV, and `prefix` and `names` to $GITHUB_OUTPUT.
 set -euo pipefail
 
 fail() { echo "::error::$*" >&2; exit 1; }
@@ -16,6 +17,8 @@ for name in BUILD_VERSION BUILD_DATE_VALUE BUILD_SHA_VALUE; do
   # One line each: a line break would add variables of its own to GITHUB_ENV.
   [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || fail "export-app-build-env: $name must be one line"
 done
+channel="${BUILD_CHANNEL_VALUE:-}"
+[[ "$channel" != *$'\n'* && "$channel" != *$'\r'* ]] || fail "export-app-build-env: BUILD_CHANNEL_VALUE must be one line"
 [[ -n "${GITHUB_ENV:-}" && -n "${GITHUB_OUTPUT:-}" ]] || fail "export-app-build-env: GITHUB_ENV and GITHUB_OUTPUT must be set"
 
 prefix="${ENV_PREFIX:-}"
@@ -43,7 +46,9 @@ names="${prefix}_VERSION ${prefix}_BUILD_DATE ${prefix}_BUILD_SHA"
   echo "${prefix}_VERSION=$BUILD_VERSION"
   echo "${prefix}_BUILD_DATE=$BUILD_DATE_VALUE"
   echo "${prefix}_BUILD_SHA=$BUILD_SHA_VALUE"
+  if [[ -n "$channel" ]]; then echo "${prefix}_BUILD_CHANNEL=$channel"; fi
 } >>"$GITHUB_ENV"
+[[ -z "$channel" ]] || names="$names ${prefix}_BUILD_CHANNEL"
 {
   echo "prefix=$prefix"
   echo "names=$names"
