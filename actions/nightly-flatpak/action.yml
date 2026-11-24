@@ -1,0 +1,62 @@
+name: "Nightly Flatpak"
+description: >-
+  Builds a Flatpak bundle and OCI layout with app ID <app-id>.nightly from a Craft app's stable
+  Linux tarball and its packaging/linux/flatpak/*.bundle.yml, so the nightly installs beside the
+  stable app. Does not push.
+
+inputs:
+  tarball:
+    description: "The app's stable Linux tarball (<prefix>-<version>-linux-<arch>.tar.gz); its arch must be the runner's"
+    required: true
+  nightly-version:
+    description: "Nightly version, used in the output file names"
+    required: true
+  prefix:
+    description: "Artifact file prefix (photocraft, artcraft-launcher)"
+    required: true
+  output-dir:
+    description: "Directory the bundle and OCI layout are written to"
+    required: false
+    default: "dist/nightly"
+  manifest:
+    description: "Bundle manifest (default: the single packaging/linux/flatpak/*.bundle.yml)"
+    required: false
+    default: ""
+
+outputs:
+  app-id:
+    description: "The nightly app ID (<app-id>.nightly)"
+    value: ${{ steps.build.outputs.app-id }}
+  bundle:
+    description: "<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>.flatpak"
+    value: ${{ steps.build.outputs.bundle }}
+  layout:
+    description: "<output-dir>/<prefix>-nightly-<nightly-version>-linux-<arch>-oci, labelled org.flatpak.ref=app/<app-id>/<arch>/stable"
+    value: ${{ steps.build.outputs.layout }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install flatpak-builder
+      shell: bash
+      run: |
+        if ! command -v flatpak-builder >/dev/null || ! command -v eu-strip >/dev/null; then
+          sudo apt-get update
+          # flatpak-builder runs eu-strip on every module it builds with debuginfo.
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common
+        fi
+        # Ubuntu 24.04's AppArmor blocks the unprivileged user namespaces bubblewrap needs.
+        userns=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+        if [ -r "$userns" ] && [ "$(cat "$userns")" = 1 ]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+    - name: Build the nightly Flatpak
+      id: build
+      shell: bash
+      env:
+        TARBALL: ${{ inputs.tarball }}
+        NIGHTLY_VERSION: ${{ inputs.nightly-version }}
+        PREFIX: ${{ inputs.prefix }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        MANIFEST: ${{ inputs.manifest }}
+      run: '"$GITHUB_ACTION_PATH/nightly-flatpak.sh" "$TARBALL" "$NIGHTLY_VERSION" "$PREFIX" "$OUTPUT_DIR" "$MANIFEST"'

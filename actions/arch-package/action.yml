@@ -25,6 +25,10 @@ inputs:
     description: "Package release number"
     required: false
     default: "1"
+  pkgname:
+    description: "Package name (default: the tarball's .desktop file basename)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -38,6 +42,7 @@ runs:
         ARCH_LICENSE: ${{ inputs.license }}
         ARCH_EXTRA_DEPENDS: ${{ inputs.extra-depends }}
         PKGREL: ${{ inputs.pkgrel }}
+        PKGNAME: ${{ inputs.pkgname }}
       run: |
         if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct 2>/dev/null || date +%s)"
@@ -56,6 +61,7 @@ runs:
             -e ARCH_LICENSE="$ARCH_LICENSE" \
             -e ARCH_EXTRA_DEPENDS="$ARCH_EXTRA_DEPENDS" \
             -e PKGREL="$PKGREL" \
+            -e PKGNAME="$PKGNAME" \
             -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$GITHUB_ACTION_PATH:/action:ro" \

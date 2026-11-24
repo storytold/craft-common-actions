@@ -5,6 +5,7 @@
 #   writes <output dir>/<app>-<version>-linux-<arch>.pkg.tar.zst (default output dir: dist/release)
 #
 # Env: ARCH_LICENSE        SPDX license expression (default: MIT OR Apache-2.0)
+#      PKGNAME             Package name (default: the .desktop file's basename, else ai.storyteller.<app>)
 #      PKGREL              Package release number (default: 1)
 #      SOURCE_DATE_EPOCH   timestamp for builddate and package reproducibility (default: now)
 set -euo pipefail
@@ -106,11 +107,15 @@ pkgver="${pkgver//-/}"
 [[ "$pkgver" =~ ^[A-Za-z0-9._+]+$ ]] || die "invalid version derived from archive: '$pkgver'"
 [[ "$pkgrel" =~ ^[1-9][0-9]*(\.[1-9][0-9]*)?$ ]] || die "invalid PKGREL: '$pkgrel'"
 
-# Determine package name from .desktop file (bundle id)
+# Determine package name from .desktop file (bundle id), unless the caller names it
 shopt -s nullglob
 desktops=("$stage"/share/applications/*.desktop)
 shopt -u nullglob
-if [[ "${#desktops[@]}" -gt 0 ]]; then
+pkgname_source=".desktop file"
+if [[ -n "${PKGNAME:-}" ]]; then
+  pkgname="$PKGNAME"
+  pkgname_source="PKGNAME"
+elif [[ "${#desktops[@]}" -gt 0 ]]; then
   pkgname="$(basename "${desktops[0]}" .desktop)"
 else
   pkgname="ai.storyteller.$app"
@@ -124,7 +129,7 @@ fi
 # hyphen or a dot. The restricted character set plus printf %q below keeps the
 # value safe regardless of case.
 if [[ ! "$pkgname" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*$ ]]; then
-  die "invalid package name derived from .desktop file: '$pkgname'"
+  die "invalid package name from $pkgname_source: '$pkgname'"
 fi
 
 # Determine description from AppStream metainfo if available

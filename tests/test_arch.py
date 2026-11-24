@@ -272,6 +272,49 @@ exit 0
                 self.assertEqual([p.name for p in (tmp_path / "out").iterdir()],
                                  [f"myapp-{version}-linux-x86_64.pkg.tar.zst"])
 
+    def test_nightly_package_installs_beside_the_stable_one(self):
+        # A nightly tarball from nightly-rebrand: renamed files, the .nightly desktop ID, and a
+        # dotted timestamp version. artcraft-services names the package <id>-nightly.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tarball = self._create_fixture_tarball(
+                tmp_path, filename="photocraft-nightly-0.24.1.202611240228-linux-x86_64.tar.gz",
+                app_name="photocraft-nightly", desktop_name="ai.storyteller.photocraft.nightly.desktop")
+            capture, res = self._run_with_real_tar(
+                tmp_path, tarball, {"PKGNAME": "ai.storyteller.photocraft-nightly"})
+            self.assertEqual(res.returncode, 0, f"{res.stderr}\n{res.stdout}")
+            pkgbuild = (capture / "PKGBUILD").read_text()
+            self.assertIn("pkgname=ai.storyteller.photocraft-nightly\n", pkgbuild)
+            self.assertIn("pkgver=0.24.1.202611240228\n", pkgbuild)
+            relations = "\n".join(line for line in pkgbuild.splitlines()
+                                  if line.startswith(("provides=", "conflicts=", "replaces=")))
+            self.assertEqual(relations, "provides=(photocraft-nightly=0.24.1.202611240228-1)\n"
+                             "conflicts=(photocraft-nightly photocraft-nightly-bin photocraft-nightly-git)")
+            self.assertEqual([p.name for p in (tmp_path / "out").iterdir()],
+                             ["photocraft-nightly-0.24.1.202611240228-linux-x86_64.pkg.tar.zst"])
+
+    def test_package_name_override_is_validated(self):
+        for pkgname, valid in (("ai.storyteller.myapp-nightly", True), ("-myapp", False),
+                               ("myapp;touch x", False), (".myapp", False)):
+            with self.subTest(pkgname=pkgname), tempfile.TemporaryDirectory() as tmpdir:
+                tmp_path = Path(tmpdir)
+                tarball = self._create_fixture_tarball(tmp_path)
+                capture, res = self._run_with_real_tar(tmp_path, tarball, {"PKGNAME": pkgname})
+                if valid:
+                    self.assertEqual(res.returncode, 0, res.stderr)
+                    self.assertIn(f"pkgname={pkgname}\n", (capture / "PKGBUILD").read_text())
+                else:
+                    self.assertNotEqual(res.returncode, 0)
+                    self.assertIn("invalid package name from PKGNAME", res.stderr)
+
+    def test_package_name_defaults_to_the_desktop_id(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            tarball = self._create_fixture_tarball(tmp_path)
+            capture, res = self._run_with_real_tar(tmp_path, tarball)
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("pkgname=ai.storyteller.myapp\n", (capture / "PKGBUILD").read_text())
+
     def test_pkgbuild_depends_on_the_x11_keyboard_library(self):
         """The PKGBUILD depends on libxkbcommon-x11 as well as libxkbcommon.
 
@@ -342,7 +385,7 @@ exit 0
             add_metainfo(tar, arcname)
         return tarball
 
-    def _run_with_real_tar(self, tmp_path, tarball):
+    def _run_with_real_tar(self, tmp_path, tarball, extra_env=None):
         # The shared mock tools replace tar with a no-op; these tests need the archive extracted.
         tools = self._setup_mock_tools(tmp_path)
         (tools / "tar").unlink()
@@ -353,7 +396,8 @@ exit 0
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture)},
+            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "MOCK_CAPTURE": str(capture),
+                 **(extra_env or {})},
         )
 
     def test_metainfo_summary_and_homepage_are_read(self):

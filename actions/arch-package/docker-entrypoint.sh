@@ -39,6 +39,7 @@ run_as_builder() {
       ARCH_LICENSE="$arch_license" \
       ARCH_EXTRA_DEPENDS="${ARCH_EXTRA_DEPENDS:-}" \
       PKGREL="$pkgrel" \
+      PKGNAME="${PKGNAME:-}" \
       SOURCE_DATE_EPOCH="$source_date_epoch" \
       bash /action/arch-package.sh "$tarball" "$target_arch" "$out_dir"
   else
@@ -50,6 +51,7 @@ run_as_builder() {
       ARCH_LICENSE="$arch_license" \
       ARCH_EXTRA_DEPENDS="${ARCH_EXTRA_DEPENDS:-}" \
       PKGREL="$pkgrel" \
+      PKGNAME="${PKGNAME:-}" \
       SOURCE_DATE_EPOCH="$source_date_epoch" \
       bash /action/arch-package.sh "$tarball" "$target_arch" "$out_dir"
   fi
