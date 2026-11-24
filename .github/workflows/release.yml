@@ -3,6 +3,33 @@ name: "Release"
 on:
   workflow_call:
     inputs:
+      release-phase:
+        description: "Workflow mode: standard, nightly-build, nightly-sign, or nightly-oci"
+        type: string
+        default: standard
+      tooling-revision:
+        description: "Exact shared commit defining this workflow (required for nightly phases)"
+        type: string
+        default: ""
+      manual-actors:
+        type: string
+        default: '[]'
+      platforms:
+        description: "Reviewed JSON list of nightly producer platforms"
+        type: string
+        default: '["windows-x86_64"]'
+      linux-package-formats:
+        description: "Reviewed JSON list of nightly Linux package formats"
+        type: string
+        default: '[]'
+      producer_run_id:
+        description: "Original unsigned producer run (required for nightly-sign)"
+        type: string
+        default: ""
+      producer_run_attempt:
+        description: "Original unsigned producer attempt (required for nightly-sign)"
+        type: string
+        default: ""
       app-name:
         description: "Application repository name (e.g. photocraft, cadcraft)"
         type: string
@@ -152,16 +179,50 @@ on:
       prerelease:
         description: "Whether the resolved version is a prerelease"
         value: ${{ jobs.version.outputs.prerelease }}
+      unsigned-artifact-id:
+        value: ${{ jobs.nightly-build-build.outputs.artifact-id }}
+      unsigned-sha256:
+        value: ${{ jobs.nightly-build-attest.outputs.unsigned-sha256 }}
+      admitted:
+        value: ${{ jobs.nightly-sign-validate.outputs.admitted }}
+      published:
+        value: ${{ jobs.nightly-sign-publish.result == 'success' && 'true' || 'false' }}
+      platforms:
+        value: ${{ jobs.nightly-sign-validate.outputs.platforms }}
 
 permissions:
   contents: read
 
+
+# Only protected signing runs share a queue. Standard and unsigned runs retain
+# independent execution; OCI keeps its separate writer queue on the OCI job.
+concurrency:
+  group: ${{ inputs.release-phase == 'nightly-sign' && 'craft-release-ref-signer-photocraft' || format('craft-release-{0}-{1}', github.run_id, github.run_attempt) }}
+  cancel-in-progress: false
+  queue: max
+
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+  NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+
 jobs:
+  invalid-release-phase:
+    if: >-
+      !contains(fromJSON('["standard","nightly-build","nightly-sign","nightly-oci"]'), inputs.release-phase)
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: |
+          echo '::error::Unsupported release-phase'
+          exit 1
+
   # Fails fast before any build: git dependencies must come from github.com/storytold, and the
   # lock file must not declare source replacement, patches or path overrides that could silently
   # swap one. Lives here (not in each app's release.yml) so every craftapp gets the gate at @main.
   # Every build job needs `version`, so these builds are gated transitively.
   git-sources:
+    if: >-
+      inputs.release-phase == 'standard'
     name: Git dependencies come from storytold
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -208,6 +269,8 @@ jobs:
           PY
 
   version:
+    if: >-
+      inputs.release-phase == 'standard'
     timeout-minutes: 10
     name: version
     needs: git-sources
@@ -232,9 +295,10 @@ jobs:
           app-title: ${{ inputs.app-title }}
 
   macos:
+    if: >-
+      inputs.release-phase == 'standard' && (!inputs.dry-run)
     timeout-minutes: 90
     name: macOS universal
-    if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
     environment: ${{ !inputs.dry-run && 'release' || '' }}
@@ -361,6 +425,8 @@ jobs:
           if [ -n "${MACOS_KEYCHAIN:-}" ]; then security delete-keychain "$MACOS_KEYCHAIN" || true; fi
 
   windows:
+    if: >-
+      inputs.release-phase == 'standard'
     timeout-minutes: 90
     name: Windows ${{ matrix.arch }}
     needs: [version]
@@ -480,6 +546,8 @@ jobs:
           if-no-files-found: error
 
   linux:
+    if: >-
+      inputs.release-phase == 'standard'
     timeout-minutes: 90
     name: Linux ${{ matrix.arch }}
     needs: [version]
@@ -584,6 +652,8 @@ jobs:
           if-no-files-found: error
 
   flatpak:
+    if: >-
+      inputs.release-phase == 'standard'
     timeout-minutes: 90
     name: Flatpak ${{ matrix.arch }}
     needs: [version, linux]
@@ -733,8 +803,9 @@ jobs:
           if-no-files-found: error
 
   arch:
+    if: >-
+      inputs.release-phase == 'standard' && (inputs.has-arch)
     name: Arch Linux ${{ matrix.arch }}
-    if: inputs.has-arch
     needs: [version, linux]
     runs-on: ubuntu-24.04
     strategy:
@@ -784,8 +855,9 @@ jobs:
           if-no-files-found: error
 
   freebsd:
+    if: >-
+      inputs.release-phase == 'standard' && (inputs.has-freebsd)
     name: FreeBSD ${{ matrix.arch }}
-    if: inputs.has-freebsd
     needs: [version]
     runs-on: ubuntu-latest
     timeout-minutes: 300
@@ -1132,9 +1204,10 @@ jobs:
           echo "::endgroup::"
 
   web:
+    if: >-
+      inputs.release-phase == 'standard' && (inputs.has-web)
     timeout-minutes: 90
     name: Web (wasm)
-    if: inputs.has-web
     needs: [version]
     runs-on: ubuntu-latest
     env:
@@ -1212,9 +1285,10 @@ jobs:
           if-no-files-found: error
 
   linux-riscv64:
+    if: >-
+      inputs.release-phase == 'standard' && (inputs.has-riscv64)
     timeout-minutes: 90
     name: Linux riscv64
-    if: inputs.has-riscv64
     needs: [version]
     environment: ${{ !inputs.dry-run && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
@@ -1321,9 +1395,10 @@ jobs:
           if-no-files-found: error
 
   server:
+    if: >-
+      inputs.release-phase == 'standard' && (inputs.has-server)
     timeout-minutes: 90
     name: Server Linux ${{ matrix.arch }}
-    if: inputs.has-server
     needs: [version]
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -1395,9 +1470,10 @@ jobs:
           if-no-files-found: error
 
   release:
+    if: >-
+      inputs.release-phase == 'standard' && (!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure'))
     timeout-minutes: 10
     name: Draft GitHub Release
-    if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
     environment: ${{ !inputs.dry-run && 'release' || '' }}
@@ -1456,3 +1532,1750 @@ jobs:
           if ! gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services; then
             echo "::warning::Failed to dispatch update-craft-release-versions.yml on storytold/artcraft-services."
           fi
+
+  # nightly-build: original trust boundary; no dependencies on other phases.
+  nightly-build-git-sources:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    name: Git dependencies come from storytold
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Git dependencies come from storytold
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
+          # Source replacement, patches and path overrides in cargo config never show up
+          # in Cargo.lock. Parsed rather than grepped: TOML has many spellings of one key.
+          # Cargo still reads the legacy .cargo/config.
+          python3 - <<'PY'
+          import os, sys, tomllib
+          for path in (".cargo/config", ".cargo/config.toml"):
+              if not os.path.exists(path):
+                  continue
+              config = tomllib.load(open(path, "rb"))
+              replaced = [name for name, source in config.get("source", {}).items()
+                          if isinstance(source, dict) and "replace-with" in source]
+              if replaced or "patch" in config or "paths" in config:
+                  print(f"{path} replaces, patches or overrides a source")
+                  sys.exit(1)
+          PY
+          # Check locked git origins first: cargo metadata resolves and can fetch them.
+          python3 - <<'PY'
+          import sys, tomllib
+          lock = tomllib.load(open("Cargo.lock", "rb"))
+          bad = sorted({p["source"] for p in lock.get("package", [])
+                        if p.get("source", "").startswith("git+")
+                        and not p["source"].startswith("git+https://github.com/storytold/")})
+          if bad:
+              print("Git dependencies outside github.com/storytold:", *bad, sep="\n")
+              sys.exit(1)
+          PY
+          # Fails when Cargo.lock is out of date with the manifests.
+          cargo metadata --locked --format-version 1 > /dev/null
+
+
+  nightly-build-select-platforms:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    # Validate the caller's list once. Build jobs then match exact array elements; a bare
+    # JSON string such as "not-linux-x86_64" can never substring-match a platform.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      platforms: ${{ steps.select.outputs.platforms }}
+      linux-package-formats: ${{ steps.select-packages.outputs.formats }}
+    steps:
+      - name: Require a JSON array of distinct supported platform IDs
+        id: select
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          supported = {'linux-x86_64', 'macos-aarch64', 'windows-x86_64'}
+          try:
+              value = json.loads(os.environ['PLATFORMS'])
+          except ValueError:
+              sys.exit('platforms must be a JSON array of supported platform IDs')
+          if not (isinstance(value, list) and value and all(isinstance(item, str) and item in supported for item in value)):
+              sys.exit('platforms must be a non-empty JSON array of supported platform IDs')
+          if len(set(value)) != len(value):
+              sys.exit('platforms must not repeat a platform')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('platforms='+json.dumps(sorted(value), separators=(',', ':'))+'\n')
+          PY
+      - name: Validate optional Linux package formats
+        id: select-packages
+        env:
+          PLATFORMS: ${{ steps.select.outputs.platforms }}
+          LINUX_PACKAGE_FORMATS: ${{ inputs.linux-package-formats }}
+        run: |
+          python3 -I -B - <<'PY'
+          import json, os, sys
+          supported = {'deb', 'rpm', 'appimage', 'flatpak', 'oci', 'arch'}
+          platforms = json.loads(os.environ['PLATFORMS'])
+          try:
+              fmts = json.loads(os.environ['LINUX_PACKAGE_FORMATS'])
+          except ValueError:
+              sys.exit('linux-package-formats must be a JSON array')
+          if not (isinstance(fmts, list) and all(isinstance(f, str) and f in supported for f in fmts) and len(set(fmts)) == len(fmts)):
+              sys.exit('linux-package-formats must be a JSON array of distinct supported formats')
+          if fmts and 'linux-x86_64' not in platforms:
+              sys.exit('linux-package-formats requires linux-x86_64 in platforms')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('formats='+json.dumps(sorted(fmts), separators=(',', ':'))+'\n')
+          PY
+
+  nightly-build-build:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'windows-x86_64'))
+    needs: [nightly-build-git-sources, nightly-build-select-platforms]
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'unreviewed defining workflow' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ((git -C .nightly-tools rev-parse HEAD) -cne $env:TOOLING_REVISION) { throw 'tooling checkout differs' }
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform windows-x86_64 --output .unsigned-plan
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned producer identity refused' }
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # No platform secrets, environment, OIDC permission, cache, or version mutation.
+      - name: Compile unsigned package only
+        shell: pwsh
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+          DIST: dist
+        run: |
+          pwsh -NoProfile -File packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned compiler failed' }
+      - name: Smoke only in the credentialless compiler job
+        shell: pwsh
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          EXACT_ASSET: ${{ steps.plan.outputs.unsigned-asset }}
+        run: |
+          $unpack = Join-Path $env:RUNNER_TEMP 'nightly-compiler-smoke'
+          $profile = Join-Path $env:RUNNER_TEMP 'nightly-compiler-profile'
+          Expand-Archive -LiteralPath (Join-Path 'dist' $env:EXACT_ASSET) -DestinationPath $unpack
+          python -B .nightly-tools/scripts/nightly_smoke.py --executable (Join-Path $unpack 'photocraft.exe') --profile-root $profile --version $env:EXACT_VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'unsigned GUI smoke failed' }
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform windows-x86_64 --directory dist --plan .unsigned-plan/plan.json --output .unsigned-handoff
+          if ($LASTEXITCODE -ne 0) { throw 'compiler handoff refused' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-build-attest:
+    if: >-
+      inputs.release-phase == 'nightly-build'
+    needs: nightly-build-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      unsigned-sha256: ${{ steps.subject.outputs.unsigned-sha256 }}
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.nightly-build-build.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.nightly-build-build.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-build-build.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.nightly-build-build.outputs.unsigned-sha256 }}
+        run: |
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform windows-x86_64 --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+  nightly-build-build-macos:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'macos-aarch64'))
+    needs: [nightly-build-git-sources, nightly-build-select-platforms]
+    # Same larger Arm runner as the stable macOS build; no secrets, environment, OIDC or cache.
+    runs-on: macos-15-xlarge
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = arm64
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform macos-aarch64 --output .unsigned-plan
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: aarch64-apple-darwin
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      # No platform secrets, environment, OIDC permission, cache, or version mutation.
+      # The app-owned script builds the GUI-only nightly app; Developer ID comes later.
+      - name: Compile unsigned package only
+        shell: bash
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/macos-aarch64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: bash packaging/macos/nightly.sh --arch aarch64
+      - name: Smoke only in the credentialless compiler job
+        shell: bash
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          BUILT_ASSET: ${{ steps.plan.outputs.built-asset }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/nightly-dist/macos-aarch64/$BUILT_ASSET"
+          python3 -B .nightly-tools/scripts/nightly_unix.py inventory --pending .nightly-tools/nightly-unix-pending.json \
+            --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive"
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private --pending .nightly-tools/nightly-unix-pending.json \
+            --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive" \
+            --output "$RUNNER_TEMP/nightly-compiler-smoke"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft" \
+            --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform macos-aarch64 --directory "$RUNNER_TEMP/nightly-dist/macos-aarch64" --plan .unsigned-plan/plan.json --output .unsigned-handoff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-build-attest-macos:
+    if: >-
+      inputs.release-phase == 'nightly-build'
+    needs: nightly-build-build-macos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.nightly-build-build-macos.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.nightly-build-build-macos.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-build-build-macos.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.nightly-build-build-macos.outputs.unsigned-sha256 }}
+        run: |
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform macos-aarch64 --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+  nightly-build-build-linux:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    # Linux joins the same producer run as Windows (one release, every admitted platform).
+    # Off unless the caller lists linux-x86_64; no secrets, environment, OIDC, cache or version mutation.
+    needs: [nightly-build-git-sources, nightly-build-select-platforms]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity without editing source
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = x86_64
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          deb-arch: amd64
+          nfpm-version: 2.47.0
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Compile unsigned package only
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
+          DIST: ${{ runner.temp }}/nightly-dist/linux-x86_64
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: bash packaging/linux/nightly.sh --arch x86_64
+      - name: Inventory and smoke only in the credentialless compiler job
+        env:
+          EXACT_VERSION: ${{ steps.plan.outputs.version }}
+          EXACT_ASSET: ${{ steps.plan.outputs.asset }}
+        run: |
+          set -euo pipefail
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private \
+            --pending .nightly-tools/nightly-unix-pending.json --platform linux-x86_64 \
+            --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/linux-x86_64/$EXACT_ASSET" \
+            --output "$RUNNER_TEMP/nightly-compiler-smoke"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/photocraft" \
+            --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
+      - name: Seal only the exact unsigned compiler bytes
+        id: seal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-seal --platform linux-x86_64 --directory "$RUNNER_TEMP/nightly-dist/linux-x86_64" --plan .unsigned-plan/plan.json --output .unsigned-handoff
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: nightly-unsigned-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .unsigned-handoff/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-build-attest-linux:
+    if: >-
+      inputs.release-phase == 'nightly-build'
+    needs: nightly-build-build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    outputs:
+      unsigned-sha256: ${{ steps.subject.outputs.unsigned-sha256 }}
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Require the actual compiler artifact ID and independent compiler hash
+        env:
+          COMPILER_ARTIFACT: ${{ needs.nightly-build-build-linux.outputs.artifact-id }}
+          COMPILER_SHA256: ${{ needs.nightly-build-build-linux.outputs.unsigned-sha256 }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-build-build-linux.outputs.artifact-id }}
+          path: .unsigned
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently hash the exact compiler payload and recompute its source identity
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_COMPILER_SHA256: ${{ needs.nightly-build-build-linux.outputs.unsigned-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform linux-x86_64 --directory .unsigned
+      - name: Attest actual independently hashed unsigned payload, never a caller digest
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+
+  nightly-build-build-linux-packages:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'linux-x86_64') && needs.nightly-build-select-platforms.outputs.linux-package-formats != '[]' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    name: Linux packages ${{ matrix.arch }}
+    needs: [nightly-build-git-sources, nightly-build-select-platforms]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04, deb: amd64, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64, target: aarch64-unknown-linux-gnu }
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before any shared code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Prepare exact original-run identity
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
+      - name: Export the app's build variables
+        uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          app-name: ${{ inputs.app-name }}
+          version: ${{ steps.plan.outputs.version }}
+          date: ${{ steps.plan.outputs.build-date }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          ref: ${{ inputs.craft-fonts-ref }}
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          deb-arch: ${{ matrix.deb }}
+          nfpm-version: 2.47.0
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils librsvg2-common skopeo
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - id: rust
+        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        with:
+          targets: ${{ matrix.target }}
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ steps.rust.outputs.toolchain }}
+          targets: ${{ steps.rust.outputs.targets }}
+          components: ${{ steps.rust.outputs.components }}
+      - name: Build and package (AppImage, deb, rpm, tar.gz) in isolated nightly mode
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_OVERRIDE_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.nightly-build-select-platforms.outputs.linux-package-formats }}
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+          CRAFT_FONTS_REQUIRED: '1'
+        run: |
+          set -euo pipefail
+          pkg_formats="$(python3 -I -B -c "import json,os; fmts=set(json.loads(os.environ['LINUX_PACKAGE_FORMATS'])); out=[f for f in ('appimage','deb','rpm') if f in fmts]; out.append('tar'); print(' '.join(out))")"
+          arch_tar_args=()
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'arch' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            # This private handoff contains the Arch-only launcher; other formats use dist/release.
+            arch_tar_args=(--arch-tar-dir dist/arch-nightly)
+          fi
+          packaging/linux/package.sh --formats "$pkg_formats" "${arch_tar_args[@]}"
+      - name: Build Flatpak bundle and OCI layout
+        if: contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'flatpak') || contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'oci')
+        env:
+          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
+          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
+          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
+          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.nightly-build-select-platforms.outputs.linux-package-formats }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one app tarball for ${VERSION} in dist/release, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          base="$(basename "${tarballs[0]}" .tar.gz)"
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'oci' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
+            packaging/linux/flatpak-oci.sh "${tarballs[0]}"
+            test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
+            python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
+          import hashlib, json, pathlib, shutil, sys
+          layout, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+          index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
+          manifests = index.get("manifests", [])
+          assert len(manifests) == 1, f"expected 1 OCI manifest, got {len(manifests)}"
+          digest = manifests[0]["digest"]
+          assert digest.startswith("sha256:") and len(digest) == 71
+          blob = layout / "blobs" / "sha256" / digest.split(":", 1)[1]
+          shutil.copyfile(blob, out)
+          assert hashlib.sha256(out.read_bytes()).hexdigest() == digest.split(":", 1)[1]
+          manifest_obj = json.loads(blob.read_bytes())
+          cfg_hex = manifest_obj["config"]["digest"].split(":", 1)[1]
+          cfg_obj = json.loads((layout / "blobs" / "sha256" / cfg_hex).read_bytes())
+          ref_label = cfg_obj.get("config", {}).get("Labels", {}).get("org.flatpak.ref", "")
+          assert ref_label.startswith("app/ai.storyteller.photocraft.nightly/"), f"expected nightly Flatpak app ID, got {ref_label!r}"
+          PY
+            if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' not in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+              rm -f "dist/release/$base.flatpak"
+            fi
+          else
+            packaging/linux/flatpak-bundle.sh --no-test "${tarballs[0]}"
+          fi
+          if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
+            test -f "dist/release/$base.flatpak" && test -s "dist/release/$base.flatpak" || {
+              echo "::error::expected Flatpak bundle dist/release/$base.flatpak not found or empty"
+              exit 1
+            }
+          fi
+      - name: Find tarball for Arch package
+        id: tarball
+        if: contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch')
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/arch-nightly/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one app tarball for ${VERSION} in dist/arch-nightly, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
+      - name: Build x86_64 Arch package with reviewed tooling revision and smoke-test side-by-side install
+        if: matrix.arch == 'x86_64' && contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch')
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+        run: |
+          set -euo pipefail
+          bash .nightly-tools/actions/arch-package/run.sh
+          smoke_dir="$(mktemp -d .arch-side-by-side.XXXXXX)"
+          trap 'rm -rf "$PWD/$smoke_dir"' EXIT
+          # The container's non-root builder has a different UID from the runner.
+          chmod 0755 "$smoke_dir"
+          # The stable fixture must use the ordinary payload, not the Arch nightly launcher.
+          cp "dist/release/photocraft-${VERSION}-linux-x86_64.tar.gz" "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
+          chmod 0644 "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
+          TARBALL="$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz" \
+            TARGET_ARCH="x86_64" \
+            OUTPUT_DIR="$smoke_dir/out" \
+            PKGREL="1" \
+            ARCH_LICENSE="LicenseRef-Proprietary" \
+            bash .nightly-tools/actions/arch-package/run.sh
+          cp "dist/release/photocraft-${VERSION}-linux-x86_64.pkg.tar.zst" "$smoke_dir/out/"
+          docker run --rm -v "$PWD/$smoke_dir/out:/pkgs:ro" \
+            archlinux:base-devel@sha256:949ecb1661609ab7e8f6854ba03efd62792e7a796313738e94b040c095c20d91 \
+            bash -euxc 'pacman -U --noconfirm --assume-installed glibc=2.39 --assume-installed gcc-libs=14.1 --assume-installed hicolor-icon-theme=0.18 --assume-installed libxkbcommon=1.7 --assume-installed libxkbcommon-x11=1.7 --assume-installed vulkan-icd-loader=1.3 /pkgs/photocraft-0.0.1-linux-x86_64.pkg.tar.zst /pkgs/photocraft-*-nightly.*-linux-x86_64.pkg.tar.zst && pacman -Qi ai.storyteller.photocraft ai.storyteller.photocraft.nightly && test -x /usr/bin/photocraft && test -x /usr/bin/photocraft-nightly'
+          rm -rf "$smoke_dir"
+          trap - EXIT
+      - name: Upload aarch64 tarball handoff for Arch package job
+        if: matrix.arch == 'aarch64' && contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-linux-arch-aarch64-tarball-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.tarball.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Smoke-test x86_64 nightly binary channel isolation before removing tarball
+        if: matrix.arch == 'x86_64'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkg-smoke"
+          tar -xzf dist/release/photocraft-"${VERSION}"-linux-x86_64.tar.gz -C "$RUNNER_TEMP/pkg-smoke" --strip-components=1
+          python3 -B .nightly-tools/scripts/nightly_smoke.py \
+            --executable "$RUNNER_TEMP/pkg-smoke/bin/photocraft" \
+            --profile-root "$RUNNER_TEMP/pkg-smoke-profile" --version "$VERSION"
+      - name: Remove duplicate unsigned tarballs after packaging
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          shopt -s nullglob
+          rm -f dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz
+      - name: Verify built Linux package versions and nightly identities
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in dist/release/*; do
+            name="$(basename "$f")"
+            case "$name" in
+              *-"${VERSION}"-linux-"${ARCH}".deb)
+                test "$(dpkg-deb -f "$f" Package)" = "photocraft-nightly" || { echo "::error::$name is not Package: photocraft-nightly"; exit 1; }
+                ;;
+              *-"${VERSION}"-linux-"${ARCH}".rpm)
+                test "$(rpm -qp --qf '%{NAME}' "$f")" = "photocraft-nightly" || { echo "::error::$name is not Name: photocraft-nightly"; exit 1; }
+                ;;
+              *-"${VERSION}"-linux-"${ARCH}".pkg.tar.zst)
+                tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$name is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+                ;;
+              *-"${VERSION}"-linux-"${ARCH}".*) ;;
+              *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
+              *) echo "::error::unexpected package or version mismatch in $name (expected *-${VERSION}-linux-${ARCH}.*)"; exit 1 ;;
+            esac
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.arch == 'x86_64' || needs.nightly-build-select-platforms.outputs.linux-package-formats != '["arch"]'
+        with:
+          name: nightly-linux-packages-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  nightly-build-build-linux-arch-arm:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'linux-x86_64') && contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    name: Arch Linux aarch64
+    needs: [nightly-build-select-platforms, nightly-build-build-linux-packages]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind immutable defining workflow before shared packaging code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nightly-linux-arch-aarch64-tarball-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/linux
+          if-no-files-found: error
+          digest-mismatch: error
+      - name: Find aarch64 tarball
+        id: tarball
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          shopt -s nullglob
+          tarballs=()
+          for f in dist/linux/*-linux-aarch64.tar.gz; do
+            case "${f##*/}" in *-cli-*|*-server-*) ;; *) tarballs+=("$f") ;; esac
+          done
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "::error::expected one aarch64 tarball in dist/linux, found ${#tarballs[@]}: ${tarballs[*]}"
+            exit 1
+          fi
+          echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
+      - name: Build aarch64 Arch package with reviewed tooling revision
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+          TARGET_ARCH: aarch64
+          GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+        run: |
+          bash .nightly-tools/actions/arch-package/run.sh
+          for f in dist/release/*.pkg.tar.zst; do
+            tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$f is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-linux-arch-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/release/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  nightly-build-attest-linux-packages:
+    if: >-
+      inputs.release-phase == 'nightly-build' && (!cancelled() && contains(fromJSON(needs.nightly-build-select-platforms.outputs.platforms), 'linux-x86_64') && needs.nightly-build-select-platforms.outputs.linux-package-formats != '[]' && needs.nightly-build-build-linux-packages.result == 'success' && (!contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch') || needs.nightly-build-build-linux-arch-arm.result == 'success') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main')
+    needs: [nightly-build-select-platforms, nightly-build-build-linux-packages, nightly-build-build-linux-arch-arm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      # Fresh runner: no app checkout, hooks, payload execution or restored cache.
+      - name: Bind defining workflow without loading application code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: nightly-linux-packages-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: >-
+          contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'deb') ||
+          contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'rpm') ||
+          contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'appimage') ||
+          contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'flatpak') ||
+          contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'oci')
+        with:
+          name: nightly-linux-packages-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: contains(fromJSON(needs.nightly-build-select-platforms.outputs.linux-package-formats), 'arch')
+        with:
+          name: nightly-linux-arch-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Inventory Linux package payloads for attestation
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LINUX_PACKAGE_FORMATS: ${{ needs.nightly-build-select-platforms.outputs.linux-package-formats }}
+        run: |
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-packages-subject --platform linux-x86_64 --directory .linux-packages --formats "$LINUX_PACKAGE_FORMATS"
+      - name: Attest Linux package payloads
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.subject.outputs.subject-path }}
+
+  # nightly-sign: original trust boundary; no dependencies on other phases.
+  nightly-sign-validate:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+      platforms: ${{ steps.admit.outputs.platforms }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.validate.outputs.bundle-sha256 }}
+      has-linux-packages: ${{ steps.validate.outputs.has-linux-packages }}
+      version: ${{ steps.validate.outputs.version }}
+      tag: ${{ steps.validate.outputs.tag }}
+      source-commit: ${{ steps.validate.outputs.source-commit }}
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Snapshot exact-C quality before artifact work
+        id: admit
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_RUN_ID: ${{ inputs.producer_run_id }}
+          PRODUCER_RUN_ATTEMPT: ${{ inputs.producer_run_attempt }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py admit --source .release-source --producer-run-id "$env:PRODUCER_RUN_ID" --producer-run-attempt "$env:PRODUCER_RUN_ATTEMPT" --output .admission
+          if ($LASTEXITCODE -ne 0) { throw 'producer/quality admission refused' }
+      # One exact authenticated artifact ID per admitted platform, each into its own directory.
+      - name: Download exact authenticated Windows producer artifact; verify transport ZIP digest
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'windows-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-windows-x86_64 }}
+          path: .unsigned/windows-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated macOS producer artifact; verify transport ZIP digest
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'macos-aarch64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-macos-aarch64 }}
+          path: .unsigned/macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux producer artifact; verify transport ZIP digest
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-linux-x86_64 }}
+          path: .unsigned/linux-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux x86_64 packages from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64') && steps.admit.outputs.artifact-id-nightly-linux-packages-x86_64 != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-packages-x86_64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux aarch64 packages from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64') && steps.admit.outputs.artifact-id-nightly-linux-packages-aarch64 != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-packages-aarch64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux aarch64 Arch package from producer run for validation
+        if: steps.admit.outputs.admitted == 'true' && contains(fromJSON(steps.admit.outputs.platforms), 'linux-x86_64') && steps.admit.outputs.artifact-id-nightly-linux-arch-aarch64 != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.producer_run_id }}
+          artifact-ids: ${{ steps.admit.outputs.artifact-id-nightly-linux-arch-aarch64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify every unsigned payload with trusted patched gh, then revalidate admission
+        if: steps.admit.outputs.admitted == 'true'
+        id: validate
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $validateArgs = @('--source', '.release-source', '--state', '.admission', '--directory', '.unsigned', '--output', '.validated')
+          if (Test-Path .linux-packages) { $validateArgs += @('--linux-packages', '.linux-packages') }
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py validate @validateArgs
+          if ($LASTEXITCODE -ne 0) { throw 'cryptographic unsigned provenance or retained quality refused' }
+      - name: Upload only trusted validator handoff
+        if: steps.admit.outputs.admitted == 'true'
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .validated/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-sign-sign-windows:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-validate.outputs.admitted == 'true' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'windows-x86_64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    needs: nightly-sign-validate
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.sign.outputs.bundle-sha256 }}
+    steps:
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only the trusted same-run validator artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-validate.outputs.artifact-id }}
+          path: .validated
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck real ref, quality, pause and freshness before raw signing-secret exports
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py guard --source .release-source --platform windows-x86_64 --directory .validated --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256"
+          if ($LASTEXITCODE -ne 0) { throw 'pre-secret signing gate refused' }
+      - name: Sign data only through protected existing Windows adapter
+        id: sign
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py sign --source .release-source --platform windows-x86_64 --directory .validated --expected-sha256 "$env:EXPECTED_BUNDLE_SHA256" --output .signed
+          if ($LASTEXITCODE -ne 0) { throw 'mandatory native signing/verification refused' }
+      - name: Upload only finite signed bytes and two-role receipts
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-signed-windows-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-sign-sign-macos:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-validate.outputs.admitted == 'true' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    needs: nightly-sign-validate
+    # Same Apple route and `release` environment as the stable macOS job.
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.sign.outputs.bundle-sha256 }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only the trusted same-run validator artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-validate.outputs.artifact-id }}
+          path: .validated
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck real ref, quality, pause and freshness before raw signing-secret exports
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py guard --source .release-source --platform macos-aarch64 --directory .validated --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
+      - name: Sign, notarize and staple data only through the protected app macOS adapter
+        id: sign
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py sign --source .release-source --platform macos-aarch64 --directory .validated --expected-sha256 "$EXPECTED_BUNDLE_SHA256" --output .signed
+      - name: Upload only finite signed bytes and two-role receipts
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-signed-macos-aarch64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-sign-verify-macos:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-validate.outputs.admitted == 'true' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    needs: [nightly-sign-validate, nightly-sign-sign-macos]
+    # Fresh runner, NO release environment or platform secrets.
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      final-sha256: ${{ steps.verify.outputs.final-sha256 }}
+      asset: ${{ steps.verify.outputs.asset }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only exact signer-produced macOS artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-macos.outputs.artifact-id }}
+          path: .signed/macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently verify Developer ID, team, runtime, timestamp, staple and Gatekeeper
+        id: verify
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-sign-macos.outputs.bundle-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py verify-platform --source .release-source --platform macos-aarch64 --directory .signed/macos-aarch64 --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
+  nightly-sign-smoke-macos:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-validate.outputs.admitted == 'true' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    needs: [nightly-sign-validate, nightly-sign-sign-macos, nightly-sign-verify-macos]
+    # The only job that runs signed payload code: no environment, secrets, tokens or
+    # outputs the publisher consumes. Hardened runtime only applies once signed.
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        shell: bash
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+      - name: Download only exact signer-produced macOS artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-macos.outputs.artifact-id }}
+          path: .signed/macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Launch the exact verified signed app once, secret-free, through the app verifier
+        shell: bash
+        env:
+          ASSET: ${{ needs.nightly-sign-verify-macos.outputs.asset }}
+          FINAL_SHA256: ${{ needs.nightly-sign-verify-macos.outputs.final-sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$ASSET" =~ ^photocraft-[0-9A-Za-z.-]+-macos-aarch64-nightly[.]zip$ ]]
+          final="$PWD/.signed/macos-aarch64/$ASSET"
+          test -f "$final" && test ! -L "$final"
+          test "$(shasum -a 256 "$final" | cut -d' ' -f1)" = "$FINAL_SHA256"
+          team="$(git -C .release-source show HEAD:.github/nightly-signing-policy.json | python3 -I -c "import json,re,sys; t=json.load(sys.stdin)['platforms']['macos-aarch64']['trust']['apple_team_id']; assert re.fullmatch('[A-Z0-9]{10}',t); print(t)")"
+          bash .release-source/packaging/macos/nightly-verify.sh --input "$final" --expect signed --team "$team"
+  nightly-sign-sign-linux:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-validate.outputs.admitted == 'true' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'linux-x86_64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    # Linux signs on Ubuntu with the existing stable LINUX_SIGNING_KEY in the release environment,
+    # exposed only to the single sign step. Never builds, extracts or runs the payload.
+    needs: nightly-sign-validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      bundle-sha256: ${{ steps.sign.outputs.bundle-sha256 }}
+      final-sha256: ${{ steps.sign.outputs.final-sha256 }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only the trusted same-run validator artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-validate.outputs.artifact-id }}
+          path: .validated
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Install Linux package signing tools
+        if: needs.nightly-sign-validate.outputs.has-linux-packages == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rpm debsigs binutils skopeo
+      - name: Recheck real ref, quality, pause and freshness before the signing secret is exposed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py guard --platform linux-x86_64 --source .release-source --directory .validated --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
+      - name: Sign data only with the existing stable OpenPGP key (detached .asc)
+        id: sign
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-validate.outputs.bundle-sha256 }}
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py sign --platform linux-x86_64 --source .release-source --directory .validated --expected-sha256 "$EXPECTED_BUNDLE_SHA256" --output .signed
+      - name: Upload only finite signed bytes, detached signature support and receipts
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-release-signed-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .signed/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+  nightly-sign-verify-linux:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (needs.nightly-sign-sign-linux.result == 'success' && contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'linux-x86_64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    # Fresh keyless runner: no release environment or secrets. gpgv trusts only the
+    # reviewed key in release source and the policy fingerprint, never the release asset.
+    needs: [nightly-sign-validate, nightly-sign-sign-linux]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      attestations: read
+    outputs:
+      final-sha256: ${{ steps.verify.outputs.final-sha256 }}
+    steps:
+      - name: Select Python for nightly helpers
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only the exact signer-produced Linux artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-linux.outputs.artifact-id }}
+          path: .signed/linux-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Independently verify the detached signature, exact bytes and published key without credentials
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_BUNDLE_SHA256: ${{ needs.nightly-sign-sign-linux.outputs.bundle-sha256 }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py verify-platform --platform linux-x86_64 --source .release-source --directory .signed/linux-x86_64 --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
+
+  nightly-sign-publish:
+    if: >-
+      inputs.release-phase == 'nightly-sign' && !inputs.dry-run && (!cancelled() && needs.nightly-sign-validate.result == 'success' && needs.nightly-sign-validate.outputs.admitted == 'true' && (!contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'windows-x86_64') || needs.nightly-sign-sign-windows.result == 'success') && (!contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'macos-aarch64') || (needs.nightly-sign-sign-macos.result == 'success' && needs.nightly-sign-verify-macos.result == 'success' && needs.nightly-sign-smoke-macos.result == 'success')) && (!contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'linux-x86_64') || (needs.nightly-sign-sign-linux.result == 'success' && needs.nightly-sign-verify-linux.result == 'success')) && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch')
+    name: Publish signed nightly
+    needs: [nightly-sign-validate, nightly-sign-sign-windows, nightly-sign-sign-macos, nightly-sign-verify-macos, nightly-sign-smoke-macos, nightly-sign-sign-linux, nightly-sign-verify-linux]
+    # !cancelled() (not always()) so a skipped NON-admitted platform cannot block while a cancel
+    # still stops release writes; every admitted
+    # platform's jobs must have succeeded, and the bridge refuses a missing digest too.
+    runs-on: windows-latest
+    # Every step has its own bound and the job budget exceeds their sum, so a slow
+    # step fails as a step: the tolerant ownership upload can never time the job out.
+    timeout-minutes: 100
+    # Fresh Windows verifier, but NO release environment or platform secrets.
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out only the actual release execution source
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Bind protected policy and actual immutable defining workflow
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
+      - name: Check out only the defining shared workflow revision
+        timeout-minutes: 5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Download only exact signer-produced Windows artifact ID
+        timeout-minutes: 10
+        if: contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'windows-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-windows.outputs.artifact-id }}
+          path: .signed/windows-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download only exact signer-produced macOS artifact ID
+        timeout-minutes: 10
+        if: contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'macos-aarch64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-macos.outputs.artifact-id }}
+          path: .signed/macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download only exact signer-produced Linux artifact ID
+        timeout-minutes: 10
+        if: contains(fromJSON(needs.nightly-sign-validate.outputs.platforms), 'linux-x86_64')
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.nightly-sign-sign-linux.outputs.artifact-id }}
+          path: .signed/linux-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Revalidate actual producer, natively verify Windows and bind each fresh platform verifier
+        timeout-minutes: 15
+        id: final
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_BUNDLE_SHA256_WINDOWS_X86_64: ${{ needs.nightly-sign-sign-windows.outputs.bundle-sha256 }}
+          SIGNED_BUNDLE_SHA256_MACOS_AARCH64: ${{ needs.nightly-sign-sign-macos.outputs.bundle-sha256 }}
+          VERIFIED_FINAL_SHA256_MACOS_AARCH64: ${{ needs.nightly-sign-verify-macos.outputs.final-sha256 }}
+          SIGNED_BUNDLE_SHA256_LINUX_X86_64: ${{ needs.nightly-sign-sign-linux.outputs.bundle-sha256 }}
+          VERIFIED_FINAL_SHA256_LINUX_X86_64: ${{ needs.nightly-sign-verify-linux.outputs.final-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py final --source .release-source --directory .signed
+          if ($LASTEXITCODE -ne 0) { throw 'fresh native signature or publication preflight refused' }
+      - name: Attest actual final signed-output bytes from trusted publisher
+        timeout-minutes: 5
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-path: ${{ steps.final.outputs.subject-path }}
+      - name: Publish the signed nightly and preserve ownership
+        timeout-minutes: 15
+        id: publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED_BUNDLE_SHA256_WINDOWS_X86_64: ${{ needs.nightly-sign-sign-windows.outputs.bundle-sha256 }}
+          SIGNED_BUNDLE_SHA256_MACOS_AARCH64: ${{ needs.nightly-sign-sign-macos.outputs.bundle-sha256 }}
+          VERIFIED_FINAL_SHA256_MACOS_AARCH64: ${{ needs.nightly-sign-verify-macos.outputs.final-sha256 }}
+          SIGNED_BUNDLE_SHA256_LINUX_X86_64: ${{ needs.nightly-sign-sign-linux.outputs.bundle-sha256 }}
+          VERIFIED_FINAL_SHA256_LINUX_X86_64: ${{ needs.nightly-sign-verify-linux.outputs.final-sha256 }}
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_release_entry.py publish --source .release-source --directory .signed --combined .combined --packet .packet --ownership .ownership
+          if ($LASTEXITCODE -ne 0) { throw 'publication stopped; reconcile any public state before retrying' }
+      - name: Stage immutable OCI publication proof
+        timeout-minutes: 2
+        continue-on-error: true
+        shell: pwsh
+        run: python -I -B .nightly-tools/scripts/nightly_oci.py stage-proof
+      - name: Retain finalized OCI publication proof
+        timeout-minutes: 5
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-oci-proof-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .oci-proof/proof.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain only finalized ownership evidence
+        timeout-minutes: 5
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nightly-ownership-v2-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .ownership/ownership.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 90
+
+  # nightly-oci: original trust boundary; no dependencies on other phases.
+  nightly-oci-push-oci:
+    if: >-
+      inputs.release-phase == 'nightly-oci' && !inputs.dry-run && (github.repository == 'storytold/photocraft' && github.event_name == 'workflow_run' && github.event.action == 'completed' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'release' && github.event.workflow_run.repository.full_name == 'storytold/photocraft' && github.event.workflow_run.head_repository.full_name == 'storytold/photocraft')
+    # This repository owns one set of floating OCI tags. Never let a second
+    # writer publish while this job is rechecking freshness and copying tags.
+    concurrency:
+      group: craft-nightly-oci-photocraft
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Bind immutable defining workflow
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+          SIGNER_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$SIGNER_SHA"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - name: Resolve verified release target and exact producer package artifact IDs
+        id: target
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py policy
+      - name: Download exact-attempt protected publisher proof
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: nightly-oci-proof-photocraft-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: .publisher-proof
+          digest-mismatch: error
+      - name: Fetch release metadata from GitHub REST API
+        id: release-meta
+        if: steps.target.outputs.oci-enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SIGNER_ID: ${{ github.event.workflow_run.id }}
+          SIGNER_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SIGNER_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py resolve
+      - name: Install skopeo
+        if: steps.target.outputs.oci-enabled == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+      - name: Download exact authenticated Linux x86_64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-meta.outputs.producer-id }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-x86_64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux aarch64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-meta.outputs.producer-id }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-aarch64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify release target, SHA256SUMS.txt, and .oci.sig before pushing OCI tags
+        if: steps.target.outputs.oci-enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py push

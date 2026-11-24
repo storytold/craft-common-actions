@@ -17,10 +17,29 @@ def jobs(text):
             for i, match in enumerate(matches)}
 
 
+def phase_workflow(phase):
+    """Use active unified jobs while keeping the assertions in phase-local job IDs."""
+    unified = workflow("release.yml")
+    header, _ = unified.split("\njobs:\n", 1)
+    prefix = phase + "-"
+    selected = []
+    for name, block in jobs(unified).items():
+        if not name.startswith(prefix):
+            continue
+        block = block.split("\n  # nightly-", 1)[0]
+        assert f"inputs.release-phase == '{phase}'" in block.split("    steps:", 1)[0]
+        block = re.sub(r"(?m)^  " + prefix, "  ", block)
+        block = re.sub(r"\bneeds\." + prefix, "needs.", block)
+        block = re.sub(r"(?m)^    needs: .+$", lambda m: m[0].replace(prefix, ""), block)
+        selected.append(block.rstrip() + "\n")
+    assert selected
+    return header + "\njobs:\n" + "".join(selected)
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.unsigned = workflow("nightly-unsigned.yml")
-        self.release = workflow("nightly-release.yml")
+        self.unsigned = phase_workflow("nightly-build")
+        self.release = phase_workflow("nightly-sign")
         self.safe = workflow("nightly-release-no-key.yml")
 
     def test_privileged_workflows_have_no_standalone_trigger(self):
@@ -59,7 +78,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, graph["git-sources"])
 
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
-        self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
+        self.assertIn("inputs.release-phase == 'nightly-sign' && 'craft-release-ref-signer-photocraft'", self.release)
+        self.assertIn("cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
         self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish"})
         for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
@@ -167,9 +187,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_lockfile_git_origins_are_checked_before_cargo_metadata_can_fetch(self):
         # `cargo metadata --locked` still resolves and fetches git sources over the network.
-        for name in ("nightly-unsigned.yml",):  # windows/unix: their own test files
+        for name in ("nightly-build",):  # legacy windows/unix: their own test files
             with self.subTest(workflow=name):
-                block = jobs(workflow(name))["git-sources"]
+                block = jobs(phase_workflow(name))["git-sources"]
                 origin = block.index('not p["source"].startswith("git+https://github.com/storytold/")')
                 self.assertLess(block.index('for path in (".cargo/config", ".cargo/config.toml")'), origin)
                 self.assertLess(origin, block.index("cargo metadata --locked --format-version 1"))
@@ -232,7 +252,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_notify_website_dispatches_artcraft_services_outside_signer(self):
         import os, subprocess, yaml
         self.assertNotIn("notify-website", jobs(self.release))
-        self.assertNotIn("ARTCRAFT_SERVICES_DISPATCH_TOKEN", self.release)
+        self.assertNotIn("secrets.ARTCRAFT_SERVICES_DISPATCH_TOKEN", "".join(jobs(self.release).values()))
         notify_wf = workflow("nightly-notify-website.yml")
         data = yaml.safe_load(notify_wf)
         secrets = data[True]["workflow_call"]["secrets"] if True in data else data["on"]["workflow_call"]["secrets"]
@@ -247,7 +267,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, notify)
         self.assertIn("gh workflow run update-craft-release-versions.yml --repo storytold/artcraft-services", notify)
 
-        oci = workflow("nightly-oci.yml")
+        oci = phase_workflow("nightly-oci")
         self.assertIn("packages: write", oci)
         self.assertNotIn("packages: write", self.release)
         self.assertIn("nightly_oci.py push", jobs(oci)["push-oci"])
@@ -281,8 +301,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_outside_git_origin_refuses_without_running_cargo(self):
         import os, subprocess, sys, tempfile, textwrap
-        for name in ("nightly-unsigned.yml",):  # windows/unix: their own test files
-            block = jobs(workflow(name))["git-sources"].split("      - name: Git dependencies come from storytold\n        run: |\n", 1)[1]
+        for name in ("nightly-build",):  # legacy windows/unix: their own test files
+            block = jobs(phase_workflow(name))["git-sources"].split("      - name: Git dependencies come from storytold\n        run: |\n", 1)[1]
             lines = []
             for line in block.splitlines():
                 if line.strip() and not line.startswith(" "*10): break

@@ -20,8 +20,11 @@ class DryRunTests(unittest.TestCase):
         for name, job in JOBS.items():
             env = job.get('environment')
             if env is not None:
-                self.assertIn(DRY, env, name)
-                self.assertNotEqual(env.strip(), 'release', name)
+                if name.startswith('nightly-sign-'):
+                    self.assertIn(DRY, job.get('if', ''), name)
+                else:
+                    self.assertIn(DRY, env, name)
+                    self.assertNotEqual(env.strip(), 'release', name)
 
     def test_the_draft_and_macos_are_skipped(self):
         # The draft is the release; macOS runs on a paid larger runner.

@@ -472,7 +472,7 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertNotIn('schedule:',self.main)
 
     def test_public_signer_identities_are_reviewed_caller_source_never_repository_variables(self):
-        for name in ('nightly.yml','nightly-windows.yml','nightly-unix.yml','nightly-signing-unix.yml','nightly-release.yml','nightly-unsigned.yml'):
+        for name in ('nightly.yml','nightly-windows.yml','nightly-unix.yml','nightly-signing-unix.yml','release.yml'):
             source=(ROOT/'.github/workflows'/name).read_text()
             self.assertNotIn('vars.NIGHTLY_APPLE_TEAM_ID',source)
             self.assertNotIn('vars.NIGHTLY_WINDOWS_PUBLISHER_SUBJECT',source)

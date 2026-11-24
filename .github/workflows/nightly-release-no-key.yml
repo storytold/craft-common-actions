@@ -8,6 +8,7 @@ on:
       - 'tests/test_nightly*.py'
       - 'tests/test_publish_nightly.py'
       - '.github/workflows/nightly*.yml'
+      - '.github/workflows/release.yml'
       - 'nightly-apps.json'
   workflow_dispatch:
 permissions:

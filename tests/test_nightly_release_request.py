@@ -148,6 +148,49 @@ class RequestTests(unittest.TestCase):
         self.assertTrue(all(method == 'GET' and not suffix.endswith('/zip') for method,suffix in self.api.calls))
         self.assertEqual(self.env['GITHUB_SHA'], 'd'*40)
 
+    def test_unified_release_defining_workflow_changes_pin_without_changing_caller_or_history(self):
+        import base64
+        import json
+        import nightly_release as release
+
+        old_policy = copy.deepcopy(self.policy)
+        prior = self.invoke()
+        old_evidence = self.result()
+        old_sha = prior['signer']['source_commit']
+        sha = '9'*40
+        path = 'storytold/craft-common-actions/.github/workflows/release.yml@'+sha
+        self.policy.update(producer_tooling_revision=sha, signer_tooling_revision=sha,
+                           producer_workflow_ref=path)
+        self.env.update(TOOLING_REVISION=sha, GITHUB_SHA='8'*40)
+        self.modify_run(200, 'head_sha', self.env['GITHUB_SHA'])
+        with self.assertRaisesRegex(ValueError, 'pinned reusable producer provenance'):
+            self.invoke()
+        self.modify_run(100, 'referenced_workflows', [{'path': path, 'sha': sha}])
+        current = self.invoke()
+        self.assertEqual(current['producer']['workflow_path'], prior['producer']['workflow_path'])
+        self.assertEqual(current['signer']['workflow_path'], prior['signer']['workflow_path'])
+        self.assertEqual(current['producer']['tooling_revision'], sha)
+        self.assertEqual(current['signer']['tooling_revision'], sha)
+        with self.assertRaisesRegex(ValueError, 'certificate'):
+            self.verify(old_evidence)
+        evidence = self.result()
+        evidence[0]['verificationResult']['signature']['certificate']['buildSignerDigest'] = sha
+        self.assertEqual(self.verify(evidence)['payload_sha256'], 'f'*64)
+
+        # Prior published receipts still use the historical, source-owned policy.
+        blob = json.dumps(old_policy).encode()
+        compare = r.p.compare_path(old_sha, current['signer']['source_commit'])
+        self.api.rows[compare] = {'status': 'ahead', 'ahead_by': 1, 'behind_by': 0,
+                                  'base_commit': {'sha': old_sha}, 'merge_base_commit': {'sha': old_sha},
+                                  'commits': []}
+        self.api.rows['/contents/.github/nightly-signing-policy.json?ref='+old_sha] = {
+            'encoding': 'base64', 'size': len(blob), 'content': base64.b64encode(blob).decode()}
+        historical = release.prior_policy(self.api, self.policy, prior, current)
+        self.assertEqual(historical, old_policy)
+        self.assertEqual(r.verify_unsigned_attestation(historical, prior, old_evidence, 'f'*64)['payload_sha256'], 'f'*64)
+        with self.assertRaisesRegex(ValueError, 'historical trust root differs'):
+            release.prior_policy(self.api, {**self.policy, 'signer_workflow_path': '.github/workflows/other.yml'}, prior, current)
+
     def test_actual_context_ref_tag_event_identity_and_pin_refuse_before_api(self):
         for key,value in [('GITHUB_REPOSITORY', 'other/photocraft'), ('GITHUB_REPOSITORY_ID', '124'),
             ('GITHUB_REF', 'refs/heads/main'), ('GITHUB_REF', 'refs/tags/release'),

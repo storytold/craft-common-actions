@@ -360,10 +360,12 @@ def steps(block):
     return re.split(r'(?=^      - )', block.split('    steps:\n', 1)[1], flags=re.M)[1:]
 
 
+from test_nightly_release_workflows import phase_workflow
+
 class LinuxReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
-        self.release = (ROOT/'.github/workflows/nightly-release.yml').read_text()
-        self.unsigned = (ROOT/'.github/workflows/nightly-unsigned.yml').read_text()
+        self.release = phase_workflow("nightly-sign")
+        self.unsigned = phase_workflow("nightly-build")
 
     def test_linux_secret_reaches_only_the_single_protected_sign_step(self):
         self.assertEqual(self.release.count('secrets.LINUX_SIGNING_KEY'), 1)
