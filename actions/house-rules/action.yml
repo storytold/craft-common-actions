@@ -1,7 +1,7 @@
 name: Check house rules
 description: >-
-  Fail unless the AGENTS.md craft-agents block (or the old house-rules blocks) matches craft-contrib
-  at the commit it names, and that commit is on main. An intact older commit warns only when the normalized standards file changed on main.
+  Fail unless the AGENTS.md craft-agents block matches craft-contrib at the commit it names, and that
+  commit is on main. The retired house-rules blocks (RFC-0006) fail. An intact older commit warns only when the normalized standards file changed on main.
 
 inputs:
   working-directory:
@@ -12,7 +12,7 @@ inputs:
     description: "Checkout of storytold/craft-contrib with main history"
     required: true
   require-rust:
-    description: "Old house-rules blocks only: require the Rust block as well as the core block"
+    description: "Ignored: it applied only to the retired house-rules blocks"
     required: false
     default: "true"
 

@@ -910,14 +910,16 @@ jobs:
 
 ### 10. `house-rules.yml`
 
-Fails unless `AGENTS.md` carries the shared house rules from
-[storytold/craft-contrib](https://github.com/storytold/craft-contrib) unchanged. Each block names
-the commit it was copied from and the SHA-256 of the bytes inside it. The check loads
-`standards/house-rules-core.md` (and `standards/house-rules-rust.md` when `rust` is true) at that
-commit, requires the commit to be on `main`, and compares the normalized bytes. An edited block, or
-a commit that is not on `main`, fails. An intact older commit warns only when its normalized standards file changed on `main`.
-If the file is unchanged, there is no warning. A source that cannot be read
-fails as "could not check". `rust` defaults to true; a repository that is not Rust passes `false`.
+Fails unless `AGENTS.md` carries the shared agent rules from
+[storytold/craft-contrib](https://github.com/storytold/craft-contrib) unchanged: one `craft-agents`
+block holding `standards/app-agents.md` (RFC-0072). The block names the commit it was copied from and
+the SHA-256 of the bytes inside it. The check loads `standards/app-agents.md` at that commit, requires
+the commit to be on `main`, and compares the normalized bytes. An edited block, or a commit that is not
+on `main`, fails. An intact older commit warns only when the normalized file changed on `main`. A
+source that cannot be read fails as "could not check". The RFC-0006 `craft-house-rules` blocks are
+retired: a file that still carries them fails and is moved with
+`python3 actions/house-rules/house_rules.py write-agents --directory <app> --source <craft-contrib>`.
+`rust` only applied to the retired blocks; it is still accepted, so callers need no change.
 
 The caller is only the workflow call. The reusable workflow checks the app out and checks
 craft-contrib out at `main` with full history.
@@ -1035,7 +1037,7 @@ Individual actions are also available for composing custom pipelines:
   ```
 
   The same step fails when a crate's sources name a path into another crate's directory (an `include_str!`/`include_bytes!` path, or a `../` literal in a file that uses `CARGO_MANIFEST_DIR`) that `reads` does not cover, or when a declared path matches no tracked file.
-- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` asks for the Rust block as well as the core block.
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` applied only to the retired house-rules blocks and is ignored.
 
 ## Storytold Organization Hosting
 

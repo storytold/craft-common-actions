@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Write and check the shared rules in AGENTS.md.
 
-Two formats are accepted. The old one is the generated `craft-house-rules` blocks (core and
-rust). The new one is a single `craft-agents` block holding `standards/app-agents.md`
-(RFC-0072); `write-agents` generates it. A file with both formats fails.
+`check` accepts one format: a single `craft-agents` block holding `standards/app-agents.md`
+(RFC-0072); `write-agents` generates it and replaces the old blocks. The old generated
+`craft-house-rules` blocks (core and rust, RFC-0006) are retired, so a file that still carries
+them fails, as does a file with both formats. `write` and `allow_house_rules` keep the old format
+readable only until RFC-0072 rollout step 4 deletes its sources.
 
 The bytes inside a block are the normalized standards file. The recorded sha256
 must match those bytes, and those bytes must match the file at the recorded
@@ -218,8 +220,18 @@ def judge_block(source: str, block: dict) -> tuple[str | None, str | None]:
     return None, None
 
 
-def check_file(agents: str, source: Path, require_rust: bool) -> tuple[list[str], list[str]]:
-    """Return (failures, warnings). A missing source is a failure worded as could not check."""
+RETIRED = (
+    "house rules: the craft-house-rules blocks are retired (RFC-0072); replace them with the craft-agents block"
+    " (house_rules.py write-agents)"
+)
+
+
+def check_file(agents: str, source: Path, require_rust: bool, allow_house_rules: bool = False) -> tuple[list[str], list[str]]:
+    """Return (failures, warnings). A missing source is a failure worded as could not check.
+
+    `allow_house_rules` checks the retired house-rules blocks instead of failing them; only the tests of
+    that format use it.
+    """
     checkout = checkout_path(str(source))
     if checkout is None:
         return ["house rules: could not check the craft-contrib checkout"], []
@@ -237,6 +249,9 @@ def check_file(agents: str, source: Path, require_rust: bool) -> tuple[list[str]
         if len(by_name) > 1:
             failures.append("house rules: the craft-agents block cannot sit beside house-rules blocks")
         wanted = ["agents"]
+    elif not allow_house_rules:
+        # An agent reading the old blocks follows rules RFC-0072 replaced
+        return ([RETIRED] if by_name else ["house rules: the agents block is missing"]), []
     else:
         wanted = ["core", "rust"] if require_rust else ["core"]
     for name in wanted:
