@@ -1,0 +1,88 @@
+name: "Nightly feed"
+description: "Plans one nightly of a Craft app: identity, distro version, tag and tag family, run-created date, launcher platforms and build channel from the launcher registry, and whether an unchanged scheduled source skips the run"
+
+inputs:
+  mode:
+    description: "What to do. Only 'plan' (the release workflow's version job)"
+    required: true
+  app-name:
+    description: "Application repository name (e.g. photocraft); launcher-registry apps get v<identity> tags, every other app nightly_<nv>"
+    required: true
+  version:
+    description: "Cargo version from resolve-version; its prerelease and build suffix are dropped for the identity base"
+    required: true
+  nightly:
+    description: "'true' to plan a nightly; otherwise every output is empty, launcher-platforms is [] and skip is false"
+    required: false
+    default: "false"
+
+outputs:
+  identity:
+    description: "<X.Y.Z>-nightly.<YYYYMMDD>.<run_id>.<run_attempt>.g<sha12>"
+    value: ${{ steps.plan.outputs.identity }}
+  nightly-version:
+    description: "Distro package version <X.Y.Z>.<YYYYMMDD>.<run_id>.<run_attempt>"
+    value: ${{ steps.plan.outputs.nightly-version }}
+  tag:
+    description: "Release tag: v<identity> for launcher-registry apps, nightly_<nightly-version> otherwise"
+    value: ${{ steps.plan.outputs.tag }}
+  tag-family:
+    description: "'v' or 'nightly_'"
+    value: ${{ steps.plan.outputs.tag-family }}
+  date:
+    description: "UTC date of the run's created_at, YYYY-MM-DD (the date in the identity)"
+    value: ${{ steps.plan.outputs.date }}
+  published-at:
+    description: "The run's created_at in Unix seconds (NIGHTLY.json published_at)"
+    value: ${{ steps.plan.outputs.published-at }}
+  launcher-platforms:
+    description: "JSON array of launcher platforms to build (linux, macos, windows); [] for apps outside the registry"
+    value: ${{ steps.plan.outputs.launcher-platforms }}
+  build-channel:
+    description: "Compile-time build channel for the launcher builds only (e.g. nightly-v1); empty outside the registry"
+    value: ${{ steps.plan.outputs.build-channel }}
+  skip:
+    description: "'true' on a scheduled run when the newest published nightly of the tag family was built from this commit"
+    value: ${{ steps.plan.outputs.skip }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Plan the nightly
+      id: plan
+      if: inputs.mode == 'plan'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        APP_NAME: ${{ inputs.app-name }}
+        VERSION: ${{ inputs.version }}
+        NIGHTLY: ${{ inputs.nightly }}
+        ACTION_DIR: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        args=(plan --app "$APP_NAME" --version "$VERSION" --nightly "$NIGHTLY")
+        if [ "$NIGHTLY" = true ]; then
+          work="$(mktemp -d "$RUNNER_TEMP/nightly-plan.XXXXXX")"
+          # Scheduled events carry no repository payload, so the default branch is read from the API.
+          default="$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)"
+          # created_at stays the same on every attempt, so a re-run keeps the identity's date.
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '{id, head_sha, created_at}' >"$work/run.json"
+          args+=(--default-branch "$default" --run "$work/run.json")
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            # Newest first, so the newest nightly of either tag family is on the first page.
+            gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '[.[] | {tag_name, draft, prerelease, target_commitish}]' >"$work/releases.json"
+            args+=(--releases "$work/releases.json")
+          fi
+        fi
+        python3 -I -B "$ACTION_DIR/nightly_feed.py" "${args[@]}"
+
+    - name: Refuse an unknown mode
+      if: inputs.mode != 'plan'
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        echo "::error::nightly-feed has no mode '$MODE'"
+        exit 1
