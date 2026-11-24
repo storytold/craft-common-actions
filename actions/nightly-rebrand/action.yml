@@ -1,0 +1,74 @@
+name: "Nightly rebrand"
+description: "Converts one architecture's stable Linux tar.gz, deb and rpm of a Craft app into <prefix>-nightly packages that install beside the stable app"
+
+inputs:
+  input-dir:
+    description: "Directory with the stable artifacts from packaging/linux/package.sh (<prefix>-<version>-linux-<arch>.{tar.gz,deb,rpm}); other files are ignored"
+    required: true
+  output-dir:
+    description: "Directory the nightly artifacts are written to"
+    required: false
+    default: "dist/nightly"
+  version:
+    description: "Stable version in the input file names"
+    required: true
+  nightly-version:
+    description: "Version of the nightly packages, digits and dots only (e.g. 0.24.1.202611240228)"
+    required: true
+
+outputs:
+  prefix:
+    description: "Artifact prefix of the app (usually the repository name)"
+    value: ${{ steps.rebrand.outputs.prefix }}
+  tarball:
+    description: "Path of the nightly tar.gz (empty when the input had none)"
+    value: ${{ steps.rebrand.outputs.tarball }}
+  files:
+    description: "Paths of the nightly artifacts written, one per line"
+    value: ${{ steps.rebrand.outputs.files }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check the tools the inputs need
+      id: tools
+      shell: bash
+      env:
+        INPUT_DIR: ${{ inputs.input-dir }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        rpms=("$INPUT_DIR"/*.rpm)
+        missing() { if command -v "$1" >/dev/null; then echo false; else echo true; fi; }
+        if [ "${#rpms[@]}" -gt 0 ]; then
+          echo "rpm-tools=$(if command -v rpm >/dev/null && command -v rpm2cpio >/dev/null; then echo false; else echo true; fi)" >> "$GITHUB_OUTPUT"
+          echo "nfpm=$(missing nfpm)" >> "$GITHUB_OUTPUT"
+        fi
+        case "$RUNNER_ARCH" in
+          X64) echo "deb-arch=amd64" >> "$GITHUB_OUTPUT" ;;
+          ARM64) echo "deb-arch=arm64" >> "$GITHUB_OUTPUT" ;;
+        esac
+
+    - name: Install the rpm tools
+      if: steps.tools.outputs.rpm-tools == 'true'
+      uses: storytold/craft-common-actions/actions/install-apt-packages@main
+      with:
+        packages: rpm rpm2cpio
+
+    - name: Install nfpm
+      if: steps.tools.outputs.nfpm == 'true'
+      uses: storytold/craft-common-actions/actions/install-nfpm@main
+      with:
+        deb-arch: ${{ steps.tools.outputs.deb-arch }}
+
+    - name: Convert to nightly packages
+      id: rebrand
+      shell: bash
+      env:
+        INPUT_DIR: ${{ inputs.input-dir }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        STABLE_VERSION: ${{ inputs.version }}
+        NIGHTLY_VERSION: ${{ inputs.nightly-version }}
+      run: |
+        python3 "$GITHUB_ACTION_PATH/nightly_rebrand.py" --input-dir "$INPUT_DIR" --output-dir "$OUTPUT_DIR" \
+          --version "$STABLE_VERSION" --nightly-version "$NIGHTLY_VERSION"
