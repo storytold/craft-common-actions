@@ -216,7 +216,7 @@ class RenameRuleTests(unittest.TestCase):
 
 
 def newc(members):
-    """A newc cpio archive, as rpm2cpio writes: (name, mode, body) members."""
+    """A newc cpio archive, the rpm payload format: (name, mode, body) members."""
     out = b''
     for index, (name, mode, body) in enumerate(members + [('TRAILER!!!', 0, b'')]):
         encoded = name.encode() + b'\0'
@@ -362,8 +362,7 @@ class DebAndTarballRoundTripTests(unittest.TestCase):
             self.assertIn('Exec=photocraft-nightly %F', desktop)
 
 
-@unittest.skipUnless(shutil.which('rpm') and shutil.which('rpm2cpio') and shutil.which('nfpm'),
-                     'needs rpm, rpm2cpio and nfpm')
+@unittest.skipUnless(shutil.which('rpm') and shutil.which('nfpm'), 'needs rpm and nfpm')
 class RpmRoundTripTests(unittest.TestCase):
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:

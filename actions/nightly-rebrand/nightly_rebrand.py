@@ -11,15 +11,19 @@ usage: nightly_rebrand.py --input-dir DIR --output-dir DIR --version V --nightly
 from __future__ import annotations
 
 import argparse
+import bz2
 import collections
+import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 import posixpath
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
@@ -432,7 +436,7 @@ def convert_deb(src: Path, out: Path, prefix: str, nightly_version: str, work: P
 # ---- rpm ------------------------------------------------------------------------------------------
 
 def parse_cpio(data: bytes):
-    """Yield (name, mode, mtime, body) from a newc cpio archive (rpm2cpio's output)."""
+    """Yield (name, mode, mtime, body) from a newc cpio archive (an rpm payload)."""
     pos = 0
     while True:
         if data[pos:pos + 6] not in (b'070701', b'070702'):
@@ -468,6 +472,32 @@ def rpm_relations(src: Path, flag: str, stable: str) -> list[str]:
     return out
 
 
+def rpm_payload(src: Path, compressor: str) -> bytes:
+    """The rpm's uncompressed cpio payload.
+
+    Read directly rather than with rpm2cpio: Ubuntu 24.04's rpm2cpio (rpm 4.18) exits 1 on
+    large nfpm-built rpms although it writes the whole archive."""
+    data = src.read_bytes()
+    pos = 96  # the lead
+    for padded in (True, False):  # signature header (padded to 8 bytes), then the main header
+        if data[pos:pos + 3] != b'\x8e\xad\xe8':
+            raise RebrandError(f'{src} has no rpm header at offset {pos}')
+        index, size = struct.unpack('>II', data[pos + 8:pos + 16])
+        pos += 16 + 16 * index + size
+        if padded:
+            pos = (pos + 7) & ~7
+    payload = data[pos:]
+    if compressor == 'gzip':
+        return gzip.decompress(payload)
+    if compressor in ('xz', 'lzma'):
+        return lzma.decompress(payload)
+    if compressor == 'bzip2':
+        return bz2.decompress(payload)
+    if compressor == 'zstd':
+        return run(['zstd', '-dc'], input=payload).stdout
+    raise RebrandError(f'unsupported rpm payload compressor {compressor!r} in {src}')
+
+
 def entries_from_cpio(data: bytes, config_paths: set[str]) -> list[Entry]:
     entries = []
     for name, mode, mtime, body in parse_cpio(data):
@@ -492,7 +522,7 @@ def convert_rpm(src: Path, out: Path, prefix: str, nightly_version: str, work: P
         path, _, flag = line.rpartition('\t')
         if int(flag or 0) & 1:  # RPMFILE_CONFIG
             config_paths.add(path)
-    entries = entries_from_cpio(run(['rpm2cpio', src]).stdout, config_paths)
+    entries = entries_from_cpio(rpm_payload(src, rpm_tag(src, 'PAYLOADCOMPRESSOR') or 'gzip'), config_paths)
     names = Names.from_entries(prefix, entries)
     entries, path_map = convert(entries, names)
 
