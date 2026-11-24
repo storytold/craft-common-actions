@@ -554,12 +554,12 @@ exit 0
             self.assertTrue(pkg_file.exists())
 
     @unittest.skipUnless(
-        sys.platform == "linux" and platform.machine() == "x86_64" and shutil.which("docker"),
-        "Linux x86_64 Docker required for pacman side-by-side container smoke test",
+        sys.platform == "linux"
+        and platform.machine() == "x86_64"
+        and all(shutil.which(t) for t in ("pacman", "makepkg", "fakeroot", "bsdtar", "zstd")),
+        "Linux x86_64 pacman/makepkg/fakeroot/bsdtar/zstd required for side-by-side pacman install smoke test",
     )
     def test_stable_and_nightly_arch_packages_install_side_by_side_in_pacman(self):
-        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
-            self.skipTest("Docker daemon unavailable")
         run_sh = ROOT / "actions" / "arch-package" / "run.sh"
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -571,8 +571,10 @@ exit 0
                     (src / d).mkdir(parents=True)
                 (src / "bin/myapp").write_text(f"#!/bin/sh\necho {greeting}\n")
                 os.chmod(src / "bin/myapp", 0o755)
+                (src / "bin/myapp-cli").write_text(f"#!/bin/sh\necho {greeting}-cli\n")
+                os.chmod(src / "bin/myapp-cli", 0o755)
                 (src / "share/applications/ai.storyteller.myapp.desktop").write_text(
-                    "[Desktop Entry]\nName=MyApp\nExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
+                    "[Desktop Entry]\nName=MyApp\nExec=myapp\nTryExec=myapp\nIcon=ai.storyteller.myapp\nType=Application\n"
                 )
                 (src / "share/metainfo/ai.storyteller.myapp.metainfo.xml").write_text(
                     "<component><id>ai.storyteller.myapp</id>"
@@ -610,22 +612,48 @@ exit 0
                 )
                 self.assertEqual(res.returncode, 0, f"run.sh failed: {res.stderr}\n{res.stdout}")
 
+            pacroot = tmp_path / "pacroot"
+            for sub in ("var/lib/pacman/local", "var/cache/pacman/pkg", "var/log", "etc/pacman.d/gnupg"):
+                (pacroot / sub).mkdir(parents=True)
+            pacman_conf = tmp_path / "pacman.conf"
+            pacman_conf.write_text(
+                "[options]\n"
+                f"RootDir = {pacroot}\n"
+                f"DBPath = {pacroot}/var/lib/pacman\n"
+                f"CacheDir = {pacroot}/var/cache/pacman/pkg\n"
+                f"LogFile = {pacroot}/var/log/pacman.log\n"
+                f"GPGDir = {pacroot}/etc/pacman.d/gnupg\n"
+                "Architecture = x86_64\n"
+                "SigLevel = Never\n"
+                "LocalFileSigLevel = Never\n",
+                encoding="utf-8",
+            )
+            stable_pkg = dist_dir / "myapp-1.2.3-linux-x86_64.pkg.tar.zst"
+            nightly_pkg = dist_dir / f"myapp-{version}-linux-x86_64.pkg.tar.zst"
             install_res = subprocess.run(
                 [
-                    "docker", "run", "--rm",
-                    "-v", f"{dist_dir}:/dist:ro",
-                    "archlinux:base-devel",
-                    "bash", "-euxc",
-                    "pacman -U --noconfirm --nodeps /dist/myapp-1.2.3-linux-x86_64.pkg.tar.zst "
-                    f"/dist/myapp-{version}-linux-x86_64.pkg.tar.zst && "
-                    "pacman -Qi ai.storyteller.myapp ai.storyteller.myapp.nightly && "
-                    "test \"$(/usr/bin/myapp)\" = 'stable-ok' && "
-                    "test \"$(/usr/bin/myapp-nightly)\" = 'nightly-ok'",
+                    "fakeroot", "pacman", "--config", str(pacman_conf),
+                    "-U", "--noconfirm", "--nodeps", "--noscriptlet",
+                    str(stable_pkg), str(nightly_pkg),
                 ],
                 capture_output=True,
                 text=True,
             )
             self.assertEqual(install_res.returncode, 0, f"pacman side-by-side failed: {install_res.stderr}\n{install_res.stdout}")
+            query_res = subprocess.run(
+                ["pacman", "--config", str(pacman_conf), "-Qi", "ai.storyteller.myapp", "ai.storyteller.myapp.nightly"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(query_res.returncode, 0, f"pacman -Qi failed: {query_res.stderr}\n{query_res.stdout}")
+            self.assertEqual(
+                subprocess.run([str(pacroot / "usr/bin/myapp")], capture_output=True, text=True, check=True).stdout.strip(),
+                "stable-ok",
+            )
+            self.assertEqual(
+                subprocess.run([str(pacroot / "usr/bin/myapp-nightly")], capture_output=True, text=True, check=True).stdout.strip(),
+                "nightly-ok",
+            )
 
 
 if __name__ == "__main__":

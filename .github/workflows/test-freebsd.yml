@@ -51,7 +51,7 @@ jobs:
       - name: Configure apt mirrors
         uses: ./actions/configure-apt-mirrors
       - name: Install YAML parser
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-yaml tcsh rpm debsigs dpkg-dev skopeo pacman-package-manager makepkg fakeroot libarchive-tools zstd
       # On 11 Nov 2026 one run found no candidate for tcsh or debsigs right after an update that
       # fetched every index, while the runs before and after passed. These answer whether apt
       # read those indexes, and whether this CPU runs the amd64v3 packages they list.
