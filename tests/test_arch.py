@@ -336,11 +336,14 @@ exit 0
                 (tar_root / "share/metainfo/ai.storyteller.myapp.tools.metainfo.xml").write_text(
                     '<component><id>ai.storyteller.myapp.tools</id>'
                     '<developer\n  id="ai.storyteller">\n  <name>Storyteller</name>\n</developer>\n<name>Tools</name>'
+                    '<icon type="stock">aaa.myapp.tools</icon>'
                     "<launchable type='desktop-id'>ai.storyteller.myapp.tools.desktop</launchable></component>\n"
                 )
                 (tar_root / "share/mime/packages/ai.storyteller.myapp.tools.xml").write_text("<mime-info>Tools</mime-info>\n")
                 (tar_root / "share/icons/hicolor/256x256/apps/ai.storyteller.myapp.tools.png").write_bytes(b"tools icon")
                 (tar_root / "share/icons/hicolor/256x256/apps/myapp-custom.png").write_bytes(b"custom icon")
+                # Icon of a desktop entry that has no Icon= key: renamed by its desktop ID.
+                (tar_root / "share/icons/hicolor/256x256/apps/aaa.myapp.tools.png").write_bytes(b"aaa icon")
                 (tar_root / "share/applications/aaa.myapp.tools.desktop").write_text(
                     "[Desktop Entry]\nName=More Tools\nExec=myapp-cli --help\n"
                 )
@@ -463,6 +466,8 @@ exit 0
             tools_meta = nightly_pkgdir / "usr/share/metainfo/ai.storyteller.myapp.tools.nightly.metainfo.xml"
             self.assertIn("<id>ai.storyteller.myapp.tools.nightly</id>", tools_meta.read_text())
             self.assertIn('>ai.storyteller.myapp.tools.nightly.desktop</launchable>', tools_meta.read_text())
+            self.assertIn('<icon type="stock">aaa.myapp.tools.nightly</icon>', tools_meta.read_text())
+            self.assertIn("usr/share/icons/hicolor/256x256/apps/aaa.myapp.tools.nightly.png", nightly_files)
             self.assertIn('<developer\n  id="ai.storyteller">\n  <name>Storyteller</name>\n</developer>\n<name>Tools Nightly</name>', tools_meta.read_text())
             tools_mime = nightly_pkgdir / "usr/share/mime/packages/ai.storyteller.myapp.tools.nightly.xml"
             self.assertEqual(tools_mime.read_text(), "<mime-info>Tools</mime-info>\n")

@@ -375,18 +375,29 @@ cat <<NIGHTLY_PKG
     ' "\$desktop_map" "\$desktop_file" > "\$desktop_file.tmp" && mv -- "\$desktop_file.tmp" "\$desktop_file" || { rm -f -- "\$desktop_map"; return 1; }
     move_nightly "\$desktop_file" "\${desktop_file%/*}/\$new_id.desktop" || { rm -f -- "\$desktop_map"; return 1; }
   done
+  # One icon-id resolution ("id <stem> <new>") shared by the XML pass and the icon renamer:
+  # the package base id, then a same-named desktop ID, then the first desktop Icon= record.
+  icon_ids="\$(awk -v base="$base_pkgname" -v pkg="$pkgname" '
+    \$1 == "icon" { if (!(\$2 in icon)) icon[\$2] = \$3; next }
+    { desk[substr(\$1, 1, length(\$1) - 8)] = substr(\$2, 1, length(\$2) - 8) }
+    END {
+      for (n in icon) if (!(n in desk)) desk[n] = icon[n]
+      desk[base] = pkg
+      for (n in desk) print "id", n, desk[n]
+    }
+  ' "\$desktop_map")" && printf '%s\n' "\$icon_ids" >> "\$desktop_map" || { rm -f -- "\$desktop_map"; return 1; }
   # Whole-file XML pass over metainfo and mime files, skipping comments: suffix every
   # <name> outside <developer> with " Nightly", and point stock icons and mime
   # <icon name=...> at the renamed icons.
   nightly_xml() {
-    awk -v base="$base_pkgname" -v pkg="$pkgname" '
+    awk '
       function ws(c) { return c == " " || c == "\t" || c == "\n" || c == "\r" }
       function is_tag(tag, t,    c) {
         if (substr(tag, 1, length(t) + 1) != "<" t) return 0
         c = substr(tag, length(t) + 2, 1)
         return c == ">" || c == "/" || ws(c)
       }
-      function renamed(icon) { return (icon in icons) ? icons[icon] : (icon == base ? pkg : "") }
+      function renamed(icon) { return (icon in ids) ? ids[icon] : "" }
       # Sets VS/VL to the value span of attribute a in tag; 0 when absent.
       function attr(tag, a,    i, j, c) {
         for (i = index(tag, a); i > 0; i = (c = index(substr(tag, i + 1), a)) ? i + c : 0) {
@@ -402,7 +413,7 @@ cat <<NIGHTLY_PKG
         return 0
       }
       BEGIN { q = sprintf("%c", 34); sq = sprintf("%c", 39) }
-      FILENAME == ARGV[1] { if (\$1 == "icon" && !(\$2 in icons)) icons[\$2] = \$3; next }
+      FILENAME == ARGV[1] { if (\$1 == "id") ids[\$2] = \$3; next }
       { s = s \$0 "\n" }
       END {
         while ((i = index(s, "<")) > 0) {
@@ -449,7 +460,7 @@ cat <<NIGHTLY_PKG
         }
         return out s
       }
-      FILENAME == ARGV[1] { if (\$1 != "icon") desktop[\$1] = \$2; next }
+      FILENAME == ARGV[1] { if (\$1 ~ /\.desktop\$/) desktop[\$1] = \$2; next }
       {
         \$0 = replace_all(\$0, "<binary>" app "</binary>", "<binary>" app "-nightly</binary>")
         \$0 = replace_all(\$0, "<binary>" app "-cli</binary>", "<binary>" app "-nightly-cli</binary>")
@@ -482,16 +493,8 @@ cat <<NIGHTLY_PKG
       [ "\$icon_name" != "\$ext" ] || continue
       stem="\${icon_name%.*}"
       [[ "\$stem" =~ ^[a-zA-Z0-9@_+][a-zA-Z0-9@._+-]*\$ ]] || continue
-      if [ "\$stem" = "$base_pkgname" ]; then
-        icon_id="$pkgname"
-      else
-        icon_id="\$(awk -v name="\$stem" '
-          \$1 == name ".desktop" { desktop = substr(\$2, 1, length(\$2) - 8) }
-          \$1 == "icon" && \$2 == name && icon == "" { icon = \$3 }
-          END { print (desktop != "" ? desktop : icon) }
-        ' "\$desktop_map")"
-        [ -n "\$icon_id" ] || continue
-      fi
+      icon_id="\$(awk -v name="\$stem" '\$1 == "id" && \$2 == name { print \$3 }' "\$desktop_map")"
+      [ -n "\$icon_id" ] || continue
       move_nightly "\$icon_path" "\${icon_path%/*}/\$icon_id.\$ext" || exit 1
     done || { rm -f -- "\$desktop_map"; return 1; }
   fi
