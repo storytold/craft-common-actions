@@ -137,9 +137,7 @@ class ReleaseWorkflowListsNoAppsTests(unittest.TestCase):
                 self.assertEqual(export.get("id"), "app-env")
                 self.assertEqual(export["uses"], "storytold/craft-common-actions/actions/export-app-build-env@main")
                 self.assertEqual(export["with"]["app-name"], "${{ inputs.app-name }}")
-                # The Linux builds carry the nightly identity when the app passes build-channel.
-                version = "linux-version" if name in ("linux", "linux-riscv64") else "version"
-                self.assertEqual(export["with"]["version"], f"${{{{ needs.version.outputs.{version} }}}}")
+                self.assertEqual(export["with"]["version"], "${{ needs.version.outputs.version }}")
                 self.assertEqual(export["with"]["date"], "${{ needs.version.outputs.date }}")
 
     def test_the_freebsd_vm_receives_the_exported_names(self):
