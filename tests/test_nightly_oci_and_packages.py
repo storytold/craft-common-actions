@@ -843,6 +843,50 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
             with self.assertRaisesRegex(n.InvalidNightly, "unexpected signature rogue.sig"):
                 linux_rel.verify(trust, pkg_dir, asset, support2, source_dir, env, self.version)
 
+    def test_package_signing_subprocesses_receive_key_only_as_import_stdin(self):
+        from contextlib import ExitStack
+        import nightly_release_linux as linux
+
+        names = {"unsigned_asset": "fixture.unsigned.tar.gz", "asset": "fixture.tar.gz"}
+        unsigned = self.root / names["unsigned_asset"]
+        unsigned.write_bytes(b"synthetic tar bytes")
+        output = self.root / "signed"
+        output.mkdir()
+        packages = self.root / "native-packages"
+        packages.mkdir()
+        pkg = packages / f"photocraft-{self.version}-linux-x86_64.deb"
+        pkg.write_bytes(b"synthetic package")
+        fake_key = "synthetic-import-stdin-not-a-key"
+        calls = []
+
+        def tar_sign(_, staged, dest, __):
+            dest.write_bytes(staged.read_bytes())
+            dest.with_suffix(dest.suffix + ".asc").write_bytes(b"synthetic signature")
+            return self.fingerprint
+
+        def package_subprocess(argv, **kwargs):
+            self.assertNotIn("LINUX_SIGNING_KEY", kwargs["env"])
+            calls.append((argv[0], kwargs.get("input")))
+            if argv[0] == "bash":
+                (Path(argv[-1]) / (pkg.name + ".asc")).write_bytes(b"synthetic package signature")
+
+        with ExitStack() as mocks:
+            for owner, name, options in (
+                (linux, "assets", {"return_value": names}),
+                (linux, "pending", {"return_value": {}}),
+                (linux, "published_key_matches", {}),
+                (linux, "verify", {"return_value": self.fingerprint}),
+                (linux.u, "verify_archive", {}),
+                (linux.signing, "adapter", {}),
+                (linux.signing, "sign_linux", {"side_effect": tar_sign}),
+                (linux.signing, "stop_gpg_agent", {}),
+                (linux.subprocess, "run", {"side_effect": package_subprocess}),
+            ):
+                mocks.enter_context(patch.object(owner, name, **options))
+            linux.sign({"fingerprint": self.fingerprint}, unsigned, output, self.root,
+                       {**self.env, "LINUX_SIGNING_KEY": fake_key, "NIGHTLY_LINUX_PACKAGES_DIR": str(packages)}, self.version)
+        self.assertEqual(calls, [("gpg", fake_key.encode()), ("bash", None)])
+
     def test_verified_linux_packages_verifies_multi_subject_attestations(self):
         import nightly_release as rel
         import nightly_release_request as req
@@ -982,6 +1026,13 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
             claims = rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
         self.assertEqual(sorted(claims), sorted([deb.name, deb_arm.name, rpm.name, rpm_arm.name]))
+        # A digest alone is not attestation of a package's published basename.
+        subjects = evidence[0]["verificationResult"]["statement"]["subject"]
+        subjects[0]["name"] = "separate-build-output.deb"
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            with self.assertRaisesRegex(n.InvalidNightly, "attested package basename"):
+                rel.verified_linux_packages(policy, state, pkg_dir, runner=fake_runner)
+        subjects[0]["name"] = deb.name
         bundle_out = self.root / "staged-bundle"
         unsigned_dir = self.root / "unsigned-tar"
         unsigned_dir.mkdir()

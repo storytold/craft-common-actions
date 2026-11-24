@@ -416,7 +416,7 @@ def linux_package_paths(pkg_dir, version, *, app=LINUX_PACKAGE_APP, formats=None
     return sorted(present.items())
 
 
-def _gh_attest_verify(policy, request, file_path, payload_sha256, *, multi_subject=False, runner=subprocess.run):
+def _gh_attest_verify(policy, request, file_path, payload_sha256, *, subject_name=None, runner=subprocess.run):
     """Run trusted gh attestation verify on one payload and validate its provenance."""
     version = runner(["gh", "--version"], check=True, capture_output=True, timeout=30).stdout.decode()
     r.require_gh_version(version)
@@ -430,7 +430,7 @@ def _gh_attest_verify(policy, request, file_path, payload_sha256, *, multi_subje
                 "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"],
                 check=True, stdout=stream, timeout=120)
         return r.verify_unsigned_attestation(policy, request, n.bounded_json(evidence), payload_sha256,
-            multi_subject=multi_subject)
+            subject_name=subject_name)
 
 
 def verified_unsigned(policy, state, platform, directory, *, runner=subprocess.run):
@@ -456,7 +456,7 @@ def verified_linux_packages(policy, state, pkg_dir, *, runner=subprocess.run):
     claims = {}
     for name, path in linux_package_paths(pkg_dir, version, app=app, formats=formats):
         _, digest = n.digest_file(pkg_dir, name)
-        claims[name] = _gh_attest_verify(policy, request, path, digest, multi_subject=True, runner=runner)
+        claims[name] = _gh_attest_verify(policy, request, path, digest, subject_name=name, runner=runner)
     return claims
 
 

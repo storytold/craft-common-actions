@@ -500,7 +500,7 @@ def require_gh_version(version_output):
         'patched gh >= 2.102.0 required')
 
 
-def verify_unsigned_attestation(policy, request, verified_results, payload_sha256, *, multi_subject=False):
+def verify_unsigned_attestation(policy, request, verified_results, payload_sha256, *, subject_name=None):
     """Additional policy over SUCCESSFUL trusted gh>=2.102.0 verifier stdout.
 
     This pure parser is NOT a cryptographic verifier. The caller must execute a
@@ -512,6 +512,9 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
     format/permission/cross-attempt qualification is still required before use.
     """
     request_contract(policy, request); hash_value(payload_sha256)
+    if subject_name is not None:
+        n.require(isinstance(subject_name, str) and n.NAME.fullmatch(subject_name),
+                  'expected package basename required')
     n.require(isinstance(verified_results, list) and 0 < len(verified_results) <= 32,
         'successful gh verification result array required')
     n.require(len(json.dumps(verified_results, allow_nan=False).encode()) <= n.MAX_JSON_BYTES,
@@ -536,12 +539,15 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
         n.require(statement.get('_type') == 'https://in-toto.io/Statement/v1' and
             statement.get('predicateType') == 'https://slsa.dev/provenance/v1', 'unsigned provenance type differs')
         subjects = statement.get('subject')
-        if multi_subject:
+        if subject_name is not None:
             n.require(isinstance(subjects, list) and 1 <= len(subjects) <= 64 and
-                all(isinstance(s, dict) and isinstance(s.get('digest'), dict) and set(s['digest']) == {'sha256'} and
-                    hash_value(s['digest']['sha256']) for s in subjects) and
-                any(s['digest'] == {'sha256': payload_sha256} for s in subjects),
-                'unsigned payload digest differs')
+                all(isinstance(s, dict) and isinstance(s.get('name'), str) and
+                    isinstance(s.get('digest'), dict) and set(s['digest']) == {'sha256'} and
+                    hash_value(s['digest']['sha256']) for s in subjects),
+                'invalid unsigned package subjects')
+            named = [s for s in subjects if s['name'] == subject_name]
+            n.require(len(named) == 1 and named[0]['digest'] == {'sha256': payload_sha256},
+                      'unsigned payload digest differs for attested package basename')
         else:
             n.require(isinstance(subjects, list) and len(subjects) == 1 and isinstance(subjects[0], dict) and
                 subjects[0].get('digest') == {'sha256': payload_sha256}, 'unsigned payload digest differs')

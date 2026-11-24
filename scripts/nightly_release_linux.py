@@ -196,7 +196,8 @@ def sign(trust, unsigned, output, source, environment, version):
             try:
                 pkg_env = {**env, "GNUPGHOME": str(sign_home), "SIGNING_FPR": fingerprint,
                            "OCI_REGISTRY": f"ghcr.io/{environment.get('GITHUB_REPOSITORY', 'storytold/photocraft').lower()}"}
-                subprocess.run(["gpg", "--batch", "--import"], input=env["LINUX_SIGNING_KEY"].encode("utf-8"),
+                raw_key = pkg_env.pop("LINUX_SIGNING_KEY")
+                subprocess.run(["gpg", "--batch", "--import"], input=raw_key.encode("utf-8"),
                                env=pkg_env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 subprocess.run(["bash", str(sign_script), str(pkg_stage)], env=pkg_env, check=True)
             finally:
