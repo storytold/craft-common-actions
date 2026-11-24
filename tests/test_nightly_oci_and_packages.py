@@ -691,12 +691,12 @@ class NightlyOciAndPackagesTests(unittest.TestCase):
         )
 
         # Unmodified validated bundle passes verify_bundle.
-        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
+        rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, policy=policy))
 
         # Tampering with the staged Linux package breaks bundle verification.
         (validated / deb_name).write_bytes(b"tampered-deb-bytes")
         with self.assertRaises(n.InvalidNightly):
-            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, validated, policy=policy))
+            rel.verify_bundle(validated, bundle_sha, rel.validated_names(plan, policy=policy))
 
     def test_verify_oci_signature_checks_reference_and_manifest_digest(self):
         import nightly_signing as signing

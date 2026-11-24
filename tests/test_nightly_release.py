@@ -122,7 +122,7 @@ class BridgeTests(unittest.TestCase):
     def bundle(self):
         directories, manifests, claims = self.validated()
         output = self.root/("bundle" if self.payload_count == 1 else "bundle-"+str(self.payload_count))
-        digest = b.stage_bundle(output, self.state, directories, manifests, claims)
+        digest = b.stage_bundle(output, self.state, directories, manifests, claims, policy=self.policy)
         return output, digest
 
     def test_output_capability_allows_only_workspace_and_runner_temp_descendants(self):
@@ -156,7 +156,7 @@ class BridgeTests(unittest.TestCase):
         workspace = self.root/"owned"; workspace.mkdir()
         with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(workspace), "RUNNER_TEMP": str(workspace)}), patch.object(b.plat.signing, "sign_windows") as native, patch.object(b.pub, "publish_packet") as publish:
             with self.assertRaisesRegex(ValueError, "owned"):
-                b.stage_bundle(self.root/"escaped-bundle", self.state, directories, manifests, claims)
+                b.stage_bundle(self.root/"escaped-bundle", self.state, directories, manifests, claims, policy=self.policy)
             with self.assertRaisesRegex(ValueError, "owned"):
                 b.native_sign(self.policy, state, WINDOWS, directory, self.root, self.root/"escaped-signed", {})
             with self.assertRaisesRegex(ValueError, "owned"):
@@ -171,7 +171,7 @@ class BridgeTests(unittest.TestCase):
         escaped = copy.deepcopy(self.plan); escaped["platforms"][MAC]["unsigned_asset"] = "../escape.zip"
         for extra in ({**self.state, "../escape": {}}, {**self.state, "plan": escaped}):
             with self.subTest(state=extra), self.assertRaises(ValueError):
-                b.stage_bundle(self.root/"rejected-bundle", extra, directories, manifests, claims)
+                b.stage_bundle(self.root/"rejected-bundle", extra, directories, manifests, claims, policy=self.policy)
         self.assertFalse((self.root/"rejected-bundle").exists())
 
     def test_identity_uses_original_main_role_without_spoofing_real_release_sha(self):
@@ -252,23 +252,23 @@ class BridgeTests(unittest.TestCase):
 
     def test_bundle_independent_hash_covers_metadata_and_exact_payload_inventory(self):
         directory, digest = self.bundle()
-        state = b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        state = b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         self.assertEqual(state["request"], self.request)
         (directory/"request.json").write_text(json.dumps({**self.request, "repository": "other/repo"}))
         with self.assertRaisesRegex(ValueError, "bundle digest"):
-            b.verify_bundle(directory, digest, b.validated_names(self.plan))
+            b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
 
     def test_bundle_extra_files_or_symlinks_refuse(self):
         directory, digest = self.bundle()
         (directory/"evil.ps1").write_text("must not run")
-        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         (directory/"evil.ps1").unlink()
         path = directory/"quality.json"; path.unlink(); path.symlink_to(directory/"request.json")
-        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        with self.assertRaises(ValueError): b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
 
     def test_native_wrapper_uses_release_source_and_records_real_roles_and_three_digests(self):
         directory, digest = self.bundle()
-        state = b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        state = b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         calls = []; subject = self.policy["platforms"][WINDOWS]["trust"]["publisher_subject"]
         def native(source, archive, output, env, version):
             calls.append((source, archive, env, version))
@@ -440,7 +440,7 @@ class BridgeTests(unittest.TestCase):
         legacy.assert_called_once_with(None, self.registry, release)
 
     def test_missing_native_config_refuses_before_native_signer_execution(self):
-        directory, digest = self.bundle(); state = b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        directory, digest = self.bundle(); state = b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         with patch.object(b.plat.signing, "adapter"), patch.object(b.plat.signing, "sign_windows") as native:
             with self.assertRaisesRegex(ValueError, "complete Windows"):
                 b.native_sign(self.policy, state, WINDOWS, directory, self.root, self.root/"signed", self.env)
@@ -739,7 +739,7 @@ class BridgeTests(unittest.TestCase):
 
     def mac_signer_fixture(self, *, extra=False, unchanged=False, verified="SYNTH12345"):
         directory, digest = self.bundle()
-        state = b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        state = b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         calls = {}
         source = self.root/"release-source"
         for name in ("nightly.sh", "nightly-sign.sh", "import-cert.sh"):
@@ -793,7 +793,7 @@ class BridgeTests(unittest.TestCase):
     def signed_tree(self):
         """Both platforms' signed bundles laid out as the publisher downloads them."""
         directory, digest = self.bundle()
-        state = b.verify_bundle(directory, digest, b.validated_names(self.plan))
+        state = b.verify_bundle(directory, digest, b.validated_names(self.plan, policy=self.policy))
         root = self.root/"signed"; root.mkdir(); env = {"RUNNER_TEMP": str(self.root)}
         trust = {WINDOWS: "CN=Synthetic fixture only", MAC: "SYNTH12345", LINUX: LINUX_FINGERPRINT}
         for platform in (WINDOWS, MAC, LINUX):
