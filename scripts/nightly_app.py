@@ -30,12 +30,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import nightly_feed as n  # noqa: E402
 
 REGISTRY = Path(__file__).resolve().parents[1] / "nightly-apps.json"
-APP = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+# At most 32 characters: the longest signed and unsigned asset basenames must stay within the
+# 128-character asset-name bound, with room for real run IDs and attempts (finding 2).
+APP = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 DISPLAY = re.compile(r"[A-Z][A-Za-z0-9]{0,31}")
 PREFIX = re.compile(r"[A-Z][A-Z0-9_]{0,31}")
 IDENTITY = re.compile(r"[A-Za-z0-9_.-]{1,255}")
 PLATFORMS = {"linux-x86_64": ("linux", "x86_64"), "macos-aarch64": ("macos", "aarch64"), "windows-x86_64": ("windows", "x86_64")}
 EXTENSIONS = {"linux-x86_64": ".tar.gz", "macos-aarch64": ".zip", "windows-x86_64": ".zip"}
+# The only target format each release-ref plug-in signs (nightly_release_platforms / nightly_release_linux).
+FORMATS = {"linux-x86_64": "tar_gz", "macos-aarch64": "portable_zip", "windows-x86_64": "portable_zip"}
+# The whole ZIP member name, ".exe" included, must fit windows_unpack's 128-character limit.
+WINDOWS_EXE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}[.]exe")
 CHANNEL = "nightly-v1"
 
 
@@ -91,6 +97,14 @@ def row(app, registry=None):
         if value["binary"] != value["entrypoint"]:
             n.require(platform == "linux-x86_64", f"{app} {platform} entrypoint must be the GUI binary itself")
             launcher_target(value["entrypoint"], value["binary"])
+        if platform == "windows-x86_64":
+            # windows_unpack and the PowerShell helper accept only a flat GUI exe (finding 7).
+            n.require(WINDOWS_EXE.fullmatch(value["binary"]) is not None, f"{app} Windows binary must be a flat .exe name")
+        if platform == "macos-aarch64":
+            # The archive check requires the GUI at <Display> Nightly.app/Contents/MacOS/<name> (finding 1).
+            bundle_exe = re.fullmatch(re.escape(f"{display} Nightly.app/Contents/MacOS/") + r"[A-Za-z0-9][A-Za-z0-9._ -]{0,127}",
+                                      value["binary"])
+            n.require(bundle_exe is not None, f"{app} macOS binary must be {display} Nightly.app/Contents/MacOS/<name>")
     return record
 
 
@@ -100,6 +114,8 @@ def target_platforms(record):
         target = item.get("target", {}) if isinstance(item, dict) else {}
         key = next((name for name, pair in PLATFORMS.items() if pair == (target.get("os"), target.get("arch"))), None)
         n.require(key is not None, "unsupported nightly target platform")
+        # Admission uses the release plug-ins' contract, e.g. Linux is tar_gz only (finding 4).
+        n.require(target.get("format") == FORMATS[key], f"{key} nightly target must be format {FORMATS[key]}")
         found.append(key)
     n.require(len(found) == len(set(found)), "duplicate nightly target platform")
     return sorted(found)
@@ -188,6 +204,8 @@ def launcher_target(entrypoint, binary):
     """The GUI binary relative to the launcher's directory (it must sit in or below it)."""
     home = entrypoint.rsplit("/", 1)[0] + "/" if "/" in entrypoint else ""
     n.require(binary.startswith(home) and binary != entrypoint, "the GUI binary must sit in or below its launcher's directory")
+    # The launcher is a regular file, so nothing can sit beneath it (finding 3).
+    n.require(not binary.startswith(entrypoint + "/"), "the GUI binary cannot sit beneath the launcher file")
     target = binary[len(home):]
     n.require(LAUNCHER_BINARY.fullmatch(target) is not None and ".." not in target.split("/"),
               f"invalid launcher GUI target: {target!r}")
@@ -226,9 +244,10 @@ def admit(app, repository, ref, registry=None, release=False):
         return False, str(error)
     if repository != record["repository"]:
         return False, f"{repository} is not {app}'s reviewed repository {record['repository']}"
-    branch = "release" if release else record["default_branch"]
-    if ref != "refs/heads/" + branch:
-        return False, f"{ref} is not {app}'s {'release' if release else 'default'} branch"
+    # The signer runs on a protected signer branch (the policy names which); the producer on main.
+    branches = ("release", "nightly-signer") if release else (record["default_branch"],)
+    if ref not in ["refs/heads/" + branch for branch in branches]:
+        return False, f"{ref} is not {app}'s {'signer' if release else 'default'} branch"
     return True, "admitted"
 
 

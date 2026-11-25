@@ -1,5 +1,7 @@
 name: Release-ref nightly signer
 # No push, schedule, workflow_run or workflow_dispatch entry point here.
+# The signer runs on a protected signer branch: refs/heads/release or refs/heads/nightly-signer. The jobs
+# accept either; the scripts then require exactly the branch the reviewed policy's release_branch names.
 # Only the protected app caller can satisfy the real release-ref admission.
 # One release carries every admitted platform: all sign/verify jobs must succeed.
 on:
@@ -37,7 +39,7 @@ env:
   NIGHTLY_APP: ${{ inputs.app-name }}
 jobs:
   validate:
-    if: github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
@@ -77,7 +79,7 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
-      - name: Admit only a reviewed registry app on its own repository's release branch
+      - name: Admit only a reviewed registry app on its own repository's signer branch
         shell: pwsh
         run: |
           python -I -B .nightly-tools/scripts/nightly_app.py admit --require --release-ref --app-name "$env:NIGHTLY_APP" --repository "$env:GITHUB_REPOSITORY" --ref "$env:GITHUB_REF"
@@ -182,7 +184,7 @@ jobs:
           retention-days: 14
   sign-windows:
     needs: validate
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 20
     environment: release
@@ -260,7 +262,7 @@ jobs:
           retention-days: 14
   sign-macos:
     needs: validate
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     # Same Apple route and `release` environment as the stable macOS job.
     runs-on: macos-15
     timeout-minutes: 120
@@ -341,7 +343,7 @@ jobs:
           retention-days: 14
   verify-macos:
     needs: [validate, sign-macos]
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     # Fresh runner, NO release environment or platform secrets.
     runs-on: macos-15
     timeout-minutes: 20
@@ -400,7 +402,7 @@ jobs:
         run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py verify-platform --source .release-source --platform macos-aarch64 --directory .signed/macos-aarch64 --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
   smoke-macos:
     needs: [validate, sign-macos, verify-macos]
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     # The only job that runs signed payload code: no environment, secrets, tokens or
     # outputs the publisher consumes. Hardened runtime only applies once signed.
     runs-on: macos-15
@@ -457,7 +459,7 @@ jobs:
     needs: validate
     if: >-
       needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
-      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     environment: release
@@ -535,7 +537,7 @@ jobs:
     needs: [validate, sign-linux]
     if: >-
       needs.sign-linux.result == 'success' && contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
-      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -596,7 +598,7 @@ jobs:
       (!contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') || needs.sign-windows.result == 'success') &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' && needs.smoke-macos.result == 'success')) &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || (needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success')) &&
-      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: windows-latest
     # Every step has its own bound and the job budget exceeds their sum, so a slow
     # step fails as a step: the tolerant ownership upload can never time the job out.

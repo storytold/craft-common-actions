@@ -264,12 +264,13 @@ class ReadOnlyGitHub:
         return gh_json(self.repository, path[1:])
 
 
-def recheck_publication(api, request):
+def recheck_publication(api, request, branch="release"):
+    n.require(branch in request_tools.SIGNER_BRANCHES, "unreviewed signer branch")
     for name in ("producer", "signer"):
         request_tools.active(api, request[name])
-    ref = api.request("GET", "/git/ref/heads/release")
+    ref = api.request("GET", "/git/ref/heads/"+branch)
     live = ref.get("object", {})
-    n.require(ref.get("ref") == "refs/heads/release" and live.get("type") == "commit",
+    n.require(ref.get("ref") == "refs/heads/"+branch and live.get("type") == "commit",
               "protected release ref is missing or is not a commit")
     live_sha = request_tools.commit(live.get("sha"))
     signer_sha = request_tools.commit(request["signer"]["source_commit"])
@@ -477,9 +478,25 @@ def _verify_and_push_oci(
     return pushed
 
 
+def require_policy_branch(policy, head_branch):
+    """The completed signer run must come from exactly the signer branch its reviewed policy names."""
+    branch = request_tools.signer_branch(policy)
+    n.require(head_branch == branch, f"signer run is on {head_branch!r}, but its reviewed policy signs on {branch!r}")
+    return branch
+
+
+def bound_signer_branch(api, policy, signer):
+    """Re-read the exact signer run attempt and bind it to the policy's signer branch."""
+    run = api.request("GET", f"/actions/runs/{signer['run_id']}/attempts/{signer['run_attempt']}")
+    n.require(run.get("id") == signer["run_id"] and run.get("head_sha") == signer["source_commit"],
+              "completed signer run differs from the publication")
+    return require_policy_branch(policy, run.get("head_branch"))
+
+
 def report_policy():
     policy = n.bounded_json(".release-source/.github/nightly-signing-policy.json")
     request_tools.validate_policy(policy)
+    require_policy_branch(policy, os.environ.get("SIGNER_BRANCH"))
     n.require(policy["signer_tooling_revision"] == os.environ["TOOLING_REVISION"], "policy signer_tooling_revision mismatch")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
         out.write(f"oci-enabled={str('oci' in request_tools.policy_linux_package_formats(policy)).lower()}\n")
@@ -534,6 +551,7 @@ def push_completed_publication():
                      "checksum_sha256", "release_support", "roles"}, "bound OCI publication state")
     roles = state.pop("roles")
     api = ReadOnlyGitHub(state["repository"])
+    bound_signer_branch(api, policy, roles["signer"])  # Before any push, from the authenticated run.
     verify_and_push_oci(
         **state,
         evidence_dir=".release-evidence",
@@ -541,7 +559,7 @@ def push_completed_publication():
         public_key=".release-source/.github/nightly-linux-signing-key.asc",
         fingerprint=policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"],
         environment=os.environ,
-        publication_guard=lambda: recheck_publication(api, roles),
+        publication_guard=lambda: recheck_publication(api, roles, request_tools.signer_branch(policy)),
     )
 
 

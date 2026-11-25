@@ -764,4 +764,37 @@ class RequestTests(unittest.TestCase):
             r.release_receipt_v3(self.legacy_policy(), self.legacy_request(), 'windows-x86_64', 'f'*64, '1'*64, 'CN=Synthetic fixture only', {})
 
 
+    def use_signer_branch(self, branch):
+        """Move the fixture's policy, signer run and runner context to one signer branch."""
+        self.policy['release_branch'] = branch
+        self.env['GITHUB_REF'] = 'refs/heads/'+branch
+        self.env['GITHUB_WORKFLOW_REF'] = 'storytold/photocraft/.github/workflows/nightly-sign.yml@refs/heads/'+branch
+        for key, row in self.api.rows.items():
+            if isinstance(row, dict) and row.get('id') == 200 and 'head_branch' in row:
+                row['head_branch'] = branch
+
+    def test_signer_branch_is_the_policy_value_from_the_allowlist(self):
+        for branch in ('release', 'nightly-signer'):
+            with self.subTest(branch=branch):
+                self.assertEqual(r.signer_branch({**self.policy, 'release_branch': branch}), branch)
+        for branch in ('main', 'nightly-signer-x', 'refs/heads/release', 'Release', '', None, 'v1.0.0'):
+            with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, 'unreviewed release policy'):
+                r.validate_policy({**self.policy, 'release_branch': branch})
+
+    def test_request_runs_on_exactly_the_policy_signer_branch(self):
+        self.assertEqual(self.invoke()['signer']['source_commit'], 'd'*40)  # release, as before
+        self.use_signer_branch('nightly-signer')
+        self.assertEqual(self.invoke()['signer']['source_commit'], 'd'*40)
+        # A nightly-signer policy refuses a run on release, and the reverse.
+        for policy_branch, run_branch in (('nightly-signer', 'release'), ('release', 'nightly-signer')):
+            with self.subTest(policy=policy_branch, run=run_branch):
+                self.use_signer_branch(run_branch); self.policy['release_branch'] = policy_branch
+                with self.assertRaisesRegex(ValueError, 'release branch dispatch required'):
+                    self.invoke()
+        # The authenticated run's own head_branch must agree too, not only the runner context.
+        self.use_signer_branch('nightly-signer')
+        self.api.rows['/actions/runs/200']['head_branch'] = 'release'
+        with self.assertRaisesRegex(ValueError, 'run branch/workflow differs'):
+            self.invoke()
+
 if __name__ == '__main__': unittest.main()
