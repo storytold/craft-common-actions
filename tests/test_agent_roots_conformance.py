@@ -147,7 +147,7 @@ FAKE_CLI_TEMPLATE = textwrap.dedent(
                 [
                     sys.executable,
                     "-c",
-                    "import sys, time; [sys.stderr.write('warn') or sys.stderr.flush() or time.sleep(0.005) for _ in range(200)]",
+                    "import sys, time; [(sys.stderr.write('warn'), sys.stderr.flush(), time.sleep(0.005)) for _ in range(100)]",
                 ],
                 start_new_session=True,
                 close_fds=False,
