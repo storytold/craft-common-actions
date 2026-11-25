@@ -400,7 +400,7 @@ def _remaining(rows, s):
     return sorted(remaining, key=lambda i: i['key'])
 
 
-def _closed_since(reads, s, analysis):
+def _closed_since(reads, s, analysis, collect=None):
     """Every resolved issue updated after C's analysis, newest update first, stopping at that analysis.
 
     An issue open at C is now either unresolved (the current inventory) or was resolved after C's
@@ -426,17 +426,41 @@ def _closed_since(reads, s, analysis):
             n.require(item['key'] not in seen, 'duplicate resolved issue'); seen.add(item['key'])
             n.require(approved.get(item['key']) == item, 'issue open at candidate C is not reviewed debt (resolved after its analysis)')
             found.append(item)
+            if collect is not None: collect.append(issue)
         if len(rows) < PAGE_SIZE:
             return sorted(found, key=lambda i: i['key'])
     raise n.Unavailable('Sonar resolved-issue bound reached before candidate C')
 
 
+def _resolved_at(reads, issue):
+    """When a resolved issue was resolved: closeDate for analysis closures, else its changelog."""
+    if issue.get('closeDate') is not None:
+        return provider_time(issue['closeDate'])
+    changes = reads.get('sonar', '/api/issues/changelog?' + urlencode({'issue': issue['key']})).get('changelog')
+    n.require(isinstance(changes, list) and len(changes) <= MAX_ITEMS, 'missing/bounded issue changelog')
+    times = [provider_time(change.get('creationDate')) for change in changes
+             if isinstance(change, dict) and any(isinstance(d, dict) and d.get('key') in ('status', 'resolution', 'issueStatus') for d in change.get('diffs') or [])]
+    n.require(times, 'manual resolution without a dated changelog transition')
+    return max(times)
+
+
+def _open_at(reads, issue, since):
+    """Was this issue open at C's analysis? Created by then, and not yet resolved."""
+    if provider_time(issue.get('creationDate')) > since:
+        return False
+    return not issue.get('resolution') or _resolved_at(reads, issue) > since
+
+
 def _measures_at(reads, s, analysis, covered):
-    """Sonar's own per-type counts at C must not exceed the issues the reconstruction found.
+    """Sonar's own per-type counts at C must not exceed the found issues that were open at C.
 
     Every issue counted at C was open at C, so it is in the current inventory or the resolved-since
-    scan: an honest reconstruction can never fall short, and any gap means something was missed.
+    scan, and was created by C's analysis and resolved after it: an honest reconstruction can never
+    fall short, and any gap means something was missed (for example an issue retyped out of scope).
+    Rows that were not open at C (resolved before it, or created after it) never fill a gap.
     """
+    since = provider_time(analysis['date'])
+    covered = [issue for issue in covered if _open_at(reads, issue, since)]
     metrics = [ISSUE_METRICS[t] for t in s['issue_types']]
     reply = reads.get('sonar', '/api/measures/search_history?' + urlencode({'component': s['project'], 'branch': 'main', 'metrics': ','.join(metrics), 'from': analysis['date'], 'to': analysis['date'], 'ps': PAGE_SIZE, 'p': 1}))
     rows = reply.get('measures'); paging = reply.get('paging', {})
@@ -481,8 +505,9 @@ def _snapshot(reads, s, producer, now, missing=n.InvalidNightly):
             raise n.Unavailable('latest Sonar analysis is not a later main commit containing C; retry after the next analysis') from error
     rows = _issue_rows(reads, s)
     remaining = _remaining(rows, s)
-    closed = _closed_since(reads, s, analysis)
-    covered = list({i['key']: i for i in remaining + closed}.values())
+    resolved = []
+    closed = _closed_since(reads, s, analysis, resolved)
+    covered = list({i['key']: i for i in rows + resolved}.values())
     measures = _measures_at(reads, s, analysis, covered)  # Historical: no reread needed.
     check_id = _sonar_check(reads, s, producer, gate, analysis, now)
     n.require(_issue_rows(reads, s) == rows and _closed_since(reads, s, analysis) == closed, 'Sonar issue inventory changed during proof collection')

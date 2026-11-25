@@ -48,7 +48,7 @@ class Fixture:
         self.analysis = {'key': 'analysis-C', 'date': ANALYZED, 'revision': C}
         self.gate = {'status': 'ERROR', 'ignoredConditions': False, 'conditions': [{'metricKey': 'new_security_rating', 'comparator': 'GT', 'errorThreshold': '1', 'actualValue': '3', 'status': 'ERROR'}, {'metricKey': 'coverage', 'comparator': 'LT', 'errorThreshold': '80', 'actualValue': '100', 'status': 'OK'}]}
         self.task = {'id': 'task-C', 'analysisId': 'analysis-C', 'organization': 'storytold', 'componentKey': PROJECT, 'branch': 'main', 'branchType': 'LONG', 'type': 'REPORT', 'status': 'SUCCESS', 'warningCount': 0, 'warnings': [], 'submittedAt': CREATED, 'startedAt': CREATED, 'executedAt': DONE, 'scannerContext': 'diagnostic only'}
-        self.issues = [{**issue, 'project': PROJECT, 'organization': 'storytold', 'status': 'OPEN'} for issue in self.debt]
+        self.issues = [{**issue, 'project': PROJECT, 'organization': 'storytold', 'status': 'OPEN', 'creationDate': CREATED} for issue in self.debt]
         self.closed = {}; self.changes = {}; self.measure_count = 2; self.queue = []
         self.source = b'fixed source\n'
         self.run = {'id': 600, 'run_attempt': 1, 'run_number': 20, 'workflow_id': 60, 'path': '.github/workflows/ci.yml', 'head_sha': C, 'head_branch': 'main', 'event': 'push', 'repository': {'full_name': REPO}, 'head_repository': {'full_name': REPO}, 'created_at': CREATED, 'status': 'completed', 'conclusion': 'success'}
@@ -209,7 +209,7 @@ class CandidateTests(unittest.TestCase):
 
     def resolved(self, key, issue_hash, when, manual=None, **extra):
         """A real-shaped resolved row: analysis closures have closeDate == updateDate; manual ones no closeDate."""
-        row = {'key': key, 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': issue_hash, 'project': PROJECT, 'organization': 'storytold', 'updateDate': when, **extra}
+        row = {'key': key, 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': issue_hash, 'project': PROJECT, 'organization': 'storytold', 'updateDate': when, 'creationDate': CREATED, **extra}
         row.update({'status': 'RESOLVED', 'resolution': manual} if manual else {'status': 'CLOSED', 'resolution': 'FIXED', 'closeDate': when})
         self.f.closed[key] = row
         return row
@@ -249,6 +249,33 @@ class CandidateTests(unittest.TestCase):
             return data
         self.f.count_override = {}
         with patch.object(self.f, 'reply', side_effect=no_point), self.assertRaisesRegex(ValueError, 'no single Sonar measure'): self.admit()
+
+    def test_rows_not_open_at_C_never_fill_a_count_gap(self):
+        # Reproduction (lead's Opus review of 185839d1): a vulnerability open at C is retyped out of
+        # scope after C, so neither scan sees it; Sonar still counts it at C. Approved debt issue-2 was
+        # closed *before* C but touched after C, so the updated-since scan returns it. It must not be
+        # counted as open at C, or it hides the retyped vulnerability.
+        self.later(M)
+        self.f.issues.pop(1)
+        row = self.resolved('issue-2', '2' * 32, '2026-11-22T12:03:00+0000')
+        row['closeDate'] = '2026-11-22T11:00:00+0000'   # closed before C's 11:59 analysis
+        self.f.count_override = {'vulnerabilities': 2}   # issue-1 + the retyped one
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities at candidate C'): self.admit()
+        # The same shape with issue-2 really open at C (closed after its analysis) adds up honestly.
+        row['closeDate'] = '2026-11-22T12:03:00+0000'
+        self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})
+        # An issue created after C's analysis was not open at C either.
+        self.f.issues[0]['creationDate'] = '2026-11-22T12:30:00Z'
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities'): self.admit()
+        self.f.issues[0]['creationDate'] = CREATED
+        # A manual resolution has no closeDate: its changelog dates it.
+        del row['closeDate']; row['status'] = 'RESOLVED'; row['resolution'] = 'WONTFIX'
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T11:30:00+0000', 'diffs': [{'key': 'resolution', 'newValue': 'WONTFIX'}]}]
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities'): self.admit()   # resolved before C
+        self.f.changes['issue-2'][0]['creationDate'] = '2026-11-22T12:03:00+0000'
+        self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})                 # resolved after C
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:03:00+0000', 'diffs': [{'key': 'comment'}]}]
+        with self.assertRaisesRegex(ValueError, 'without a dated changelog transition'): self.admit()
 
     def test_later_analysis_in_C_s_second_is_a_retry(self):
         self.f.history = [{'key': 'analysis-M', 'date': ANALYZED, 'revision': M}, dict(self.f.analysis)]
