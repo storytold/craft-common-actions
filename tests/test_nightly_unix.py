@@ -101,9 +101,15 @@ class UnixProducerTests(unittest.TestCase):
         self.assertEqual(targets[0]['target'],{'os':'windows','arch':'x86_64','format':'portable_zip'})
         self.assertEqual([row for row in targets if row['target']['os']=='macos'],[u.registry_target(mac)])
         self.assertEqual([row for row in targets if row['target']['os']=='linux'],[u.registry_target(linux)])
-        # Other apps hold at most their Linux nightly tar row; none admits Windows or macOS.
-        self.assertTrue(all(all(t['target']=={'os':'linux','arch':'x86_64','format':'tar_gz'} for t in row['targets'])
-                            for name,row in self.registry['apps'].items() if name!='photocraft'))
+        # Other apps' Unix rows are their own contracts, never PhotoCraft's (the asset and identity name the app).
+        for name,row in self.registry['apps'].items():
+            if name=='photocraft' or not row['targets']: continue
+            for platform in ('linux-x86_64','macos-aarch64'):
+                with self.subTest(app=name,platform=platform):
+                    own=u.pending_contract(None,platform,name)
+                    self.assertEqual([t for t in row['targets'] if t['target']==own['target']],[u.registry_target(own)])
+                    self.assertTrue(own['asset_pattern'].startswith(name+'-'))
+                    self.assertEqual(own['isolation']['package_identity'],f'ai.storyteller.{name}.nightly')
 
     def test_admitted_linux_row_must_match_the_feed_registry_exactly(self):
         self.assertTrue(self.check()['feed_admitted'])

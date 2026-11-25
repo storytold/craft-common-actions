@@ -253,8 +253,27 @@ import nightly_windows as _w
 import nightly_release_platforms as _plat
 
 VERSION = '1.2.3-nightly.20261122.100.1.gaaaaaaaaaaaa'
-# Apps admitted with a Linux nightly tar row only (their launcher-template PRs record these rows).
+# Apps admitted beside PhotoCraft: a Linux nightly tar row (canonical launcher) plus Windows and macOS rows.
 LINUX_ROWS = ('anicraft', 'cadcraft', 'deckcraft', 'designcraft', 'effectcraft', 'figcraft', 'filmcraft', 'gridcraft', 'lightcraft', 'materialcraft', 'soundcraft', 'texturecraft', 'vectorcraft', 'wordcraft')
+# Each app's merged nightly packaging on its default branch (paths in that app's repository):
+# display name, the flat Windows GUI exe at the ZIP root (packaging/windows/nightly.ps1 Executables), and
+# the macOS GUI inside its bundle (packaging/macos/nightly-lib.sh MAC_NIGHTLY_APP, nightly_plist.py CFBundleExecutable).
+APP_TABLE = {
+    'anicraft': ('AniCraft', 'anicraft.exe', 'AniCraft Nightly.app/Contents/MacOS/AniCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'cadcraft': ('CADCraft', 'cadcraft.exe', 'CADCraft Nightly.app/Contents/MacOS/CADCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'deckcraft': ('DeckCraft', 'deckcraft.exe', 'DeckCraft Nightly.app/Contents/MacOS/DeckCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'designcraft': ('DesignCraft', 'designcraft.exe', 'DesignCraft Nightly.app/Contents/MacOS/DesignCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'effectcraft': ('EffectCraft', 'effectcraft.exe', 'EffectCraft Nightly.app/Contents/MacOS/EffectCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'figcraft': ('FigCraft', 'figcraft.exe', 'FigCraft Nightly.app/Contents/MacOS/FigCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:22
+    'filmcraft': ('FilmCraft', 'filmcraft.exe', 'FilmCraft Nightly.app/Contents/MacOS/FilmCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'gridcraft': ('GridCraft', 'gridcraft.exe', 'GridCraft Nightly.app/Contents/MacOS/GridCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'lightcraft': ('LightCraft', 'lightcraft.exe', 'LightCraft Nightly.app/Contents/MacOS/LightCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'materialcraft': ('MaterialCraft', 'materialcraft.exe', 'MaterialCraft Nightly.app/Contents/MacOS/MaterialCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'soundcraft': ('SoundCraft', 'soundcraft.exe', 'SoundCraft Nightly.app/Contents/MacOS/SoundCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'texturecraft': ('TextureCraft', 'texturecraft.exe', 'TextureCraft Nightly.app/Contents/MacOS/TextureCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:40
+    'vectorcraft': ('VectorCraft', 'vectorcraft.exe', 'VectorCraft Nightly.app/Contents/MacOS/VectorCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+    'wordcraft': ('WordCraft', 'wordcraft.exe', 'WordCraft Nightly.app/Contents/MacOS/WordCraft'),  # packaging/windows/nightly.ps1:20, packaging/macos/nightly-lib.sh:6, packaging/macos/nightly_plist.py:39
+}
 ELF = b'\x7fELF\x02\x01\x01' + b'\x00' * 9 + _struct.pack('<HHI', 2, 62, 1) + b'\x00' * 40
 MACHO = _struct.pack('<8I', 0xfeedfacf, 0x0100000c, 0, 2, 0, 0, 0, 0)
 
@@ -325,7 +344,7 @@ class PhotoCraftUnchangedTests(unittest.TestCase):
         base = json.loads((ROOT / 'tests/fixtures/nightly-apps-photocraft-targets-8f58b6d0.json').read_text())['photocraft']
         live = REGISTRY['apps']['photocraft']
         self.assertEqual({k: v for k, v in live.items() if k not in ('display_name', 'env_prefix', 'entrypoints')}, base)
-        # Apps without an admitted Linux row still have no targets and none of the name fields.
+        # Apps without admitted rows still have no targets and none of the name fields.
         for app, row in REGISTRY['apps'].items():
             if app != 'photocraft' and app not in LINUX_ROWS:
                 with self.subTest(app=app):
@@ -686,9 +705,69 @@ class RegistryRowsTests(unittest.TestCase):
         for app in LINUX_ROWS:
             with self.subTest(row=app):
                 row = REGISTRY['apps'][app]
-                self.assertEqual(row['entrypoints'], {'linux-x86_64': {'entrypoint': app, 'binary': f'{app}-bin'}})
-                self.assertEqual([t['target'] for t in row['targets']], [{'os': 'linux', 'arch': 'x86_64', 'format': 'tar_gz'}])
-                self.assertEqual(row['targets'][0]['asset_pattern'], f'{app}-{{version}}-linux-x86_64-nightly.tar.gz')
+                self.assertEqual(row['entrypoints']['linux-x86_64'], {'entrypoint': app, 'binary': f'{app}-bin'})
+                # PhotoCraft's order and shape: Windows ZIP, Linux tar, macOS app ZIP.
+                self.assertEqual([t['target'] for t in row['targets']],
+                                 [{'os': 'windows', 'arch': 'x86_64', 'format': 'portable_zip'},
+                                  {'os': 'linux', 'arch': 'x86_64', 'format': 'tar_gz'},
+                                  {'os': 'macos', 'arch': 'aarch64', 'format': 'portable_zip'}])
+                self.assertEqual([t['asset_pattern'] for t in row['targets']],
+                                 [f'{app}-{{version}}-windows-x86_64-nightly.zip', f'{app}-{{version}}-linux-x86_64-nightly.tar.gz',
+                                  f'{app}-{{version}}-macos-aarch64-nightly.zip'])
+                self.assertEqual(sorted(row['entrypoints']), sorted(REGISTRY['apps']['photocraft']['entrypoints']))
+                self.assertEqual(sorted(row), sorted(REGISTRY['apps']['photocraft']))
+
+    def test_every_platform_row_passes_the_plugins_and_renders_its_asset(self):
+        for app in self.admitted():
+            names = names_tool.App(app, REGISTRY)
+            with self.subTest(app=app):
+                self.assertEqual(names.platforms, ['linux-x86_64', 'macos-aarch64', 'windows-x86_64'])
+                # The release-ref signer's plug-in check (format, asset name, isolation) for every row.
+                self.assertEqual(_plat.registry_platforms(REGISTRY, app), names.platforms)
+                self.assertTrue(names_tool.admit(app, f'storytold/{app}', 'refs/heads/main', REGISTRY)[0])
+                self.assertTrue(names_tool.admit(app, f'storytold/{app}', 'refs/heads/nightly-signer', REGISTRY, release=True)[0])
+                record = REGISTRY['apps'][app]
+                for item in record['targets']:
+                    platform = f"{item['target']['os']}-{item['target']['arch']}"
+                    self.assertEqual(item['isolation'], _plat.isolation(app))
+                    self.assertEqual(item['asset_pattern'].replace('{version}', VERSION), names.asset(VERSION, platform))
+                    self.assertLessEqual(len(names.asset(VERSION, platform)), 128)
+                # The Windows producer's exact row and the Unix producer's macOS/Linux contracts.
+                with _patch.dict(os.environ, {'NIGHTLY_APP': app}):
+                    self.assertTrue(_w.reviewed_windows_target(record, app))
+                    self.assertEqual([t for t in record['targets'] if t['target']['os'] == 'windows'], [_w.windows_target(app)])
+                    for platform in ('linux-x86_64', 'macos-aarch64'):
+                        contract = _u.pending_contract(None, platform, app)
+                        self.assertEqual([t for t in record['targets'] if f"{t['target']['os']}-{t['target']['arch']}" == platform],
+                                         [_u.registry_target(contract)])
+                        self.assertEqual(contract['entrypoint'], names.entrypoint(platform))
+                # Windows is a flat GUI exe; macOS is the bundle executable itself, no launcher.
+                self.assertRegex(names.binary('windows-x86_64'), r'^[A-Za-z0-9][A-Za-z0-9._-]*\.exe$')
+                self.assertEqual(names.entrypoint('windows-x86_64'), names.binary('windows-x86_64'))
+                self.assertTrue(names.binary('macos-aarch64').startswith(names.bundle + '/Contents/MacOS/'))
+                self.assertEqual(names.entrypoint('macos-aarch64'), names.binary('macos-aarch64'))
+                self.assertNotIn(names.binary('windows-x86_64'), names.banned)
+
+    def test_per_app_values_match_each_apps_merged_nightly_packaging(self):
+        self.assertEqual(sorted(APP_TABLE), sorted(LINUX_ROWS))
+        for app, (display, exe, mac) in APP_TABLE.items():
+            with self.subTest(app=app):
+                names = names_tool.App(app, REGISTRY)
+                self.assertEqual(names.display, display)
+                self.assertEqual(names.identity, f'ai.storyteller.{app}.nightly')
+                self.assertEqual(names.record['entrypoints']['windows-x86_64'], {'entrypoint': exe, 'binary': exe})
+                self.assertEqual(names.record['entrypoints']['macos-aarch64'], {'entrypoint': mac, 'binary': mac})
+                self.assertEqual((names.bundle, names.product_name, names.plist_version_key),
+                                 (f'{display} Nightly.app', f'{display} Nightly', f'{display}Version'))
+
+    def test_photocraft_row_is_byte_identical(self):
+        # PhotoCraft's serialized row before the Windows/macOS rows for other apps (main 88148a57).
+        frozen = (ROOT / 'tests/fixtures/nightly-apps-photocraft-row-88148a57.json').read_text()
+        live = json.dumps(REGISTRY['apps']['photocraft'], indent=2, sort_keys=True) + '\n'
+        self.assertEqual(live, frozen)
+        text = (ROOT / 'nightly-apps.json').read_text()
+        block = '    "photocraft": ' + json.dumps(REGISTRY['apps']['photocraft'], indent=2, sort_keys=True).replace('\n', '\n    ')
+        self.assertIn(block, text)
 
     def test_no_two_apps_share_an_identity_env_prefix_or_display_name(self):
         rows = [names_tool.App(app, REGISTRY) for app in self.admitted()]
@@ -697,12 +776,27 @@ class RegistryRowsTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertEqual(len(values), len(set(values)))
                 self.assertEqual(len(values), len({value.lower() for value in values}))
+        # Every target row's identity, asset name and entrypoint is its own app's; none is shared.
+        for key in ('package_identity', 'asset_pattern', 'entrypoint'):
+            values = []
+            for row in rows:
+                for item in row.record['targets']:
+                    platform = f"{item['target']['os']}-{item['target']['arch']}"
+                    values.append(item['isolation']['package_identity'] + '|' + platform if key == 'package_identity'
+                                  else item['asset_pattern'] if key == 'asset_pattern' else row.entrypoint(platform))
+            with self.subTest(key=key):
+                self.assertEqual(len(values), len(set(values)))
+                self.assertEqual(len(values), len({value.lower() for value in values}))
+        for row in rows:
+            with self.subTest(identity=row.app):
+                self.assertEqual({item['isolation']['package_identity'] for item in row.record['targets']}, {row.identity})
 
     def test_designcraft_fixture_matches_the_live_row(self):
         live = REGISTRY['apps']['designcraft']
         synthetic = second_app_registry()['apps']['designcraft']
-        self.assertEqual(synthetic['entrypoints']['linux-x86_64'], live['entrypoints']['linux-x86_64'])
-        self.assertEqual([t for t in synthetic['targets'] if t['target']['os'] == 'linux'], live['targets'])
+        # The synthetic three-platform row is now DesignCraft's live row exactly.
+        self.assertEqual(synthetic['entrypoints'], live['entrypoints'])
+        self.assertEqual(synthetic['targets'], live['targets'])
         self.assertEqual((synthetic['display_name'], synthetic['env_prefix']), (live['display_name'], live['env_prefix']))
 
 
