@@ -354,6 +354,7 @@ class _PipeCollector:
     def drain_briefly(self, budget_seconds: float = 0.2) -> bool:
         """Drain buffered bytes after exit; return False if stdout still looks unclassified."""
         end = time.monotonic() + budget_seconds
+        stdout_before = self._stdout_total_bytes
         while self._sel.get_map() and time.monotonic() < end:
             if self.stdout_limit_exceeded:
                 break
@@ -361,14 +362,19 @@ class _PipeCollector:
             progressed = self.poll_once(min(0.01, max(0.0, end - time.monotonic())))
             if not progressed and self._bytes_read == before_bytes:
                 break
+        had_partial_stdout = bool(self._stdout_buf)
         if self._stdout_buf and not self.stdout_limit_exceeded:
             self._consume_stdout_line(self._stdout_buf)
             self._stdout_buf = b""
-        # If stdout stayed unreadably open past budget while actively streaming bytes,
-        # classify as incomplete so negative cases never false-pass.
+        # If stdout stayed open past budget while actively streaming stdout bytes (or
+        # holding an unterminated fragment), classify as incomplete so negative cases
+        # never false-pass; stderr-only noise does not make empty stdout incomplete.
+        stdout_streaming = (
+            self._stdout_total_bytes > stdout_before or had_partial_stdout
+        )
         return not (
             self._stdout_fd in self._sel.get_map()
-            and self._bytes_read > 0
+            and stdout_streaming
             and time.monotonic() >= end
         )
 

@@ -141,6 +141,19 @@ FAKE_CLI_TEMPLATE = textwrap.dedent(
             )
             sys.stderr.write("refused with detached helper\\n")
             return 1
+        if MODE == "spawn-detached-stderr-spammer" and not (read_roots and write_roots):
+            import subprocess
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys, time; [sys.stderr.write('warn') or sys.stderr.flush() or time.sleep(0.005) for _ in range(200)]",
+                ],
+                start_new_session=True,
+                close_fds=False,
+            )
+            sys.stderr.write("refused with stderr-spamming helper\\n")
+            return 1
         if MODE == "noisy-stderr" and not (read_roots and write_roots):
             sys.stderr.write("x" * 65536 + "\\n")
             return 1
@@ -355,6 +368,11 @@ class ConformanceRunnerTests(unittest.TestCase):
         elapsed = time.monotonic() - started
         self.assertTrue(all(r.passed for r in results), results)
         self.assertLess(elapsed, 5.0)
+
+    def test_detached_helper_streaming_only_stderr_does_not_fail_empty_stdout(self) -> None:
+        cli = self.make_fake_cli("spawn-detached-stderr-spammer")
+        results = check_agent_roots.run_conformance(cli, timeout=2.0)
+        self.assertTrue(all(r.passed for r in results), results)
 
     def test_noisy_stderr_is_drained_with_bounded_retention(self) -> None:
         cli = self.make_fake_cli("noisy-stderr")
