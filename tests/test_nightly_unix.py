@@ -101,7 +101,9 @@ class UnixProducerTests(unittest.TestCase):
         self.assertEqual(targets[0]['target'],{'os':'windows','arch':'x86_64','format':'portable_zip'})
         self.assertEqual([row for row in targets if row['target']['os']=='macos'],[u.registry_target(mac)])
         self.assertEqual([row for row in targets if row['target']['os']=='linux'],[u.registry_target(linux)])
-        self.assertTrue(all(not row['targets'] for name,row in self.registry['apps'].items() if name!='photocraft'))
+        # Other apps hold at most their Linux nightly tar row; none admits Windows or macOS.
+        self.assertTrue(all(all(t['target']=={'os':'linux','arch':'x86_64','format':'tar_gz'} for t in row['targets'])
+                            for name,row in self.registry['apps'].items() if name!='photocraft'))
 
     def test_admitted_linux_row_must_match_the_feed_registry_exactly(self):
         self.assertTrue(self.check()['feed_admitted'])

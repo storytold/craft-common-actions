@@ -2,9 +2,32 @@
   "apps": {
     "anicraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "AniCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "anicraft-bin",
+          "entrypoint": "anicraft"
+        }
+      },
+      "env_prefix": "ANICRAFT",
+      "note": "AniCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (anicraft) with anicraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/anicraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "anicraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.anicraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "artcraft": {
       "default_branch": "main",
@@ -14,9 +37,32 @@
     },
     "cadcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "CADCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "cadcraft-bin",
+          "entrypoint": "cadcraft"
+        }
+      },
+      "env_prefix": "CADCRAFT",
+      "note": "CADCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (cadcraft) with cadcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/cadcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "cadcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.cadcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "craft-anything": {
       "default_branch": "main",
@@ -32,51 +78,235 @@
     },
     "deckcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "DeckCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "deckcraft-bin",
+          "entrypoint": "deckcraft"
+        }
+      },
+      "env_prefix": "DECKCRAFT",
+      "note": "DeckCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (deckcraft) with deckcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/deckcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "deckcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.deckcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "designcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "DesignCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "designcraft-bin",
+          "entrypoint": "designcraft"
+        }
+      },
+      "env_prefix": "DESIGNCRAFT",
+      "note": "DesignCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (designcraft) with designcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/designcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "designcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.designcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "effectcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "EffectCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "effectcraft-bin",
+          "entrypoint": "effectcraft"
+        }
+      },
+      "env_prefix": "EFFECTCRAFT",
+      "note": "EffectCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (effectcraft) with effectcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/effectcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "effectcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.effectcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "figcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "FigCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "figcraft-bin",
+          "entrypoint": "figcraft"
+        }
+      },
+      "env_prefix": "FIGCRAFT",
+      "note": "FigCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (figcraft) with figcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/figcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "figcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.figcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "filmcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "FilmCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "filmcraft-bin",
+          "entrypoint": "filmcraft"
+        }
+      },
+      "env_prefix": "FILMCRAFT",
+      "note": "FilmCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (filmcraft) with filmcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/filmcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "filmcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.filmcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "gridcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "GridCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "gridcraft-bin",
+          "entrypoint": "gridcraft"
+        }
+      },
+      "env_prefix": "GRIDCRAFT",
+      "note": "GridCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (gridcraft) with gridcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/gridcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "gridcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.gridcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "lightcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "LightCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "lightcraft-bin",
+          "entrypoint": "lightcraft"
+        }
+      },
+      "env_prefix": "LIGHTCRAFT",
+      "note": "LightCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (lightcraft) with lightcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/lightcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "lightcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.lightcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "materialcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "MaterialCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "materialcraft-bin",
+          "entrypoint": "materialcraft"
+        }
+      },
+      "env_prefix": "MATERIALCRAFT",
+      "note": "MaterialCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (materialcraft) with materialcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/materialcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "materialcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.materialcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "pdfcraft": {
       "default_branch": "main",
@@ -151,27 +381,119 @@
     },
     "soundcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "SoundCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "soundcraft-bin",
+          "entrypoint": "soundcraft"
+        }
+      },
+      "env_prefix": "SOUNDCRAFT",
+      "note": "SoundCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (soundcraft) with soundcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/soundcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "soundcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.soundcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "texturecraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "TextureCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "texturecraft-bin",
+          "entrypoint": "texturecraft"
+        }
+      },
+      "env_prefix": "TEXTURECRAFT",
+      "note": "TextureCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (texturecraft) with texturecraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/texturecraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "texturecraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.texturecraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "vectorcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "VectorCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "vectorcraft-bin",
+          "entrypoint": "vectorcraft"
+        }
+      },
+      "env_prefix": "VECTORCRAFT",
+      "note": "VectorCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (vectorcraft) with vectorcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/vectorcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "vectorcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.vectorcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     },
     "wordcraft": {
       "default_branch": "main",
-      "note": "No source-vetted isolated package/profile adapter yet; build artifacts are not Launcher-installable.",
+      "display_name": "WordCraft",
+      "entrypoints": {
+        "linux-x86_64": {
+          "binary": "wordcraft-bin",
+          "entrypoint": "wordcraft"
+        }
+      },
+      "env_prefix": "WORDCRAFT",
+      "note": "WordCraft nightly-v1 Linux x86_64 GUI tar.gz, started through the canonical launcher (wordcraft) with wordcraft-bin beside it. macOS and Windows need their own admission.",
       "repository": "storytold/wordcraft",
-      "targets": []
+      "targets": [
+        {
+          "asset_pattern": "wordcraft-{version}-linux-x86_64-nightly.tar.gz",
+          "isolation": {
+            "associations": "none",
+            "package_identity": "ai.storyteller.wordcraft.nightly",
+            "profile_contract": "nightly",
+            "profile_version": 1
+          },
+          "target": {
+            "arch": "x86_64",
+            "format": "tar_gz",
+            "os": "linux"
+          }
+        }
+      ]
     }
   },
   "schema": "craft-nightly-registry/v1"

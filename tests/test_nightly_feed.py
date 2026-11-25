@@ -214,7 +214,9 @@ class NightlyTests(unittest.TestCase):
         production = json.loads((ROOT / "nightly-apps.json").read_text())
         self.assertGreaterEqual(len(production["apps"]), 18)
         self.assertEqual(len(production["apps"]), 19)
-        self.assertEqual([name for name, row in production["apps"].items() if row["targets"]], ["photocraft"])
+        # PhotoCraft's three platforms plus fourteen apps' Linux nightly tar rows (canonical launcher).
+        self.assertEqual([name for name, row in production["apps"].items() if row["targets"]],
+                         sorted(("photocraft",) + ('anicraft', 'cadcraft', 'deckcraft', 'designcraft', 'effectcraft', 'figcraft', 'filmcraft', 'gridcraft', 'lightcraft', 'materialcraft', 'soundcraft', 'texturecraft', 'vectorcraft', 'wordcraft')))
         # One release carries every admitted platform: Windows, Linux and the notarized macOS app.
         self.assertEqual([row["target"] for row in production["apps"]["photocraft"]["targets"]],
                          [{"os": "windows", "arch": "x86_64", "format": "portable_zip"},
