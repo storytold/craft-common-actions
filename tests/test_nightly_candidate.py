@@ -40,7 +40,7 @@ class Provider:
 class Fixture:
     def __init__(self):
         self.calls = []; self.hook = None; self.main = M
-        self.latest_revision = C; self.latest_key = 'analysis-C'; self.history = None
+        self.latest_revision = C; self.latest_key = 'analysis-C'; self.history = None; self.count_override = {}
         self.workflow_state = 'active'; self.compare_override = None; self.compare_page_one_oversized = False
         self.producer = {'repository': REPO, 'source_commit': C, 'run_id': 500, 'run_attempt': 1, 'run_number': 10, 'workflow_id': 50, 'workflow_path': '.github/workflows/nightly.yml', 'created_at': CREATED, 'tooling_revision': 'f' * 40}
         self.debt = [{'key': 'issue-' + str(i), 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': str(i) * 32} for i in (1, 2)]
@@ -106,11 +106,20 @@ class Fixture:
             if path == '/api/ce/task': return {'task': self.task}
             if path == '/api/issues/search':
                 if q.get('resolved') == ['true']:
-                    assert q['s'] == ['CLOSE_DATE'] and q['asc'] == ['false']
-                    return page('issues', sorted(self.closed.values(), key=lambda i: i.get('closeDate', ''), reverse=True))
+                    assert q['s'] == ['UPDATE_DATE'] and q['asc'] == ['false']
+                    return page('issues', sorted(self.closed.values(), key=lambda i: i.get('updateDate', ''), reverse=True))
                 assert q['resolved'] == ['false']
                 return page('issues', self.issues)
             if path == '/api/issues/changelog': return {'changelog': self.changes[q['issue'][0]]}
+            if path == '/api/measures/search_history':
+                assert q['from'] == q['to'] and q['branch'] == ['main']
+                at = q['from'][0]
+                def honest(metric):
+                    kind = {'vulnerabilities': 'VULNERABILITY', 'bugs': 'BUG', 'code_smells': 'CODE_SMELL'}[metric]
+                    later = [i for i in self.closed.values() if c.provider_time(i['updateDate']) > c.provider_time(at)]
+                    return sum(i['type'] == kind for i in self.issues + later)
+                metrics = q['metrics'][0].split(',')
+                return {'paging': {'pageIndex': 1, 'pageSize': 100, 'total': 1}, 'measures': [{'metric': m, 'history': [{'date': at, 'value': str(self.count_override.get(m, honest(m)))}]} for m in metrics]}
             if path == '/api/measures/component': return {'component': {'key': PROJECT, 'measures': [{'metric': 'vulnerabilities', 'value': str(self.measure_count)}]}}
             if path == '/api/components/show': return {'component': {'key': PROJECT + ':src/file.py', 'qualifier': 'FIL', 'path': 'src/file.py'}}
             if path == '/api/components/tree': return page('components', [{'key': PROJECT + ':src/file.py', 'qualifier': 'FIL', 'path': 'src/file.py'}])
@@ -154,6 +163,16 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(self.revalidate(receipt), receipt)
         self.assertFalse(any(path.startswith('/api/ce/') for _, path in self.f.calls))
 
+    def test_revalidation_ignores_edited_analysis_events(self):
+        self.later(M); receipt = self.admit()
+        self.f.history[-1]['events'] = [{'category': 'VERSION', 'name': '1.2.3'}]
+        self.assertEqual(self.revalidate(receipt), receipt)
+
+    def test_purged_C_analysis_at_publish_time_is_expiry(self):
+        self.later(M); receipt = self.admit()
+        self.f.history = self.f.history[:-1]
+        with self.assertRaisesRegex(c.n.Unavailable, 'no Sonar main analysis of exact candidate C'): self.revalidate(receipt)
+
     def test_revalidation_refuses_a_changed_C_gate(self):
         self.later(M); receipt = self.admit()
         self.f.gate['conditions'][1]['actualValue'] = '99'
@@ -168,10 +187,13 @@ class CandidateTests(unittest.TestCase):
             if suffix.startswith('/compare/' + C + '...' + M):
                 return {'status': 'diverged', 'ahead_by': 1, 'behind_by': 1, 'base_commit': {'sha': C}, 'merge_base_commit': {'sha': P}, 'commits': []}
             return original(provider, suffix)
-        with patch.object(self.f, 'reply', side_effect=reply), self.assertRaisesRegex(ValueError, 'diverged'): self.admit()
+        with patch.object(self.f, 'reply', side_effect=reply), self.assertRaisesRegex(c.n.Unavailable, 'not a later main commit containing C'): self.admit()
         self.assertTrue(self.admit())  # unchanged ancestry admits
         self.f.history[0]['date'] = '2026-11-22T11:00:00+0000'
         with self.assertRaisesRegex(ValueError, 'not newest first'): self.admit()
+        self.f.history = [dict(self.f.analysis)]; original_latest = c._latest
+        older = {'key': 'analysis-B', 'date': ANALYZED, 'revision': B}  # L in C's second, or older: retry
+        with patch.object(c, '_latest', return_value=older), self.assertRaisesRegex(c.n.Unavailable, 'not strictly newer'): self.admit()
 
     def test_C_analysis_missing_stale_or_paged_out_refuses(self):
         self.f.history = [{'key': 'analysis-M', 'date': ANALYZED, 'revision': M}]
@@ -185,41 +207,72 @@ class CandidateTests(unittest.TestCase):
         self.f.history = [{**self.f.analysis}, {'key': 'analysis-C-older', 'date': '2026-11-22T11:00:00+0000', 'revision': C}]
         self.assertEqual(self.admit()['sonar']['analysis']['key'], 'analysis-C')
 
-    def test_issue_closed_after_C_must_be_reviewed_debt(self):
+    def resolved(self, key, issue_hash, when, manual=None, **extra):
+        """A real-shaped resolved row: analysis closures have closeDate == updateDate; manual ones no closeDate."""
+        row = {'key': key, 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': issue_hash, 'project': PROJECT, 'organization': 'storytold', 'updateDate': when, **extra}
+        row.update({'status': 'RESOLVED', 'resolution': manual} if manual else {'status': 'CLOSED', 'resolution': 'FIXED', 'closeDate': when})
+        self.f.closed[key] = row
+        return row
+
+    def test_issue_resolved_after_C_must_be_reviewed_debt(self):
         self.later(M)
-        new = {'key': 'issue-9', 'rule': 'security:S2', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'BLOCKER', 'hash': '9' * 32, 'project': PROJECT, 'organization': 'storytold', 'status': 'CLOSED', 'resolution': 'FIXED', 'closeDate': '2026-11-22T12:01:00+0000'}
         # Open at C, fixed by the later commit M: the unresolved inventory alone would miss it.
-        self.f.closed['issue-9'] = new
+        new = self.resolved('issue-9', '9' * 32, '2026-11-22T12:01:00+0000', severity='BLOCKER')
         with self.assertRaisesRegex(ValueError, 'issue open at candidate C is not reviewed debt'): self.admit()
-        # Closed at or before C's analysis: it was not open at C.
-        new['closeDate'] = ANALYZED
+        # Resolved at or before C's analysis: it was not open at C.
+        new['updateDate'] = new['closeDate'] = ANALYZED
         self.assertEqual(self.admit()['sonar']['closed_since'], [])
         # Reviewed debt fixed after C is fine, and recorded.
         del self.f.closed['issue-9']
-        fixed = self.f.issues.pop(1)
-        self.f.closed['issue-2'] = {**fixed, 'status': 'CLOSED', 'resolution': 'FIXED', 'closeDate': '2026-11-22T12:01:00+0000'}
+        self.f.issues.pop(1); self.resolved('issue-2', '2' * 32, '2026-11-22T12:01:00+0000')
         result = self.admit()['sonar']
         self.assertEqual(([i['key'] for i in result['remaining']], [i['key'] for i in result['closed_since']]), (['issue-1'], ['issue-2']))
-        # Manual resolutions count the same way: they were open at C.
-        self.f.closed['issue-9'] = {**new, 'closeDate': '2026-11-22T12:02:00+0000', 'resolution': 'WONTFIX', 'status': 'RESOLVED'}
-        with self.assertRaisesRegex(ValueError, 'not reviewed debt'): self.admit()
 
-    def test_closed_issue_scan_is_sound_and_bounded(self):
+    def test_unreviewed_issue_marked_false_positive_after_C_refuses(self):
+        # Manual resolutions carry no closeDate (live data); updateDate still dates them after C.
         self.later(M)
-        base = {'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'project': PROJECT, 'organization': 'storytold', 'status': 'CLOSED', 'resolution': 'FIXED'}
-        self.f.closed = {'x': {**base, 'key': 'x', 'hash': '7' * 32}}  # no closeDate
+        for resolution in ('FALSE-POSITIVE', 'WONTFIX', 'ACCEPTED'):
+            self.f.closed = {}
+            row = self.resolved('issue-8', '8' * 32, '2026-11-22T12:02:00+0000', manual=resolution)
+            self.assertNotIn('closeDate', row)
+            with self.subTest(resolution=resolution), self.assertRaisesRegex(ValueError, 'issue open at candidate C is not reviewed debt'): self.admit()
+
+    def test_measure_at_C_catches_what_the_reconstruction_misses(self):
+        self.later(M)
+        self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})
+        self.f.count_override = {'vulnerabilities': 3}  # Sonar saw one more open at C than the scans found
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities at candidate C'): self.admit()
+        original = self.f.reply
+        def no_point(provider, suffix):
+            data = original(provider, suffix)
+            if suffix.startswith('/api/measures/search_history'): data['measures'][0]['history'] = []
+            return data
+        self.f.count_override = {}
+        with patch.object(self.f, 'reply', side_effect=no_point), self.assertRaisesRegex(ValueError, 'no single Sonar measure'): self.admit()
+
+    def test_later_analysis_in_C_s_second_is_a_retry(self):
+        self.f.history = [{'key': 'analysis-M', 'date': ANALYZED, 'revision': M}, dict(self.f.analysis)]
+        with self.assertRaisesRegex(c.n.Unavailable, "shares candidate C's timestamp"): self.admit()
+
+    def test_resolved_issue_scan_is_sound_and_bounded(self):
+        self.later(M)
+        row = self.resolved('x', '7' * 32, '2026-11-22T12:01:00+0000'); del row['updateDate']
         with self.assertRaisesRegex(ValueError, 'provider timestamp'): self.admit()
+        self.f.closed = {}
         original = self.f.reply
         def unsorted(provider, suffix):
             data = original(provider, suffix)
             if 'resolved=true' in suffix:
-                data['issues'] = [{**base, 'key': 'issue-1', 'hash': '1' * 32, 'closeDate': '2026-11-22T12:01:00+0000'},
-                                  {**base, 'key': 'issue-2', 'hash': '2' * 32, 'closeDate': '2026-11-22T12:05:00+0000'}]
+                a = dict(self.resolved('issue-1', '1' * 32, '2026-11-22T12:01:00+0000')); b = dict(self.resolved('issue-2', '2' * 32, '2026-11-22T12:05:00+0000'))
+                self.f.closed = {}; data['issues'] = [a, b]
             return data
+        with patch.object(self.f, 'reply', side_effect=unsorted), self.assertRaisesRegex(ValueError, 'not newest update first'): self.admit()
         self.f.closed = {}
-        with patch.object(self.f, 'reply', side_effect=unsorted), self.assertRaisesRegex(ValueError, 'not newest closure first'): self.admit()
-        self.f.closed = {f'k{i}': {**base, 'key': 'issue-1', 'hash': '1' * 32, 'closeDate': '2026-11-22T12:59:00+0000'} for i in range(2)}
-        with self.assertRaisesRegex(ValueError, 'duplicate closed issue'): self.admit()
+        row = self.resolved('issue-1', '1' * 32, '2026-11-22T12:59:00+0000'); self.f.closed['dup'] = dict(row)
+        with self.assertRaisesRegex(ValueError, 'duplicate resolved issue'): self.admit()
+        self.f.closed = {}
+        self.resolved('issue-1', '1' * 32, '2026-11-22T12:59:00+0000', organization='other')
+        with self.assertRaisesRegex(ValueError, 'unknown/unresolved item'): self.admit()
 
     def test_new_main_analysis_during_collection_is_a_retry_not_a_freeze(self):
         count = [0]
@@ -232,8 +285,8 @@ class CandidateTests(unittest.TestCase):
         self.f.hook = None
         self.assertEqual(self.admit()['sonar']['latest']['revision'], M)  # The retry admits C.
 
-    def test_26_hours_policy_needs_no_review_renewal(self):
-        result = self.admit(now=NOW + 26 * 3600)
+    def test_20_hours_policy_needs_no_review_renewal(self):
+        result = self.admit(now=NOW + 20 * 3600)  # C's analysis must stay within Sonar's ~1-day intraday retention
         self.assertEqual(result['policy_sha256'], c.digest(self.f.policy))
         self.assertNotIn('expires_at', self.f.policy)
 
@@ -546,9 +599,15 @@ class CandidateTests(unittest.TestCase):
                 if manual:
                     wanted['workflow_blob'] = 'e'*40; wanted['jobs'][0]['applicability'] = 'manual-input-only'
                     self.f.job['conclusion'] = self.f.check['conclusion'] = 'skipped'
+                estimate = c.minimum_reads(self.f.policy['required_workflows'])
+                # Right after C's own analysis (L == C) the C-in-L compare is skipped: one read fewer.
+                receipt = self.admit(); self.f.calls.clear()
+                self.assertEqual(self.revalidate(receipt), receipt)
+                self.assertEqual(len(self.f.calls), estimate - 1)
+                # The normal path (main analysed again after C) is exactly the estimate.
+                self.later(M); self.f.calls.clear()
                 receipt = self.admit(); admitted = len(self.f.calls); self.f.calls.clear()
                 self.assertEqual(self.revalidate(receipt), receipt)
-                estimate = c.minimum_reads(self.f.policy['required_workflows'])
                 self.assertEqual(estimate, len(self.f.calls))
                 self.assertLessEqual(admitted, estimate)
 
@@ -618,11 +677,11 @@ class CandidateTests(unittest.TestCase):
                 'jobs': [{'name': f'job-{k}', 'app_id': 15368, 'applicability': 'manual-input-only' if k == 0 else 'required'}
                          for k in range(1 + extra_jobs // 32 + (i < extra_jobs % 32))]} for i in range(32)]
         per_workflow = lambda workflows: c.minimum_reads(workflows) - c.FIXED_READS
-        fits = shape(53)  # 32*14 + 2*(32+53) = 618 = MAX_READS - FIXED_READS
+        fits = shape(52)  # 32*14 + 2*(32+52) = 616 = MAX_READS - FIXED_READS
         self.assertEqual((per_workflow(fits), c.minimum_reads(fits)), (c.MAX_READS - c.FIXED_READS, c.MAX_READS))
         self.f.policy['required_workflows'] = fits
         c.contract(self.f.policy, self.f.producer)  # exactly at the budget: accepted
-        for extra in (54, 64):  # one job over the room left, and workflow reads alone of exactly 640
+        for extra in (53, 64):  # one job over the room left, and workflow reads alone of exactly 640
             workflows = shape(extra)
             self.f.policy['required_workflows'] = workflows
             with self.subTest(per_workflow=per_workflow(workflows)), self.assertRaisesRegex(ValueError, 'read budget'):

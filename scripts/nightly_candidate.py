@@ -11,8 +11,10 @@ Sonar facts bind to C's own main analysis (the newest analysis whose revision
 is C), so later merges and their analyses do not stop admission. Sonar has no
 issue list "as of" an analysis: the issues open at C are covered by the current
 unresolved main inventory (at the latest analysis, a later commit containing C)
-plus every issue closed after C's analysis, and all of them must be reviewed
-debt. Reviewed debt that is fixed later needs no fix proof.
+plus every resolved issue updated after C's analysis (analysis closures and manual
+resolutions alike), and all of them must be reviewed debt; Sonar's own per-type
+counts at C must not exceed what that finds. Reviewed debt fixed later needs no
+fix proof.
 Rule/profile/scanner configuration and warnings are trusted as resolved by
 SonarCloud, like main CI; provider configuration changes can hide issues.
 No immutable scan-inventory proof or warning-free scan is claimed.
@@ -38,16 +40,19 @@ ISSUE_METRICS = {'BUG': 'bugs', 'VULNERABILITY': 'vulnerabilities', 'CODE_SMELL'
 ACCEPTED_METRICS = {'bugs': 'BUG', 'vulnerabilities': 'VULNERABILITY', 'code_smells': 'CODE_SMELL', 'security_rating': 'VULNERABILITY', 'new_security_rating': 'VULNERABILITY'}
 FINGERPRINT = {'key', 'rule', 'component', 'type', 'severity', 'hash'}
 RECEIPT = 'craft-nightly-candidate-receipt/v4'
-# Revalidation's fixed reads, one page each: the Sonar snapshot (C's analysis, gate, latest
-# analysis, unresolved and closed-since issue pages, Sonar check list and reread, then the
-# issue/closed/gate/latest/C-analysis rereads = 12; a compare when main's latest analysis is a
-# later commit adds one), two ancestry passes (main ref + compare each = 4), and the two
-# post-collection Sonar reread triples (latest analysis, unresolved and closed-since pages = 6)
-# that bracket the final workflow freshness pass: 22. minimum_reads() = FIXED_READS +
-# per-workflow reads, and the contract admits a shape only when that total is <= MAX_READS.
-FIXED_READS = 22
-# C's analysis must be recent enough that Sonar still holds every issue closed since (30-day purge).
-MAX_ANALYSIS_AGE = 7 * 86400
+# Revalidation's fixed reads, one page each, on the normal path where main's latest analysis L is a
+# later commit than C: the Sonar snapshot (C's analysis, gate, latest analysis, the C-in-L compare,
+# C's measures, unresolved and updated-since issue pages, Sonar check list and reread, then the
+# issue/updated/gate/latest/C-analysis rereads = 14), two ancestry passes (main ref + compare each
+# = 4), and the two post-collection Sonar reread triples (latest analysis, unresolved and
+# updated-since pages = 6) that bracket the final workflow freshness pass: 24. Right after C's own
+# analysis (L == C) the compare is skipped. minimum_reads() = FIXED_READS + per-workflow reads, and
+# the contract admits a shape only when that total is <= MAX_READS.
+FIXED_READS = 24
+# Sonar housekeeping keeps every main analysis for about a day, then one per day, so an intraday
+# analysis of C can vanish after 24-48 hours (which refuses: fail closed). Admission therefore needs
+# C's analysis to be at most a day old; that is also far inside the 30-day closed-issue purge.
+MAX_ANALYSIS_AGE = 86400
 
 
 def digest(value):
@@ -81,7 +86,7 @@ def provider_time(value):
 
 
 def minimum_reads(workflows):
-    """Fewest reads revalidation can make: one page per list and no fixed debt.
+    """Reads revalidation makes with one page per list on the normal path (L later than C).
 
     Each workflow is selected twice and freshness-checked once (workflow, run
     list, run and any manual blob), lists its jobs twice and reads each
@@ -306,7 +311,7 @@ def _analysis_row(row, now):
     return row
 
 
-def _exact(reads, s, source, now):
+def _exact(reads, s, source, now, missing=n.InvalidNightly):
     """C's own main analysis: the newest one whose revision is C (Sonar lists analyses newest first).
 
     Main may have newer analyses of later commits; they no longer stop admission of C.
@@ -320,14 +325,18 @@ def _exact(reads, s, source, now):
             _analysis_row(row, now)
             n.require(row['key'] not in seen, 'duplicate Sonar analysis in history pages'); seen.add(row['key'])
             when = provider_time(row['date'])
-            n.require(previous is None or when <= previous, 'Sonar analyses are not newest first'); previous = when
+            n.require(previous is None or when <= previous, 'Sonar analyses are not newest first')
             if row['revision'] == source:
-                # Closed issues are purged after 30 days by default, so the closed-since read must cover C's analysis.
                 if when < now - MAX_ANALYSIS_AGE:
-                    raise n.Unavailable('candidate C was analysed too long ago for its issue history to be complete')
+                    raise n.Unavailable('candidate C was analysed too long ago (Sonar housekeeping keeps intraday analyses about a day)')
+                # API dates have whole seconds: a later analysis in C's own second would make its
+                # closures look as if they happened at C. A later analysis resolves it.
+                if previous is not None and previous <= when:
+                    raise n.Unavailable("a later Sonar analysis shares candidate C's timestamp; retry after the next analysis")
                 return row
+            previous = when
         if len(rows) < PAGE_SIZE:
-            raise n.InvalidNightly('no Sonar main analysis of exact candidate C (never analysed, or removed by Sonar housekeeping)')
+            raise missing('no Sonar main analysis of exact candidate C (never analysed, or removed by Sonar housekeeping)')
     raise n.Unavailable('Sonar analysis history bound reached before candidate C')
 
 
@@ -392,31 +401,53 @@ def _remaining(rows, s):
 
 
 def _closed_since(reads, s, analysis):
-    """Every issue resolved after C's analysis, newest closure first, stopping at that analysis.
+    """Every resolved issue updated after C's analysis, newest update first, stopping at that analysis.
 
-    An issue open at C is now either unresolved (the current inventory) or was closed after C's
-    analysis (this read); both must be reviewed debt. Issues created after C and closed again
-    before admission are included too, which only refuses more.
+    An issue open at C is now either unresolved (the current inventory) or was resolved after C's
+    analysis: by an analysis (CLOSED, closeDate == updateDate) or by hand (false positive, accepted,
+    won't fix: no closeDate at all). updateDate is always present and is at least the resolution
+    time, so this scan covers both; all must be reviewed debt. Issues created after C, and old
+    closed issues merely touched after C, are included too, which only refuses more.
     """
-    path = '/api/issues/search?' + urlencode({'organization': s['organization'], 'componentKeys': s['project'], 'branch': 'main', 'types': ','.join(s['issue_types']), 'resolved': 'true', 's': 'CLOSE_DATE', 'asc': 'false'})
+    path = '/api/issues/search?' + urlencode({'organization': s['organization'], 'componentKeys': s['project'], 'branch': 'main', 'types': ','.join(s['issue_types']), 'resolved': 'true', 's': 'UPDATE_DATE', 'asc': 'false'})
     since = provider_time(analysis['date']); found = []; seen = set(); previous = None
+    approved = {i['key']: i for i in s['debt']}
     for page in range(1, MAX_PAGES + 1):
         reply = reads.get('sonar', path + '&ps=' + str(PAGE_SIZE) + '&p=' + str(page))
         rows = reply.get('issues'); paging = reply.get('paging', {})
-        n.require(isinstance(rows, list) and len(rows) <= PAGE_SIZE and paging.get('pageIndex') == page and paging.get('pageSize') == PAGE_SIZE and type(paging.get('total')) is int, 'invalid Sonar closed-issue page')
+        n.require(isinstance(rows, list) and len(rows) <= PAGE_SIZE and paging.get('pageIndex') == page and paging.get('pageSize') == PAGE_SIZE and type(paging.get('total')) is int, 'invalid Sonar resolved-issue page')
         for issue in rows:
-            n.require(isinstance(issue, dict) and issue.get('project') == s['project'] and 'pullRequest' not in issue and issue.get('resolution'), 'unknown/unresolved item in resolved issue scope')
-            closed = provider_time(issue.get('closeDate'))  # Every resolved issue must say when, or the early stop is unsound.
-            n.require(previous is None or closed <= previous, 'Sonar closed issues are not newest closure first'); previous = closed
-            if closed <= since:
+            n.require(isinstance(issue, dict) and issue.get('project') == s['project'] and issue.get('organization') == s['organization'] and 'pullRequest' not in issue and issue.get('resolution'), 'unknown/unresolved item in resolved issue scope')
+            updated = provider_time(issue.get('updateDate'))  # Every row says when, or the early stop is unsound.
+            n.require(previous is None or updated <= previous, 'Sonar resolved issues are not newest update first'); previous = updated
+            if updated <= since:
                 return sorted(found, key=lambda i: i['key'])
             item = fingerprint(issue, s)
-            n.require(item['key'] not in seen, 'duplicate closed issue'); seen.add(item['key'])
-            n.require({i['key']: i for i in s['debt']}.get(item['key']) == item, 'issue open at candidate C is not reviewed debt (closed after its analysis)')
+            n.require(item['key'] not in seen, 'duplicate resolved issue'); seen.add(item['key'])
+            n.require(approved.get(item['key']) == item, 'issue open at candidate C is not reviewed debt (resolved after its analysis)')
             found.append(item)
         if len(rows) < PAGE_SIZE:
             return sorted(found, key=lambda i: i['key'])
-    raise n.Unavailable('Sonar closed-issue bound reached before candidate C')
+    raise n.Unavailable('Sonar resolved-issue bound reached before candidate C')
+
+
+def _measures_at(reads, s, analysis, covered):
+    """Sonar's own per-type counts at C must not exceed the issues the reconstruction found.
+
+    Every issue counted at C was open at C, so it is in the current inventory or the resolved-since
+    scan: an honest reconstruction can never fall short, and any gap means something was missed.
+    """
+    metrics = [ISSUE_METRICS[t] for t in s['issue_types']]
+    reply = reads.get('sonar', '/api/measures/search_history?' + urlencode({'component': s['project'], 'branch': 'main', 'metrics': ','.join(metrics), 'from': analysis['date'], 'to': analysis['date'], 'ps': PAGE_SIZE, 'p': 1}))
+    rows = reply.get('measures'); paging = reply.get('paging', {})
+    n.require(isinstance(rows, list) and paging.get('pageIndex') == 1 and type(paging.get('total')) is int and paging['total'] <= PAGE_SIZE and sorted(r.get('metric') for r in rows if isinstance(r, dict)) == sorted(metrics), 'missing/unknown Sonar measure history at candidate C')
+    at = provider_time(analysis['date']); counts = {}
+    for row in rows:
+        history = [h for h in row.get('history') or [] if isinstance(h, dict) and provider_time(h.get('date')) == at]
+        n.require(len(history) == 1, 'no single Sonar measure at candidate C analysis')
+        counts[row['metric']] = int(number(history[0].get('value')))
+        n.require(counts[row['metric']] <= sum(1 for i in covered if ISSUE_METRICS[i['type']] == row['metric']), f"Sonar counts more {row['metric']} at candidate C than the reconstructed open issues")
+    return counts
 
 
 def _same_issues(reads, s, snapshot):
@@ -428,26 +459,37 @@ def _same_issues(reads, s, snapshot):
     n.require(_closed_since(reads, s, snapshot['analysis']) == snapshot['closed_since'], 'Sonar closed issues changed during workflow collection')
 
 
-def _snapshot(reads, s, producer, now):
+def _identity(analysis):
+    """What pins an analysis: its key, revision and date (events or baselines may be edited later)."""
+    return {key: analysis[key] for key in ('key', 'revision', 'date')}
+
+
+def _snapshot(reads, s, producer, now, missing=n.InvalidNightly):
     source = producer['source_commit']
-    analysis = _exact(reads, s, source, now)  # The very first network read.
+    analysis = _identity(_exact(reads, s, source, now, missing))  # The very first network read.
     gate = _gate(reads, s, analysis)
-    latest = _latest(reads, s, now)
+    latest = _identity(_latest(reads, s, now))
     if latest['key'] == analysis['key']:
         n.require(latest == analysis, 'Sonar analysis identity differs')
     else:
-        # The current inventory describes L, which must be a later main commit containing C.
-        n.require(provider_time(latest['date']) >= provider_time(analysis['date']), 'latest Sonar analysis predates candidate C')
-        _compare(reads, source, latest['revision'], False)
+        # The current inventory describes L, which must be a strictly later main commit containing C.
+        if provider_time(latest['date']) <= provider_time(analysis['date']):
+            raise n.Unavailable('latest Sonar analysis is not strictly newer than candidate C; retry after the next analysis')
+        try:
+            _compare(reads, source, latest['revision'], False)
+        except n.InvalidNightly as error:
+            raise n.Unavailable('latest Sonar analysis is not a later main commit containing C; retry after the next analysis') from error
     rows = _issue_rows(reads, s)
     remaining = _remaining(rows, s)
     closed = _closed_since(reads, s, analysis)
+    covered = list({i['key']: i for i in remaining + closed}.values())
+    measures = _measures_at(reads, s, analysis, covered)  # Historical: no reread needed.
     check_id = _sonar_check(reads, s, producer, gate, analysis, now)
     n.require(_issue_rows(reads, s) == rows and _closed_since(reads, s, analysis) == closed, 'Sonar issue inventory changed during proof collection')
     n.require(_gate(reads, s, analysis) == gate, 'Sonar selected gate changed')
-    if _latest(reads, s, now) != latest or _exact(reads, s, source, now) != analysis:
+    if _identity(_latest(reads, s, now)) != latest or _identity(_exact(reads, s, source, now, missing)) != analysis:
         raise n.Unavailable('a new Sonar main analysis landed during collection; retry')
-    return {'analysis': analysis, 'latest': latest, 'check_id': check_id, 'gate': gate, 'remaining': remaining, 'closed_since': closed, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(remaining), 'closed_sha256': digest(closed)}
+    return {'analysis': analysis, 'latest': latest, 'check_id': check_id, 'gate': gate, 'measures': measures, 'remaining': remaining, 'closed_since': closed, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(remaining), 'closed_sha256': digest(closed)}
 
 
 def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
@@ -461,7 +503,7 @@ def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
     that window but does not remove it.
     """
     for final in (False, True):
-        if _latest(reads, s, now) != snapshot['latest']:
+        if _identity(_latest(reads, s, now)) != snapshot['latest']:
             raise n.Unavailable('a new Sonar main analysis landed before ' + stage + ' completed; retry')
         _same_issues(reads, s, snapshot)
         if not final:
@@ -498,8 +540,9 @@ def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
     for value, key in (('remaining', 'issues_sha256'), ('closed_since', 'closed_sha256')):
         n.require(retained.get(key) == digest(retained.get(value)), 'retained issue digest differs')
     n.require(retained.get('scope_trust') == 'provider-resolved' and retained.get('issue_count') == len(retained.get('remaining', [])), 'retained issue count or fixed provider trust descriptor differs')
-    snapshot = _snapshot(reads, s, producer, now)
-    for key in ('analysis', 'gate', 'check_id'):
+    # A purged analysis at publish time is expiry (Unavailable), not a new invalidity.
+    snapshot = _snapshot(reads, s, producer, now, missing=n.Unavailable)
+    for key in ('analysis', 'gate', 'check_id', 'measures'):
         n.require(snapshot[key] == retained[key], 'retained candidate C analysis, gate or Sonar check changed')
     _ancestry(reads, producer['source_commit'], None)
     n.require(_workflows(reads, policy, producer, now) == receipt['workflows'], 'selected exact-C quality runs changed/superseded')
