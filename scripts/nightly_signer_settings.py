@@ -5,14 +5,17 @@
   apply    --repos all|a,b,...        make them; per repo, skip what is already exact and refuse anything else
   readback --repos all|a,b,...        check every setting exactly
   advance  --repos <one> --sha S [--apply]   fast-forward one repo's branch to a reviewed main commit
-  rollback --repos <one> [--apply]           cancel its signer runs and drop the environment trust
+  rollback --repos <one> [--apply]           drop the environment trust (verified), then cancel its signer runs
+  --require-pinned-release                   also refuse release.yml callers not pinned to a full SHA (default: warn)
 
 `all` means every app with targets in craft-common-actions main's nightly-apps.json. Two org rulesets, because a
 ruleset's bypass covers all of its rules: the no-delete/no-force rule must live in a ruleset with no bypass at all.
 A repo's branch is created at its main tip only once its switch-on PR has merged; the tip's callers, pins, policy
-and trust closure are checked first. Nothing is ever forced, deleted or adopted.
+and trust closure are checked first. Nothing is ever forced, deleted or adopted. Needs PyYAML and the gh CLI.
 """
-import argparse, base64, json, re, subprocess, sys
+import argparse, base64, copy, json, re, subprocess, sys
+
+import yaml  # PyYAML: workflows are checked as parsed jobs, not by regex over their text.
 
 ORG, TEAM, BRANCH, ENV = "storytold", "release-managers", "nightly-signer", "release"
 REF = f"refs/heads/{BRANCH}"
@@ -26,13 +29,40 @@ SECRETS = {"linux": {"LINUX_SIGNING_KEY"},
            "windows": {"AZURE_CERT_PROFILE", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SIGNING_ACCOUNT",
                        "AZURE_SIGNING_ENDPOINT", "AZURE_TENANT_ID"}}
 GUARD = "${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}"
+SHA40 = re.compile(r"[0-9a-f]{40}")
+# The only reusable workflows an app may call: craft-common-actions' own, at a plain ref (local ./ calls are
+# files in the same .github/workflows listing, so they are checked there).
+CCA_CALL = re.compile(re.escape(CCA) + r"/\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)@([A-Za-z0-9._/-]+)")
+# The tooling the signer pins and the pin checks verify; every other callee's call chain is resolved and checked.
+PINNED_TOOLING = ("nightly-release.yml", "nightly-unsigned.yml")
+MAX_CALL_DEPTH = 4  # GitHub allows ten levels; craft-common-actions nests at most two.
+# --require-pinned-release: also require release.yml callers to pin a full SHA. Off by default while every app
+# calls release.yml@main; its environment bindings are checked at the called ref either way.
+OPTIONS = {"require_pinned_release": False}
+MAX_FIRST_PARENT_STEPS = 500
+MAX_CANCEL_ROUNDS = 5
+ACTIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
+# gh api arguments are fixed flags plus a method from this set and a REST path of plain characters: nothing
+# read from a repository can become an option or a second argument.
+METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+API_PATH = re.compile(r"(?:repos|orgs)/[A-Za-z0-9_.~%/?=&,-]{1,400}")
 
 
 class Refuse(Exception):
     pass
 
 
+def api_argument(method, path):
+    """The method and path, refused unless they are a known method and a plain REST path (no option, no ..)."""
+    if method not in METHODS:
+        raise Refuse(f"unsupported API method {method!r}")
+    if not API_PATH.fullmatch(path or "") or ".." in path.split("?", 1)[0].split("/"):
+        raise Refuse(f"refusing an unexpected API path {path!r}")
+    return METHODS[METHODS.index(method)], path
+
+
 def gh(method, path, body=None, write=False, apply=False, ok404=False):
+    method, path = api_argument(method, path)
     shown = f"{method} {path}" + (f"  {json.dumps(body, sort_keys=True)}" if body is not None else "")
     if write and not apply:
         print("  WOULD ", shown); return None
@@ -49,7 +79,12 @@ def gh(method, path, body=None, write=False, apply=False, ok404=False):
 
 def text_at(repo, path, ref, ok404=False):
     body = gh("GET", f"repos/{repo}/contents/{path}?ref={ref}", ok404=ok404)
-    return None if body is None else base64.b64decode(body["content"]).decode("utf-8")
+    if body is None:
+        return None
+    # The contents API returns encoding "none" and no content for a file over 1 MB: that must not read as empty.
+    if not isinstance(body, dict) or body.get("encoding") != "base64" or not isinstance(body.get("content"), str):
+        raise Refuse(f"{repo} {path} at {ref} did not come back as a base64 file (too large, or not a file)")
+    return base64.b64decode(body["content"]).decode("utf-8")
 
 
 def ancestor(repo, older, newer):
@@ -86,6 +121,86 @@ def main_tip(app):
     return gh("GET", f"repos/{ORG}/{app}/branches/main")["commit"]["sha"]
 
 
+def parse_workflow(text, where):
+    """A workflow's jobs as parsed mappings (string scalars only), or a refusal."""
+    try:
+        doc = yaml.load(text, Loader=yaml.BaseLoader)
+    except yaml.YAMLError as error:
+        raise Refuse(f"{where} is not valid YAML: {str(error).splitlines()[0]}")
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict) or not all(isinstance(job, dict) for job in jobs.values()):
+        raise Refuse(f"{where} has no mapping of jobs")
+    return jobs
+
+
+def environment_name(job):
+    env = job.get("environment")
+    return env.get("name") if isinstance(env, dict) else env
+
+
+def callee_problems(callee, ref, seen, depth=1):
+    """Every job a craft-common-actions callee runs, down its whole call chain: an environment only behind the
+    stable-only guard, and no call outside craft-common-actions."""
+    where = f"{CCA} {callee}@{ref}"
+    if (callee, ref) in seen:
+        return []
+    seen.add((callee, ref))
+    if depth > MAX_CALL_DEPTH:
+        return [f"{where}: reusable call chain deeper than {MAX_CALL_DEPTH}"]
+    problems = []
+    for name, job in parse_workflow(text_at(CCA, f".github/workflows/{callee}", ref), where).items():
+        env = environment_name(job)
+        if env is not None and env != GUARD:
+            problems.append(f"{where} job {name} binds environment {env!r} without the stable-only guard")
+        uses = job.get("uses")
+        if uses is None:
+            continue
+        local = re.fullmatch(r"\./\.github/workflows/([A-Za-z0-9_.-]+\.ya?ml)", uses)
+        nested = (local.group(1), ref) if local else (CCA_CALL.fullmatch(uses).groups() if CCA_CALL.fullmatch(uses) else None)
+        if nested is None:
+            problems.append(f"{where} job {name} calls {uses!r}, outside {CCA}")
+        else:
+            problems += callee_problems(*nested, seen, depth + 1)
+    return problems
+
+
+def signer_job_problems(app, jobs, pin):
+    """nightly-sign.yml must be one job that calls the pinned signer for this app, guarded to the signer branch."""
+    signer = {name: job for name, job in jobs.items()
+              if (CCA_CALL.fullmatch(job.get("uses") or "") or [None])[0] is not None
+              and CCA_CALL.fullmatch(job["uses"]).group(1) == "nightly-release.yml"}
+    if len(signer) != 1:
+        return [f"nightly-sign.yml has {len(signer)} jobs calling nightly-release.yml, expected exactly one"]
+    name, job = next(iter(signer.items()))
+    problems, condition = [], " ".join(str(job.get("if", "")).split())
+    if condition.startswith("false") or "false &&" in condition:
+        problems.append("nightly-sign.yml is still switched off (`false &&`)")
+    if not all(guard in condition for guard in (f"github.repository == '{ORG}/{app}'", f"github.ref == '{REF}'",
+                                                 "github.ref_type == 'branch'")):
+        problems.append(f"nightly-sign.yml does not guard on {ORG}/{app}, {REF} and a branch ref")
+    inputs = job.get("with") if isinstance(job.get("with"), dict) else {}
+    if inputs.get("app-name") != app:
+        problems.append(f"nightly-sign.yml does not pass app-name: {app}")
+    if CCA_CALL.fullmatch(job["uses"]).group(2) != pin or inputs.get("tooling-revision") != pin:
+        problems.append(f"nightly-sign.yml job {name} does not call nightly-release.yml and pass tooling-revision at {pin}")
+    if "secrets" in job:
+        problems.append(f"nightly-sign.yml job {name} passes secrets; only the callee's signing job reads the {ENV} environment")
+    return problems
+
+
+def signing_policy(app, sha, text):
+    """The decoded signing policy, or a refusal naming the app and file (valid JSON can still be the wrong shape)."""
+    where = f"{app} .github/nightly-signing-policy.json at {sha[:10]}"
+    try:
+        policy = json.loads(text)
+    except ValueError as error:
+        raise Refuse(f"{where} is not JSON: {error}")
+    fields = ("release_branch", "producer_tooling_revision", "signer_tooling_revision")
+    if not isinstance(policy, dict) or not all(isinstance(policy.get(field), str) for field in fields):
+        raise Refuse(f"{where} is not an object with string {', '.join(fields)}")
+    return policy
+
+
 def check_tree(app, sha):
     """Refuse a tip whose switch-on is incomplete or where anything else can reach an environment."""
     repo, problems = f"{ORG}/{app}", []
@@ -93,41 +208,48 @@ def check_tree(app, sha):
     policy_text = text_at(repo, ".github/nightly-signing-policy.json", sha, ok404=True)
     if sign is None or policy_text is None:
         raise Refuse("switch-on not merged: nightly-sign.yml or .github/nightly-signing-policy.json missing at main")
-    if re.search(r"if:\s*>-?\s*\n\s*false\s*&&", sign) or "false &&" in sign:
-        problems.append("nightly-sign.yml is still switched off (`false &&`)")
-    if "github.ref == 'refs/heads/nightly-signer'" not in sign:
-        problems.append("nightly-sign.yml does not guard on refs/heads/nightly-signer")
-    pins = set(re.findall(re.escape(CCA) + r"/\.github/workflows/nightly-(?:release|unsigned)\.yml@(\S+)", sign))
-    if not re.search(r"app-name:\s*" + re.escape(app) + r"\s*$", sign, re.M):
-        problems.append(f"nightly-sign.yml does not pass app-name: {app}")
-    policy = json.loads(policy_text)
-    if policy.get("release_branch") != BRANCH:
-        problems.append(f"policy release_branch is {policy.get('release_branch')!r}, not {BRANCH!r}")
-    names = gh("GET", f"repos/{repo}/contents/.github/workflows?ref={sha}")
-    for item in names:
+    policy = signing_policy(app, sha, policy_text)
+    if policy["release_branch"] != BRANCH:
+        problems.append(f"policy release_branch is {policy['release_branch']!r}, not {BRANCH!r}")
+    pins, seen = {policy["producer_tooling_revision"], policy["signer_tooling_revision"]}, set()
+    sign_jobs = None
+    for item in gh("GET", f"repos/{repo}/contents/.github/workflows?ref={sha}"):
         if not item["name"].endswith((".yml", ".yaml")):
             continue
-        body = text_at(repo, item["path"], sha)
-        if re.search(r"(?m)^\s*environment\s*:", body):
-            problems.append(f"{item['name']} binds an environment directly")
-        for callee, pin in re.findall(r"uses:\s*" + re.escape(CCA) + r"/\.github/workflows/([\w.-]+\.ya?ml)@(\S+)", body):
+        jobs = parse_workflow(text_at(repo, item["path"], sha), item["name"])
+        if item["name"] == "nightly-sign.yml":
+            sign_jobs = jobs
+        for name, job in jobs.items():
+            if "environment" in job:
+                problems.append(f"{item['name']} binds an environment directly")
+            uses = job.get("uses")
+            if uses is None or re.fullmatch(r"\./\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", uses):
+                continue  # A local callee is a file of this same listing, checked in its own turn.
+            call = CCA_CALL.fullmatch(uses)
+            if call is None:
+                problems.append(f"{item['name']} job {name} calls {uses!r}, which is not an approved {CCA} workflow")
+                continue
+            callee, pin = call.groups()
             if callee == "nightly-release.yml" and item["name"] != "nightly-sign.yml":
                 problems.append(f"{item['name']} calls nightly-release.yml; only nightly-sign.yml may")
-            if callee in ("nightly-release.yml", "nightly-unsigned.yml"):
+            if callee in PINNED_TOOLING:
                 pins.add(pin)
-                if not re.fullmatch(r"[0-9a-f]{40}", pin):
+                if not SHA40.fullmatch(pin):
                     problems.append(f"{item['name']} calls {callee}@{pin}, not a full SHA")
-            if callee == "release.yml":
-                callee_text = text_at(CCA, ".github/workflows/release.yml", pin)
-                envs = re.findall(r"(?m)^\s*environment:\s*(.+?)\s*$", callee_text)
-                if not envs or any(value != GUARD for value in envs):
-                    problems.append(f"{item['name']} calls release.yml@{pin}, which lacks the stable-only guard")
-    pins |= {policy.get("producer_tooling_revision"), policy.get("signer_tooling_revision")}
+            else:
+                if callee == "release.yml" and not SHA40.fullmatch(pin):
+                    if OPTIONS["require_pinned_release"]:
+                        problems.append(f"{item['name']} calls release.yml@{pin}, not a full SHA (--require-pinned-release)")
+                    else:
+                        print(f"  WARN   {app} {item['name']} calls release.yml@{pin}, not a full SHA: its environment guard is "
+                              f"checked at today's {pin} only (pass --require-pinned-release to refuse)")
+                problems += callee_problems(callee, pin, seen)
     if len(pins) != 1:
         problems.append(f"caller and policy pins differ: {sorted(map(str, pins))}")
     else:
         pin = next(iter(pins))
-        if not (re.fullmatch(r"[0-9a-f]{40}", pin or "") and ancestor(CCA, pin, "main") and ancestor(CCA, SIGNER_BRANCH_SUPPORT, pin)):
+        problems += signer_job_problems(app, sign_jobs or {}, pin)
+        if not (SHA40.fullmatch(pin) and ancestor(CCA, pin, "main") and ancestor(CCA, SIGNER_BRANCH_SUPPORT, pin)):
             problems.append(f"pin {pin} is not a craft-common-actions main commit that includes #364")
     if problems:
         raise Refuse("trust-closure check refused at " + sha[:10] + ":\n      " + "\n      ".join(problems))
@@ -153,10 +275,21 @@ def org_rulesets():
 
 
 def shape(ruleset):
-    bypass = sorted((b["actor_type"], b["actor_id"] if b["actor_type"] == "Team" else None, b["bypass_mode"]) for b in ruleset.get("bypass_actors") or [])
-    conditions = json.loads(json.dumps(ruleset["conditions"])); conditions["repository_name"].pop("include", None)
-    rules = sorted(json.dumps({"type": r["type"], **({"parameters": r["parameters"]} if r.get("parameters") else {})}, sort_keys=True) for r in ruleset["rules"])
-    return {"target": ruleset["target"], "enforcement": ruleset["enforcement"], "conditions": conditions, "rules": rules, "bypass": bypass}
+    """Everything but the covered repo names. Another repository selector (repository_id, a property) stays in the
+    conditions, so it differs from the canonical shape instead of failing to read."""
+    bypass = sorted((b.get("actor_type"), b.get("actor_id") if b.get("actor_type") == "Team" else None, b.get("bypass_mode"))
+                    for b in ruleset.get("bypass_actors") or [])
+    conditions = copy.deepcopy(ruleset.get("conditions") or {})
+    if isinstance(conditions.get("repository_name"), dict):
+        conditions["repository_name"].pop("include", None)
+    rules = sorted(json.dumps({"type": r.get("type"), **({"parameters": r["parameters"]} if r.get("parameters") else {})}, sort_keys=True)
+                   for r in ruleset.get("rules") or [])
+    return {"target": ruleset.get("target"), "enforcement": ruleset.get("enforcement"), "conditions": conditions, "rules": rules, "bypass": bypass}
+
+
+def covered(ruleset):
+    """The repo names a canonical-shaped ruleset covers (read only after shape() matched)."""
+    return set(ruleset["conditions"]["repository_name"]["include"])
 
 
 def env_trust(app):
@@ -171,6 +304,8 @@ def env_trust(app):
 
 
 def ensure_rulesets(apps, apply):
+    """Create or widen the two rulesets. Returns which repos each covered before this run, or None in a plan
+    whose token cannot read the org rulesets (then no ruleset change is proposed: it is undetermined)."""
     team = gh("GET", f"orgs/{ORG}/teams/{TEAM}")["id"]
     try:
         current = org_rulesets()
@@ -178,25 +313,34 @@ def ensure_rulesets(apps, apply):
         if apply:
             raise
         # A plan with a token lacking admin:org still checks every repo; apply always needs the real read.
-        print(f"  NOTE   cannot read org rulesets with this token ({error}); planning as if neither exists")
-        current = {}
+        print(f"  NOTE   org ruleset changes undetermined: cannot read the org rulesets ({error}); none proposed")
+        return None
+    before = {}
     for body in canonical(apps, team):
         have = current.get(body["name"])
         if have is None:
             gh("POST", f"orgs/{ORG}/rulesets", body, write=True, apply=apply); continue
         if shape(have) != shape(body):
             raise Refuse(f"org ruleset {body['name']!r} differs from the canonical one; reconcile by hand, never overwrite")
-        covered = have["conditions"]["repository_name"]["include"]
-        missing = sorted(set(apps) - set(covered))
+        before[body["name"]] = covered(have)
+        missing = sorted(set(apps) - before[body["name"]])
         if not missing:
             print(f"  exact  org ruleset {body['name']!r} already covers {len(apps)} repos"); continue
-        have["conditions"]["repository_name"]["include"] = sorted(set(covered) | set(apps))  # Only the repo list changes.
-        update = {k: have[k] for k in ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")}
+        update = {k: copy.deepcopy(have[k]) for k in ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")}
+        update["conditions"]["repository_name"]["include"] = sorted(before[body["name"]] | set(apps))  # Only the repo list changes.
         gh("PUT", f"orgs/{ORG}/rulesets/{have['id']}", update, write=True, apply=apply)
-    return current
+    return before
 
 
-def setup_repo(app, apply, rulesets_existed, row):
+def owned_before(app, before):
+    """True only if both rulesets already covered this repo when the run started: then a branch there was made by
+    an earlier apply, under the rulesets. None when the rulesets could not be read (plan only)."""
+    if before is None:
+        return None
+    return all(app in before.get(name, set()) for name in (RULESET_WRITERS, RULESET_HISTORY))
+
+
+def setup_repo(app, apply, owned, row):
     """Per repo: secrets, branch at the switched-on main tip, then environment trust. Skip exact, refuse anything else."""
     trust = env_trust(app)
     check_secrets(app, row)
@@ -209,8 +353,11 @@ def setup_repo(app, apply, rulesets_existed, row):
         gh("POST", f"repos/{ORG}/{app}/git/refs", {"ref": REF, "sha": tip}, write=True, apply=apply)
     else:
         head = branch["object"]["sha"]
-        # Resume only a branch our own earlier apply made: the rulesets covered it, and it is a checked main commit.
-        if not rulesets_existed or not ancestor(f"{ORG}/{app}", head, main_tip(app)):
+        # Resume only a branch our own earlier apply made: both rulesets already covered this repo when the run
+        # started (so only release-managers could have created it), and it is a checked main commit.
+        if owned is None:
+            raise Refuse(f"{REF} already exists at {head[:10]}; whether an earlier apply made it is undetermined without the org rulesets")
+        if not owned or not ancestor(f"{ORG}/{app}", head, main_tip(app)):
             raise Refuse(f"{REF} already exists at {head[:10]} and is not ours: it may be hostile. Delete it; never adopt it.")
         check_tree(app, head)
         print(f"  exact  {app} {REF} at {head[:10]}")
@@ -228,8 +375,8 @@ def readback(apps, registry_rows):
         if have is None:
             problems.append(f"missing org ruleset {body['name']!r}"); continue
         if shape(have) != shape(body):
-            problems.append(f"{body['name']!r} differs: {shape(have)}")
-        missing = sorted(set(apps) - set(have["conditions"]["repository_name"]["include"]))
+            problems.append(f"{body['name']!r} differs: {shape(have)}"); continue
+        missing = sorted(set(apps) - covered(have))
         if missing:
             problems.append(f"{body['name']!r} does not cover {missing}")
     for app in apps:
@@ -251,15 +398,44 @@ def readback(apps, registry_rows):
     return 1 if problems else 0
 
 
-def queued_signer_runs(app):
-    runs = gh("GET", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/runs?branch={BRANCH}&per_page=100", ok404=True) or {"workflow_runs": []}
-    return [r["id"] for r in runs["workflow_runs"] if r["status"] in ("queued", "in_progress", "waiting", "pending", "requested")]
+def queued_signer_runs(app, max_pages=20):
+    """Every active signer run on the branch: each active status asked for separately, every page, deduplicated."""
+    found = set()
+    for status in ACTIVE_RUN_STATUSES:
+        for page in range(1, max_pages + 1):
+            data = gh("GET", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/runs?branch={BRANCH}&status={status}"
+                             f"&per_page=100&page={page}", ok404=True) or {"workflow_runs": []}
+            runs = data.get("workflow_runs") or []
+            found |= {r["id"] for r in runs if r.get("status") in ACTIVE_RUN_STATUSES}
+            if len(runs) < 100:
+                break
+        else:
+            raise Refuse(f"more than {max_pages * 100} {status} signer runs: refusing to guess which are active")
+    return sorted(found)
+
+
+def first_parent_of_main(app, sha, head):
+    """True if sha is on main's first-parent line above head: a commit that was main's tip, not one from inside a
+    merged branch. Walks first parents down from main's tip; refuses rather than guessing past a bound."""
+    repo, commit = f"{ORG}/{app}", main_tip(app)
+    for _ in range(MAX_FIRST_PARENT_STEPS):
+        if commit == sha:
+            return True
+        if commit == head:
+            return False
+        parents = gh("GET", f"repos/{repo}/commits/{commit}")["parents"]
+        if not parents:
+            return False
+        commit = parents[0]["sha"]
+    raise Refuse(f"{sha[:10]} is more than {MAX_FIRST_PARENT_STEPS} first-parent commits below main; advance in smaller steps")
 
 
 def advance(app, sha, apply):
     head = gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}")["object"]["sha"]
     if not (ancestor(f"{ORG}/{app}", sha, main_tip(app)) and ancestor(f"{ORG}/{app}", head, sha) and head != sha):
         raise Refuse(f"{sha} is not a main commit that fast-forwards {REF} from {head}")
+    if not first_parent_of_main(app, sha, head):
+        raise Refuse(f"{sha} is not on main's first-parent history (a commit from inside a merged branch, never main's tip)")
     if queued_signer_runs(app):
         raise Refuse("a nightly-sign run is queued or running; it would fail closed after the move. Wait for it.")
     check_tree(app, sha)
@@ -267,15 +443,49 @@ def advance(app, sha, apply):
     gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
 
 
-def rollback(app, apply):
-    for run_id in queued_signer_runs(app):  # Running jobs keep secrets they already read.
-        gh("POST", f"repos/{ORG}/{app}/actions/runs/{run_id}/force-cancel", write=True, apply=apply)
-    for policy in gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies?per_page=100")["branch_policies"]:
-        if policy["name"] == BRANCH:
-            gh("DELETE", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies/{policy['id']}", write=True, apply=apply)
-    if apply and env_trust(app) != [("release", "branch")]:
-        raise Refuse(f"{ENV} environment still trusts more than release")
+def cancel_round(app, apply, failures):
+    """Ask once to cancel every active signer run; returns how many were active."""
+    try:
+        runs = queued_signer_runs(app)
+    except Refuse as error:
+        failures.append(f"listing signer runs: {error}"); return 0
+    for run_id in runs:  # Running jobs keep secrets they already read.
+        try:
+            gh("POST", f"repos/{ORG}/{app}/actions/runs/{run_id}/force-cancel", write=True, apply=apply)
+        except Refuse as error:
+            if "HTTP 409" in str(error):
+                print(f"  note   run {run_id} could not be cancelled because it is no longer running (HTTP 409)")
+            else:
+                failures.append(f"cancelling run {run_id}: {error}")
+    return len(runs)
+
+
+def rollback(app, apply, wait=None):
+    """Revoke the environment trust first and verify it, so no run can enter the environment from here on. Then
+    cancel the active signer runs, each on its own, and list again until none is left (force-cancel is
+    asynchronous). Every failure is reported. The branch and rulesets stay on purpose: the security-relevant state
+    is the environment trusting release only, and deleting the branch needs the no-bypass history ruleset off."""
+    import time
+    wait = time.sleep if wait is None else wait
+    failures = []
+    try:
+        for policy in gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies?per_page=100")["branch_policies"]:
+            if policy["name"] == BRANCH:
+                gh("DELETE", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies/{policy['id']}", write=True, apply=apply)
+        if apply and env_trust(app) != [("release", "branch")]:
+            failures.append(f"{ENV} environment still trusts more than release")
+    except Refuse as error:
+        failures.append(f"revoking the {BRANCH} trust: {error}")
+    active = cancel_round(app, apply, failures)
+    rounds = 1
+    while apply and active and rounds < MAX_CANCEL_ROUNDS:
+        wait(10)
+        active, rounds = cancel_round(app, apply, failures), rounds + 1
+    if apply and active:
+        failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
     print("  Keep the rulesets until the environment is verified; if compromise is suspected, rotate the release secrets.")
+    if failures:
+        raise Refuse("; ".join(failures))
 
 
 def main():
@@ -283,7 +493,10 @@ def main():
     parser.add_argument("mode", choices=("plan", "apply", "readback", "advance", "rollback"))
     parser.add_argument("--repos", required=True, help="all, or a comma-separated list of app names")
     parser.add_argument("--sha"); parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--require-pinned-release", action="store_true",
+                        help="also refuse release.yml callers that do not pin a full SHA (every app calls @main today)")
     args = parser.parse_args()
+    OPTIONS["require_pinned_release"] = args.require_pinned_release
     reg = registry()
     admitted = registry_apps(reg)
     apps = admitted if args.repos == "all" else sorted(set(args.repos.split(",")))
@@ -313,14 +526,14 @@ def main():
         print(f"== {app}")
         try:
             # Rulesets exist (or are created above) before any branch, so a new branch is protected from its first moment.
-            setup_repo(app, apply, all(name in existed for name in (RULESET_WRITERS, RULESET_HISTORY)), reg["apps"][app])
+            setup_repo(app, apply, owned_before(app, existed), reg["apps"][app])
             ready.append(app)
         except Refuse as error:
             print(f"  REFUSED {app}: {error}"); blocked.append(app)
     print(f"== {'applied' if apply else 'would apply'}: {', '.join(ready) or 'none'}; refused: {', '.join(blocked) or 'none'}")
-    if apply and ready:
-        readback(ready, reg["apps"])
-    sys.exit(1 if blocked else 0)
+    # A failed readback after apply is a failed apply.
+    verified = readback(ready, reg["apps"]) if apply and ready else 0
+    sys.exit(1 if blocked or verified else 0)
 
 
 if __name__ == "__main__":
