@@ -442,40 +442,57 @@ def _closed_since(reads, s, analysis, collect=None):
     raise n.Unavailable('Sonar resolved-issue bound reached before candidate C')
 
 
-def _resolved_at(reads, issue):
-    """When a resolved issue was resolved: closeDate for analysis closures, else its changelog."""
-    if issue.get('closeDate') is not None:
-        return provider_time(issue['closeDate'])
+OPEN_STATUSES = ('OPEN', 'CONFIRMED', 'REOPENED')
+
+
+def _changes_after(reads, issue, since):
+    """The issue's changelog entries after C's analysis, newest first; none needed if untouched since."""
+    if provider_time(issue.get('updateDate')) <= since:
+        return []
     changes = reads.get('sonar', '/api/issues/changelog?' + urlencode({'issue': issue['key']})).get('changelog')
-    n.require(isinstance(changes, list) and len(changes) <= MAX_ITEMS, 'missing/bounded issue changelog')
-    times = [provider_time(change.get('creationDate')) for change in changes
-             if isinstance(change, dict) and any(isinstance(d, dict) and d.get('key') in ('status', 'resolution', 'issueStatus') for d in change.get('diffs') or [])]
-    n.require(times, 'manual resolution without a dated changelog transition')
-    return max(times)
+    # The changelog is unpaginated: a reply at the bound may be truncated, so it can't establish history.
+    n.require(isinstance(changes, list) and len(changes) < MAX_ITEMS, 'missing/possibly truncated issue changelog')
+    after = []
+    for change in changes:
+        n.require(isinstance(change, dict) and isinstance(change.get('diffs'), list) and all(isinstance(d, dict) for d in change['diffs']), 'incomplete issue changelog record')
+        if provider_time(change.get('creationDate')) > since:
+            after.append(change)
+    return sorted(after, key=lambda change: provider_time(change['creationDate']), reverse=True)
 
 
-def _unchanged_since(reads, issue, since):
+def _unchanged_since(issue, after):
     """Refuse an issue open at C whose severity or type was edited after C's analysis.
 
     Its current fingerprint then doesn't prove the fingerprint at C (for example CRITICAL at C,
-    lowered to the approved MAJOR later). An issue not updated since C needs no read.
+    lowered to the approved MAJOR later).
     """
-    if provider_time(issue.get('updateDate')) <= since:
-        return
-    changes = reads.get('sonar', '/api/issues/changelog?' + urlencode({'issue': issue['key']})).get('changelog')
-    n.require(isinstance(changes, list) and len(changes) <= MAX_ITEMS, 'missing/bounded issue changelog')
-    for change in changes:
-        n.require(isinstance(change, dict) and isinstance(change.get('diffs'), list), 'incomplete issue changelog record')
-        if provider_time(change.get('creationDate')) > since:
-            n.require(not any(isinstance(d, dict) and d.get('key') in ('severity', 'type', 'impactSeverity', 'cleanCodeAttribute') for d in change['diffs']),
-                      'issue severity/type changed after candidate C; its fingerprint at C is unproven')
+    n.require(not any(d.get('key') in ('severity', 'type', 'impactSeverity', 'cleanCodeAttribute') for change in after for d in change['diffs']),
+              'issue severity/type changed after candidate C; its fingerprint at C is unproven')
 
 
 def _open_at(reads, issue, since):
-    """Was this issue open at C's analysis? Created by then, and not yet resolved."""
+    """Was this issue open at C's analysis? Its status and resolution are walked back from now to C.
+
+    A reopen after C means it was resolved at C; an (auto-)closure after C means it was open at C only
+    if the walk-back says so. An issue untouched since C keeps its current state. A status change
+    without its old value can't establish the state at C, which refuses.
+    """
     if provider_time(issue.get('creationDate')) > since:
         return False
-    return not issue.get('resolution') or _resolved_at(reads, issue) > since
+    after = _changes_after(reads, issue, since)
+    status, resolution = issue.get('status'), issue.get('resolution')
+    for change in after:
+        for diff in change['diffs']:
+            if diff.get('key') == 'status':
+                n.require(isinstance(diff.get('oldValue'), str), 'issue status history before candidate C is unknown')
+                status = diff['oldValue']
+            elif diff.get('key') == 'resolution':
+                resolution = diff.get('oldValue')  # Absent: there was no resolution before this change.
+    n.require(isinstance(status, str) and status in OPEN_STATUSES + ('RESOLVED', 'CLOSED', 'ACCEPTED', 'FALSE_POSITIVE', 'FIXED'), 'unknown issue status at candidate C')
+    opened = status in OPEN_STATUSES and not resolution
+    if opened:
+        _unchanged_since(issue, after)
+    return opened
 
 
 def _measures_at(reads, s, analysis, covered):
@@ -488,8 +505,6 @@ def _measures_at(reads, s, analysis, covered):
     """
     since = provider_time(analysis['date'])
     covered = [issue for issue in covered if _open_at(reads, issue, since)]
-    for issue in covered:
-        _unchanged_since(reads, issue, since)
     metrics = [ISSUE_METRICS[t] for t in s['issue_types']]
     reply = reads.get('sonar', '/api/measures/search_history?' + urlencode({'component': s['project'], 'branch': 'main', 'metrics': ','.join(metrics), 'from': analysis['date'], 'to': analysis['date'], 'ps': PAGE_SIZE, 'p': 1}))
     rows = reply.get('measures'); paging = reply.get('paging', {})

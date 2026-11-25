@@ -213,6 +213,9 @@ class CandidateTests(unittest.TestCase):
         row = {'key': key, 'rule': 'security:S1', 'component': PROJECT + ':src/file.py', 'type': 'VULNERABILITY', 'severity': 'MAJOR', 'hash': issue_hash, 'project': PROJECT, 'organization': 'storytold', 'updateDate': when, 'creationDate': CREATED, **extra}
         row.update({'status': 'RESOLVED', 'resolution': manual} if manual else {'status': 'CLOSED', 'resolution': 'FIXED', 'closeDate': when})
         self.f.closed[key] = row
+        # Its resolution transition, as Sonar's changelog records it (no oldValue: unresolved before).
+        self.f.changes[key] = [{'creationDate': when, 'diffs': [{'key': 'status', 'oldValue': 'OPEN', 'newValue': row['status']},
+                                                               {'key': 'resolution', 'newValue': row['resolution']}]}]
         return row
 
     def test_issue_resolved_after_C_must_be_reviewed_debt(self):
@@ -259,11 +262,13 @@ class CandidateTests(unittest.TestCase):
         self.later(M)
         self.f.issues.pop(1)
         row = self.resolved('issue-2', '2' * 32, '2026-11-22T12:03:00+0000')
-        row['closeDate'] = '2026-11-22T11:00:00+0000'   # closed before C's 11:59 analysis
+        row['closeDate'] = '2026-11-22T11:00:00+0000'   # closed before C's 11:59 analysis, only touched after it
+        closure = self.f.changes['issue-2'][0]
+        self.f.changes['issue-2'] = [{**closure, 'creationDate': '2026-11-22T11:00:00+0000'}, {'creationDate': '2026-11-22T12:03:00+0000', 'diffs': [{'key': 'assignee', 'newValue': 'someone'}]}]
         self.f.count_override = {'vulnerabilities': 2}   # issue-1 + the retyped one
         with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities at candidate C'): self.admit()
         # The same shape with issue-2 really open at C (closed after its analysis) adds up honestly.
-        row['closeDate'] = '2026-11-22T12:03:00+0000'
+        row['closeDate'] = '2026-11-22T12:03:00+0000'; self.f.changes['issue-2'] = [{**closure, 'creationDate': '2026-11-22T12:03:00+0000'}]
         self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})
         # An issue created after C's analysis was not open at C either.
         self.f.issues[0]['creationDate'] = '2026-11-22T12:30:00Z'
@@ -271,12 +276,36 @@ class CandidateTests(unittest.TestCase):
         self.f.issues[0]['creationDate'] = CREATED
         # A manual resolution has no closeDate: its changelog dates it.
         del row['closeDate']; row['status'] = 'RESOLVED'; row['resolution'] = 'WONTFIX'
-        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T11:30:00+0000', 'diffs': [{'key': 'resolution', 'newValue': 'WONTFIX'}]}]
+        manual = {'diffs': [{'key': 'status', 'oldValue': 'OPEN', 'newValue': 'RESOLVED'}, {'key': 'resolution', 'newValue': 'WONTFIX'}]}
+        self.f.changes['issue-2'] = [{**manual, 'creationDate': '2026-11-22T11:30:00+0000'}]
         with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities'): self.admit()   # resolved before C
         self.f.changes['issue-2'][0]['creationDate'] = '2026-11-22T12:03:00+0000'
         self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})                 # resolved after C
-        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:03:00+0000', 'diffs': [{'key': 'comment'}]}]
-        with self.assertRaisesRegex(ValueError, 'without a dated changelog transition'): self.admit()
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:03:00+0000', 'diffs': [{'key': 'status', 'newValue': 'RESOLVED'}]}]
+        with self.assertRaisesRegex(ValueError, 'status history before candidate C is unknown'): self.admit()
+
+    def test_state_at_C_is_walked_back_from_the_changelog(self):
+        # The count gap: one vulnerability open at C was retyped out of scope after C, so Sonar counts 2.
+        self.later(M); self.f.count_override = {'vulnerabilities': 2}
+        self.f.issues.pop(1)
+        # Reopened after C: unresolved now, but it was FIXED at C, so it must not fill the gap.
+        reopened = {**self.f.debt[1], 'project': PROJECT, 'organization': 'storytold', 'status': 'REOPENED', 'creationDate': CREATED, 'updateDate': '2026-11-22T12:20:00+0000'}
+        self.f.issues.append(reopened)
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T11:00:00+0000', 'diffs': [{'key': 'status', 'oldValue': 'OPEN', 'newValue': 'CLOSED'}, {'key': 'resolution', 'newValue': 'FIXED'}]},
+                                     {'creationDate': '2026-11-22T12:20:00+0000', 'diffs': [{'key': 'status', 'oldValue': 'CLOSED', 'newValue': 'REOPENED'}, {'key': 'resolution', 'oldValue': 'FIXED'}]}]
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities at candidate C'): self.admit()
+        # Auto-closed after C, but already resolved (won't fix) before C: its later closeDate proves nothing.
+        self.f.issues.pop()
+        row = self.resolved('issue-2', '2' * 32, '2026-11-22T12:20:00+0000')
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T11:00:00+0000', 'diffs': [{'key': 'status', 'oldValue': 'OPEN', 'newValue': 'RESOLVED'}, {'key': 'resolution', 'newValue': 'WONTFIX'}]},
+                                     {'creationDate': '2026-11-22T12:20:00+0000', 'diffs': [{'key': 'status', 'oldValue': 'RESOLVED', 'newValue': 'CLOSED'}, {'key': 'resolution', 'oldValue': 'WONTFIX', 'newValue': 'FIXED'}]}]
+        with self.assertRaisesRegex(ValueError, 'Sonar counts more vulnerabilities at candidate C'): self.admit()
+        # Honest control: open at C and closed after it does count.
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:20:00+0000', 'diffs': [{'key': 'status', 'oldValue': 'OPEN', 'newValue': 'CLOSED'}, {'key': 'resolution', 'newValue': 'FIXED'}]}]
+        self.assertEqual(self.admit()['sonar']['measures'], {'vulnerabilities': 2})
+        # A changelog at the bound may be truncated: refuse.
+        self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:20:00+0000', 'diffs': []}] * c.MAX_ITEMS
+        with self.assertRaisesRegex(ValueError, 'possibly truncated issue changelog'): self.admit()
 
     def test_later_analysis_in_C_s_second_is_a_retry(self):
         self.f.history = [{'key': 'analysis-M', 'date': ANALYZED, 'revision': M}, dict(self.f.analysis)]
