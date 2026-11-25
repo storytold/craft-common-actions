@@ -31,14 +31,14 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_main_build_and_attester_are_separate_and_credential_bound(self):
         graph = jobs(self.unsigned)
-        self.assertEqual(set(graph), {"select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux", "build-linux-packages", "build-linux-arch-arm", "attest-linux-packages"})
+        self.assertEqual(set(graph), {"admit-app", "select-platforms", "git-sources", "build", "attest", "build-macos", "attest-macos", "build-linux", "attest-linux", "build-linux-packages", "build-linux-arch-arm", "attest-linux-packages"})
         self.assertEqual(graph["select-platforms"].count("secrets."), 0); self.assertIn("permissions: {}", graph["select-platforms"])
         self.assertIn("cargo metadata --locked", graph["git-sources"])
         self.assertIn("-Nightly -BuildOnly", graph["build"])
         self.assertIn("bash packaging/macos/nightly.sh --arch aarch64", graph["build-macos"])
         self.assertIn("default: '[\"windows-x86_64\"]'", self.unsigned)
         for build, attest, platform in (("build", "attest", "windows-x86_64"), ("build-macos", "attest-macos", "macos-aarch64")):
-            self.assertIn("needs: [git-sources, select-platforms]", graph[build])
+            self.assertIn("needs: [admit-app, git-sources, select-platforms]", graph[build])
             self.assertIn("contains(fromJSON(needs.select-platforms.outputs.platforms), '"+platform+"')", graph[build])
             self.assertNotIn("fromJSON(inputs.platforms)", graph[build])
             self.assertIn("nightly_smoke.py", graph[build])
@@ -59,7 +59,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn(forbidden, graph["git-sources"])
 
     def test_release_queue_is_constant_not_input_ref_or_candidate_sharded(self):
-        self.assertIn("concurrency:\n  group: craft-release-ref-signer-photocraft\n  cancel-in-progress: false\n  queue: max", self.release)
+        # One queue per admitted app: the reviewed app-name, never a run, ref or candidate input.
+        self.assertIn("concurrency:\n  group: craft-release-ref-signer-${{ inputs.app-name }}\n  cancel-in-progress: false\n  queue: max", self.release)
         graph = jobs(self.release)
         self.assertEqual(set(graph), {"validate", "sign-windows", "sign-macos", "verify-macos", "smoke-macos", "sign-linux", "verify-linux", "publish"})
         for name, platform in (("sign-windows", "windows-x86_64"), ("sign-macos", "macos-aarch64")):
@@ -71,7 +72,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_each_release_job_checks_the_real_official_release_dispatch(self):
         for block in jobs(self.release).values():
-            for required in ("github.repository == 'storytold/photocraft'", "github.event_name == 'workflow_dispatch'", "github.ref == 'refs/heads/release'", "github.ref_type == 'branch'", "ref: ${{ github.sha }}", "DEFINING_SHA: ${{ job.workflow_sha }}", "persist-credentials: false", "path: .release-source"):
+            for required in ("github.repository == format('storytold/{0}', inputs.app-name)", "github.event_name == 'workflow_dispatch'", "github.ref == 'refs/heads/release'", "github.ref_type == 'branch'", "ref: ${{ github.sha }}", "DEFINING_SHA: ${{ job.workflow_sha }}", "persist-credentials: false", "path: .release-source"):
                 self.assertIn(required, block)
             self.assertNotIn("actions/cache", block)
             self.assertNotIn("secrets: inherit", block)

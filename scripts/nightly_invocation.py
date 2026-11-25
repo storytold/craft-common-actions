@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free admission for the reviewed PhotoCraft nightly caller.
+"""Credential-free admission for a reviewed app's nightly caller (the app comes from NIGHTLY_APP).
 
 Manual actors must be a reviewed literal JSON array in caller workflow source,
 never an untrusted dispatch input. This prevents accidental use, not a writer
@@ -8,8 +8,12 @@ from editing or bypassing the workflow. It does not admit platforms or app code.
 from collections.abc import Mapping
 import json
 import os
+from pathlib import Path
 import re
 import sys
+
+# Run with `python -I`: only this tooling checkout's own siblings (nightly_app), never app code.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 MAX_ACTORS_BYTES = 4096
 MAX_ACTORS = 64
@@ -62,8 +66,9 @@ def require_invocation(environment, actors_json='[]'):
     actors = manual_actors(actors_json)
     if not isinstance(environment, Mapping):
         raise ValueError('invocation environment must be a mapping')
-    if environment.get('GITHUB_REPOSITORY') != 'storytold/photocraft':
-        raise ValueError('invocation requires the reviewed PhotoCraft repository')
+    import nightly_app as apps
+    if environment.get('GITHUB_REPOSITORY') != apps.current(environment).repository:
+        raise ValueError('invocation requires the reviewed app repository')
     if environment.get('GITHUB_REF') != 'refs/heads/main':
         raise ValueError('invocation requires the main branch')
     event = environment.get('GITHUB_EVENT_NAME')

@@ -498,6 +498,17 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertIn('apple-team-id: REVIEWED_STABLE_APPLE_TEAM_ID_REQUIRED',caller)
         self.assertIn('windows-publisher-subject: REVIEWED_STABLE_WINDOWS_PUBLISHER_SUBJECT_REQUIRED',caller)
 
+
+    def test_pending_metadata_is_optional_and_resolved_once(self):
+        self.assertIsNone(s.pending_metadata(None)); self.assertIsNone(s.pending_metadata(''))
+        pending = ROOT/'nightly-unix-pending.json'
+        self.assertEqual(s.pending_metadata(str(pending)), json.loads(pending.read_text()))
+        source = (ROOT/'scripts/nightly_signing.py').read_text()
+        # Both the inventory and the final Mac verification use the one resolved value.
+        self.assertNotIn('n.bounded_json(args.pending)', source)
+        self.assertEqual(source.count('pending = pending_metadata(args.pending)'), 1)
+        self.assertIn("mac_verify(output, args.version, pending, os.environ", source)
+
     def test_required_app_signer_no_unsigned_fallback_and_no_leaf_pin(self):
         script=(ROOT/'scripts/nightly_signing_windows.ps1').read_text()
         self.assertIn('-Required -CheckOnly',script); self.assertIn('-Required -Files',script)

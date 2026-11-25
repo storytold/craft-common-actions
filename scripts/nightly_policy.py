@@ -176,8 +176,9 @@ def external_contract(row,policy):
         n.fields(item,{'provider','name','app_id','details_url','baseline_check_id','baseline_conclusion','green_required'},'external check policy')
         n.require(item['provider']=='sonarcloud-code-analysis' and item['name']=='SonarCloud Code Analysis' and
                   type(item['app_id']) is int and item['app_id']==12526 and
-                  item['details_url']=='https://sonarcloud.io/dashboard?id=storytold_photocraft&branch=main' and
-                  policy['run']['repository']=='storytold/photocraft','external provider/app/project identity not reviewed')
+                  isinstance(policy['run']['repository'],str) and re.fullmatch(r'storytold/[a-z0-9][a-z0-9-]*',policy['run']['repository']) and
+                  item['details_url']=='https://sonarcloud.io/dashboard?id='+policy['run']['repository'].replace('/','_')+'&branch=main',
+                  'external provider/app/project identity not reviewed')
         n.positive(item['baseline_check_id'],'external baseline check ID')
         n.require(item['name'] not in names and item['baseline_check_id'] not in ids,'duplicate external policy')
         names.add(item['name']);ids.add(item['baseline_check_id'])

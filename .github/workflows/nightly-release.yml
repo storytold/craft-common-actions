@@ -14,6 +14,10 @@ on:
       producer_run_attempt:
         type: string
         required: true
+      app-name:
+        description: "The app's nightly-apps.json name; its row must be reviewed and name this repository"
+        type: string
+        required: true
     outputs:
       admitted:
         value: ${{ jobs.validate.outputs.admitted }}
@@ -24,14 +28,16 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: craft-release-ref-signer-photocraft
+  group: craft-release-ref-signer-${{ inputs.app-name }}
   cancel-in-progress: false
   queue: max
 env:
   TOOLING_REVISION: ${{ inputs.tooling-revision }}
+  # Every shared script derives the app's names from its reviewed registry row (scripts/nightly_app.py).
+  NIGHTLY_APP: ${{ inputs.app-name }}
 jobs:
   validate:
-    if: github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 20
     permissions:
@@ -71,6 +77,11 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Admit only a reviewed registry app on its own repository's release branch
+        shell: pwsh
+        run: |
+          python -I -B .nightly-tools/scripts/nightly_app.py admit --require --release-ref --app-name "$env:NIGHTLY_APP" --repository "$env:GITHUB_REPOSITORY" --ref "$env:GITHUB_REF"
+          if ($LASTEXITCODE -ne 0) { throw 'app is not an admitted nightly registry row for this repository' }
       - name: Snapshot exact-C quality before artifact work
         id: admit
         shell: pwsh
@@ -171,7 +182,7 @@ jobs:
           retention-days: 14
   sign-windows:
     needs: validate
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 20
     environment: release
@@ -249,7 +260,7 @@ jobs:
           retention-days: 14
   sign-macos:
     needs: validate
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     # Same Apple route and `release` environment as the stable macOS job.
     runs-on: macos-15
     timeout-minutes: 120
@@ -330,7 +341,7 @@ jobs:
           retention-days: 14
   verify-macos:
     needs: [validate, sign-macos]
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     # Fresh runner, NO release environment or platform secrets.
     runs-on: macos-15
     timeout-minutes: 20
@@ -389,7 +400,7 @@ jobs:
         run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py verify-platform --source .release-source --platform macos-aarch64 --directory .signed/macos-aarch64 --expected-sha256 "$EXPECTED_BUNDLE_SHA256"
   smoke-macos:
     needs: [validate, sign-macos, verify-macos]
-    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+    if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     # The only job that runs signed payload code: no environment, secrets, tokens or
     # outputs the publisher consumes. Hardened runtime only applies once signed.
     runs-on: macos-15
@@ -434,7 +445,7 @@ jobs:
           FINAL_SHA256: ${{ needs.verify-macos.outputs.final-sha256 }}
         run: |
           set -euo pipefail
-          [[ "$ASSET" =~ ^photocraft-[0-9A-Za-z.-]+-macos-aarch64-nightly[.]zip$ ]]
+          [[ "$NIGHTLY_APP" =~ ^[a-z0-9][a-z0-9-]*$ && "$ASSET" =~ ^${NIGHTLY_APP}-[0-9A-Za-z.-]+-macos-aarch64-nightly[.]zip$ ]]
           final="$PWD/.signed/macos-aarch64/$ASSET"
           test -f "$final" && test ! -L "$final"
           test "$(shasum -a 256 "$final" | cut -d' ' -f1)" = "$FINAL_SHA256"
@@ -446,7 +457,7 @@ jobs:
     needs: validate
     if: >-
       needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
-      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     environment: release
@@ -524,7 +535,7 @@ jobs:
     needs: [validate, sign-linux]
     if: >-
       needs.sign-linux.result == 'success' && contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
-      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     permissions:
@@ -585,7 +596,7 @@ jobs:
       (!contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') || needs.sign-windows.result == 'success') &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') || (needs.sign-macos.result == 'success' && needs.verify-macos.result == 'success' && needs.smoke-macos.result == 'success')) &&
       (!contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') || (needs.sign-linux.result == 'success' && needs.verify-linux.result == 'success')) &&
-      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
+      github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/release' && github.ref_type == 'branch'
     runs-on: windows-latest
     # Every step has its own bound and the job budget exceeds their sum, so a slow
     # step fails as a step: the tolerant ownership upload can never time the job out.
@@ -693,7 +704,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-oci-proof-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
+          name: nightly-oci-proof-${{ inputs.app-name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .oci-proof/proof.json
           include-hidden-files: true
           if-no-files-found: ignore
@@ -704,7 +715,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: nightly-ownership-v2-photocraft-${{ github.run_id }}-${{ github.run_attempt }}
+          name: nightly-ownership-v2-${{ inputs.app-name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: .ownership/ownership.json
           include-hidden-files: true
           if-no-files-found: warn

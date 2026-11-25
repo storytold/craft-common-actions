@@ -9,7 +9,8 @@ import nightly_feed as n
 FIELDS = {'schema','app','repository','tag','source_commit','release_id','run_id','run_attempt','tooling_revision'}
 
 def receipt(ident, release, environment):
-    n.require(environment.get('GITHUB_REPOSITORY') == ident['repository'] == 'storytold/photocraft' and
+    import nightly_app as apps
+    n.require(environment.get('GITHUB_REPOSITORY') == ident['repository'] == apps.current(environment).repository and
               environment.get('GITHUB_REF') == 'refs/heads/main' and
               environment.get('GITHUB_EVENT_NAME') in {'schedule','workflow_dispatch'} and
               environment.get('GITHUB_SHA') == ident['source_commit'], 'ownership context mismatch')

@@ -4,10 +4,13 @@ param(
   [Parameter(Mandatory=$true)][string]$Root,
   [Parameter(Mandatory=$true)][string]$ExpectedPublisher,
   [Parameter(Mandatory=$true)][string]$ExpectedVersion,
+  # The app's GUI exe and nightly ProductName, from its registry row (scripts/nightly_app.py).
+  [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}[.]exe$')][string]$ExeName,
+  [Parameter(Mandatory=$true)][ValidatePattern('^[A-Z][A-Za-z0-9]{0,31} Nightly$')][string]$ProductName,
   [string]$Signer
 )
 $ErrorActionPreference = 'Stop'
-$Exe = Join-Path (Resolve-Path -LiteralPath $Root).Path 'photocraft.exe'
+$Exe = Join-Path (Resolve-Path -LiteralPath $Root).Path $ExeName
 if (-not $ExpectedPublisher -or $ExpectedPublisher.Contains("`n") -or $ExpectedPublisher.Contains("`r")) { throw 'exact publisher subject required' }
 if ($Mode -eq 'sign') {
   if ($env:WINDOWS_CERTIFICATE) {
@@ -25,7 +28,7 @@ if ($Mode -eq 'sign') {
   if ($LASTEXITCODE -ne 0) { throw 'app signing backend failed' }
 }
 $Version = [Diagnostics.FileVersionInfo]::GetVersionInfo($Exe)
-if ($Version.ProductName -cne 'PhotoCraft Nightly' -or $Version.ProductVersion -cne $ExpectedVersion) { throw 'signed PE lost exact nightly ProductName/ProductVersion' }
+if ($Version.ProductName -cne $ProductName -or $Version.ProductVersion -cne $ExpectedVersion) { throw 'signed PE lost exact nightly ProductName/ProductVersion' }
 $Signature = Get-AuthenticodeSignature -LiteralPath $Exe
 if ($Signature.Status -ne 'Valid' -or -not $Signature.SignerCertificate -or -not $Signature.TimeStamperCertificate) { throw 'valid timestamped Authenticode signature required' }
 if ($Signature.SignerCertificate.Subject -cne $ExpectedPublisher) { throw 'Authenticode signer differs from configured exact publisher subject' }

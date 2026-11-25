@@ -16,6 +16,7 @@ import time
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import nightly_app as apps
 import nightly_feed as n
 import nightly_policy as p
 import nightly_release as release_tools
@@ -162,7 +163,7 @@ def release_bindings(release, policy, receipt_sha256, *, repository, release_id,
     n.require(linux == expected, "Linux signing receipt differs")
     formats = request_tools.policy_linux_package_formats(policy)
     n.require("oci" in formats, "OCI disabled by protected package policy")
-    names = request_tools.expected_signed_linux_support_names("photocraft", version, ("oci",))
+    names = request_tools.expected_signed_linux_support_names(apps.current_name(), version, ("oci",))
     n.require(names <= set(linux["support"]), "OCI manifest/signature absent from Linux signing receipt")
     return req, {name: linux["support"][name] for name in names}
 
@@ -173,8 +174,8 @@ def completed_publication(api, policy, proof, *, signer_id, signer_attempt, sign
     owner = proof["ownership"]
     n.fields(owner, {"schema", "app", "repository", "tag", "source_commit", "release_id",
                      "producer", "signer", "policy_sha256", "signing_receipt_sha256"}, "OCI ownership")
-    n.require(owner["schema"] == "craft-nightly-ownership/v2" and owner["app"] == "photocraft" and
-              owner["repository"] == policy["repository"] == "storytold/photocraft" and
+    n.require(owner["schema"] == "craft-nightly-ownership/v2" and owner["app"] == apps.current_name() and
+              owner["repository"] == policy["repository"] == apps.current().repository and
               owner["policy_sha256"] == request_tools.digest(policy), "OCI ownership policy differs")
     n.positive(owner["release_id"], "publisher release ID")
     checksums = request_tools.hash_value(proof["checksums_sha256"])
@@ -289,7 +290,7 @@ def verify_and_push_oci(*, checksum_sha256, release_support, evidence_dir, publi
     descriptor = n.bounded_bytes(directory / "NIGHTLY.json", n.MAX_JSON_BYTES, "OCI descriptor")
     n.require(checksums.get("NIGHTLY.json") == hashlib.sha256(descriptor).hexdigest(),
               "descriptor differs from authenticated checksum inventory")
-    required = request_tools.expected_signed_linux_support_names("photocraft", kwargs["version"], ("oci",))
+    required = request_tools.expected_signed_linux_support_names(apps.current_name(), kwargs["version"], ("oci",))
     n.require(set(release_support) == required, "complete OCI manifest and signature receipts required")
     for name, bound in release_support.items():
         n.require(checksums.get(name) == bound["sha256"], "OCI support missing from authenticated inventory")

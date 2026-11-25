@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/nightly_feed.py")
 n = importlib.util.module_from_spec(spec); spec.loader.exec_module(n)
 sys.modules["nightly_feed"] = n
+sys.modules.pop("nightly_app", None)  # it imported the replaced nightly_feed
 p = types.ModuleType("publisher_v4_effective")
 exec(compile((ROOT / "scripts/publish_nightly.py").read_text(), "publish_nightly.py", "exec"), p.__dict__)
 

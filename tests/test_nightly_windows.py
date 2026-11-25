@@ -22,6 +22,7 @@ spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/ni
 n = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(n)
 sys.modules["nightly_feed"] = n
+sys.modules.pop("nightly_app", None)  # it imported the replaced nightly_feed
 spec = importlib.util.spec_from_file_location("nightly_windows", ROOT / "scripts/nightly_windows.py")
 w = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(w)
