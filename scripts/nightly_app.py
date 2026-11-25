@@ -86,11 +86,11 @@ def row(app, registry=None):
     for platform, value in entrypoints.items():
         n.fields(value, {"entrypoint", "binary"}, f"{app} {platform} entrypoint")
         relative(value["entrypoint"], "entrypoint"); relative(value["binary"], "binary")
-        # A launcher entrypoint execs the binary through its own directory, so the binary must sit
-        # in or below that directory (the archive check derives the exec path the same way).
-        home = value["entrypoint"].rsplit("/", 1)[0] if "/" in value["entrypoint"] else ""
-        n.require(value["binary"] == value["entrypoint"] or not home or value["binary"].startswith(home + "/"),
-                  f"{app} {platform} binary must sit in or below its launcher's directory")
+        # A Linux launcher entrypoint is the canonical template, which execs the binary through its own
+        # directory: the binary must sit in or below it, under a strictly validated name.
+        if value["binary"] != value["entrypoint"]:
+            n.require(platform == "linux-x86_64", f"{app} {platform} entrypoint must be the GUI binary itself")
+            launcher_target(value["entrypoint"], value["binary"])
     return record
 
 
@@ -179,6 +179,30 @@ class App:
 
 
 DEFAULT_APP = "photocraft"
+LAUNCHER_TEMPLATE = Path(__file__).resolve().parent / "nightly-launcher.sh.in"
+# A launcher's GUI target: relative path segments of plain filename characters, no hidden or option-like parts.
+LAUNCHER_BINARY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}(?:/[A-Za-z0-9][A-Za-z0-9_.+-]{0,127}){0,7}")
+
+
+def launcher_target(entrypoint, binary):
+    """The GUI binary relative to the launcher's directory (it must sit in or below it)."""
+    home = entrypoint.rsplit("/", 1)[0] + "/" if "/" in entrypoint else ""
+    n.require(binary.startswith(home) and binary != entrypoint, "the GUI binary must sit in or below its launcher's directory")
+    target = binary[len(home):]
+    n.require(LAUNCHER_BINARY.fullmatch(target) is not None and ".." not in target.split("/"),
+              f"invalid launcher GUI target: {target!r}")
+    return target
+
+
+def render_launcher(app, platform="linux-x86_64", registry=None):
+    """The one canonical Linux nightly launcher for this app, rendered from scripts/nightly-launcher.sh.in."""
+    names = App(app, registry)
+    entry = names.record["entrypoints"][platform]
+    target = launcher_target(entry["entrypoint"], entry["binary"])
+    n.require(IDENTITY.fullmatch(names.identity) is not None and "/" not in names.identity, "invalid app identity")
+    text = LAUNCHER_TEMPLATE.read_text(encoding="utf-8")
+    n.require(text.count("@BINARY@") == 1 and text.count("@APP_ID@") == 1, "launcher template placeholders differ")
+    return text.replace("@BINARY@", target).replace("@APP_ID@", names.identity).encode("utf-8")
 
 
 def current_name(environment=None):
@@ -210,7 +234,7 @@ def admit(app, repository, ref, registry=None, release=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=("names", "check", "admit", "env", "path"))
+    parser.add_argument("mode", choices=("names", "check", "admit", "env", "path", "launcher"))
     parser.add_argument("--app-name", required=True)
     parser.add_argument("--kind", choices=("deb", "rpm", "arch", "flatpak", "entrypoint", "binary"))
     parser.add_argument("--value")
@@ -240,6 +264,8 @@ def main(argv=None):
             if ok:
                 app = App(args.app_name, registry)
                 lines.update({"display-name": app.display, "env-prefix": app.prefix, "identity": app.identity})
+        elif args.mode == "launcher":
+            sys.stdout.write(render_launcher(args.app_name, "linux-x86_64", registry).decode("utf-8")); return 0
         elif args.mode == "env":
             if None in (args.version, args.sha, args.date):
                 parser.error("env needs --version, --sha and --date")
