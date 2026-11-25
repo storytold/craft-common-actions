@@ -435,6 +435,7 @@ class SecondAppTests(unittest.TestCase):
     def test_rendered_template_is_the_only_accepted_launcher(self):
         self.assertIn('target="$dir/lib/designcraft-nightly/designcraft"\nreadonly target\n', LAUNCHER)
         self.assertIn('/ai.storyteller.designcraft.nightly"\nreadonly profile_root\n', LAUNCHER)
+        self.assertIn('  --launch-profile) exec "$target" "$@" ;;\n', LAUNCHER)
         self.assertNotIn('@BINARY@', LAUNCHER); self.assertNotIn('@APP_ID@', LAUNCHER)
         variants = {
             'trailing newline': LAUNCHER + '\n', 'missing final newline': LAUNCHER[:-1], 'CRLF': LAUNCHER.replace('\n', '\r\n'),
@@ -545,6 +546,33 @@ class LauncherTemplateRuntimeTests(unittest.TestCase):
                 self.assertEqual(self.argv(shell, ['f'], xdg)[3], '/data/x/ai.storyteller.designcraft.nightly')
                 # Started through a relative path from another directory, it still finds its own binary.
                 self.assertEqual(self.argv(shell, [], base, cwd=str(self.root.parent))[0], '--launch-profile')
+
+    def test_launcher_profile_argv_passes_through_unchanged(self):
+        import shutil as _shutil
+        home = self.temp.name + '/home'
+        root = home + '/.local/share/ai.storyteller.designcraft.nightly'
+        # The Launcher's exact shape (launcher bc765549, nightly_profile.rs launch_arguments): always
+        # `--launch-profile nightly-v1 --profile-root <data>/profiles/<app> -- [files...]`, `--` even with no files.
+        managed = '/home/u/.local/share/ArtCraft Launcher/profiles/designcraft'
+        for shell in [s for s in ('bash', 'dash') if _shutil.which(s)]:
+            env = {'PATH': os.environ['PATH'], 'HOME': home}
+            with self.subTest(shell=shell):
+                # The Launcher's exact forms reach the app byte for byte (no second profile pair).
+                for argv in (['--launch-profile', 'nightly-v1', '--profile-root', managed, '--'],
+                             ['--launch-profile', 'nightly-v1', '--profile-root', managed, '--', 'a b.png'],
+                             ['--launch-profile', 'nightly-v1', '--profile-root', managed, '--', 'one.png', 'two words.psd', '--version'],
+                             # Other values pass through too; the app's own parser refuses them.
+                             ['--launch-profile', 'nightly-v2', '--profile-root', 'relative'],
+                             ['--launch-profile']):
+                    self.assertEqual(self.argv(shell, argv, env), argv)
+                # Anything else still gets the fixed profile.
+                self.assertEqual(self.argv(shell, ['--launch-profile=nightly-v1'], env),
+                                 ['--launch-profile', 'nightly-v1', '--profile-root', root, '--', '--launch-profile=nightly-v1'])
+                self.assertEqual(self.argv(shell, ['--help'], env), ['--launch-profile', 'nightly-v1', '--profile-root', root, '--', '--help'])
+                self.assertEqual(self.argv(shell, ['file.png', '--launch-profile'], env),
+                                 ['--launch-profile', 'nightly-v1', '--profile-root', root, '--', 'file.png', '--launch-profile'])
+                for flag in ('--version', '-V'):
+                    self.assertEqual(self.argv(shell, [flag], env), ['--launch-profile', 'nightly-v1', '--profile-root', root, '--version'])
 
     def test_shellcheck_clean_when_available(self):
         import shutil as _shutil, subprocess
