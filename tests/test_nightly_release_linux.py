@@ -387,10 +387,12 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
             condition = job_block(self.release, name).split('    runs-on:', 1)[0]
             with self.subTest(job=name):
                 self.assertIn("contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64')", condition)
+                signer_refs = "(github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer')"
                 for fragment in ("github.repository == format('storytold/{0}', inputs.app-name)", "github.event_name == 'workflow_dispatch'",
-                                 "github.ref == 'refs/heads/release'", "github.ref_type == 'branch'"):
+                                 signer_refs, "github.ref_type == 'branch'"):
                     self.assertIn(fragment, condition)
-                self.assertNotIn('||', condition)
+                # The signer-ref allowlist is the only alternative in the guard.
+                self.assertNotIn('||', condition.replace(signer_refs, ''))
         self.assertIn("needs.validate.outputs.admitted == 'true'", job_block(self.release, 'sign-linux'))
         self.assertIn("needs.sign-linux.result == 'success'", job_block(self.release, 'verify-linux'))
 

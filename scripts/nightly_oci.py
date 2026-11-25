@@ -264,12 +264,13 @@ class ReadOnlyGitHub:
         return gh_json(self.repository, path[1:])
 
 
-def recheck_publication(api, request):
+def recheck_publication(api, request, branch="release"):
+    n.require(branch in request_tools.SIGNER_BRANCHES, "unreviewed signer branch")
     for name in ("producer", "signer"):
         request_tools.active(api, request[name])
-    ref = api.request("GET", "/git/ref/heads/release")
+    ref = api.request("GET", "/git/ref/heads/"+branch)
     live = ref.get("object", {})
-    n.require(ref.get("ref") == "refs/heads/release" and live.get("type") == "commit",
+    n.require(ref.get("ref") == "refs/heads/"+branch and live.get("type") == "commit",
               "protected release ref is missing or is not a commit")
     live_sha = request_tools.commit(live.get("sha"))
     signer_sha = request_tools.commit(request["signer"]["source_commit"])
@@ -541,7 +542,7 @@ def push_completed_publication():
         public_key=".release-source/.github/nightly-linux-signing-key.asc",
         fingerprint=policy["platforms"]["linux-x86_64"]["trust"]["fingerprint"],
         environment=os.environ,
-        publication_guard=lambda: recheck_publication(api, roles),
+        publication_guard=lambda: recheck_publication(api, roles, request_tools.signer_branch(policy)),
     )
 
 

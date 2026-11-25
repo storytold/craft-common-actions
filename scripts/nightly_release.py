@@ -215,7 +215,8 @@ def ordinal(producer):
 def verified_history_roles(api, policy, request):
     signer = request["signer"]
     for name in ("producer", "signer"):
-        role = request[name]; branch = "release" if name == "signer" else "main"
+        # The signer ran on the branch its own (historical) policy names.
+        role = request[name]; branch = r.signer_branch(policy) if name == "signer" else "main"
         run = api.request("GET", f"/actions/runs/{role['run_id']}/attempts/{role['run_attempt']}")
         r.repository(policy, run.get("repository")); r.repository(policy, run.get("head_repository"))
         n.require(run.get("id") == role["run_id"] and run.get("run_attempt") == role["run_attempt"] and

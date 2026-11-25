@@ -221,6 +221,16 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      # The `release` environment holds the signing keys and also trusts refs/heads/nightly-signer (the
+      # nightly signer's branch). A stable build binds it only on refs/heads/release (see each job's
+      # `environment:`), and a real (non-dry) stable run anywhere else stops here, before any build.
+      - name: Stable releases run only on refs/heads/release
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/release' }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "::error::stable releases run only on refs/heads/release, not $REF; use dry-run elsewhere"
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -237,7 +247,7 @@ jobs:
     if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: macos-15-xlarge
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -367,7 +377,7 @@ jobs:
     # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
     # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
     runs-on: ${{ matrix.runner }}
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -485,7 +495,7 @@ jobs:
     needs: [version]
     # The signing key lives in the release environment, as it does for the macOS, Windows and
     # flatpak jobs; without this the Linux packages are built unsigned.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -589,7 +599,7 @@ jobs:
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: read
       packages: write
@@ -1221,7 +1231,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1405,7 +1415,7 @@ jobs:
     if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: write
     steps:

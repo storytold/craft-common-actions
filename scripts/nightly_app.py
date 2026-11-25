@@ -197,9 +197,10 @@ def admit(app, repository, ref, registry=None, release=False):
         return False, str(error)
     if repository != record["repository"]:
         return False, f"{repository} is not {app}'s reviewed repository {record['repository']}"
-    branch = "release" if release else record["default_branch"]
-    if ref != "refs/heads/" + branch:
-        return False, f"{ref} is not {app}'s {'release' if release else 'default'} branch"
+    # The signer runs on a protected signer branch (the policy names which); the producer on main.
+    branches = ("release", "nightly-signer") if release else (record["default_branch"],)
+    if ref not in ["refs/heads/" + branch for branch in branches]:
+        return False, f"{ref} is not {app}'s {'signer' if release else 'default'} branch"
     return True, "admitted"
 
 

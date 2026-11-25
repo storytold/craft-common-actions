@@ -895,3 +895,44 @@ class BridgeTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+
+class SignerBranchHistoryTests(unittest.TestCase):
+    """verified_history_roles checks the prior signer run on the branch the prior policy names."""
+    def rows(self, signer_branch):
+        repo = {"full_name": "storytold/photocraft", "id": 123}
+        def run(role_id, branch, path, event, sha):
+            return {"id": role_id, "run_attempt": 1, "run_number": role_id, "workflow_id": role_id + 1, "head_sha": sha,
+                    "head_branch": branch, "path": path, "event": event, "repository": repo, "head_repository": repo,
+                    "created_at": "2026-11-22T00:00:00Z", "run_started_at": "2026-11-22T00:00:01Z",
+                    "triggering_actor": {"login": "github-actions[bot]"}, "status": "completed", "conclusion": "success"}
+        producer = run(100, "main", ".github/workflows/nightly.yml", "schedule", "a" * 40)
+        signer = run(200, signer_branch, ".github/workflows/nightly-sign.yml", "workflow_dispatch", "d" * 40)
+        role = lambda row: {"run_id": row["id"], "run_attempt": 1, "source_commit": row["head_sha"], "workflow_id": row["workflow_id"],
+                            "workflow_path": row["path"], "event": row["event"], "run_number": row["run_number"],
+                            "created_at": row["created_at"], "run_started_at": row["run_started_at"],
+                            "triggering_actor": "github-actions[bot]"}
+        jobs = {"total_count": 1, "jobs": [{"status": "completed", "conclusion": "success",
+                                            "steps": [{"name": b.PUBLISH_STEP, "conclusion": "success"}]}]}
+        api_rows = {"/actions/runs/100/attempts/1": producer, "/actions/runs/200/attempts/1": signer}
+        return api_rows, jobs, {"producer": role(producer), "signer": role(signer)}
+
+    def check(self, policy_branch, run_branch):
+        api_rows, jobs, request = self.rows(run_branch)
+        policy = {"repository": "storytold/photocraft", "repository_id": 123, "release_branch": policy_branch}
+        class API:
+            def request(self, method, path):
+                return copy.deepcopy(api_rows[path])
+        with patch.object(b.p, "bounded_rows", return_value=jobs["jobs"]):
+            return b.verified_history_roles(API(), policy, request)
+
+    def test_prior_signer_branch_comes_from_the_prior_policy(self):
+        for branch in ("release", "nightly-signer"):
+            with self.subTest(branch=branch):
+                self.assertIsNone(self.check(branch, branch))
+        for policy_branch, run_branch in (("release", "nightly-signer"), ("nightly-signer", "release")):
+            with self.subTest(policy=policy_branch, run=run_branch), self.assertRaisesRegex(ValueError, "prior exact run"):
+                self.check(policy_branch, run_branch)
+        with self.assertRaisesRegex(ValueError, "unreviewed release policy"):
+            self.check("main", "main")
