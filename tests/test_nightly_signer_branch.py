@@ -2,7 +2,9 @@
 from pathlib import Path
 import re
 import sys
+import os
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -139,12 +141,17 @@ class OciSignerBranchBindingTests(unittest.TestCase):
                     return {"id": 200, "head_sha": sha, "head_branch": run_branch}
             pushed = []
             cwd = os.getcwd(); os.chdir(root)
+            # The fixture is this job's workspace and runner temp, as in CI; owned_path stays enforced.
+            owned = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(root.resolve()), "RUNNER_TEMP": str(root.resolve())})
             try:
-                with patch.object(oci, "ReadOnlyGitHub", API), \
+                with owned, patch.object(oci, "ReadOnlyGitHub", API), \
                         patch.object(oci, "verify_and_push_oci", side_effect=lambda **kw: pushed.append(kw)):
                     oci.push_completed_publication()
             finally:
                 os.chdir(cwd)
+            if pushed:
+                self.assertEqual(pushed[0]["fingerprint"], "A" * 40)
+                self.assertEqual(pushed[0]["evidence_dir"], ".release-evidence")
             return bool(pushed)
 
     def test_push_is_bound_to_the_policy_branch_before_any_push(self):
@@ -152,8 +159,13 @@ class OciSignerBranchBindingTests(unittest.TestCase):
         self.assertTrue(self.run_push("release", "release"))
         for policy_branch, run_branch in (("release", "nightly-signer"), ("nightly-signer", "release"),
                                           ("nightly-signer", "main"), ("release", "feature")):
-            with self.subTest(policy=policy_branch, run=run_branch), self.assertRaises(ValueError):
+            # The branch binding refuses, not the ownership boundary.
+            with self.subTest(policy=policy_branch, run=run_branch), \
+                    self.assertRaisesRegex(ValueError, "but its reviewed policy signs on"):
                 self.run_push(policy_branch, run_branch)
+        # Run under a CI-like environment whose workspace is elsewhere: the fixture still owns its root.
+        with patch.dict(os.environ, {"GITHUB_WORKSPACE": "/nonexistent/ci-workspace"}):
+            self.assertTrue(self.run_push("nightly-signer", "nightly-signer"))
         with self.assertRaisesRegex(ValueError, "signer run differs"):
             self.run_push("nightly-signer", "nightly-signer", sha="f" * 40)
 

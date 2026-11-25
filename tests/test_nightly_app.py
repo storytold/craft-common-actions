@@ -482,6 +482,49 @@ class SecondAppTests(unittest.TestCase):
         registry['apps']['designcraft']['entrypoints']['macos-aarch64']['entrypoint'] = 'DesignCraft Nightly.app/run'
         self.assertFalse(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0])
 
+
+    def test_admission_matches_the_archive_and_plugin_contracts(self):
+        def refused(mutate, label):
+            registry = second_app_registry(); mutate(registry['apps']['designcraft'])
+            with self.subTest(case=label):
+                ok, reason = names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)
+                self.assertFalse(ok, label)
+                return reason
+        mac = 'macos-aarch64'; win = 'windows-x86_64'; lin = 'linux-x86_64'
+        def set_entry(platform, entry, binary):
+            return lambda row: row['entrypoints'].__setitem__(platform, {'entrypoint': entry, 'binary': binary})
+        # 1: the macOS GUI must be <Display> Nightly.app/Contents/MacOS/<name>.
+        refused(set_entry(mac, 'DesignCraft.app/Contents/MacOS/DesignCraft', 'DesignCraft.app/Contents/MacOS/DesignCraft'), 'mac bundle name')
+        refused(set_entry(mac, 'DesignCraft Nightly.app/Contents/Resources/x', 'DesignCraft Nightly.app/Contents/Resources/x'), 'mac outside MacOS')
+        refused(set_entry(mac, 'DesignCraft Nightly.app/Contents/MacOS/a/b', 'DesignCraft Nightly.app/Contents/MacOS/a/b'), 'mac nested')
+        # 3: nothing can sit beneath the launcher file itself.
+        refused(set_entry(lin, 'bin/start', 'bin/start/gui'), 'binary beneath launcher')
+        # 4: each platform's target format is the one its release plug-in signs.
+        refused(lambda row: [t['target'].__setitem__('format', 'appimage') for t in row['targets'] if t['target']['os'] == 'linux'], 'linux appimage')
+        refused(lambda row: [t['target'].__setitem__('format', 'tar_gz') for t in row['targets'] if t['target']['os'] == 'macos'], 'mac tar_gz')
+        # 7: Windows signs only a flat exe.
+        refused(set_entry(win, 'bin/designcraft.exe', 'bin/designcraft.exe'), 'nested windows exe')
+        refused(set_entry(win, 'designcraft', 'designcraft'), 'windows without .exe')
+        # Valid shapes still pass.
+        for label, mutate in (('sibling GUI', set_entry(lin, 'bin/start', 'bin/start-bin')),
+                              ('libexec GUI', set_entry(lin, 'bin/start', 'bin/libexec/gui'))):
+            registry = second_app_registry(); mutate(registry['apps']['designcraft'])
+            with self.subTest(case=label):
+                self.assertTrue(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0])
+
+    def test_app_names_keep_every_asset_name_within_the_bound(self):
+        longest = 'a' * 32
+        self.assertEqual(names_tool.app_name(longest), longest)
+        with self.assertRaises(_n.InvalidNightly):
+            names_tool.app_name('a' * 33)
+        # Worst case the bound covers: base 999.999.999, an 11-digit run ID and a 2-digit attempt.
+        version = '999.999.999-nightly.20261125.' + '9' * 11 + '.99.g' + 'a' * 12
+        for platform, extension in names_tool.EXTENSIONS.items():
+            final = f'{longest}-{version}-{platform}-nightly{extension}'
+            unsigned = final[:-len(extension)] + '.unsigned' + extension
+            with self.subTest(platform=platform):
+                self.assertTrue(_n.NAME.fullmatch(final) and _n.NAME.fullmatch(unsigned), (len(final), len(unsigned)))
+
     def test_launcher_cli_prints_the_rendered_template(self):
         out = _io.StringIO()
         with contextlib.redirect_stdout(out):

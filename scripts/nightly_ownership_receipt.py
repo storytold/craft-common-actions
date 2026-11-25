@@ -9,8 +9,9 @@ import nightly_feed as n
 FIELDS = {'schema','app','repository','tag','source_commit','release_id','run_id','run_attempt','tooling_revision'}
 
 def receipt(ident, release, environment):
-    import nightly_app as apps
-    n.require(environment.get('GITHUB_REPOSITORY') == ident['repository'] == apps.current(environment).repository and
+    # Bound to the identity validated before publication (its registry row is storytold/<app>), never a
+    # later NIGHTLY_APP lookup that could fail after the release is public (finding 6).
+    n.require(environment.get('GITHUB_REPOSITORY') == ident['repository'] == 'storytold/' + ident['app'] and
               environment.get('GITHUB_REF') == 'refs/heads/main' and
               environment.get('GITHUB_EVENT_NAME') in {'schedule','workflow_dispatch'} and
               environment.get('GITHUB_SHA') == ident['source_commit'], 'ownership context mismatch')

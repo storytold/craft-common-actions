@@ -12,8 +12,8 @@ import publish_nightly as publisher
 def subject(registry,prepared,policy,directory,environment,*,signed=False):
     p.validate_prepared(registry,prepared,policy,environment)
     ident,metadata=publisher.prepare_packet(registry,prepared,directory,environment,signed=signed)
-    import nightly_app as apps
-    targets=n.app_record(registry,apps.current_name(environment))['targets']
+    # The app prepare_packet just validated, not whatever NIGHTLY_APP says (finding 5).
+    targets=n.app_record(registry,ident['app'])['targets']
     n.require(len(targets)==1 and targets[0]['target']=={'os':'windows','arch':'x86_64','format':'portable_zip'},'attestation subject adapter not reviewed')
     filename=targets[0]['asset_pattern'].replace('{version}',prepared['version'])
     n.require(set(metadata)=={'NIGHTLY.json','SHA256SUMS.txt',filename},'attestation packet differs')
