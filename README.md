@@ -986,6 +986,22 @@ owner's permissions. Tags default to the branch name, the semver tag and `latest
 branch, and the `tags` input replaces those metadata-action rules. `timeout-minutes` (default 60)
 bounds each platform build; the manifest merge has its own 15-minute limit.
 
+### 12. `agent-roots-conformance.yml`
+
+Verifies Rule 18 startup confinement on a built `<app>-cli` artifact uploaded by `gate.yml` (or another build job). It runs the binary against temporary directories and fails unless the entry point refuses to start with no roots, only `--automation-read-root`, only `--automation-write-root`, a missing read root, or a missing write root, while accepting both valid roots and answering an MCP JSON-RPC `initialize` request. When `connect-flag` is set (for example `--connect`, `--bridge`, or `--attach`), it also binds a local loopback control-channel stub that advertises no roots and requires the CLI to exit non-zero before answering MCP `initialize`.
+
+#### Caller Example:
+```yaml
+jobs:
+  agent-roots:
+    needs: gate
+    uses: storytold/craft-common-actions/.github/workflows/agent-roots-conformance.yml@main
+    with:
+      artifact-name: wordcraft-cli-ubuntu-24.04
+      binary-path: wordcraft-cli
+      connect-flag: --connect
+```
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -1038,6 +1054,7 @@ Individual actions are also available for composing custom pipelines:
 
   The same step fails when a crate's sources name a path into another crate's directory (an `include_str!`/`include_bytes!` path, or a `../` literal in a file that uses `CARGO_MANIFEST_DIR`) that `reads` does not cover, or when a declared path matches no tracked file.
 - `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` applied only to the retired house-rules blocks and is ignored.
+- `actions/agent-roots-conformance`: The Rule 18 startup confinement check `agent-roots-conformance.yml` runs. Takes a local `binary` path, optional `subcommand` (default `mcp`), `extra-args`, `connect-flag`, `connect-address-format` (`host:port` or `port`), `connect-extra-args`, and `timeout-seconds`. Can also be called inside an app's existing Linux build job before uploading artifacts.
 
 ## Storytold Organization Hosting
 
@@ -1098,6 +1115,7 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
 | Git sources | 5 |
+| Agent roots conformance | 10 |
 | Docker build, per platform / manifest merge | 60 / 15 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
