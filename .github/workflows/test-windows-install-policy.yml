@@ -134,12 +134,15 @@ jobs:
           job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" --paginate \
             --jq '.jobs[] | select(.name | startswith("Reusable workflow / ")) | .id')
           test "$(printf '%s\n' "$job" | grep -c .)" -eq 1 || { echo "Expected one reusable workflow job, got: $job"; exit 1; }
+          # curl, not gh api: gh refuses to print a response with the log's colour codes in it.
           # A finished job's log can take a few seconds to appear.
           for attempt in 1 2 3 4 5 6; do
-            gh api "repos/$REPO/actions/jobs/$job/logs" > job.log 2>/dev/null && break
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+              "$GITHUB_API_URL/repos/$REPO/actions/jobs/$job/logs" -o raw.log && break
             sleep 10
           done
-          test -s job.log || { echo "No log for job $job"; exit 1; }
+          test -s raw.log || { echo "No log for job $job"; exit 1; }
+          tr -d '\r' < raw.log > job.log
           expect() { grep -qF -- "$1" job.log || { echo "Not in the reusable workflow's log: $1"; exit 1; }; }
           expect "Download action repository '$REPO@$SHA'"
           expect "Run $REPO/actions/windows-install-policy@$SHA"
