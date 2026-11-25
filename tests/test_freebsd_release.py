@@ -19,12 +19,16 @@ COPY = next(step['run'] for step in STEPS if step.get('name') == 'Copy release a
 
 @unittest.skipUnless(shutil.which('rsync'), 'rsync required')
 class FreeBSDReleaseTests(unittest.TestCase):
-    def run_release(self, fail_build=False, with_cli=False, arch='x86_64', package_arch=None, input_version=''):
+    def run_release(self, fail_build=False, with_cli=False, arch='x86_64', package_arch=None, input_version='',
+                    with_cross_env=None):
         """Return (exit code, complete archive copied to the host, stale partial file left, cargo log, output).
 
-        arch='aarch64' writes the cross environment the toolchain step leaves behind.
+        arch='aarch64' writes the cross environment the toolchain step leaves behind,
+        unless with_cross_env is False.
         package_arch makes a packaging/freebsd/package.sh that names its archive after it.
         """
+        if with_cross_env is None:
+            with_cross_env = arch == 'aarch64'
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             guest, host, tools = (root / name for name in ('guest', 'host', 'tools'))
@@ -33,7 +37,7 @@ class FreeBSDReleaseTests(unittest.TestCase):
             target = guest / 'craft-target'
             (target / 'release').mkdir(parents=True)
             (target / 'release/partial').write_text('failed restore')
-            if arch == 'aarch64':
+            if with_cross_env:
                 (guest / 'craft-cross').mkdir()
                 (guest / 'craft-cross/env').write_text('export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n')
             if package_arch:
@@ -75,7 +79,7 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                        CARGO_TARGET_DIR=str(target), GITHUB_WORKSPACE=str(guest),
                        REAL_RSYNC=shutil.which('rsync'), VERSION='1.0.0', INPUT_VERSION=input_version,
                        FAIL_BUILD=str(fail_build).lower(), WITH_CLI=str(with_cli).lower(), APP_NAME='fixture',
-                       CARGO_LOG=str(log))
+                       ARCH=arch, CARGO_LOG=str(log))
             env.pop('CARGO_BUILD_TARGET', None)
             script = BUILD.replace('${{ inputs.app-name }}', 'fixture').replace('${{ matrix.arch }}', arch)
             script = script.replace('${{ steps.cargo-cache.outcome }}', 'failure')
@@ -117,6 +121,13 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         self.assertEqual(log[0], 'xtask|', log)
         self.assertEqual(log[-1], 'build|aarch64-unknown-freebsd', log)
 
+    def test_aarch64_fails_closed_without_the_cross_env(self):
+        code, copied, _, log, output = self.run_release(arch='aarch64', with_cross_env=False)
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('expected aarch64-unknown-freebsd', output)
+        self.assertFalse(copied)
+        self.assertEqual(log, [])
+
     def test_package_script_archive_must_match_the_matrix_arch(self):
         for arch, package_arch, code in (('x86_64', 'x86_64', 0), ('aarch64', 'aarch64', 0),
                                          ('aarch64', 'x86_64', 1), ('x86_64', 'aarch64', 1)):
@@ -126,6 +137,49 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                 if code:
                     self.assertIn('must honor CARGO_BUILD_TARGET', result[4])
 
+
+
+VM = next(step for step in STEPS if str(step.get('uses', '')).startswith('step-security/freebsd-vm@'))
+CI = yaml.load((ROOT / '.github/workflows/freebsd.yml').read_text(), Loader=yaml.BaseLoader)
+CI_VM = next(step for step in CI['jobs']['freebsd']['steps'] if str(step.get('uses', '')).startswith('step-security/freebsd-vm@'))
+
+
+def arc_block(prepare):
+    """The guest memory guard: from the ARC comment through its closing fi."""
+    start = prepare.index('if [ "$(uname -s)" = FreeBSD ]; then')
+    return prepare[start:prepare.index('\nfi\n', start)+4]
+
+
+class FreeBSDReleaseMemoryTests(unittest.TestCase):
+    def test_release_guest_caps_the_zfs_arc_like_ci_before_any_build(self):
+        prepare = VM['with']['prepare']
+        self.assertIn('sysctl vfs.zfs.arc_max=2147483648', prepare)
+        self.assertEqual(arc_block(prepare), arc_block(CI_VM['with']['prepare']))
+        self.assertLess(prepare.index('vfs.zfs.arc_max'), prepare.index('pkg install'))
+
+    def test_only_freebsd_codegen_units_override_reaches_the_guest(self):
+        # The one release-profile change: 16 codegen units for the FreeBSD guest's lower link memory.
+        env = DATA['jobs']['freebsd']['env']
+        overrides = {key: value for key, value in env.items() if key.startswith('CARGO_PROFILE_')}
+        self.assertEqual(overrides, {'CARGO_PROFILE_RELEASE_CODEGEN_UNITS': '16'})
+        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', VM['with']['envs'].split())
+        self.assertEqual([name for name in VM['with']['envs'].split() if name.startswith('CARGO_PROFILE_')],
+                         ['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'])
+        # No other job sets a profile override, and the FreeBSD job has no LTO override.
+        for name, job in DATA['jobs'].items():
+            keys = [key for key in (job.get('env') or {}) if key.startswith('CARGO_PROFILE_')]
+            self.assertEqual(keys, ['CARGO_PROFILE_RELEASE_CODEGEN_UNITS'] if name == 'freebsd' else [], name)
+            for step in job.get('steps', []):
+                self.assertFalse([key for key in (step.get('env') or {}) if key.startswith('CARGO_PROFILE_')], name)
+        self.assertNotIn('LTO', ' '.join(env))
+
+    def test_vm_size_build_jobs_and_release_profile_are_unchanged(self):
+        self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '12288'))  # Host runner keeps its headroom.
+        self.assertEqual(DATA['jobs']['freebsd']['env']['CARGO_BUILD_JOBS'], '4')
+        for text in (VM['with']['prepare'], BUILD):
+            text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+            for forbidden in ('mdconfig', 'swapon', 'CARGO_PROFILE_RELEASE', 'codegen-units', 'lto', 'thinlto'):
+                self.assertNotIn(forbidden, text)  # No ZFS-backed swap file; LTO settings stay the app's.
 
 if __name__ == '__main__':
     unittest.main()

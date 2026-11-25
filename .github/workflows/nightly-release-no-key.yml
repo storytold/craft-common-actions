@@ -1,0 +1,31 @@
+name: Release-ref signer no-key tests
+# Standalone source tests only. Never calls a producer, signer or release workflow.
+on:
+  pull_request:
+    paths:
+      - 'scripts/nightly*.py'
+      - 'scripts/publish_nightly.py'
+      - 'tests/test_nightly*.py'
+      - 'tests/test_publish_nightly.py'
+      - '.github/workflows/nightly*.yml'
+      - 'nightly-apps.json'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run synthetic contracts without provider access or native execution
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          python3 -m unittest discover -s tests -p 'test_nightly*.py' -v
+          python3 -m unittest discover -s tests -p 'test_publish_nightly.py' -v

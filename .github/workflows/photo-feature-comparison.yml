@@ -1,0 +1,62 @@
+name: Photo no-build feature comparison
+on:
+  pull_request:
+    paths: [.github/workflows/photo-feature-comparison.yml]
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: storytold/photocraft
+          ref: 057297bb0b0872244ac0910e640db8d87e46572f
+          persist-credentials: false
+      - name: Compare resolved features without compiling
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 057297bb0b0872244ac0910e640db8d87e46572f
+          cargo +stable --version
+          sha256sum Cargo.toml Cargo.lock
+          mkdir "$RUNNER_TEMP/photo-feature-comparison"
+          for arch in x86_64 aarch64; do
+            target="$arch-unknown-freebsd"
+            timeout 120s cargo +stable tree --locked --workspace --features heif --target "$target" --edges normal,build,dev --prefix none --format '{p}|{f}' > "$RUNNER_TEMP/photo-feature-comparison/$arch-baseline.txt"
+            timeout 120s cargo +stable tree --locked --workspace --features heif --target "$target" --edges normal,build,dev --prefix none --format '{p}|{f}' --exclude photocraft-web --exclude photocraft-web-boot > "$RUNNER_TEMP/photo-feature-comparison/$arch-reduced.txt"
+          done
+          git diff --exit-code -- Cargo.toml Cargo.lock
+          python3 - "$RUNNER_TEMP/photo-feature-comparison" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          excluded = ('photocraft-web v', 'photocraft-web-boot v')
+          def inventory(path):
+              result = set()
+              for line in path.read_text().splitlines():
+                  line = line.strip().removesuffix(' (*)')
+                  if not line or line in ('[build-dependencies]', '[dev-dependencies]'):
+                      continue
+                  if '|' not in line:
+                      raise ValueError(f'unexpected cargo tree line: {line!r}')
+                  package, features = line.split('|', 1)
+                  if package.startswith(excluded):
+                      continue
+                  result.add((package, tuple(sorted(filter(None, features.split(','))))))
+              assert result, 'empty resolved feature inventory'
+              return result
+          for arch in ('x86_64', 'aarch64'):
+              baseline = inventory(root / f'{arch}-baseline.txt')
+              reduced = inventory(root / f'{arch}-reduced.txt')
+              print(json.dumps({'architecture': arch,
+                                'baseline_entries': len(baseline), 'reduced_entries': len(reduced),
+                                'baseline_inventory': sorted(baseline), 'reduced_inventory': sorted(reduced),
+                                'baseline_only': sorted(baseline - reduced),
+                                'reduced_only': sorted(reduced - baseline)}, sort_keys=True))
+          print('Diagnostic only: matching tree summaries do not prove compiler-unit or coverage equivalence.')
+          print('No compilation performed; production coverage unchanged.')
+          PY

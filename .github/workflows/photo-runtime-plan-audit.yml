@@ -1,0 +1,106 @@
+name: Photo FreeBSD implicit-host runtime plan audit
+on:
+  pull_request:
+    paths:
+      - .github/workflows/photo-runtime-plan-audit.yml
+      - scripts/compare_cargo_target_projection.py
+      - scripts/audit_cargo_runtime_units.py
+      - tests/test_compare_cargo_target_projection.py
+      - tests/test_audit_cargo_runtime_units.py
+permissions:
+  contents: read
+jobs:
+  planned-graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_*cargo*py' -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: storytold/photocraft
+          ref: 057297bb0b0872244ac0910e640db8d87e46572f
+          path: photo
+          persist-credentials: false
+      - name: Verify pinned checkout before VM transfer
+        run: |
+          test "$(git -C photo rev-parse HEAD)" = 057297bb0b0872244ac0910e640db8d87e46572f
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess
+          names = subprocess.check_output(['git', '-C', 'photo', 'ls-files', '-z']).split(bytes([0]))
+          identity = {}
+          for raw_name in filter(None, names):
+              name = os.fsdecode(raw_name)
+              path = pathlib.Path('photo') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              identity[str(path)] = [kind, hashlib.sha256(data).hexdigest()]
+          assert identity, 'empty source inventory'
+          pathlib.Path('photo-source-identity.json').write_text(json.dumps(identity, sort_keys=True))
+          PYCODE
+      - name: Prepare native FreeBSD host, without application compilation
+        uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128
+        with:
+          release: '15.1'
+          usesh: 'true'
+          cpu: '4'
+          mem: '12288'
+          copyback: 'false'
+          prepare: pkg install -y git curl python3
+      - name: Install official pinned nightly planner
+        shell: freebsd {0}
+        run: |
+          set -eu
+          test "$(uname -s)" = FreeBSD
+          curl --proto '=https' --tlsv1.2 --retry 2 --connect-timeout 15 --max-time 60 -fsS https://sh.rustup.rs -o /tmp/photo-install-rustup.sh
+          timeout 180s sh /tmp/photo-install-rustup.sh -y --profile minimal --default-toolchain nightly-2026-11-18 --no-modify-path
+          "$HOME/.cargo/bin/cargo" +nightly-2026-11-18 -Vv
+          "$HOME/.cargo/bin/rustc" +nightly-2026-11-18 -Vv
+      - name: Compare prebuild targets without compiling
+        shell: freebsd {0}
+        run: |
+          set -eu
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cd photo
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib
+          identity = json.loads(pathlib.Path('../photo-source-identity.json').read_text())
+          for name, expected in identity.items():
+              path = pathlib.Path('..') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              assert [kind, hashlib.sha256(data).hexdigest()] == expected, name
+          print('All tracked source files match host-verified pinned checkout')
+          PYCODE
+          sha256 Cargo.toml Cargo.lock
+          mkdir /tmp/photo-unit-graphs
+          # Match production native-host target/profile context. ARM is build-only;
+          # this diagnostic does not claim to audit ARM runtime behavior.
+          unset CARGO_BUILD_TARGET
+          export CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_HOME=/var/tmp/craft-cargo CARGO_TARGET_DIR=/var/tmp/craft-target
+          cargo +nightly-2026-11-18 -Vv
+          timeout 120s cargo +nightly-2026-11-18 build --locked --workspace --all-targets --features heif --profile test --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/native-full.json
+          timeout 120s cargo +nightly-2026-11-18 build --locked --workspace --lib --bins --tests --example flat_open_bench --example bench_camera_raw --example bench_shape_drag --example bench_stack_reuse --example compositor_build_probe --example zero_block_probe --features heif --profile test --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/native-selected.json
+          timeout 120s cargo +nightly-2026-11-18 test --workspace --locked --features heif --exclude photocraft-gpu --lib --bins --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/runtime-lib-bin.json
+          timeout 120s cargo +nightly-2026-11-18 test --workspace --locked --features heif --exclude photocraft-gpu --doc --unit-graph -Z unstable-options > /tmp/photo-unit-graphs/runtime-doc.json
+          timeout 120s cargo +nightly-2026-11-18 test --workspace --locked --features heif --exclude photocraft-gpu --test '*' --unit-graph -Z unstable-options -- --test-threads=1 > /tmp/photo-unit-graphs/runtime-integration.json
+          timeout 120s cargo +nightly-2026-11-18 test -p photocraft-gpu --locked --unit-graph -Z unstable-options -- --test-threads=1 > /tmp/photo-unit-graphs/runtime-gpu.json
+          timeout 30s python3 ../scripts/audit_cargo_runtime_units.py /tmp/photo-unit-graphs
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib
+          identity = json.loads(pathlib.Path('../photo-source-identity.json').read_text())
+          for name, expected in identity.items():
+              path = pathlib.Path('..') / name
+              kind = 'symlink' if path.is_symlink() else 'file'
+              data = os.readlink(path).encode() if kind == 'symlink' else path.read_bytes()
+              assert [kind, hashlib.sha256(data).hexdigest()] == expected, name
+          print('Planning left all tracked source files unchanged')
+          PYCODE
+          echo 'No application compilation or test execution. Exact native runtime-command plans audited.'
+          echo 'Nightly planner differs from production stable; equality is planned graph evidence only.'

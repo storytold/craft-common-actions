@@ -11,7 +11,9 @@ permissions:
 
 concurrency:
   group: sonarcloud-${{ github.ref }}
-  cancel-in-progress: true
+  # A push to main publishes the analysis: never cancel one mid-scan. A newer push still
+  # replaces a queued one, so the latest commit is scanned and analyses arrive in order.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   sonarcloud:

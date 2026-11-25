@@ -1,0 +1,106 @@
+name: "Windows build diagnostic"
+
+# Finds why Windows builds take about 1.5x as long as Linux. Run by hand only: it compiles one
+# repository four ways on the same commit and prints what each variant changes. Nothing calls it.
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Repository whose tests are compiled"
+        type: string
+        default: "storytold/craft-libs"
+      ref:
+        description: "Branch, tag or commit to compile"
+        type: string
+        default: "main"
+      command:
+        description: "The build to time, run with bash; --timings is added so each unit's duration is kept"
+        type: string
+        default: "cargo test --workspace --no-run --lib --bins --tests --all-features --timings"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: ${{ matrix.variant }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, defender-exclusions, dev-drive, both]
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Machine state
+        shell: pwsh
+        run: |
+          Get-ComputerInfo -Property OsName, OsVersion, CsProcessors | Format-List
+          Get-MpComputerStatus | Select-Object AMRunningMode, RealTimeProtectionEnabled, AntivirusSignatureVersion | Format-List
+          Get-MpPreference | Select-Object DisableRealtimeMonitoring, ExclusionPath, ExclusionProcess | Format-List
+          fsutil fsinfo volumeinfo D:
+
+      # Process start-up cost: rustc is launched once per unit, so a 1.5x ratio here against a Linux
+      # run of the same loop means the gap is per-process cost and only fewer processes help.
+      - name: Launch benchmark
+        shell: pwsh
+        run: |
+          $t = Measure-Command { 1..300 | ForEach-Object { rustc --version | Out-Null } }
+          "300 launches of rustc --version: $($t.TotalSeconds) s"
+
+      - name: Defender exclusions
+        if: matrix.variant == 'defender-exclusions' || matrix.variant == 'both'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath 'D:\t', "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", "$env:GITHUB_WORKSPACE"
+          Add-MpPreference -ExclusionProcess 'rustc.exe', 'cargo.exe', 'link.exe', 'rust-lld.exe'
+          Get-MpPreference | Select-Object ExclusionPath, ExclusionProcess | Format-List
+
+      # A ReFS Dev Drive for the target directory; Defender runs it in performance mode.
+      - name: Dev Drive
+        if: matrix.variant == 'dev-drive' || matrix.variant == 'both'
+        shell: pwsh
+        run: |
+          $vhd = New-VHD -Path 'D:\devdrive.vhdx' -SizeBytes 30GB -Dynamic
+          $disk = Mount-VHD -Path $vhd.Path -Passthru | Initialize-Disk -PassThru
+          $volume = New-Partition -InputObject $disk -AssignDriveLetter -UseMaximumSize | Format-Volume -DevDrive -Confirm:$false -Force
+          "CARGO_TARGET_DIR=$($volume.DriveLetter):\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          fsutil devdrv query "$($volume.DriveLetter):"
+
+      - name: Target directory
+        if: matrix.variant == 'baseline' || matrix.variant == 'defender-exclusions'
+        shell: pwsh
+        run: '"CARGO_TARGET_DIR=D:\t" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          if [ -f rust-toolchain.toml ]; then channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml); fi
+          rustup toolchain install "${channel:-stable}" --profile minimal --no-self-update
+          rustup default "${channel:-stable}"
+          rustc --version
+
+      - name: Build
+        shell: bash
+        env:
+          BUILD: ${{ inputs.command }}
+        run: |
+          start=$(date +%s)
+          bash -euo pipefail -c "$BUILD"
+          echo "build seconds: $(( $(date +%s) - start ))"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: timings-${{ matrix.variant }}
+          path: ${{ env.CARGO_TARGET_DIR }}/cargo-timings/*.html
+          if-no-files-found: warn

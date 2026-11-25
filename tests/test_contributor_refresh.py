@@ -81,7 +81,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
         """Keep refresh read-only and publish the validated file under its output name."""
         workflow = load('refresh-contributors.yml')
         self.assertEqual(workflow['permissions'], {'contents': 'read', 'pull-requests': 'read'})
-        steps = workflow['jobs']['refresh']['steps']
+        steps = [s for s in workflow['jobs']['refresh']['steps'] if s.get('name') != 'Harden runner']
         checkout = steps[0]
         self.assertEqual(checkout['with']['fetch-depth'], '0')
         self.assertEqual(checkout['with']['persist-credentials'], 'false')
@@ -97,7 +97,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
 
     def test_generator_is_shared_and_paired_with_the_workflow_revision(self):
         """Pinned and forked workflows select their own generator, with literal path arguments."""
-        steps = load('refresh-contributors.yml')['jobs']['refresh']['steps']
+        steps = [s for s in load('refresh-contributors.yml')['jobs']['refresh']['steps'] if s.get('name') != 'Harden runner']
         self.assertEqual(steps[1]['uses'], '$/actions/refresh-contributors')
         action = shared_action()['runs']['steps'][0]
         self.assertEqual(action['env']['GENERATOR_PATH'], '${{ github.action_path }}/refresh_contributors.py')
@@ -134,7 +134,7 @@ Path('contributors/contributors.json').write_text(json.dumps(credits))
                 self.assertEqual(settings['path'], 'contributors')
                 build_steps = [i for i, s in enumerate(steps)
                                if 'cargo ' in s.get('run', '') or 'packaging/' in s.get('run', '')
-                               or 'vmactions/freebsd-vm@' in s.get('uses', '')]
+                               or 'step-security/freebsd-vm@' in s.get('uses', '')]
                 self.assertTrue(build_steps)
                 self.assertTrue(all(download < i for i in build_steps))
                 self.assertNotIn('continue-on-error', steps[download])

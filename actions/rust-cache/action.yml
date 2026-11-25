@@ -1,0 +1,398 @@
+name: "Rust cache"
+description: >-
+  The suite's rust-cache dependency cache, with one key shared by every job that builds the same
+  workspace. The restore prefix hashes the canonical root [profile] table without the wasm-only
+  profiles, named web or wasm (a dependency, version, comment or web-profile edit keeps the cache), and rust-cache still keys on the lockfile, member manifests,
+  toolchain and build environment. Restores by default and saves only where the caller allows it.
+
+inputs:
+  cache-version:
+    description: "gate.yml's cache-version: bump it to start the dependency cache afresh"
+    required: false
+    # v2: the entries saved under v1 lost most dependencies to the old cleanup (see the Rust cache
+    # step), and rust-cache never replaces an exact-key entry, so they would be restored as they
+    # are until the lockfile changes. The new prefix makes the next default-branch run save a full one.
+    default: "v2"
+  job:
+    description: >-
+      The job whose cache entry to use; the calling job by default. Name the job that saves the
+      entry (the gate workflow's is `gate`) to restore it from your own job without writing to it.
+    required: false
+    default: ""
+  save-if:
+    description: >-
+      Whether to save the cache: true or false, normally the value of a GitHub expression. Only an
+      accepted true saves (after trimming ASCII whitespace, ignoring ASCII case); empty,
+      whitespace-only or unrecognized values restore only.
+    required: false
+    default: "false"
+  cache-on-failure:
+    description: >-
+      Save the cache even when the job fails. Off by default: a job that fails before its test
+      build (fmt, clippy) saves an entry without the test profile's dependencies, and rust-cache
+      never replaces an exact-key entry, so every run restores the half-filled entry until
+      Cargo.lock changes
+    required: false
+    default: "false"
+  align-environment:
+    description: >-
+      Drop CARGO_HOME from the cache key so it matches a leg that never had one. A toolchain action
+      exports CARGO_HOME=$HOME/.cargo, which rust-cache hashes; the value changes nothing about the
+      build, and the action's cached registry paths are that same directory, so it is only noise in
+      the key. Refuses to run when CARGO_HOME points somewhere else, unless it is the runner's own
+      cache that CRAFT_RUNNER_CARGO_HOME names.
+    required: false
+    default: "false"
+  cache-workspace-crates:
+    description: >-
+      Keep the workspace crates' compiled libraries and library unit-test executables in the entry
+      as well, in a rolling entry: a saving run writes an entry of its own, and every run restores
+      the newest one. The entry also holds .ci-cache-meta, where actions/restore-mtimes records the
+      commit it was built from; pair the two so Cargo rebuilds only what changed since then
+    required: false
+    default: "false"
+  restore:
+    description: >-
+      With cache-workspace-crates: restore the newest entry. `false` builds everything from source
+      and, where the caller saves, writes a fresh entry
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    # Root workspace profiles are not among rust-cache's member manifests. Hash only the native
+    # ones here: a dependency/version/comment change must not discard the fallback cache for every other
+    # dependency. rust-cache still hashes the lockfile, toolchain, member manifests and build
+    # environment, and Cargo checks fingerprints.
+    - name: Cache profile key
+      id: cache-profile
+      shell: bash
+      run: |
+        python - <<'PYTHON'
+        import hashlib
+        import json
+        import os
+        import re
+        import tomllib
+        from pathlib import Path
+        # A profile named web or wasm (web, web-release, wasm-release) builds only for a wasm
+        # target, so editing it cannot change a native build's dependency artifacts.
+        wasm_only = re.compile(r"(web|wasm)([-_].*)?")
+        manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+        native = {name: table for name, table in manifest.get("profile", {}).items()
+                  if not wasm_only.fullmatch(name)}
+        profiles = json.dumps(native, sort_keys=True, separators=(",", ":"))
+        key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"key={key}\n")
+        PYTHON
+
+    # Equivalent to the old `key: <profile hash>` plus rust-cache's automatic GITHUB_JOB suffix.
+    # A shared-key contains that entire fragment; rust-cache appends no further job id to it.
+    # Refuse an empty half instead of silently missing every restore.
+    - name: Cache entry
+      id: entry
+      shell: bash
+      env:
+        PROFILE: ${{ steps.cache-profile.outputs.key }}
+        JOB: ${{ inputs.job || github.job }}
+        CRATES: ${{ inputs.cache-workspace-crates }}
+      run: |
+        set -euo pipefail
+        if [ -z "$PROFILE" ] || [ -z "$JOB" ]; then
+          echo "::error::the cache key needs a profile hash and a job name, got '${PROFILE}' and '${JOB}'"
+          exit 1
+        fi
+        echo "key=$PROFILE-$JOB" >>"$GITHUB_OUTPUT"
+        if [ "${CRATES:-false}" = true ]; then
+          # rust-cache appends `-<os.type()>-<os.arch()>` to the shared key (src/config.ts), so a
+          # run's own entry (the Run entry step) repeats that suffix to start with the restore
+          # step's whole key.
+          case "$RUNNER_OS" in
+            Linux) os=Linux ;;
+            Windows) os=Windows_NT ;;
+            macOS) os=Darwin ;;
+            *) echo "::error::cache-workspace-crates: unknown runner OS '$RUNNER_OS'"; exit 1 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) arch=x64 ;;
+            ARM64) arch=arm64 ;;
+            *) echo "::error::cache-workspace-crates: unknown runner architecture '$RUNNER_ARCH'"; exit 1 ;;
+          esac
+          echo "crates=$PROFILE-$JOB-crates" >>"$GITHUB_OUTPUT"
+          echo "crates-os=$PROFILE-$JOB-crates-$os-$arch" >>"$GITHUB_OUTPUT"
+        fi
+
+    # rust-cache reads an *empty* save-if as `true` (it trims the input and falls back to true when
+    # nothing is left), so this action emits one canonical word and only an accepted `true` grants a
+    # save: an empty, whitespace-only or unrecognized input restores instead.
+    - name: Cache save policy
+      id: save
+      shell: bash
+      env:
+        SAVE: ${{ inputs.save-if }}
+      run: |
+        set -euo pipefail
+        # The input is a caller's decision, never code: it is matched against two words, not
+        # evaluated. Whitespace and case are ASCII only, deliberately. rust-cache's own trim leaves
+        # U+0085 (NEL) in place and so refuses a value wrapped in it, which this matches; it does
+        # strip U+00A0 (NBSP) and the other Unicode spaces, which this deliberately does not, so the
+        # wrapper is never looser than the cache action -- only narrower.
+        LC_ALL=C
+        export LC_ALL
+        value="${SAVE-}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        case "$value" in
+          [Tt][Rr][Uu][Ee])
+            echo "save=true" >>"$GITHUB_OUTPUT"
+            ;;
+          ''|[Ff][Aa][Ll][Ss][Ee])
+            echo "save=false" >>"$GITHUB_OUTPUT"
+            ;;
+          *)
+            # Fail closed: a blank, whitespace-only or other unrecognized value never saves. One
+            # line always, so a newline in the input cannot add a second GITHUB_OUTPUT record. The
+            # value itself is never echoed: it is a caller's configuration and a misdirected one
+            # could hold a secret, which the log has no use for.
+            printf '::warning::save-if is not true or false after trimming, so this run restores only\n'
+            echo "save=false" >>"$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    # rust-cache looks for the target directory at `<workspace>/<target>` (a path join), so a
+    # CARGO_TARGET_DIR outside the checkout, such as a short `D:\t` on Windows, has to reach it
+    # as a relative path. Without that it restores nothing and the save finds no path to cache
+    # (storytold/photocraft#15232). Unset, this is rust-cache's own default, `. -> target`.
+    - name: Cache target directory
+      id: target
+      shell: bash
+      run: |
+        python - <<'PYTHON'
+        import os
+        target = os.environ.get("CARGO_TARGET_DIR") or "target"
+        try:
+            relative = os.path.relpath(os.path.abspath(target), os.getcwd())
+        except ValueError:
+            print(f"::error::CARGO_TARGET_DIR {target} is on another drive than the checkout, which rust-cache can only reach by a relative path")
+            raise SystemExit(1)
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"workspaces=. -> {relative.replace(os.sep, '/')}\n")
+        PYTHON
+
+    # rust-cache hashes every CARGO*, CC*, CFLAGS*, CXX*, CMAKE* and RUST* variable it can see
+    # (src/config.ts). A toolchain action's CARGO_HOME export therefore splits a key that should be
+    # shared; the plain and the aligned cache steps below differ only in that variable.
+    #
+    # rust-cache also caches, and at save prunes, the registry, git and bin directories under
+    # CARGO_HOME, and it has no input to leave them out. A self-hosted runner whose CARGO_HOME is a
+    # cache of its own (a node-wide crate cache that other jobs read and write at the same time)
+    # names that directory in CRAFT_RUNNER_CARGO_HOME. When the job's CARGO_HOME is that directory,
+    # rust-cache gets an unused, job-private directory as CARGO_HOME instead, so it never restores
+    # into, prunes or saves the runner's cache, and its entries hold only the target directory. That path
+    # differs from a GitHub-hosted leg's, so the two never restore each other's entries. A job that
+    # sets a CARGO_HOME of its own is not the runner's and is aligned or refused as before.
+    # Outputs: `mode` (empty for the plain steps, `aligned`, or `runner`) and the `cargo-home` the
+    # aligned steps give rust-cache.
+    - name: Align the cache environment
+      id: cargo-home
+      if: inputs.align-environment == 'true' || runner.environment != 'github-hosted'
+      shell: bash
+      env:
+        ALIGN: ${{ inputs.align-environment }}
+      run: |
+        set -euo pipefail
+        # Compare the directories, not their spelling. On a Windows runner git-bash reports
+        # $HOME/.cargo as /c/Users/x/.cargo while the same directory arrives as C:\Users\x\.cargo
+        # from a native tool or a workflow input: one directory, two spellings, and a drive letter
+        # whose case is not significant there either. Refuse only when the paths really differ.
+        normalise() {
+          local path="${1//\\//}"
+          path="${path%/}"
+          case "$path" in
+            [A-Za-z]:*) printf '/%s%s' "$(printf '%s' "${path%%:*}" | tr '[:upper:]' '[:lower:]')" "${path#?:}" ;;
+            *) printf '%s' "$path" ;;
+          esac
+        }
+        same_directory() {
+          local left right
+          if [ -d "$1" ] && [ -d "$2" ]; then
+            left="$(cd "$1" && pwd -P)"
+            right="$(cd "$2" && pwd -P)"
+          else
+            left="$(normalise "$1")"
+            right="$(normalise "$2")"
+            case "$1$2" in
+              *[A-Za-z]:*)
+                left="$(printf '%s' "$left" | tr '[:upper:]' '[:lower:]')"
+                right="$(printf '%s' "$right" | tr '[:upper:]' '[:lower:]')"
+                ;;
+            esac
+          fi
+          [ "$left" = "$right" ]
+        }
+        if [ -n "${CRAFT_RUNNER_CARGO_HOME:-}" ] && [ -n "${CARGO_HOME:-}" ] \
+          && same_directory "$CARGO_HOME" "$CRAFT_RUNNER_CARGO_HOME"; then
+          echo "CARGO_HOME is the runner's own cache, so rust-cache leaves it alone"
+          echo "mode=runner" >>"$GITHUB_OUTPUT"
+          echo "cargo-home=$RUNNER_TEMP/rust-cache-cargo-home" >>"$GITHUB_OUTPUT"
+        elif [ "$ALIGN" = true ]; then
+          if [ -n "${CARGO_HOME:-}" ] && ! same_directory "$CARGO_HOME" "$HOME/.cargo"; then
+            echo "::error::align-environment matches a leg with no CARGO_HOME, but this job sets $CARGO_HOME; drop the input, or stop overriding CARGO_HOME, so the cache never restores another registry directory"
+            exit 1
+          fi
+          echo "mode=aligned" >>"$GITHUB_OUTPUT"
+          echo "cargo-home=" >>"$GITHUB_OUTPUT"
+        fi
+
+    # v2.9.3 is the first release with both fixes the suite needs:
+    # - Cargo's new build-dir layout (`build/<package>/<hash>/`, Rust 1.100) keeps its directories.
+    #   Older cleanups cut every name at its last `-` as if it ended in `-<hash>`, so `build/cfg-if`
+    #   became `cfg` and was deleted: each saved entry lost most dependencies (Swatinem#371).
+    # - Windows saves find their paths. A bundled minimatch 3 whose `require('path')` throws in the
+    #   ES-module build fell back to `/` as the separator, and every Windows save failed with
+    #   "Path Validation Error" (#249: step-security's v2.9.2 fork has #371 but not Swatinem#355,
+    #   which uses the top-level @actions/glob instead).
+    # Every rust-cache pin in this repository stays on this commit (tests/test_rust_cache.py).
+    - name: Rust cache
+      if: inputs.cache-workspace-crates != 'true' && steps.cargo-home.outputs.mode == ''
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        save-if: ${{ steps.save.outputs.save }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # An empty CARGO_HOME (align-environment) is falsy to rust-cache, so it leaves the variable out
+    # of the environment hash and falls back to $HOME/.cargo for the paths it caches
+    # (src/config.ts: `value &&` in the hash loop, `process.env.CARGO_HOME || path.join(HOME,
+    # ".cargo")` for the paths). On a runner-provided cargo home it is the job-private directory.
+    - name: Rust cache (aligned environment)
+      if: inputs.cache-workspace-crates != 'true' && steps.cargo-home.outputs.mode != ''
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      env:
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        save-if: ${{ steps.save.outputs.save }}
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # cache-workspace-crates: a rolling entry. rust-cache never replaces an entry whose key exists,
+    # and its key changes only with the lockfile, so a fixed key would keep the first saved commit
+    # until Cargo.lock changes, and the diff restore-mtimes touches would grow toward a full
+    # rebuild. Each saving run therefore writes an entry of its own (see Run entry), and the restore
+    # below leaves the environment and lockfile hashes out of its key, so rust-cache's restore key
+    # is `<job>-crates-<os>-<arch>` and GitHub returns the newest entry under that prefix. Both
+    # steps cache the same paths, so the saved entries match the restore's version. Toolchain and
+    # lockfile changes still restore the newest entry; Cargo rebuilds what they touch.
+    - name: Rust cache (newest workspace entry)
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && steps.cargo-home.outputs.mode == ''
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.crates }}
+        add-rust-environment-hash-key: "false"
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        save-if: "false"
+
+    - name: Rust cache (newest workspace entry, aligned environment)
+      if: inputs.cache-workspace-crates == 'true' && inputs.restore != 'false' && steps.cargo-home.outputs.mode != ''
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      env:
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.entry.outputs.crates }}
+        add-rust-environment-hash-key: "false"
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        save-if: "false"
+
+    # The run's entry is named after the entry the restore above brought back, by the run id that
+    # entry recorded in .ci-cache-meta/entry: `<job>-crates-<os>-<arch>-<parent run>-0`. Runs that
+    # restored the same entry, with the same lockfile and toolchain, compute the same key, and GitHub
+    # refuses to save a key that exists, so a run whose restored entry already has a newer child saves
+    # nothing (rust-cache still packs the archive; the reservation then fails with one warning). Attempt 0 never names a run, so the key
+    # cannot equal a run's own. Nothing restored gives `0-0`, so concurrent first runs save once
+    # too. A cold build, or a restored entry from before the record existed, writes the run's own
+    # `<run>-<attempt>`: a cold build must always be able to start a fresh entry.
+    - name: Run entry
+      id: run-entry
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true'
+      shell: bash
+      env:
+        PREFIX: ${{ steps.entry.outputs.crates-os }}
+        RESTORE: ${{ inputs.restore }}
+        RUN_ID: ${{ github.run_id }}
+        RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        set -euo pipefail
+        META=.ci-cache-meta
+        parent=""
+        if [ -s "$META/entry" ]; then
+          parent=$(tr -d '[:space:]' < "$META/entry")
+        fi
+        if [ "$RESTORE" = false ]; then
+          suffix=$RUN
+        elif [[ "$parent" =~ ^[0-9]+$ ]]; then
+          suffix=$parent-0
+        elif [ -e "$META/commit" ]; then
+          suffix=$RUN
+        else
+          suffix=0-0
+        fi
+        mkdir -p "$META"
+        echo "$RUN_ID" > "$META/entry"
+        echo "key=$PREFIX-$suffix" >>"$GITHUB_OUTPUT"
+        echo "this run's entry: $PREFIX-$suffix"
+
+    # Its restore usually finds nothing and leaves the restored files alone. An overlapping run that
+    # restored the same parent may have saved this key in the seconds since the restore above: an
+    # exact match then restores that sibling's entry and the post step skips the save ("Cache
+    # up-to-date"), and a match with another lockfile hash restores it and cleans the target
+    # directory first. Either way the build stays correct. The post step trims the target directory
+    # to dependencies and workspace crates and saves.
+    - name: Rust cache (this run's workspace entry)
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true' && steps.cargo-home.outputs.mode != 'runner'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.run-entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        cache-workspace-crates: "true"
+        save-if: "true"
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # The same save with the runner-provided cargo home's job-private stand-in, so the entry's paths
+    # match the restore's above and the runner's own cache is never pruned.
+    - name: Rust cache (this run's workspace entry, runner cargo home)
+      if: inputs.cache-workspace-crates == 'true' && steps.save.outputs.save == 'true' && steps.cargo-home.outputs.mode == 'runner'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      env:
+        CARGO_HOME: ${{ steps.cargo-home.outputs.cargo-home }}
+      with:
+        prefix-key: ${{ inputs.cache-version }}-rust
+        shared-key: ${{ steps.run-entry.outputs.key }}
+        workspaces: ${{ steps.target.outputs.workspaces }}
+        cache-directories: .ci-cache-meta
+        cache-workspace-crates: "true"
+        save-if: "true"
+        cache-on-failure: ${{ inputs.cache-on-failure }}
+
+    # A saving leg's build records the units it used in this file (Cargo's JSON messages), and
+    # actions/cache-trim trims the target directory to them before the post step saves. The name
+    # starts with none of the prefixes rust-cache hashes into its key (CARGO, CC, CFLAGS, CXX, CMAKE,
+    # RUST): a variable only saving legs set would split their key from every other leg's. The start
+    # time beside it lets the trim tell a unit this job built but did not record from a stale one.
+    - name: Unit record
+      if: steps.save.outputs.save == 'true'
+      shell: bash
+      run: |
+        date +%s >"$RUNNER_TEMP/craft-cache-units.start"
+        echo "CRAFT_CACHE_UNITS=$RUNNER_TEMP/craft-cache-units.jsonl" >>"$GITHUB_ENV"

@@ -50,8 +50,8 @@ class SupplyChainOptInTests(unittest.TestCase):
         self.assertEqual(permissions["contents"], "write")
         uses = [step["uses"] for step in job["steps"] if "uses" in step]
         self.assertTrue(any(item.startswith("actions/attest@") for item in uses))
-        self.assertTrue(any(item.startswith("anchore/sbom-action@") for item in uses))
-        sbom = next(step for step in job["steps"] if step.get("uses", "").startswith("anchore/sbom-action@"))
+        self.assertTrue(any(item.startswith(("anchore/sbom-action@", "step-security/sbom-action@")) for item in uses))
+        sbom = next(step for step in job["steps"] if step.get("uses", "").startswith(("anchore/sbom-action@", "step-security/sbom-action@")))
         self.assertEqual(sbom["with"]["upload-release-assets"], "false")
         self.assertEqual(sbom["with"]["format"], "cyclonedx-json")
 
@@ -64,7 +64,7 @@ class SupplyChainOptInTests(unittest.TestCase):
         steps = self.supply["jobs"]["attest"]["steps"]
         collection = next(step for step in steps if step.get("name") == "Collect release files")
         for index, step in enumerate(steps):
-            if step.get("uses", "").startswith(("anchore/sbom-action@", "actions/attest@")):
+            if step.get("uses", "").startswith(("anchore/sbom-action@", "step-security/sbom-action@", "actions/attest@")):
                 self.assertLess(steps.index(collection), index)
                 self.assertNotIn("if", step)
         self.assertNotIn("continue-on-error", collection)

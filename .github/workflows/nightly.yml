@@ -1,0 +1,853 @@
+name: Dedicated Photo nightly producer (private source)
+# GitHub.com only. Protected isolated signing; no diagnostic matrix or enabled schedule.
+on:
+  workflow_call:
+    secrets:
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERT_PROFILE:
+        required: false
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      LINUX_SIGNING_KEY:
+        required: false
+    inputs:
+      force:
+        type: boolean
+        default: false
+      manual-actors:
+        description: "Reviewed literal JSON logins in caller source; accidental-use guard only; empty disables manual runs and re-runs"
+        type: string
+        default: '[]'
+      tooling-revision:
+        type: string
+        required: true
+      app-name:
+        type: string
+        required: true
+      app-title:
+        type: string
+        required: true
+      craft-fonts-ref:
+        type: string
+        default: bfcbf714e45a3ea8e98f88ab2b7971372a576414
+      linux-signing-fingerprint:
+        description: "Reviewed full uppercase primary fingerprint of the stable Linux key, committed in caller source; never a repository variable"
+        type: string
+        default: ''
+      production-signing:
+        description: "Opt in to production-signed nightly artifacts (and their publication). Off unless the caller sets true; a caller existing is not consent to sign."
+        type: boolean
+        default: false
+      apple-team-id:
+        description: "Reviewed literal Apple Developer team ID in caller source (public; stable's team). Empty refuses macOS signing."
+        type: string
+        default: ''
+      windows-publisher-subject:
+        description: "Reviewed literal exact Authenticode publisher subject in caller source (public); empty refuses Windows signing"
+        type: string
+        default: ''
+permissions:
+  contents: read
+env:
+  TOOLING_REVISION: ${{ inputs.tooling-revision }}
+  NIGHTLY_REVIEWED_POLICY_SHA256: ${{ vars.NIGHTLY_REVIEWED_POLICY_SHA256 }}
+jobs:
+  identity:
+    if: >-
+      inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      build: ${{ steps.prepare.outputs.build }}
+      version: ${{ steps.prepare.outputs.version }}
+      ready: ${{ steps.prepare.outputs.ready }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.seal.outputs.sha256 }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Read exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
+      - name: Prepare immutable identity and run cheap bounded quality and pause preflight
+        id: prepare
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+          FORCE_NIGHTLY: ${{ inputs.force }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_policy.py prepare \
+            --registry .nightly-tools/nightly-apps.json --app "$APP_NAME" \
+            --config .github/nightly-publication-policy.json --identity .nightly-input/nightly-identity.json \
+            --policy .nightly-input/nightly-producer-policy.json --force "$FORCE_NIGHTLY"
+      - name: Independently hash the exact identity and policy in their producer job
+        id: seal
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py seal --kind identity --directory .nightly-input
+      - name: Upload the producer-bound identity
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          include-hidden-files: true
+          name: nightly-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .nightly-input/*
+          if-no-files-found: error
+          retention-days: 14
+
+  build-windows:
+    needs: identity
+    if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true
+    permissions:
+      contents: read
+    uses: $/.github/workflows/nightly-windows.yml
+    with:
+      manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
+      tooling-revision: ${{ inputs.tooling-revision }}
+      app-name: ${{ inputs.app-name }}
+      version: ${{ needs.identity.outputs.version }}
+      identity-artifact-id: ${{ needs.identity.outputs.artifact-id }}
+      identity-sha256: ${{ needs.identity.outputs.sha256 }}
+      craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+      windows-publisher-subject: ${{ inputs.windows-publisher-subject }}
+    secrets:
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+      AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+      AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+
+  build-linux:
+    # Same opt-in as Windows: no signing, staging or Linux secret use unless the caller sets production-signing.
+    if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true
+    needs: identity
+    permissions:
+      contents: read
+    uses: $/.github/workflows/nightly-unix.yml
+    with:
+      manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
+      tooling-revision: ${{ inputs.tooling-revision }}
+      app-name: ${{ inputs.app-name }}
+      version: ${{ needs.identity.outputs.version }}
+      identity-artifact-id: ${{ needs.identity.outputs.artifact-id }}
+      identity-sha256: ${{ needs.identity.outputs.sha256 }}
+      platform: linux-x86_64
+      craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+      linux-signing-fingerprint: ${{ inputs.linux-signing-fingerprint }}
+    secrets:
+      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+
+  build-macos:
+    needs: identity
+    if: needs.identity.outputs.ready == 'true' && needs.identity.outputs.build == 'true' && inputs.production-signing == true
+    permissions:
+      contents: read
+    uses: $/.github/workflows/nightly-unix.yml
+    with:
+      manual-actors: ${{ inputs.manual-actors }}
+      production-signing: ${{ inputs.production-signing }}
+      tooling-revision: ${{ inputs.tooling-revision }}
+      app-name: ${{ inputs.app-name }}
+      version: ${{ needs.identity.outputs.version }}
+      identity-artifact-id: ${{ needs.identity.outputs.artifact-id }}
+      identity-sha256: ${{ needs.identity.outputs.sha256 }}
+      platform: macos-aarch64
+      craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+      apple-team-id: ${{ inputs.apple-team-id }}
+    secrets:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  status:
+    if: always()
+    needs: [identity, build-windows, build-linux, build-macos, stage-nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Summarize the installable-only path and real barriers
+        env:
+          IDENTITY_RESULT: ${{ needs.identity.result }}
+          WINDOWS_RESULT: ${{ needs.build-windows.result }}
+          MACOS_RESULT: ${{ needs.build-macos.result }}
+          LINUX_RESULT: ${{ needs.build-linux.result }}
+          STAGING_RESULT: ${{ needs.stage-nightly.result }}
+          BUILD_REQUESTED: ${{ needs.identity.outputs.build }}
+          PRODUCTION_SIGNING: ${{ inputs.production-signing }}
+        run: |
+          {
+            echo '## Dedicated nightly source candidate'
+            printf 'Identity/preflight: `%s`. Windows build: `%s`. Linux build: `%s`. macOS build: `%s`. Build requested: `%s`.\n' "$IDENTITY_RESULT" "$WINDOWS_RESULT" "$LINUX_RESULT" "$MACOS_RESULT" "$BUILD_REQUESTED"
+            printf 'Packet staging: `%s`.\n' "$STAGING_RESULT"
+            printf 'Production signing opted in by the caller: `%s`.\n' "$PRODUCTION_SIGNING"
+            echo 'Named policy refusal is in the identity step summary; a failed/red check is not bypassed.'
+            echo 'Legacy diagnostics have a separate workflow/run and cannot contribute artifacts here.'
+            echo 'Windows and macOS require verified signing (macOS: Developer ID, notarized, stapled); skipped native jobs are not platform coverage.'
+            echo 'Unchanged-source skip applies to this installable producer only. Diagnostics run independently.'
+            echo 'Publication and attestation are literally disabled; no native/quality/admission proof is implied.'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$IDENTITY_RESULT" = success
+          if [ "$BUILD_REQUESTED" = true ] && [ "$PRODUCTION_SIGNING" = true ]; then
+            test "$WINDOWS_RESULT" = success
+            test "$LINUX_RESULT" = success
+            test "$MACOS_RESULT" = success
+            test "$STAGING_RESULT" = success
+          fi
+
+  stage-nightly:
+    if: >-
+      inputs.production-signing == true &&
+      needs.identity.outputs.ready == 'true' && needs.build-windows.result == 'success' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' &&
+      needs.identity.outputs.build == 'true' &&
+      github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'schedule' && github.run_attempt == '1') ||
+       ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+        contains(fromJSON(inputs.manual-actors), github.triggering_actor)))
+    needs: [identity, build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.seal.outputs.sha256 }}
+    env:
+      NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}
+      NIGHTLY_APPLE_TEAM_ID: ${{ inputs.apple-team-id }}
+      NIGHTLY_LINUX_SIGNING_FINGERPRINT: ${{ inputs.linux-signing-fingerprint }}
+    steps:
+      - name: Read exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
+      - name: Require exact Windows signer receipt ID and independent signer hash
+        shell: bash
+        env:
+          RECEIPT_ID: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$RECEIPT_ID" --expected-sha256 "$RECEIPT_SHA256"
+      - name: Download original Windows signer receipt by exact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          path: .nightly-signing-windows-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck original unsigned to final signed Windows provenance before consuming package
+        env:
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform windows-x86_64 \
+            --receipt-directory .nightly-signing-windows-x86_64 --receipt-sha256 "$RECEIPT_SHA256" \
+            --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}" \
+            --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256"
+      - name: Require exact macOS signer receipt ID and independent signer hash
+        shell: bash
+        env:
+          RECEIPT_ID: ${{ needs.build-macos.outputs.receipt-artifact-id }}
+          RECEIPT_SHA256: ${{ needs.build-macos.outputs.receipt-sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$RECEIPT_ID" --expected-sha256 "$RECEIPT_SHA256"
+      - name: Download original macOS signer receipt by exact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.build-macos.outputs.receipt-artifact-id }}
+          path: .nightly-signing-macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck original unsigned to final signed macOS provenance before consuming package
+        env:
+          RECEIPT_SHA256: ${{ needs.build-macos.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-macos.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          ASSET: ${{ needs.build-macos.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform macos-aarch64 \
+            --receipt-directory .nightly-signing-macos-aarch64 --receipt-sha256 "$RECEIPT_SHA256" \
+            --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}" \
+            --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256"
+      - name: Require exact Linux signer receipt ID and independent signer hash
+        shell: bash
+        env:
+          RECEIPT_ID: ${{ needs.build-linux.outputs.receipt-artifact-id }}
+          RECEIPT_SHA256: ${{ needs.build-linux.outputs.receipt-sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$RECEIPT_ID" --expected-sha256 "$RECEIPT_SHA256"
+      - name: Download original Linux signer receipt by exact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.build-linux.outputs.receipt-artifact-id }}
+          path: .nightly-signing-linux-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck original unsigned to final signed Linux provenance before consuming package
+        env:
+          RECEIPT_SHA256: ${{ needs.build-linux.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-linux.outputs.sha256 }}
+          ASSET: ${{ needs.build-linux.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform linux-x86_64 \
+            --receipt-directory .nightly-signing-linux-x86_64 --receipt-sha256 "$RECEIPT_SHA256" \
+            --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}" \
+            --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256"
+      - name: Require exact numeric IDs and independent producer hashes before download
+        shell: bash
+        env:
+          IDENTITY_ID: ${{ needs.identity.outputs.artifact-id }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          WINDOWS_ID: ${{ needs.build-windows.outputs.artifact-id }}
+          WINDOWS_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          MACOS_ID: ${{ needs.build-macos.outputs.artifact-id }}
+          MACOS_SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          LINUX_ID: ${{ needs.build-linux.outputs.artifact-id }}
+          LINUX_SHA256: ${{ needs.build-linux.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$LINUX_ID" --expected-sha256 "$LINUX_SHA256"
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$IDENTITY_ID" --expected-sha256 "$IDENTITY_SHA256"
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$WINDOWS_ID" --expected-sha256 "$WINDOWS_SHA256"
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$MACOS_ID" --expected-sha256 "$MACOS_SHA256"
+      - name: Download exact identity artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.identity.outputs.artifact-id }}
+          path: .nightly-input
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact final signed Windows ZIP artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-windows.outputs.artifact-id }}
+          path: .nightly-build-windows-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact final signed Linux package and detached signature by artifact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-linux.outputs.artifact-id }}
+          path: .nightly-build-linux-x86_64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Reverify Linux bytes and signature against the reviewed source key, never the bundled export
+        env:
+          RECEIPT_SHA256: ${{ needs.build-linux.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-linux.outputs.sha256 }}
+          ASSET: ${{ needs.build-linux.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform linux-x86_64 \
+            --receipt-directory .nightly-signing-linux-x86_64 --receipt-sha256 "$RECEIPT_SHA256" \
+            --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}" \
+            --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256" \
+            --package-directory .nightly-build-linux-x86_64 --source .
+      - name: Download exact final notarized macOS ZIP artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build-macos.outputs.artifact-id }}
+          path: .nightly-build-macos-aarch64
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify independent producer bytes, then stage every admitted platform together
+        env:
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          WINDOWS_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          WINDOWS_ASSET: ${{ needs.build-windows.outputs.asset }}
+          MACOS_SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          MACOS_ASSET: ${{ needs.build-macos.outputs.asset }}
+          LINUX_ASSET: ${{ needs.build-linux.outputs.asset }}
+          APP_NAME: ${{ inputs.app-name }}
+        run: |
+          set -euo pipefail
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py verify --kind identity --directory .nightly-input --expected-sha256 "$IDENTITY_SHA256"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py verify --kind zip --directory .nightly-build-windows-x86_64 --asset "$WINDOWS_ASSET" --expected-sha256 "$WINDOWS_SHA256"
+          python3 -B .nightly-tools/scripts/nightly_artifacts.py verify --kind zip --directory .nightly-build-macos-aarch64 --asset "$MACOS_ASSET" --expected-sha256 "$MACOS_SHA256"
+          mkdir .nightly-build
+          cp -- ".nightly-build-windows-x86_64/$WINDOWS_ASSET" ".nightly-build-macos-aarch64/$MACOS_ASSET" .nightly-build/
+          # Linux ships the verified tar.gz and its detached .asc only; the bundled key export is never staged.
+          cp -- ".nightly-build-linux-x86_64/$LINUX_ASSET" ".nightly-build-linux-x86_64/$LINUX_ASSET.asc" .nightly-build/
+          python3 -B .nightly-tools/scripts/nightly_feed.py stage-v2 \
+            --registry .nightly-tools/nightly-apps.json --app "$APP_NAME" \
+            --identity .nightly-input/nightly-identity.json --policy .nightly-input/nightly-producer-policy.json \
+            --artifacts .nightly-build --output .nightly-publish
+      - name: Bind the staged manifest/hash set and every final signed producer ZIP
+        id: seal
+        env:
+          WINDOWS_ASSET: ${{ needs.build-windows.outputs.asset }}
+          WINDOWS_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          MACOS_ASSET: ${{ needs.build-macos.outputs.asset }}
+          MACOS_SHA256: ${{ needs.build-macos.outputs.sha256 }}
+          LINUX_ASSET: ${{ needs.build-linux.outputs.asset }}
+          LINUX_SHA256: ${{ needs.build-linux.outputs.sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py seal --kind packet --directory .nightly-publish --asset "$WINDOWS_ASSET,$LINUX_ASSET,$MACOS_ASSET" --zip-sha256 "$WINDOWS_SHA256,$LINUX_SHA256,$MACOS_SHA256"
+      - name: Upload the stage-producer-bound packet
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          include-hidden-files: true
+          name: nightly-packet-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .nightly-publish/*
+          if-no-files-found: error
+          retention-days: 14
+
+
+  attest-nightly:
+    if: ${{ false }} # Actual attestation/publication needs separate explicit authorization.
+    needs: [identity, status, build-windows, stage-nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}
+    steps:
+      - name: Read exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
+      - name: Require exact signer receipt ID and independent signer hash
+        shell: bash
+        env:
+          RECEIPT_ID: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$RECEIPT_ID" --expected-sha256 "$RECEIPT_SHA256"
+      - name: Download original signer receipt by exact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          path: .nightly-signing
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck original unsigned to final signed provenance before consuming package
+        env:
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform windows-x86_64             --receipt-directory .nightly-signing --receipt-sha256 "$RECEIPT_SHA256"             --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}"             --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256"
+      - name: Require exact numeric IDs and independent producer hashes before download
+        shell: bash
+        env:
+          IDENTITY_ID: ${{ needs.identity.outputs.artifact-id }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          PACKET_ID: ${{ needs.stage-nightly.outputs.artifact-id }}
+          PACKET_SHA256: ${{ needs.stage-nightly.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$IDENTITY_ID" --expected-sha256 "$IDENTITY_SHA256"
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$PACKET_ID" --expected-sha256 "$PACKET_SHA256"
+      - name: Download exact identity artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.identity.outputs.artifact-id }}
+          path: .nightly-input
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact staged packet artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.stage-nightly.outputs.artifact-id }}
+          path: .nightly-publish
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Bind the exact provenance subject to final signed producer bytes
+        id: subject
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          PACKET_SHA256: ${{ needs.stage-nightly.outputs.sha256 }}
+          ZIP_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          SIGNER_RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+          ORIGINAL_UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_attestation.py \
+            --registry .nightly-tools/nightly-apps.json --config .github/nightly-publication-policy.json \
+            --identity .nightly-input/nightly-identity.json --policy .nightly-input/nightly-producer-policy.json \
+            --directory .nightly-publish --asset "$ASSET" \
+            --identity-sha256 "$IDENTITY_SHA256" --packet-sha256 "$PACKET_SHA256" --zip-sha256 "$ZIP_SHA256" \
+            --signing-receipt-directory .nightly-signing --signing-receipt-sha256 "$SIGNER_RECEIPT_SHA256" \
+            --unsigned-sha256 "$ORIGINAL_UNSIGNED_SHA256"
+      # Official pinned v3.2.0; provenance is neither signing nor quality proof.
+      - name: Attest the final signed producer-bound package
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        with:
+          subject-name: ${{ steps.subject.outputs.name }}
+          subject-digest: ${{ steps.subject.outputs.digest }}
+          push-to-registry: false
+
+  publish-nightly:
+    if: ${{ false }} # Actual attestation/publication needs separate explicit authorization.
+    needs: [identity, status, build-windows, stage-nightly, attest-nightly]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: nightly-publication-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+      checks: read
+    env:
+      NIGHTLY_WINDOWS_PUBLISHER_SUBJECT: ${{ inputs.windows-publisher-subject }}
+    steps:
+      - name: Read exact application source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind app-reviewed tooling to the defining job before shared checkout
+        shell: bash
+        env:
+          DEFINING_WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          python -I -B - <<'PY'
+          import json, os, pathlib, re
+          pin=os.environ['TOOLING_REVISION']
+          assert re.fullmatch('[0-9a-f]{40}',pin) and pin!='0'*40, 'reviewed immutable tooling SHA required'
+          assert os.environ['DEFINING_WORKFLOW_REPOSITORY']=='storytold/craft-common-actions', 'unexpected defining workflow repository'
+          assert os.environ['DEFINING_WORKFLOW_SHA']==pin, 'app-reviewed input must equal the defining job workflow SHA'
+          path=pathlib.Path('.github/nightly-publication-policy.json')
+          assert path.is_file() and not path.is_symlink(), 'app publication policy unresolved'
+          with path.open('rb') as stream: data=stream.read(262145)
+          assert len(data)<=262144, 'publication policy exceeds bound'
+          def unique(pairs):
+              result={}
+              for key,value in pairs:
+                  if key in result: raise ValueError('duplicate app-policy key')
+                  result[key]=value
+              return result
+          config=json.loads(data,object_pairs_hook=unique)
+          assert config.get('schema') in ('craft-nightly-publication-policy/v1','craft-nightly-publication-policy/v2') and config.get('tooling_revision')==pin, 'tooling pin differs from app-reviewed policy'
+          if config['schema'].endswith('/v2'):
+              import hashlib
+              expected=os.environ.get('NIGHTLY_REVIEWED_POLICY_SHA256','')
+              digest=hashlib.sha256(json.dumps(config,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+              assert re.fullmatch('[0-9a-f]{64}',expected) and digest==expected, 'independent reviewed baseline policy digest required'
+          PY
+      - name: Check out the defining job's own immutable tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Verify exact tooling checkout
+        shell: bash
+        run: test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+      - name: Admit scheduled first attempt or reviewed current manual actor before credentials or mutation
+        shell: bash
+        env:
+          NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+        run: python -I -B .nightly-tools/scripts/nightly_invocation.py
+      - name: Require exact signer receipt ID and independent signer hash
+        shell: bash
+        env:
+          RECEIPT_ID: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+        run: python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$RECEIPT_ID" --expected-sha256 "$RECEIPT_SHA256"
+      - name: Download original signer receipt by exact ID
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          artifact-ids: ${{ needs.build-windows.outputs.receipt-artifact-id }}
+          path: .nightly-signing
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recheck original unsigned to final signed provenance before consuming package
+        env:
+          RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}
+          SIGNED_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+        run: |
+          python3 -B .nightly-tools/scripts/nightly_signing.py verify-receipt --platform windows-x86_64             --receipt-directory .nightly-signing --receipt-sha256 "$RECEIPT_SHA256"             --asset "$ASSET" --identity-sha256 "${IDENTITY_SHA256}"             --unsigned-sha256 "$UNSIGNED_SHA256" --final-sha256 "$SIGNED_SHA256"
+      - name: Require exact numeric IDs and independent producer hashes before download
+        shell: bash
+        env:
+          IDENTITY_ID: ${{ needs.identity.outputs.artifact-id }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          PACKET_ID: ${{ needs.stage-nightly.outputs.artifact-id }}
+          PACKET_SHA256: ${{ needs.stage-nightly.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$IDENTITY_ID" --expected-sha256 "$IDENTITY_SHA256"
+          python -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$PACKET_ID" --expected-sha256 "$PACKET_SHA256"
+      - name: Download exact identity artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.identity.outputs.artifact-id }}
+          path: .nightly-input
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact staged packet artifact ID, never a name replacement
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.stage-nightly.outputs.artifact-id }}
+          path: .nightly-publish
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Publish
+        id: publish
+        env:
+          ASSET: ${{ needs.build-windows.outputs.asset }}
+          IDENTITY_SHA256: ${{ needs.identity.outputs.sha256 }}
+          PACKET_SHA256: ${{ needs.stage-nightly.outputs.sha256 }}
+          ZIP_SHA256: ${{ needs.build-windows.outputs.zip-sha256 }}
+          SIGNER_RECEIPT_SHA256: ${{ needs.build-windows.outputs.receipt-sha256 }}
+          ORIGINAL_UNSIGNED_SHA256: ${{ needs.build-windows.outputs.unsigned-sha256 }}
+          APP_NAME: ${{ inputs.app-name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B .nightly-tools/scripts/publish_nightly.py \
+            --registry .nightly-tools/nightly-apps.json --app "$APP_NAME" \
+            --identity .nightly-input/nightly-identity.json --policy .nightly-input/nightly-producer-policy.json \
+            --config .github/nightly-publication-policy.json \
+            --directory .nightly-publish --asset "$ASSET" \
+            --identity-sha256 "$IDENTITY_SHA256" --packet-sha256 "$PACKET_SHA256" --zip-sha256 "$ZIP_SHA256" \
+            --signing-receipt-directory .nightly-signing --signing-receipt-sha256 "$SIGNER_RECEIPT_SHA256" \
+            --unsigned-sha256 "$ORIGINAL_UNSIGNED_SHA256" \
+            --ownership-directory .nightly-ownership
+      - name: Upload nightly ownership receipt
+        id: ownership-upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          include-hidden-files: true
+          name: ${{ steps.publish.outputs.ownership-artifact-name }}
+          path: .nightly-ownership/ownership.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+      - name: Plan keep-seven pruning after the exact successful publication
+        if: ${{ false }} # Separate hard-off switch until approved first manual publication.
+        id: prune-plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RELEASE_ID: ${{ steps.publish.outputs.release-id }}
+          NIGHTLY_BOT_ID: ${{ vars.NIGHTLY_BOT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir .nightly-prune-plan
+          python3 -B .nightly-tools/scripts/nightly_prune.py plan \
+            --registry .nightly-tools/nightly-apps.json --app photocraft \
+            --config .github/nightly-pruning-policy.json --current-release-id "$CURRENT_RELEASE_ID" \
+            --bot-id "$NIGHTLY_BOT_ID" > .nightly-prune-plan/plan.json
+      - name: Upload nightly prune plan before any deletion
+        if: steps.prune-plan.outcome == 'success'
+        id: prune-plan-upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          include-hidden-files: true
+          name: nightly-prune-plan-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .nightly-prune-plan/plan.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 90
+      - name: Prune only authenticated bot-owned nightlies, release then tag
+        if: steps.prune-plan-upload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_RELEASE_ID: ${{ steps.publish.outputs.release-id }}
+          NIGHTLY_BOT_ID: ${{ vars.NIGHTLY_BOT_ID }}
+          CHECKPOINT_ID: ${{ steps.prune-plan-upload.outputs.artifact-id }}
+          CHECKPOINT_SHA256: ${{ steps.prune-plan-upload.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          python3 -B .nightly-tools/scripts/nightly_prune.py apply \
+            --registry .nightly-tools/nightly-apps.json --app photocraft \
+            --config .github/nightly-pruning-policy.json --current-release-id "$CURRENT_RELEASE_ID" \
+            --bot-id "$NIGHTLY_BOT_ID" --plan .nightly-prune-plan/plan.json \
+            --checkpoint .nightly-prune-plan/checkpoint.json \
+            --checkpoint-artifact-id "$CHECKPOINT_ID" --checkpoint-artifact-sha256 "$CHECKPOINT_SHA256" \
+            --approve-first-run

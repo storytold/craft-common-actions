@@ -1,0 +1,44 @@
+{
+  "schema": "craft-nightly-pending-producers/v1",
+  "app": "photocraft",
+  "capabilities": {
+    "linux-x86_64": {
+      "target": {
+        "os": "linux",
+        "arch": "x86_64",
+        "format": "tar_gz"
+      },
+      "rust_target": "x86_64-unknown-linux-gnu",
+      "entrypoint": "photocraft",
+      "asset_pattern": "photocraft-{version}-linux-x86_64-nightly.tar.gz",
+      "isolation": {
+        "package_identity": "ai.storyteller.photocraft.nightly",
+        "profile_contract": "nightly",
+        "profile_version": 1,
+        "associations": "none"
+      },
+      "status": "feed-admitted",
+      "feed_admitted": true,
+      "runtime_qualified": false
+    },
+    "macos-aarch64": {
+      "target": {
+        "os": "macos",
+        "arch": "aarch64",
+        "format": "portable_zip"
+      },
+      "rust_target": "aarch64-apple-darwin",
+      "entrypoint": "PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft",
+      "asset_pattern": "photocraft-{version}-macos-aarch64-nightly.zip",
+      "isolation": {
+        "package_identity": "ai.storyteller.photocraft.nightly",
+        "profile_contract": "nightly",
+        "profile_version": 1,
+        "associations": "none"
+      },
+      "status": "feed-admitted",
+      "feed_admitted": true,
+      "runtime_qualified": false
+    }
+  }
+}

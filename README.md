@@ -11,7 +11,7 @@ This repository unifies and eliminates duplicate CI/CD and release workflow defi
 ### 1. `release.yml`
 Full multi-platform release pipeline for Craft apps:
 - **macOS universal** (x86_64 + aarch64 universal bundle, DMG, CLI, Developer ID codesign & notarization)
-- **Windows** (x64, x86, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
+- **Windows** (x64, ARM64 MSI installer with WiX v5, CLI, Azure Trusted Signing)
 - **Linux** (x86_64, aarch64 AppImage, deb, rpm, tar.gz via nfpm)
 - **Flatpak** (x86_64, aarch64 bundle generation)
 - **FreeBSD** (FreeBSD 15.1-STABLE VM build & packaging for x86_64 and aarch64; aarch64 is cross-compiled in the same x86_64 VM and set by default through `freebsd-architectures`, see #39)
@@ -19,6 +19,36 @@ Full multi-platform release pipeline for Craft apps:
 - **WebAssembly** (wasm32-unknown-unknown with Trunk)
 - **Linux RISC-V 64** (cross-compilation for riscv64gc-unknown-linux-gnu, producing deb, rpm, and tar.gz via SHA256-verified nfpm; built on Ubuntu 24.04, so it sets `GLIBC_FLOOR=2.39` for the app's `nfpm.yaml` to declare, see #44)
 - **Draft Release** (signs the Linux packages, computes and signs `SHA256SUMS.txt`, and publishes/updates draft GitHub Release; see [Linux package signing](#linux-package-signing))
+
+Every build job sets `VERSION`, `BUILD_DATE` and `BUILD_SHA`, and the app's own
+`<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA`. The prefix is the one the app's
+`packaging/env.sh` (or `packaging/common.sh`) reads in `VERSION="${<PREFIX>_VERSION:-...}"`, so a
+new app needs no change here; without that line it is `app-name` in capitals (`craft-anything`:
+`CRAFT_ANYTHING`).
+
+#### Cutting a release
+
+`scripts/cut_release.py <owner/app>` cuts a release without a version-bump pull request, so a
+change of version strings never waits on the full CI of a pull request:
+
+1. It takes the newest commit on main whose `CI` run for a push passed (`--commit` picks another;
+   `--gate-workflow` names another workflow).
+2. It commits the version bump there: `[workspace.package] version`, the internal path
+   dependencies, and Cargo.lock's entries for the workspace's own packages. A repository with
+   other files that name the version adds `packaging/set-version.sh <old> <new>`.
+3. It merges that into `release` (main's version lines win) and pushes, which starts the app's
+   `release.yml`.
+4. It opens a pull request that brings the same bump to main, with auto-merge on where the
+   repository allows it. The release doesn't wait for it.
+5. With `--publish` it waits for `release.yml` and publishes the draft once every job passed and
+   the draft has assets. Otherwise it stops after the push.
+
+The version defaults to the next minor after the last published release (`--part patch`, or
+`--version 1.2.3-rc.1`). `--dry-run` does everything but push. It needs git, cargo (to check
+Cargo.lock) and an authenticated `gh` whose account may update `release`.
+
+`scripts/release_train.py --all --skip figcraft,soundcraft --publish` runs it for many apps at once, in
+parallel, with a log per app and a summary of what was published or stopped.
 
 #### Caller Example:
 ```yaml
@@ -89,7 +119,9 @@ somewhere users can check it independently. On first install, compare that finge
 The workflow pushes the Flatpak OCI image itself: the app's `packaging/linux/flatpak-oci.sh` only
 builds the layout. Every run except a pull request pushes `ghcr.io/<repo>:<version>-<arch>`; only a
 stable version built from the `release` branch also moves `stable-<arch>`, whatever the app's copy
-of the script does with `--push`.
+of the script does with `--push`. When `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are configured
+(e.g. as organization secrets), the job dual-pushes the OCI layout to `docker.io/storytold/<app>`
+with the same version and stable architecture tags.
 
 The key must sign without a passphrase. Keep the primary key offline and store only a signing
 subkey:
@@ -244,6 +276,9 @@ Lints all packaging configurations and metadata:
 - `appstreamcli validate`
 - Flatpak manifest consistency checks
 - FreeBSD dry run & embedded icons verification
+- AppImage desktop integration and bundled CLI/MCP tests, when the caller provides
+  `packaging/linux/apprun-test.sh` or `packaging/linux/apprun-cli-test.sh`. No app-local
+  workflow job is needed; a failing script fails the shared lint job.
 
 #### Caller Example:
 ```yaml
@@ -352,7 +387,9 @@ same toolchain, configuration and profile, so a release that only bumps a versio
 or a PR that touches a manifest, still restores compiled dependencies instead of
 rebuilding them cold; Cargo's own fingerprints decide which of those artifacts
 are still valid. Toolchain, configuration and profile changes start a new cache
-without a fallback. The test and release workflows use separate profile
+without a fallback. A run saves only when no entry for the same exact match was saved that
+day (UTC), so a busy main keeps one entry per dependency fingerprint and day instead of one
+per commit; later runs restore that entry and Cargo rebuilds only what changed since. The test and release workflows use separate profile
 namespaces. The workflow-file pattern fingerprints the caller's configuration;
 changes to the shared workflow that need a new namespace must bump the cache
 action's version prefix.
@@ -360,7 +397,13 @@ action's version prefix.
 Cache data is restored on the host and explicitly transferred to the guest's
 `/var/tmp/craft-cargo` and `/var/tmp/craft-target`. Only registry/git data and
 `debug`/`release` artifacts are saved, excluding incremental state, Cargo
-credentials/config and Rust toolchains. Successful non-PR runs save caches on a best-effort basis; PRs
+credentials/config and Rust toolchains. A cross build passes its triple as `target`, and
+its `target/<triple>/<profile>` output is saved and restored too: without it, the aarch64
+release job kept only its build scripts and compiled everything else cold. `release.yml`
+keys its cache on the inputs that change the FreeBSD build (app name, architecture,
+craft-fonts ref and FreeBSD release), not on all its inputs: `contributors-artifact`
+names the run, so a key that held it could never be restored, and a `dry-run` shares
+the release's entry, so a dry run warms the cache a release restores. Successful non-PR runs save caches on a best-effort basis; PRs
 only restore. Restore, checkpoint and save failures are non-blocking; each phase has a 10-minute
 time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards
@@ -475,16 +518,221 @@ The quality gate for an app's pull requests and pushes to main. It runs `command
 - the app and craft-fonts (at the suite's pin, with `CRAFT_FONTS_REQUIRED=1`) checked out without
   persisted credentials, and craft-i18n when the app has `craft-i18n.rev`;
 - `packages` installed through `actions/install-apt-packages` on Linux legs (none when empty);
+- an optional `setup-command` run from the repository root before the gate, for fetching pinned
+  test data such as licensed corpora; its environment changes can be written to `$GITHUB_ENV`;
+- with `cache-paths` and `cache-key`, those paths restored before `setup-command` and saved after
+  it where the dependency cache saves, as one entry for every OS. Put the pins of what the setup
+  fetches in `cache-key` (`psd-corpus-<commit>`), or keep them in a file and name it in
+  `cache-key-files` (its hash joins the key), and let the setup skip a fetch whose files are
+  already there;
 - the channel from `rust-toolchain.toml`, or `toolchain`, with clippy, rustfmt and `targets`;
 - prebuilt cargo tools from `tools` (by default `cargo-nextest@0.9.150`);
 - `CARGO_PROFILE_DEV_DEBUG=line-tables-only` (set `dev-debug: ""` to keep the repository's
-  profile) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
-- a rust-cache dependency cache saved by the default branch by default. Pull requests only
+  profile), `dev-strip: true` (no debug info and stripped symbols in the test profile, for CI test
+  builds; off by default) and the caller's `env`, `linux-env` and `windows-env` lines, each `KEY=VALUE`;
+- a rust-cache dependency cache saved by the default branch by default; give each call of the
+  workflow in one job a `cache-name` (`gate-<name>` entry) so the calls do not share one key; Pull requests only
   restore caches; callers may opt manual branch runs into branch-scoped writes with
   `cache-save-on-dispatch: true`. The restore prefix includes the canonical root `[profile]`
-  table; dependency, version and comment edits do not discard reusable dependency artifacts.
+  table without the wasm-only profiles (names `web` or `wasm`, with or without a `-suffix`);
+  dependency, version, comment and web-profile edits do not discard reusable dependency
+  artifacts.
   rust-cache still keys on lockfiles, member manifests, toolchain and build environment, and
-  Cargo validates restored fingerprints. Bump `cache-version` to start afresh.
+  Cargo validates restored fingerprints. Bump `cache-version` to start afresh;
+- with `sccache: true`, sccache (through the GitHub Actions cache) for the workspace's own
+  library crates, which rust-cache doesn't keep. It writes where the dependency cache saves and
+  only reads elsewhere; set `SCCACHE_GHA_RW_MODE` in `env` to choose. On the cluster runners,
+  which set `SCCACHE_WEBDAV_ENDPOINT`, sccache uses the shared cluster cache instead, under the
+  key prefix `sccache/<cache-version>` that every repository shares. Two controls keep PR runs
+  from writing: gate-setup sets `SCCACHE_WEBDAV_RW_MODE=READ_ONLY` wherever the dependency cache
+  doesn't save (`SCCACHE_WEBDAV_RW_MODE` in `env` overrides it), and the cache server accepts
+  writes only with the writer credential, which only the main-branch runner set holds. Test, binary and
+  proc-macro crates aren't cacheable, so it mainly helps workspaces with many library crates.
+  sccache's cache starts afresh when `cache-version` or any `Cargo.toml` or `build.rs` changes,
+  because its key leaves out `--check-cfg`: a cached compile would replay its old
+  `unexpected_cfgs` warnings after the expected cfgs change. It also can't see files a procedural
+  macro reads without rustc tracking them (some asset-embedding macros): don't opt in while
+  such files change often, or bump `cache-version` when they do. `SCCACHE_GHA_VERSION` in
+  `env` sets the cache's version instead;
+
+With `warm-command`, a default-branch run (or an opted-in manual run) adds a `cache warm (<os>)`
+leg per runner beside the gate leg. It runs only that command, for example
+`cargo test --workspace --no-run --locked`, and saves the `gate` dependency entry as soon as it
+succeeds. The gate legs then only restore. Without it, the gate saves at the end of a green run,
+so a main whose tests fail never saves and every pull request builds cold. Pull requests never
+get the leg. Give the command the build the gate does (same features, profile and targets), since
+the entry holds what that build compiled; the leg has the same setup, environment and
+`setup-command` as the gate. With `archive-command` the build job saves the entry and no warm leg
+runs.
+
+With `lint-command`, each runner in `os` also gets a `lint (<os>)` leg beside its `gate (<os>)`
+leg. It has the same setup except `setup-command`, runs `lint-command` (fmt, clippy, other checks
+that need no test build), and keeps a rust-cache entry of its own, since a check build's
+dependencies are not the test build's. Clippy then runs beside the test build instead of before
+it. Empty (the default) runs no lint legs, and the test legs keep their names:
+
+```yaml
+    with:
+      lint-command: |
+        cargo fmt --check
+        cargo clippy --workspace --all-targets --locked -- -D warnings
+      command: cargo nextest run --workspace --locked --profile ci
+```
+
+With `test-shards: N` (N > 0), each runner runs its tests as N legs, `test <k>/<N> (<os>)`, in
+place of its `gate (<os>)` leg. The default, 0, runs one `gate (<os>)` leg per runner as described
+above.
+
+- Each shard leg has the gate leg's full setup, restores the gate's Rust cache entry, and runs
+  `shard-command` (`windows-shard-command` on Windows), which builds and runs its share of the
+  tests. The gate sets `GATE_SHARD` (1 to N), `GATE_SHARDS` (N) and `NEXTEST_PARTITION`
+  (`hash:<GATE_SHARD>/<GATE_SHARDS>`) for it.
+- Shard 1 saves the cache by the gate leg's rules; with `warm-command` the `cache warm (<os>)` leg
+  saves instead. The other shards only restore.
+- `lint (<os>)` and `cache warm (<os>)` still run once per runner.
+- A `gate (<os>)` job passes only when every shard of that runner passed, so required checks keep
+  their names. It waits for every shard leg; the shards themselves start at once.
+- Each shard leg records its status in an artifact and a file named after the runner label
+  (`gate-shard-<os>-<k>`), so a workflow run can hold one sharded gate call per runner label. A
+  re-run replaces the status of every leg it runs.
+
+```yaml
+    with:
+      test-shards: 4
+      shard-command: cargo nextest run --workspace --locked --profile ci --partition "$NEXTEST_PARTITION"
+```
+
+With `archive-command` as well, each runner builds its tests once instead of once per shard:
+
+- A `build (<os>)` job runs `archive-command`, which writes a nextest archive to
+  `$NEXTEST_ARCHIVE_FILE`, and uploads it as the `gate-archive-<os>` artifact (uncompressed: the
+  archive is already zstd). Where the dependency cache saves, this job saves the `gate` entry.
+- The shard legs wait for it, download the archive, restore no cache and build nothing:
+  `shard-command` runs the tests from `$NEXTEST_ARCHIVE_FILE`
+  (`cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" ...`). The lint legs never wait for
+  the build job.
+- `after-archive-command` runs in the build job after the upload, for checks that need the build
+  directory, such as doctests. The shards wait for the whole build job, its cache save included,
+  so this command's time adds to the gate's wall time. `gate (<os>)` passes only when the build
+  job passed too.
+- `test-shards` must be set: the shards are what run the archive.
+- A failed build skips the shards of every runner in the call. Give each runner its own call to
+  keep one runner's build failure from hiding another runner's test results.
+
+```yaml
+    with:
+      test-shards: 4
+      archive-command: cargo nextest archive --workspace --locked --archive-file "$NEXTEST_ARCHIVE_FILE"
+      after-archive-command: cargo test --doc --workspace --locked
+      shard-command: cargo nextest run --archive-file "$NEXTEST_ARCHIVE_FILE" --workspace-remap . --partition "$NEXTEST_PARTITION"
+```
+
+With `shard-archives: true` as well, each shard downloads only the test binaries it runs:
+
+- The build job sets `$NEXTEST_ARCHIVE_DIR`, `$NEXTEST_ARCHIVE_NAME` (the `archive-file` input)
+  and `$GATE_SHARDS` instead of `$NEXTEST_ARCHIVE_FILE`. `archive-command` writes shard k's archive
+  to `$NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME` for every k from 1 to `$GATE_SHARDS`, for
+  example with `cargo nextest archive -E 'binary_id(=...) | ...'` per shard, and the build job
+  fails if one is missing.
+- Each archive is uploaded as `gate-archive-<os>-<k>`, and shard k downloads only that one. On
+  the shard, `$NEXTEST_ARCHIVE_FILE` points at it as before.
+- Which tests each shard runs is the caller's to decide and to record: a shard runs its archive
+  without a partition. PhotoCraft balances the shards by recorded test times, splits binaries too
+  heavy for one shard by test filter, and puts its plan into every archive (its
+  `xtask/src/shards.rs`).
+- At most 8 shards: the build job has one upload step per archive, since an upload step takes one
+  artifact name. The select job rejects more.
+
+```yaml
+    with:
+      test-shards: 4
+      archive-command: cargo xtask ci archive
+      shard-archives: true
+      shard-command: bash scripts/ci-test-shard.sh
+```
+
+With `cache-workspace-crates: true`, the dependency entry also keeps the workspace crates'
+compiled libraries and unit-test executables, so a change rebuilds only the crates it reaches:
+
+- The entry rolls: the saving leg (the build job, else the warm leg or shard 1) writes an entry of
+  its own each run, and every leg restores the newest one by its prefix. A fixed key would never be
+  replaced, so its commit would fall ever further behind.
+- A run's entry is named after the entry it restored (`<job>-crates-<os>-<arch>-<parent run id>-0`,
+  from `.ci-cache-meta/entry`), so when overlapping runs restored the same entry and have the same
+  lockfile and toolchain, only the first to finish saves: GitHub refuses a key that exists, and the
+  later run logs one "Cache reservation failed" warning. Nothing restored gives `-0-0`; a cold build writes `-<run id>-<attempt>`.
+- The saved entry holds only the build units the run's build used, when the build records them
+  (Cargo's JSON messages in the file `CRAFT_CACHE_UNITS` names; see `actions/cache-trim`). Without
+  a record, rust-cache trims by package name, which keeps older builds of every package still in the
+  lockfile: after a dependency update the entry grows by the old builds.
+- The caller keeps one entry per family with `actions/cache-prune` in a job of its own that holds
+  `actions: write` (gate.yml's jobs hold no write permission). The step runs with
+  `continue-on-error`, so a failed prune warns instead of failing the run:
+
+```yaml
+  cache-prune:
+    name: cache prune
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      actions: write
+    steps:
+      - uses: storytold/craft-common-actions/actions/cache-prune@main
+        continue-on-error: true
+        with:
+          watch: true
+          watch-minutes: 110
+          saving-jobs: |
+            ^gate( / build \(.*\))?$
+```
+
+- "Re-run failed jobs" re-runs a failed build job, which saves a new entry, but not the watch job,
+  which succeeded in the first attempt. A workflow of its own on `workflow_run` (the CI workflow,
+  `completed`, branch main) with one job that holds `actions: write` and runs
+  `actions/cache-prune` once removes the replaced entry after every attempt.
+
+- After the restore, `actions/restore-mtimes` gives every tracked file an old mtime and touches
+  the files that differ from the commit the entry was built from (`.ci-cache-meta/commit`, saved
+  with the entry), so Cargo's fingerprints see exactly those as changed. The craft-fonts and
+  craft-i18n checkouts keep old mtimes while they are at the commits recorded with the entry.
+  Without a marker, or when that commit cannot be fetched, every source stays new and Cargo
+  rebuilds all workspace crates.
+- `cold-build: true` restores nothing and builds everything, and where the cache saves it writes a
+  fresh entry. Run it on a schedule as the safety net for the restored mtimes; it also starts the
+  rolling entry afresh, which drops artifacts of older toolchains and lockfiles.
+- The lint legs keep their usual entry. An app job restores the rolling entry with
+  `actions/rust-cache`'s `cache-workspace-crates: "true"`.
+- `lint-cache: false` runs the lint legs without a dependency cache (they restore and save
+  nothing), which frees about 1 GB per OS of the repository's cache budget for slower lint legs.
+
+With `select-os`, a pull request runs those legs (macOS and Windows, say) only when it can change
+platform behaviour; pushes, schedules and manual runs still run every leg. A `select legs` job
+(`actions/select-platforms`) compares the merge commit with its first parent and runs every leg
+when a changed file is
+
+- in a workspace crate whose `.rs` files or `Cargo.toml` hold a `cfg` naming `windows`, `unix`,
+  `target_os`, `target_vendor` or a `windows`/`unix` `target_family` (or a crate in
+  `select-crates`), or in any crate that depends on one (`cargo metadata --no-deps`);
+- part of the build setup (`.github/`, `Cargo.lock`, the root `Cargo.toml`, `rust-toolchain`,
+  `.cargo/`, `.config/`) or matches `select-paths`;
+- outside every workspace crate and not documentation (`*.md`, `docs/`, `LICENSE*`).
+
+A pull request labelled `select-label` (`full-ci` by default) runs every leg. The label is read
+when the run starts: after adding it, push or re-run from a new event (a manual run of the
+branch) to get the other legs. Legs that are not selected don't appear in the checks; a platform
+problem they would have caught shows up in the next push to main, which runs every leg.
+
+```yaml
+    with:
+      os: '["ubuntu-latest","windows-latest","macos-latest"]'
+      select-os: '["windows-latest","macos-latest"]'
+```
+
+Set `artifact-name` and `artifact-path` to upload outputs after the command and lockfile checks pass.
+Only the unsharded test/build leg uploads, never lint, cache-warm, or test-shard legs. Each OS uses
+`<artifact-name>-<matrix.os>`; missing files fail, retention is one day, and empty defaults do nothing.
+Callers must choose distinct names for different feature configurations or producer jobs.
 
 After the gate, the job fails if `Cargo.lock` changed. Legs run with `fail-fast: false`; each has
 `timeout-minutes` (default 60). A job only some apps need, such as a web build or a Windows-only
@@ -502,6 +750,11 @@ check, can be a second call with its own `command`, `os`, `tools` and `targets`,
       tools: trunk@0.21.14
       command: packaging/web/package.sh
 ```
+
+`setup-command` is also passed through the environment, then run with Bash from the checkout root.
+Use it for caller-specific test inputs whose contents are pinned and verified by the caller's
+fetcher. For example, a corpus-enabled workspace can fetch its locked corpus before running the
+gate and export `CRAFT_PSD_CORPUS` through `$GITHUB_ENV`; a failed fetch stops the job before tests.
 
 #### Caller Example:
 ```yaml
@@ -655,6 +908,84 @@ jobs:
     uses: storytold/craft-common-actions/.github/workflows/release.yml@main
 ```
 
+### 10. `house-rules.yml`
+
+Fails unless `AGENTS.md` carries the shared agent rules from
+[storytold/craft-contrib](https://github.com/storytold/craft-contrib) unchanged: one `craft-agents`
+block holding `standards/app-agents.md` (RFC-0072). The block names the commit it was copied from and
+the SHA-256 of the bytes inside it. The check loads `standards/app-agents.md` at that commit, requires
+the commit to be on `main`, and compares the normalized bytes. An edited block, or a commit that is not
+on `main`, fails. An intact older commit warns only when the normalized file changed on `main`. A
+source that cannot be read fails as "could not check". The RFC-0006 `craft-house-rules` blocks are
+retired: a file that still carries them fails and is moved with
+`python3 actions/house-rules/house_rules.py write-agents --directory <app> --source <craft-contrib>`.
+`rust` only applied to the retired blocks; it is still accepted, so callers need no change.
+
+The caller is only the workflow call. The reusable workflow checks the app out and checks
+craft-contrib out at `main` with full history.
+
+#### Caller Example:
+```yaml
+jobs:
+  house-rules:
+    uses: storytold/craft-common-actions/.github/workflows/house-rules.yml@main
+    with:
+      rust: true
+```
+
+### 11. `docker-build.yml`
+
+Builds one image per entry in `platforms`, pushes every platform by digest to each repository in
+`images`, then joins those digests into a single multi-arch manifest per repository. It logs in only
+where an image needs it: `ghcr.io` through the workflow token, `docker.io` when Docker Hub images
+are listed (using `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`), and `dhi.io` when `dhi-login: true`
+and the Docker Hub secrets are provided.
+
+Both craft web images publish this way. `font-preview-service` fetches its font sources into the
+build context first, so it passes a `pre-build-command`; `artcraft-services` builds one platform on a
+larger runner, passes `build-args` and a GHA layer cache, and sets `free-disk: true` because the Rust
+release build needs the space.
+
+#### Caller Example:
+```yaml
+name: Docker publish
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@main
+    with:
+      images: |
+        ghcr.io/storytold/artcraft-services
+        docker.io/storytold/artcraft-services
+      platforms: '[{"platform":"linux/amd64","runner":"github-ubuntu-64core"}]'
+      dockerfile: build/service_cpu.Dockerfile
+      build-args: |
+        GIT_SHA=${{ github.sha }}
+      free-disk: true
+      cache-from: type=gha
+      cache-to: type=gha,mode=max
+    secrets: inherit
+```
+
+The caller owns triggers, concurrency and `packages: write`; a called workflow cannot raise its
+owner's permissions. Tags default to the branch name, the semver tag and `latest` on the default
+branch, and the `tags` input replaces those metadata-action rules. `timeout-minutes` (default 60)
+bounds each platform build; the manifest merge has its own 15-minute limit.
+
 ## Composite Actions
 
 Individual actions are also available for composing custom pipelines:
@@ -672,7 +1003,8 @@ Individual actions are also available for composing custom pipelines:
     with:
       packages: pkg-config libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
   ```
-- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers.
+- `actions/configure-apt-mirrors`: Points the runner's Ubuntu archive sources at a mirror list that reaches beyond ubuntu.com, with the mirrors that answer first: the image's own mirrors (azure.archive, archive and security.ubuntu.com, or ports.ubuntu.com on arm), then `mirrors.edge.kernel.org` and `mirrors.dotsrc.org` (amd64) or `mirrors.dotsrc.org` and `ftp.tu-chemnitz.de` (arm). `install-apt-packages` runs it before every download attempt; run it before a plain `apt-get update`. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
+- `actions/install-riscv64-cross`: Installs Ubuntu ports RISC-V multiarch and cross-compilers. amd64 and riscv64 come from one pair of mirrors serving the same snapshot: Ubuntu's own (archive, security and ports.ubuntu.com), then `mirrors.dotsrc.org` for both, then `mirrors.edge.kernel.org` with `ftp.tu-chemnitz.de` (ports); the image's own Ubuntu sources are disabled in that job. A job whose Harden-Runner policy blocks egress must allow those hosts on port 443.
 - `actions/install-trunk`: Installs Trunk for WebAssembly builds.
 - `actions/draft-release`: Collects artifacts, signs the Linux packages when given `signing-key`, calculates (and signs) SHA256 checksums, and publishes/updates draft GitHub release.
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
@@ -681,7 +1013,32 @@ Individual actions are also available for composing custom pipelines:
 - `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see "Windows installation policy").
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
+- `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing, and only an accepted `true` writes: an empty, whitespace-only or unrecognized value (for example the text of an expression rather than its value) restores only; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A self-hosted runner whose `CARGO_HOME` is a crate cache of its own (the cluster runners' node cache) names that directory in `CRAFT_RUNNER_CARGO_HOME`; when the job's `CARGO_HOME` is that directory, with or without `align-environment`, rust-cache gets a job-private directory instead, so it never restores into, prunes or saves the runner's cache, and the entry holds only the target directory. Those entries are keyed apart from GitHub-hosted legs' entries. A `CARGO_HOME` the job sets itself is still refused with `align-environment`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own, named after the entry it restored (`<job>-crates-<os>-<arch>-<parent run id>-0`, so a second child of one entry is refused), since rust-cache never replaces an existing key; a saving leg also gets `CRAFT_CACHE_UNITS` for `actions/cache-trim`; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:
+
+  ```yaml
+  - uses: storytold/craft-common-actions/actions/rust-cache@main
+    with:
+      cache-version: v2 # Match the gate call; bump both together.
+      job: gate
+      align-environment: true
+  ```
+- `actions/cache-trim`: For a leg that saves the dependency cache (gate.yml runs it). Trims the target directory's build units (`<profile>/build/<package>/<hash>/`, Cargo's unit layout) using the build's record in `CRAFT_CACHE_UNITS`, before rust-cache's post step saves. `actions/rust-cache` sets `CRAFT_CACHE_UNITS` in a leg that saves; the build appends Cargo's JSON messages to it: run cargo with `--message-format json-render-diagnostics` (nextest: `--cargo-message-format json-render-diagnostics`), which keeps the diagnostics readable on stderr, and append the stdout lines that start with `{"reason":`. Record every cargo command of the leg, the one that builds a cargo-alias tool included. When an unrecorded unit was built in this job (a file newer than the start time actions/rust-cache writes beside the record), the trim keeps it and warns with the unit name. It still removes unrecorded units from earlier jobs, so an incomplete record does not save all restored units. An unrecorded command that used one of those restored units will rebuild it on the next run. Without a record it changes nothing. A trim that fails warns and exits 1; gate.yml runs it with `continue-on-error`, since the failure leaves a usable cache.
+- `actions/rust-channel`: Names the toolchain, targets and components a job installs: those of the checkout's `rust-toolchain.toml` (`channel`, `targets`, `components`) when it has one, merged with the caller's `targets` and `components`, else the caller's `toolchain` (default `stable`). Pass its outputs to the toolchain action (`toolchain`, `targets`, `components`) right after the checkout. rustup runs cargo with the file's channel, so a job that installs `stable` beside a file that names another release would make rustup fetch that release without the job's targets. Apps without the file get what they asked for. release.yml and windows-arm64.yml use it.
+- `actions/cache-prune`: For a caller job with `permissions: actions: write`. Deletes a branch's cache entries that no run will restore again: all but the newest rolling `cache-workspace-crates` entry per job, OS and architecture; and of the other rust-cache entries, and of `<name>-<sha256>` entries for the names in `content-keys`, each older entry once nothing has used it since the newest of its family was created. Other entries (apt packages, tool caches) stay. Families leave out the environment and lockfile hashes, so a toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different toolchains or environments would count as one family. `watch: true` runs beside the run's jobs and prunes each time one of `saving-jobs` (regular expressions on the jobs API's names, matching the skipped job's name too) finishes, ending when none is queued or running, once the cache list shows an entry created after the last one started (at most three more 30-second polls), or after `watch-minutes`, with one more pass; `dry-run: true` only lists. A failed pass warns and the next one tries again; a failure that stops the script warns and exits 1, so run it with `continue-on-error: true`.
+- `actions/restore-mtimes`: For a `cache-workspace-crates` entry. `mode: record`, in the job that saves the entry, writes the commit it was built from and the commits of the craft-i18n and craft-fonts checkouts to `.ci-cache-meta`, which the entry keeps. `mode: restore`, after the restore, gives every tracked file an old mtime and touches the files that differ between that commit and HEAD, so Cargo rebuilds only the units that read a changed file; the external checkouts get old mtimes only while they are at the recorded commits. Without a marker, or when the commit cannot be fetched, it changes nothing and Cargo rebuilds every workspace crate.
+- `actions/gate-setup`: The setup a `gate.yml` job runs after its checkout: craft-fonts and craft-i18n, the caller's environment, Linux packages, the Rust toolchain and cargo tools, the dependency cache through `actions/rust-cache` (with `actions/restore-mtimes` for `cache-workspace-crates`), sccache, and the caller's setup command and its cache. It takes `gate.yml`'s inputs plus which parts a job needs; other workflows have no use for it.
+- `actions/gate-run`: Runs one of `gate.yml`'s commands with bash; with `timeout-minutes`, GNU `timeout` stops the command after that many minutes, and the log lists the processes still running a minute before.
+- `actions/select-platforms`: The legs a pull request needs, for `gate.yml`'s `select-os` (see `gate.yml`); an app job that runs its own platform legs can call it after a `fetch-depth: 2` checkout and read its `os`, `platform` and `reason` outputs. With `select-tests: true` it also selects the tests: `tests` (`all`, `some` or `none`), `filter` (a nextest filterset) and `skip` (the members whose tests do not run). A pull request runs the tests of the crates that own a changed file, of the crates that declare a read of it, and of every crate that depends on those by any dependency kind; the build setup, `paths`, a crate's own `Cargo.toml` or a non-documentation file outside the crates (`docs` adds documentation globs) runs every test, and documentation alone runs none. Pass the filter to `cargo nextest run --workspace ... -E "$filter"`, so the build stays the whole workspace and only the run is narrowed. A crate whose build or tests read another crate's files declares them in its `Cargo.toml`:
+
+  ```toml
+  [package.metadata.craft]
+  reads = ["crates/cms/profiles"]
+  ```
+
+  The same step fails when a crate's sources name a path into another crate's directory (an `include_str!`/`include_bytes!` path, or a `../` literal in a file that uses `CARGO_MANIFEST_DIR`) that `reads` does not cover, or when a declared path matches no tracked file.
+- `actions/house-rules`: The check `house-rules.yml` runs. `source` is a checkout of craft-contrib with `main` history (refresh `origin/main` before checking; the local `main` ref is used only when `origin/main` is absent, never `HEAD`); `require-rust` applied only to the retired house-rules blocks and is ignored.
 
 ## Storytold Organization Hosting
 
@@ -783,6 +1140,7 @@ using `uses` cannot set `timeout-minutes`.
 | CI gate, per leg (`timeout-minutes` input) | 60 |
 | Changed paths | 5 |
 | Git sources | 5 |
+| Docker build, per platform / manifest merge | 60 / 15 |
 | SonarCloud, including coverage (`timeout-minutes` input) | 90 |
 
 A gate that hangs (a test deadlocked, a process waiting on a window) would run until the job
@@ -803,6 +1161,12 @@ so missing embedded fonts fail explicitly. Callers with `scripts/fetch-pdf-test-
 and set `CRAFT_PDF_TEST_FONT_DIR` before archive compilation and either test runner. Fixture provisioning
 failures stop that job and prevent the dependent scan. The scan still needs to finish and pass its quality gate.
 
+Sharded Rust coverage continues after test failures when the shard produced coverage profiles, so
+SonarCloud can still analyse the code. Each shard reports its test outcome in the job summary;
+failing tests also produce a warning annotation pointing to the test log. A green coverage job
+therefore does not mean all tests passed. If a shard produces no profiles, its summary records
+that the scan cannot include it and the shard fails. Runner errors also fail the shard.
+
 Callers with Python tooling can pass both `python-coverage-source` (a source directory)
 and `python-coverage-script` (the test script). The scan job runs that script under
 pinned coverage.py in an isolated virtual environment and writes `python-coverage.xml`.
@@ -817,10 +1181,28 @@ This step requires the Sonar token, so token-independent CI should also run the 
 
 Workspaces run their tests as four parallel `cargo nextest` partitions by
 default. One job builds the instrumented test archive; each partition runs from
-that archive and uploads its profile data, and the scan job merges the profiles
-with the rustup `llvm-profdata` and `llvm-cov` tools. Pass `shards: 1` to keep
-the single `cargo llvm-cov` job. Sharded runs skip doctests, because nextest
-does not run them.
+that archive, merges its own raw profiles into one sparse `.profdata` with the
+rustup `llvm-profdata`, and uploads that plus a small test-exit-status file; the scan job merges the shard
+profiles and exports them with `llvm-cov`. A raw profile that `llvm-profdata`
+cannot read (for example one cut short by a test process that crashed while
+writing it) fails its shard and is named in an error annotation, rather than
+reaching the scan. Pass `shards: 1` to keep the single `cargo llvm-cov` job.
+Sharded runs skip doctests, because nextest does not run them.
+The instrumented archive build and the unsharded `cargo llvm-cov` path default to two
+parallel rustc jobs (`build-jobs`, 1–4). A cold llvm-cov workspace build can otherwise
+start enough jobs to exhaust a hosted runner and shut it down mid-compile (exit 143).
+Each shard links the build job's target directory to its extracted copy of the
+archive, so tests that run a workspace binary through
+`env!("CARGO_BIN_EXE_<name>")` find it as they do in the gate.
+Ordinary test failures still allow coverage and static analysis to upload, but then
+fail the scan job. Missing shard status also fails closed; a green analysis job
+must not conceal failed tests. The single-shard Rust path is unchanged.
+
+The scan job frees unused runner SDKs before either Rust coverage path. The archive build
+frees them in the background, so the build starts at once. Sharded
+coverage merges and removes the shard profiles before extracting the test archive, then
+releases the compressed archive and temporary binaries as they are consumed.
+Disk-space snapshots in the logs show headroom before cleanup and aggregation.
 
 The new limits leave headroom over sampled Craft app job timings; the existing
 FreeBSD and ARM64 limits are retained. Treat these as initial limits, review
@@ -870,6 +1252,11 @@ With Python 3 and PyYAML installed, run:
 python3 -m unittest discover -s tests -v
 ```
 
+GnuPG signing fixtures need local Unix sockets for their temporary agents. They
+report an explicit skip when a local sandbox denies socket creation or binding;
+the same restriction remains a failure on GitHub Actions. Other GPG errors are
+not skipped, and the hosted suite exercises the real protected-key fixture.
+
 The tests execute the FreeBSD run template under the host's POSIX shell with
 fixture build/test commands and real tar archives. They cover failures in each
 custom test group, default build/test failures, missing/corrupt packages and font
@@ -888,3 +1275,16 @@ Only the default branch saves by default. A caller may set
 `workflow_dispatch` runs to save a cache scoped by GitHub to that branch, never a
 pull-request run. Use this selectively to avoid storage churn; sibling branches cannot
 restore each other's caches. Do not pass the input until this workflow change has landed.
+
+`gate.yml` gets its key formula from `actions/rust-cache`, and an app job that builds the same
+workspace restores the gate leg's entry with the same action rather than copying the formula. Name
+the producing job (`job: gate`); the action forms the entire profile-and-job fragment, and rust-cache
+adds no further job id to that shared key. Pass the same `cache-version` literal as the gate call
+(`v2` in the example), bump both together, leave `save-if` off, and set `align-environment: true` when
+the job installs Rust with an action that
+exports `CARGO_HOME`. rust-cache hashes every `CARGO*`, `CC*`, `CFLAGS*`, `CXX*`, `CMAKE*` and
+`RUST*` variable it can see, and the exported `CARGO_HOME` is not part of the build, so an unaligned
+job computes a different key and restores nothing. The job must otherwise build with the same
+`CARGO_*`/`RUST*` values as the gate leg. Changing a toolchain or setup-action pin is a cache-contract
+change: compare both legs' actual hashed environments and keys again. Do not call the action from an app until this lands on
+`@main`; an app's pull request can only follow this one.

@@ -1,0 +1,126 @@
+name: Push verified nightly Flatpak OCI tags
+# Separate from nightly-release.yml so nightly-release.yml needs no packages: write permission
+# and an OCI registry failure cannot affect release history or future nightly admissions.
+on:
+  workflow_call:
+    inputs:
+      tooling-revision:
+        type: string
+        required: true
+    secrets:
+      DOCKERHUB_USERNAME:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+permissions:
+  contents: read
+  packages: write
+  actions: read
+jobs:
+  push-oci:
+    if: >-
+      github.repository == 'storytold/photocraft' && github.event_name == 'workflow_run' && github.event.action == 'completed' &&
+      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'release' &&
+      github.event.workflow_run.repository.full_name == 'storytold/photocraft' &&
+      github.event.workflow_run.head_repository.full_name == 'storytold/photocraft'
+    # This repository owns one set of floating OCI tags. Never let a second
+    # writer publish while this job is rechecking freshness and copying tags.
+    concurrency:
+      group: craft-nightly-oci-photocraft
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Check out only the actual release execution source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: .release-source
+          persist-credentials: false
+      - name: Check out only the defining shared workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Bind immutable defining workflow
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+          SIGNER_SHA: ${{ github.event.workflow_run.head_sha }}
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .release-source rev-parse HEAD)" = "$SIGNER_SHA"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - name: Resolve verified release target and exact producer package artifact IDs
+        id: target
+        env:
+          TOOLING_REVISION: ${{ inputs.tooling-revision }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py policy
+      - name: Download exact-attempt protected publisher proof
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+          name: nightly-oci-proof-photocraft-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: .publisher-proof
+          digest-mismatch: error
+      - name: Fetch release metadata from GitHub REST API
+        id: release-meta
+        if: steps.target.outputs.oci-enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SIGNER_ID: ${{ github.event.workflow_run.id }}
+          SIGNER_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SIGNER_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py resolve
+      - name: Install skopeo
+        if: steps.target.outputs.oci-enabled == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo
+      - name: Download exact authenticated Linux x86_64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-meta.outputs.producer-id }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-x86_64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Download exact authenticated Linux aarch64 package artifact
+        if: steps.target.outputs.oci-enabled == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-meta.outputs.producer-id }}
+          artifact-ids: ${{ steps.release-meta.outputs.artifact-id-aarch64 }}
+          path: .linux-packages
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Verify release target, SHA256SUMS.txt, and .oci.sig before pushing OCI tags
+        if: steps.target.outputs.oci-enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_oci.py push

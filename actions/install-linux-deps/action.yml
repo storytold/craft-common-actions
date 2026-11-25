@@ -17,6 +17,8 @@ runs:
     - name: Install build and packaging tools
       shell: bash
       run: |
+        # A mirror list that reaches beyond ubuntu.com, so an outage there does not stop the job.
+        sudo "$GITHUB_ACTION_PATH/../configure-apt-mirrors/configure-apt-mirrors.sh"
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
           libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \

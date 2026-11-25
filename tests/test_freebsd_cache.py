@@ -35,7 +35,7 @@ class CargoCacheTests(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.tools) + os.pathsep + os.environ["PATH"],
                         HOME=str(self.root / "home"), RUNNER_TEMP=str(self.root / "host"),
                         FIXTURE_GUEST=str(self.guest), REAL_RSYNC=shutil.which("rsync"),
-                        CACHE_PHASE="restore", CACHE_PROFILE="debug", CACHE_CAN_SAVE="true",
+                        CACHE_PHASE="restore", CACHE_PROFILE="debug", CACHE_TARGET="", CACHE_CAN_SAVE="true",
                         CACHE_CONFIGURATION='{"features":"heif","fonts":"abc"}',
                         CACHE_SOURCE_HASH="lock-and-build-config", GITHUB_SHA="commit1",
                         GITHUB_WORKSPACE=str(self.root),
@@ -102,7 +102,7 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
                     {"FIXTURE_PACKAGES": "gtk3-2\nrust-1\n"}, {"FIXTURE_FREEBSD": "15.0-RELEASE"},
                     {"CACHE_CONFIGURATION": '{"features":"","fonts":"abc"}'},
                     {"CACHE_CONFIGURATION": '{"features":"heif","fonts":"def"}'},
-                    {"CACHE_SOURCE_HASH": "different-lock-or-build-script"}, {"CACHE_PROFILE": "release"}):
+                    {"CACHE_SOURCE_HASH": "different-lock-or-build-script"}, {"CACHE_PROFILE": "release"}, {"CACHE_TARGET": "aarch64-unknown-freebsd"}):
             with self.subTest(env=env):
                 self.assertNotEqual(first["prefix"], self.identity(**env)["prefix"])
         updated = self.identity(GITHUB_SHA="commit2")
@@ -122,9 +122,41 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         for env in ({"FIXTURE_COMPILER": "rustc 1.98.1"}, {"FIXTURE_ARCH": "aarch64"},
                     {"FIXTURE_PACKAGES": "gtk3-2\nrust-1\n"}, {"FIXTURE_FREEBSD": "15.0-RELEASE"},
                     {"CACHE_CONFIGURATION": '{"features":"heif","fonts":"def"}'},
-                    {"CACHE_PROFILE": "release"}):
+                    {"CACHE_PROFILE": "release"}, {"CACHE_TARGET": "aarch64-unknown-freebsd"}):
             with self.subTest(env=env):
                 self.assertNotEqual(first["fallback-prefix"], self.identity(**env)["fallback-prefix"])
+
+    def test_cross_target_keys_cannot_restore_native_or_other_targets(self):
+        native = self.identity()
+        arm = self.identity(CACHE_TARGET="aarch64-unknown-freebsd")
+        other = self.identity(CACHE_TARGET="riscv64-unknown-freebsd")
+        self.assertEqual(len({item["fallback-prefix"] for item in (native, arm, other)}), 3)
+        identity_step = next(step for step in ACTION["runs"]["steps"] if step.get("id") == "identity")
+        self.assertEqual(identity_step["env"]["CACHE_TARGET"], "${{ inputs.target }}")
+        # Empty target retains the exact pre-change native compatibility bytes.
+        legacy = IDENTITY.replace('"$profile_identity" | sha256sum', '"$CACHE_PROFILE" | sha256sum')
+        result = self.run_script(legacy)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        outputs = dict(line.split("=", 1) for line in (self.root / "outputs").read_text().splitlines())
+        self.assertEqual(outputs, native)
+
+    def test_the_key_carries_the_day_before_the_revision(self):
+        key = self.identity()["key"]
+        prefix = self.identity()["prefix"]
+        day, revision = key[len(prefix):].split("-", 1)
+        self.assertRegex(day, r"^\d{8}$")
+        self.assertEqual(revision, "commit1")
+
+    def test_the_save_looks_up_todays_entry_for_the_same_fingerprint(self):
+        step = next(s for s in ACTION["runs"]["steps"] if s.get("id") == "day")
+        for key, expected in (("freebsd-cargo-v3-c-f-20261115-commit1", "freebsd-cargo-v3-c-f-20261115-"),
+                              # A key from before the day was added: any entry for its fingerprint.
+                              ("freebsd-cargo-v3-c-f-commit1", "freebsd-cargo-v3-c-f-")):
+            with self.subTest(key=key):
+                (self.root / "outputs").write_text("")
+                result = self.run_script(step["run"], KEY=key)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((self.root / "outputs").read_text(), f"prefix={expected}\n")
 
     def test_cold_restore_is_valid_and_warm_restore_loads_only_selected_profile(self):
         self.transfer("restore")
@@ -234,6 +266,33 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
         self.transfer("save")
         self.assertEqual((self.cache / "target/release/app").read_text(), "cached-release")
 
+    def test_cross_target_round_trip_keeps_the_triple_directory(self):
+        triple = "aarch64-unknown-freebsd"
+        self.write(self.cache, "target/release/build/dependency/output", "host-build-script")
+        self.write(self.cache, f"target/{triple}/release/deps/libdependency.rlib", "cached-cross")
+        self.transfer("restore", CACHE_PROFILE="release", CACHE_TARGET=triple)
+        self.assertEqual((self.guest / "var/tmp/craft-target/release/build/dependency/output").read_text(), "host-build-script")
+        self.assertEqual((self.guest / f"var/tmp/craft-target/{triple}/release/deps/libdependency.rlib").read_text(), "cached-cross")
+        self.write(self.guest, f"var/tmp/craft-target/{triple}/release/app", "cross-release")
+        self.write(self.guest, f"var/tmp/craft-target/{triple}/release/incremental/state", "discard")
+        self.transfer("save", CACHE_PROFILE="release", CACHE_TARGET=triple)
+        self.assertEqual((self.cache / f"target/{triple}/release/app").read_text(), "cross-release")
+        self.assertEqual((self.cache / f"target/{triple}/release/deps/libdependency.rlib").read_text(), "cached-cross")
+        self.assertFalse((self.cache / f"target/{triple}/release/incremental").exists())
+        self.assertEqual((self.cache / "target/release/build/dependency/output").read_text(), "host-build-script")
+
+    def test_native_build_leaves_cross_directories_alone(self):
+        self.write(self.cache, "target/aarch64-unknown-freebsd/release/app", "other-arch")
+        self.transfer("restore", CACHE_PROFILE="release")
+        self.assertFalse((self.guest / "var/tmp/craft-target/aarch64-unknown-freebsd").exists())
+
+    def test_target_must_be_a_plain_triple(self):
+        for target in ("../../etc", "aarch64 unknown", "a;rm -rf /", "Aarch64/x"):
+            with self.subTest(target=target):
+                result = self.run_script(TRANSFER, CACHE_PROFILE="release", CACHE_TARGET=target)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("invalid cache target", result.stderr)
+
     def test_transport_failure_is_visible(self):
         self.tool("rsync", "import sys\nsys.exit(23)\n")
         result = self.run_script(TRANSFER)
@@ -241,6 +300,33 @@ sys.exit(subprocess.run([os.environ['REAL_RSYNC'], *args]).returncode)
 
 
 class WorkflowCacheIntegrationTests(unittest.TestCase):
+    # Release inputs that do not change what the FreeBSD job compiles, so they stay out of the
+    # cache key. contributors-artifact names the run itself, and a key that held it could never
+    # be restored by a later run; dry-run must share the release's entry so a dry run warms it;
+    # publish only decides whether the finished draft is published.
+    RELEASE_INPUTS_OUTSIDE_THE_KEY = {
+        "app-title", "web-craft-fonts", "version", "contributors-artifact", "has-web", "has-riscv64",
+        "has-freebsd", "has-arch", "wix-version", "nfpm-version", "trunk-version",
+        "freebsd-architectures", "has-server", "dry-run", "publish",
+    }
+
+    def test_release_cache_key_names_every_input_that_changes_the_freebsd_build(self):
+        data = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+        inputs = set(data["on"]["workflow_call"]["inputs"])
+        steps = data["jobs"]["freebsd"]["steps"]
+        cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]
+        self.assertEqual(len(cache_steps), 2)
+        for step in cache_steps:
+            configuration = step["with"]["configuration"]
+            self.assertNotIn("toJSON(inputs)", configuration)
+            self.assertIn("matrix.arch", configuration)
+            keyed = {name for name in inputs if f"inputs.{name})" in configuration}
+            # A new input must be put in the key or listed above as not affecting the build.
+            self.assertEqual(keyed | self.RELEASE_INPUTS_OUTSIDE_THE_KEY, inputs)
+            self.assertFalse(keyed & self.RELEASE_INPUTS_OUTSIDE_THE_KEY)
+            self.assertEqual(step["with"]["target"],
+                             "${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}")
+
     def test_restore_tries_the_exact_revision_then_a_compatible_one(self):
         restore = next(step for step in ACTION["runs"]["steps"]
                        if step.get("uses", "").startswith("actions/cache/restore@"))
@@ -249,8 +335,16 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                                 "${{ steps.identity.outputs.fallback-prefix }}"])
         save = next(step for step in ACTION["runs"]["steps"]
                     if step.get("uses", "").startswith("actions/cache/save@"))
-        # Saving always writes the exact-revision entry the caller passed back in.
+        # Saving always writes the exact-revision entry the caller passed back in, unless
+        # today already has an entry for the same fingerprint.
         self.assertEqual(save["with"]["key"], "${{ inputs.key }}")
+        lookup = next(step for step in ACTION["runs"]["steps"] if step.get("id") == "today")
+        self.assertEqual(lookup["with"]["lookup-only"], "true")
+        self.assertEqual(lookup["with"]["restore-keys"], "${{ steps.day.outputs.prefix }}")
+        self.assertIn("steps.today.outputs.cache-matched-key == ''", save["if"])
+        transfer = next(step for step in ACTION["runs"]["steps"]
+                        if step.get("name") == "Transfer Cargo data across the VM boundary")
+        self.assertEqual(transfer["if"], "inputs.phase != 'save' || steps.today.outputs.cache-matched-key == ''")
 
     def test_host_cache_stays_outside_the_vm_shells_synced_work_tree(self):
         # vmactions syncs ~/work, not just GITHUB_WORKSPACE; RUNNER_TEMP lives
@@ -278,7 +372,7 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 job = data["jobs"]["freebsd"]
                 steps = job["steps"]
                 index = lambda name: next(i for i, step in enumerate(steps) if step.get("name") == name)
-                vm = next(step for step in steps if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
+                vm = next(step for step in steps if step.get("uses", "").startswith("step-security/freebsd-vm@"))
                 self.assertEqual(vm["with"]["copyback"], "false")
                 for variable in ("CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"):
                     self.assertIn(variable, vm["with"]["envs"].split())
@@ -291,12 +385,18 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 self.assertLess(steps.index(build), steps.index(save))
                 self.assertNotIn("always()", save["if"])
                 for cache_step in cache_steps:
+                    self.assertEqual(cache_step["with"]["target"],
+                                     "${{ matrix.arch == 'aarch64' && 'aarch64-unknown-freebsd' || '' }}")
                     self.assertEqual(cache_step.get("continue-on-error"), "true")
                     self.assertEqual(cache_step.get("timeout-minutes"), "10")
                 self.assertIn("steps.cargo-cache.outputs.key != ''", save["if"])
                 self.assertIn("steps.cargo-cache.outcome", build["run"])
                 self.assertIn("pull_request", save["if"])
-                self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
+                if filename == "freebsd.yml":
+                    self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
+                else:
+                    self.assertEqual(restore["with"]["configuration"], save["with"]["configuration"])
+                    self.assertEqual(restore["with"]["target"], save["with"]["target"])
                 if filename == "release.yml":
                     self.assertEqual(job["strategy"]["matrix"]["arch"], "${{ fromJSON(inputs.freebsd-architectures) }}")
                     self.assertEqual(restore["with"]["profile"], "release")

@@ -248,10 +248,10 @@ def history(root, head):
 
 def model(trailer):
     """Recognize an agent's Git identity by its exact email, without inferring a model from humans."""
-    match = re.fullmatch(r"\s*(.*?)\s*<([^<>]+)>\s*", trailer)
+    match = re.fullmatch(r"([^<>]*)<([^<>]+)>", trailer.strip())
     if not match:
         return None
-    name, email = match.groups()
+    name, email = match[1].strip(), match[2]
     known = agent(email)
     if known is None:
         return None

@@ -30,13 +30,16 @@ PACKAGE_TEMPLATE = next(step["run"] for step in STEPS if step.get("name") == "Bu
 class FreeBSDRunTests(unittest.TestCase):
     def run_vm(self, *, command="", fail_test=0, package="valid", package_check=True,
                skip_tests=False, fonts=False, require_fonts=False, fail_build=False, arch="x86_64", restore_failed=False, checkpoint_failed=False,
-               cross_env=False, root=False, build_extra_args="", test_extra_args=""):
+               cross_env=None, root=False, build_extra_args="", test_extra_args="", build_jobs="4"):
+        if cross_env is None:
+            cross_env = arch == "aarch64"
         inputs = {key: value.get("default", "") for key, value in DATA["on"]["workflow_call"]["inputs"].items()}
         inputs.update({
             "custom-test-command": command,
             "skip-tests": str(skip_tests).lower(),
             "run-package-check": str(package_check).lower(),
             "require-craft-fonts": str(require_fonts).lower(),
+            "build-jobs": build_jobs,
             "cargo-build-extra-args": build_extra_args,
             "cargo-test-extra-args": test_extra_args,
         })
@@ -68,6 +71,7 @@ set -eu
 printf '%s|%s|%s|%s\\n' "$1" "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" "$*" >> "$PWD/cargo.log"
 python3 -c 'import json, sys; print(json.dumps(sys.argv[1:]))' "$@" >> "$PWD/args.jsonl"
 printf '%s\\n' "${CARGO_BUILD_TARGET-}" >> "$PWD/target.log"
+printf '%s\\n' "$CARGO_BUILD_JOBS" >> "$PWD/jobs.log"
 if [ "$1" = build ]; then
   [ "$FAIL_BUILD" = false ] || exit 31
 else
@@ -99,6 +103,7 @@ fi
                 path.write_text("""#!/bin/bash
 set -euo pipefail
 touch package-ran
+printf '%s\\n' "$CARGO_BUILD_JOBS" >> "$PWD/jobs.log"
 printf 'package|%s|%s|%s\\n' "${CRAFT_FONTS_DIR-}" "${CRAFT_FONTS_REQUIRED-}" package >> "$PWD/package.log"
 case "$PACKAGE_MODE" in
   failed) exit 43 ;;
@@ -120,14 +125,14 @@ fi
             for key in ("CRAFT_FONTS_DIR", "CRAFT_FONTS_REQUIRED"):
                 env.pop(key, None)
             # The VM wrapper forwards only the configured SSH SendEnv names.
-            vm = next(step for step in STEPS if step.get("uses", "").startswith("vmactions/freebsd-vm@"))
+            vm = next(step for step in STEPS if step.get("uses", "").startswith("step-security/freebsd-vm@"))
             forwarded = vm["with"]["envs"].split()
             configured = {**DATA["jobs"]["freebsd"].get("env", {}), **BUILD_STEP.get("env", {})}
             env.update({key: re.sub(r"\$\{\{ inputs\.(.*?) \}\}", replace, value)
                         for key, value in configured.items() if key in forwarded})
             env.update(PATH=str(tools) + os.pathsep + env["PATH"], FAIL_TEST=str(fail_test),
                        PACKAGE_MODE=package, FAIL_BUILD=str(fail_build).lower(),
-                       TARGET_ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
+                       TARGET_ARCH=arch, ARCH=arch, CARGO_HOME="/cargo", CARGO_TARGET_DIR="/target")
             if cross_env:
                 (work / "guest/craft-cross").mkdir(parents=True)
                 (work / "guest/craft-cross/env").write_text("export CARGO_BUILD_TARGET=aarch64-unknown-freebsd\n")
@@ -148,9 +153,18 @@ fi
             remaining = [p.parent.name for p in (work / "guest/craft-target").glob("*/partial")]
             args_log = work / "args.jsonl"
             args = [json.loads(line) for line in args_log.read_text().splitlines()] if args_log.exists() else []
-            outcome = dict(admin=admin, work=str(work), targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
+            jobs = (work / "jobs.log").read_text().splitlines() if (work / "jobs.log").exists() else []
+            outcome = dict(jobs=jobs, admin=admin, work=str(work), targets=targets, package_log=package_log, remaining=remaining, code=result.returncode, packaged=(work / "package-ran").exists(),
                            log=log, args=args, injected=(work / "injected").exists(), output=result.stdout + result.stderr)
             return outcome
+
+    def test_build_test_and_package_share_the_requested_compilation_limit(self):
+        for jobs in ("1", "4"):
+            with self.subTest(jobs=jobs):
+                result = self.run_vm(build_jobs=jobs, root=True)
+                self.assertEqual(result["code"], 0, result)
+                self.assertEqual(result["jobs"], [jobs, jobs, jobs])
+                self.assertTrue(result["packaged"])
 
     def test_extra_args_preserve_quotes_escapes_and_empty_values(self):
         value = '--features "feature one"\n\t-p path\\ with\\ spaces --config \'say "hi"\' ""'
@@ -342,6 +356,12 @@ fi
         vm = next(step["with"] for step in STEPS if "with" in step and "prepare" in step["with"])
         self.assertNotIn("arch", vm)
 
+    def test_aarch64_fails_closed_without_the_cross_env(self):
+        result = self.run_vm(arch="aarch64", cross_env=False, package_check=False)
+        self.assertNotEqual(result["code"], 0, result)
+        self.assertIn("expected aarch64-unknown-freebsd", result["output"], result)
+        self.assertEqual(result["log"], [], result)
+
     def test_aarch64_builds_for_the_cross_target_and_runs_no_tests(self):
         for command in ("", "cargo test --lib\ncargo test --doc"):
             with self.subTest(command=command):
@@ -365,6 +385,22 @@ fi
         self.assertIn('if [ "$host" != "$cross" ]; then', script)
         self.assertIn("sha256 -q", script)
         self.assertIn("CARGO_BUILD_TARGET=$target", script)
+        # After sourcing the env file, require the variable to actually be set.
+        # An unset parameter in the unquoted heredoc does not always abort FreeBSD sh.
+        self.assertIn('if [ "${CARGO_BUILD_TARGET:-}" != "$target" ]; then', script)
+        self.assertIn("alsa-lib xorgproto", script)
+        self.assertIn("pkg-config --print-errors --exists gdk-3.0 || true", script)
+        # The env file is generated by an unquoted heredoc. Do not reference
+        # PKG_CONFIG_PATH while generating it: that variable is assigned by a
+        # different line in the heredoc and is unset in the generating shell.
+        pkg_config_libdir = (
+            "export PKG_CONFIG_LIBDIR=$S/usr/local/libdata/pkgconfig:"
+            "$S/usr/local/lib/pkgconfig:$S/usr/local/share/pkgconfig:"
+            "$S/usr/share/pkgconfig:$S/usr/libdata/pkgconfig"
+        )
+        self.assertIn(pkg_config_libdir, script)
+        self.assertIn("./usr/libdata ./usr/share", script)
+        self.assertNotIn("export PKG_CONFIG_LIBDIR=$PKG_CONFIG_PATH", script)
         result = subprocess.run(["/bin/sh", "-n", "-c", script], text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 0, result)
 
@@ -389,7 +425,7 @@ fi
     def test_release_workflow_rejects_unsupported_architectures_before_the_vm(self):
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         steps = release["jobs"]["freebsd"]["steps"]
-        check = steps[0]
+        check = next(step for step in steps if step.get("name") == "Check the FreeBSD architecture")
         self.assertEqual(check["name"], "Check the FreeBSD architecture")
         self.assertEqual(check["env"]["ARCH"], "${{ matrix.arch }}")
         for arch, code in (("x86_64", 0), ("aarch64", 0), ("riscv64", 1), ("amd64", 1), ("", 1)):

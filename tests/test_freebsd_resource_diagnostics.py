@@ -1,0 +1,66 @@
+"""Ensure failure diagnostics are bounded and never replace workload results."""
+from pathlib import Path
+import unittest
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = yaml.load((ROOT / ".github/workflows/freebsd.yml").read_text(), Loader=yaml.BaseLoader)
+STEPS = DATA["jobs"]["freebsd"]["steps"]
+RELEASE = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+RELEASE_STEPS = RELEASE["jobs"]["freebsd"]["steps"]
+
+
+def diagnostics(steps):
+    return next(s for s in steps if s.get("name") == "Report final host and guest resources")
+
+
+class FreeBSDResourceDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.step = diagnostics(STEPS)
+
+    def test_release_build_reports_the_same_resources_last(self):
+        # The release FreeBSD job gets the same bounded, read-only report, as its final step.
+        step = diagnostics(RELEASE_STEPS)
+        self.assertIs(step, RELEASE_STEPS[-1])
+        self.assertEqual(step, self.step)
+        self.assertNotIn("continue-on-error", next(s for s in RELEASE_STEPS if s.get("name") == "Build and package"))
+
+    def test_diagnostics_run_after_all_work_even_on_failure(self):
+        self.assertIs(self.step, STEPS[-1])
+        self.assertEqual(self.step["if"], "always() && !cancelled()")
+        self.assertEqual(self.step["continue-on-error"], "true")
+        self.assertEqual(self.step["timeout-minutes"], "2")
+        self.assertEqual(self.step["shell"], "bash")
+        for step in STEPS:
+            if step.get("name") in ("Build and test", "Build and validate the FreeBSD package"):
+                self.assertNotIn("continue-on-error", step)
+
+    def test_guest_query_has_bounded_runtime_and_literal_read_only_commands(self):
+        run = self.step["run"]
+        self.assertIn('timeout --kill-after=5s 30s ssh -o BatchMode=yes -o ConnectTimeout=5 freebsd sh < "$diagnostics"', run)
+        guest = run.split("<<'FREEBSD_RESOURCES'\n", 1)[1].split("\nFREEBSD_RESOURCES", 1)[0]
+        self.assertEqual(guest.splitlines(), [
+            "df -k / /var/tmp",
+            "swapinfo -k",
+            "sysctl hw.physmem vm.stats.vm.v_free_count vm.stats.vm.v_inactive_count vm.stats.vm.v_wire_count",
+            "sysctl kstat.zfs.misc.arcstats.size",
+            "dmesg | grep -Ei 'out of swap|out of memory|killed|swap_pager' | tail -n 30 || true",
+        ])
+        self.assertNotIn("${{", run)
+        self.assertNotIn("rm ", run)
+        self.assertNotIn("sysctl -w", run)
+        self.assertNotIn('freebsd "$diagnostics"', run)
+        self.assertNotIn("StrictHostKeyChecking", run)
+        self.assertNotIn("UserKnownHostsFile", run)
+
+    def test_host_reports_bytes_inodes_memory_and_only_filtered_kernel_messages(self):
+        run = self.step["run"]
+        self.assertIn('df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"', run)
+        self.assertIn('df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"', run)
+        self.assertIn("free -b || true", run)
+        self.assertIn("sudo -n dmesg --color=never | grep -Ei 'out of memory|oom-kill|killed process' | tail -n 30 || true", run)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,63 @@
+name: "Restore mtimes"
+description: >-
+  Makes Cargo's fingerprints match a cache that keeps workspace build artifacts. `restore` reads
+  the commit the cache was built from (.ci-cache-meta/commit), gives every tracked file an old
+  mtime, and touches the files that differ between that commit and HEAD, so Cargo rebuilds exactly
+  the units that read a changed file. `record` writes the marker for the next run. Without a marker
+  or when the old commit cannot be fetched, `restore` does nothing and Cargo rebuilds everything.
+
+inputs:
+  mode:
+    description: "restore (before the build) or record (after it, in the job that saves the cache)"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Restore or record
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -euo pipefail
+        META=.ci-cache-meta
+        OLD=978307200 # 2001-01-01; cached outputs carry their 2026 mtimes through the tarball
+        # The commits the external checkouts are at, not the refs that named them: a branch or tag
+        # pin can move while its text stays the same.
+        pins() {
+          for d in craft-i18n craft-fonts; do
+            echo "$d=$( [ -e "$d/.git" ] && git -C "$d" rev-parse HEAD || true )"
+          done
+        }
+        if [ "$MODE" = record ]; then
+          mkdir -p "$META"
+          git rev-parse HEAD > "$META/commit"
+          pins > "$META/pins"
+          echo "recorded cache commit $(cat "$META/commit")"
+          exit 0
+        fi
+        if [ ! -s "$META/commit" ]; then
+          echo "no cache marker: Cargo builds everything"
+          exit 0
+        fi
+        base=$(tr -d '[:space:]' < "$META/commit")
+        if ! git fetch --quiet --depth=1 origin "$base"; then
+          echo "::warning::cache commit $base cannot be fetched: Cargo builds everything"
+          exit 0
+        fi
+        git ls-files -z | xargs -0 touch -d "@$OLD"
+        git diff --name-only -z "$base" HEAD | while IFS= read -r -d '' f; do
+          [ -e "$f" ] && touch -- "$f" || true
+        done > /dev/null
+        changed=$(git diff --name-only "$base" HEAD | wc -l)
+        echo "cache commit $base, $changed changed files touched"
+        git diff --name-only "$base" HEAD | sed -n "1,50p"
+        # External checkouts: old mtimes when their pins are unchanged, else left new.
+        if [ -f "$META/pins" ] && [ "$(pins)" = "$(cat "$META/pins")" ]; then
+          for d in craft-i18n craft-fonts; do
+            [ -d "$d" ] && find "$d" -path "$d/.git" -prune -o -type f -exec touch -d "@$OLD" {} + || true
+          done
+          echo "external checkouts: pins unchanged, old mtimes set"
+        else
+          echo "external checkouts: pins differ or absent, left as checked out"
+        fi

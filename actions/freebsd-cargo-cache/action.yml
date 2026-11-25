@@ -16,6 +16,11 @@ inputs:
   key:
     description: Primary key returned by the restore invocation (package/save)
     default: ""
+  target:
+    description: >-
+      Rust target triple of a cross build (e.g. aarch64-unknown-freebsd), whose output Cargo
+      writes to target/<triple>/<profile> rather than target/<profile>. Empty for a native build.
+    default: ""
 outputs:
   key:
     description: Primary cache key for the subsequent save invocation
@@ -34,6 +39,7 @@ runs:
         CACHE_CONFIGURATION: ${{ inputs.configuration }}
         CACHE_SOURCE_HASH: ${{ inputs.source-hash }}
         CACHE_PROFILE: ${{ inputs.profile }}
+        CACHE_TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
         # Read the actual guest, including native-library versions. Host Rust and
@@ -55,13 +61,22 @@ runs:
         # that touches a manifest with nothing to restore, so the fallback
         # prefix below deliberately omits it and lets Cargo invalidate the
         # stale parts. See issues #33 and #39.
-        compatible=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$CACHE_PROFILE" | sha256sum | cut -d ' ' -f 1)
+        # Keep native cache keys stable; never reuse host-only or another target's objects.
+        case "$CACHE_TARGET" in *[!a-z0-9_-]*) echo 'invalid cache target' >&2; exit 1 ;; esac
+        profile_identity=$CACHE_PROFILE
+        if [ -n "$CACHE_TARGET" ]; then
+          profile_identity="$CACHE_PROFILE|target=$CACHE_TARGET"
+        fi
+        compatible=$(printf '%s\n' "$guest" "$CACHE_CONFIGURATION" "$profile_identity" | sha256sum | cut -d ' ' -f 1)
         fingerprint=$(printf '%s\n' "$compatible" "$CACHE_SOURCE_HASH" | sha256sum | cut -d ' ' -f 1)
         fallback_prefix="freebsd-cargo-v3-$compatible-"
         prefix="$fallback_prefix$fingerprint-"
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
         echo "fallback-prefix=$fallback_prefix" >> "$GITHUB_OUTPUT"
-        echo "key=$prefix$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+        # The day in the key lets the save step keep one entry per compatible build and
+        # day, rather than one per commit: each entry is 1-7 GB, and a save per push to main
+        # pushed every other cache in the repository out of its 10 GB.
+        echo "key=$prefix$(date -u +%Y%m%d)-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
     - name: Restore guest Cargo data on the host
       if: inputs.phase == 'restore'
       id: restore
@@ -72,11 +87,33 @@ runs:
         restore-keys: |
           ${{ steps.identity.outputs.prefix }}
           ${{ steps.identity.outputs.fallback-prefix }}
+    # Skip the export and the save when today already has an entry for this exact
+    # dependency fingerprint: the next run restores that one by prefix, and Cargo
+    # rebuilds only the workspace crates that changed since. A key from before the day
+    # was added has no day to strip, so any entry for its fingerprint counts.
+    - name: Day of this entry
+      if: inputs.phase == 'save' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      id: day
+      shell: bash
+      env:
+        KEY: ${{ inputs.key }}
+      run: echo "prefix=${KEY%"$GITHUB_SHA"}" >> "$GITHUB_OUTPUT"
+    - name: Look for today's entry
+      if: steps.day.outputs.prefix != ''
+      id: today
+      uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ~/.cache/craft-freebsd-cargo
+        key: ${{ inputs.key }}
+        restore-keys: ${{ steps.day.outputs.prefix }}
+        lookup-only: true
     - name: Transfer Cargo data across the VM boundary
+      if: inputs.phase != 'save' || steps.today.outputs.cache-matched-key == ''
       shell: bash
       env:
         CACHE_PHASE: ${{ inputs.phase }}
         CACHE_PROFILE: ${{ inputs.profile }}
+        CACHE_TARGET: ${{ inputs.target }}
         # PRs may restore their base branch's cache, but never write it.
         CACHE_CAN_SAVE: ${{ github.event_name != 'pull_request' && github.event_name != 'pull_request_target' }}
       run: |
@@ -85,6 +122,7 @@ runs:
         # host archive outside that tree to avoid a second copy inside the VM.
         cache="$HOME/.cache/craft-freebsd-cargo"
         case "$CACHE_PROFILE" in debug|release) ;; *) echo 'invalid cache profile' >&2; exit 1 ;; esac
+        case "$CACHE_TARGET" in *[!a-z0-9_-]*) echo 'invalid cache target' >&2; exit 1 ;; esac
         ssh_args='ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=60 -o ConnectTimeout=120'
         remote_rsync='env PATH=/usr/local/bin:/usr/bin:/bin rsync'
         push() {
@@ -123,6 +161,13 @@ runs:
             push git /var/tmp/craft-cargo/git
             # Do not load both profiles into the space-constrained VM at once.
             push "target/$CACHE_PROFILE" "/var/tmp/craft-target/$CACHE_PROFILE"
+            # A cross build keeps only its build scripts and proc macros in target/<profile>;
+            # everything it builds for the target is under target/<triple>/<profile>.
+            if [ -n "$CACHE_TARGET" ]; then
+              # shellcheck disable=SC2029
+              ssh freebsd "mkdir -p /var/tmp/craft-target/$CACHE_TARGET/$CACHE_PROFILE"
+              push "target/$CACHE_TARGET/$CACHE_PROFILE" "/var/tmp/craft-target/$CACHE_TARGET/$CACHE_PROFILE"
+            fi
             ;;
           package)
             if [ "$CACHE_CAN_SAVE" = true ]; then
@@ -137,8 +182,9 @@ runs:
             # excluded. Keep the debug checkpoint when packaging removed it.
             pull registry /var/tmp/craft-cargo/registry
             pull git /var/tmp/craft-cargo/git
-            for profile in debug release; do
-              # profile is one of the two literal directory names above.
+            for profile in debug release ${CACHE_TARGET:+"$CACHE_TARGET/debug" "$CACHE_TARGET/release"}; do
+              # profile is one of the literal directory names above, under the validated triple
+              # for a cross build.
               # shellcheck disable=SC2029
               if ssh freebsd "test -d /var/tmp/craft-target/$profile"; then
                 pull "target/$profile" "/var/tmp/craft-target/$profile"
@@ -148,7 +194,7 @@ runs:
           *) echo 'invalid cache phase' >&2; exit 1 ;;
         esac
     - name: Save guest Cargo data from the host
-      if: inputs.phase == 'save' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target'
+      if: inputs.phase == 'save' && github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && steps.today.outputs.cache-matched-key == ''
       uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
       with:
         path: ~/.cache/craft-freebsd-cargo

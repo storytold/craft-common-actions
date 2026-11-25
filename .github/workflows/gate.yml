@@ -1,7 +1,11 @@
 name: "Gate"
 
 # The quality gate the craft apps run on pull requests and pushes to main: one job per runner in
-# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup.
+# `os`, each running `command` (by default `cargo xtask ci`) with the suite's shared setup, and with
+# `lint-command` a second job per runner that runs the lint checks beside it. With `test-shards`,
+# each runner runs its tests as that many shard jobs instead of one, and with `archive-command` a
+# `build (<os>)` job builds the tests once for all of them. The setup every job shares is
+# actions/gate-setup; each job's command runs through actions/gate-run.
 # App-specific checks (fuzzing, corpora, web builds) belong here too, as shared workflows or
 # inputs: an app's workflows only call this repository's workflows.
 on:
@@ -17,8 +21,83 @@ on:
         type: string
         required: false
         default: "cargo xtask ci"
+      artifact-name:
+        description: "Optional unsharded test/build output, uploaded as <artifact-name>-<matrix.os>; empty uploads nothing"
+        type: string
+        required: false
+        default: ""
+      artifact-path:
+        description: "Files or patterns to upload after the gate and lockfile checks; fails if no files match"
+        type: string
+        required: false
+        default: ""
+      warm-command:
+        description: "Optional build that fills the dependency cache, for example `cargo test --workspace --no-run --locked`; empty (default) runs none. Where the dependency cache saves, a `cache warm (<os>)` leg beside the gate runs it and saves the `gate` entry as soon as it succeeds, so a failing test no longer keeps the entry from being saved. Give it the build the gate does (same features, profile and targets) and nothing else; the gate legs then only restore. With archive-command the build job saves the entry, and no warm leg runs"
+        type: string
+        required: false
+        default: ""
+      setup-command:
+        description: "Optional setup script, run from the repository root before the gate (for example, fetch SHA-verified corpora)"
+        type: string
+        required: false
+        default: ""
+      cache-paths:
+        description: "Paths (one per line) that setup-command fills, restored before it and saved after it where the dependency cache saves; empty caches none. One entry serves every OS"
+        type: string
+        required: false
+        default: ""
+      cache-key:
+        description: "The key for cache-paths; put the pins of what setup-command fetches in it, so a new pin starts a new entry"
+        type: string
+        required: false
+        default: ""
+      cache-key-files:
+        description: "A glob of files (the fetch script that holds the pins, say) whose hash is added to cache-key; empty adds none"
+        type: string
+        required: false
+        default: ""
       windows-command:
         description: "The gate on Windows legs; empty runs `command`"
+        type: string
+        required: false
+        default: ""
+      lint-command:
+        description: "Lint checks (fmt, clippy) run with bash on a `lint (<os>)` leg beside each `gate (<os>)` leg, so they stay off the test leg's critical path; the lint leg skips setup-command and the caller cache. Empty runs no lint legs"
+        type: string
+        required: false
+        default: ""
+      test-shards:
+        description: "0 (default): one `gate (<os>)` leg per runner runs `command`. N > 0: per runner, N `test <k>/<N> (<os>)` legs each run `shard-command`, and `gate (<os>)` passes only when all of them did"
+        type: number
+        required: false
+        default: 0
+      shard-command:
+        description: "With test-shards: each shard leg's command, which builds and runs its share of the tests (with archive-command, runs it from the archive at $NEXTEST_ARCHIVE_FILE). `GATE_SHARD` (1..N), `GATE_SHARDS` (N) and `NEXTEST_PARTITION` (`hash:<k>/<N>`) say which share, for example `cargo nextest run --workspace --locked --partition \"$NEXTEST_PARTITION\"`"
+        type: string
+        required: false
+        default: ""
+      archive-command:
+        description: "With test-shards: build the tests once per runner, in a `build (<os>)` job that runs this command to write a nextest archive to $NEXTEST_ARCHIVE_FILE (with shard-archives, one per shard). The shard legs download the archive instead of building, and only they wait for the build job. Where the dependency cache saves, the build job saves the `gate` entry. A failed build skips the shards of every runner in the call, so give each runner a call of its own. Empty (default): each shard builds its own tests; test-shards: 0 with an archive-command is an error"
+        type: string
+        required: false
+        default: ""
+      archive-file:
+        description: "File name of the archive archive-command writes, in the runner's temporary directory"
+        type: string
+        required: false
+        default: "nextest-archive.tar.zst"
+      shard-archives:
+        description: "With archive-command: the build job writes one archive per shard instead of one for all, and each shard downloads only its own, so it fetches only the test binaries it runs. archive-command then writes shard k's archive to $NEXTEST_ARCHIVE_DIR/<k>/$NEXTEST_ARCHIVE_NAME for every k from 1 to $GATE_SHARDS ($NEXTEST_ARCHIVE_FILE is not set), and records in the archives which tests each shard runs; the shard legs get $NEXTEST_ARCHIVE_FILE as before. At most 8 shards: the build job uploads each archive in a step of its own. false (default): one archive for every shard"
+        type: boolean
+        required: false
+        default: false
+      after-archive-command:
+        description: "With archive-command: a command the build job runs after it has uploaded the archive, for checks that need the build directory (doctests, say). The shards wait for the whole build job, so its time adds to the gate's. `gate (<os>)` passes only when it passed too. Empty runs none"
+        type: string
+        required: false
+        default: ""
+      windows-shard-command:
+        description: "shard-command on Windows legs; empty runs `shard-command`"
         type: string
         required: false
         default: ""
@@ -27,6 +106,26 @@ on:
         type: string
         required: false
         default: '["ubuntu-24.04"]'
+      select-os:
+        description: 'JSON array of the `os` entries that run on a pull request only when it can change platform behaviour (actions/select-platforms: platform cfg code or its dependents, the build setup, select-paths); pushes and other events run every leg. Empty or [] runs every leg on every event'
+        type: string
+        required: false
+        default: "[]"
+      select-paths:
+        description: "Extra globs, one per line, whose change runs the select-os legs (`*` also matches `/`)"
+        type: string
+        required: false
+        default: ""
+      select-crates:
+        description: "Extra workspace crates, one per line, treated as having platform code"
+        type: string
+        required: false
+        default: ""
+      select-label:
+        description: "A pull request label that runs every leg, read when the run starts; empty: none"
+        type: string
+        required: false
+        default: "full-ci"
       craft-fonts-ref:
         # The suite's craft-fonts pin, as in release.yml and freebsd.yml.
         description: "The commit of storytold/craft-fonts the tests build with. Defaults to the suite's pin; empty builds without craft-fonts"
@@ -73,16 +172,57 @@ on:
         type: string
         required: false
         default: "line-tables-only"
+      dev-strip:
+        description: "Build the test profile with no debug info and strip symbols (CARGO_PROFILE_TEST_DEBUG=0, CARGO_PROFILE_TEST_STRIP=symbols): test binaries shrink to about a third and panics keep their file:line, while backtraces lose function names. Local builds are unaffected"
+        type: boolean
+        required: false
+        default: false
+      cache-name:
+        description: "Names this call's dependency-cache entry (`gate-<name>`), so several calls of this workflow in one job do not share one key and overwrite each other's entry; empty keeps the `gate` entry"
+        type: string
+        required: false
+        default: ""
       free-disk-space:
         description: "Delete the Linux image's unused toolchains (Android, .NET, GHC, CodeQL) in the background before the build"
         type: boolean
         required: false
         default: true
+      sccache:
+        description: "Also cache the workspace crates' compiled libraries (which rust-cache leaves out) with sccache in the GitHub Actions cache. It writes where the dependency cache is saved (pushes to the default branch, opted-in manual runs); other runs read those entries. SCCACHE_GHA_RW_MODE in `env` overrides that. Test executables are never cached. Its cache starts afresh when cache-version, a Cargo.toml or a build.rs changes; bump cache-version when files a procedural macro reads change (see the README)"
+        type: boolean
+        required: false
+        default: false
       cache-version:
         description: "Bump to start the dependency cache afresh"
         type: string
         required: false
-        default: "v1"
+        # Same default as actions/rust-cache, which explains the v2 bump.
+        default: "v2"
+      cache-workspace-crates:
+        description: "Keep the workspace crates' compiled libraries and unit-test executables in the dependency cache as a rolling entry: the leg that saves writes an entry of its own each run, every leg restores the newest one, and actions/restore-mtimes resets source mtimes from the diff against the commit that entry was built from, so Cargo rebuilds only what changed. A run's entry is named after the entry it restored, so of overlapping runs that restored the same entry with the same lockfile and toolchain, only the first to finish saves; when the build records its units (actions/cache-trim), the entry holds only those. The lint legs keep their usual entry"
+        type: boolean
+        required: false
+        default: false
+      lint-cache:
+        description: "Restore and save the lint legs' dependency-cache entry (`lint`, about 1 GB per OS). `false` runs the lint legs without a dependency cache, which frees that much of the repository's cache budget for a slower lint leg"
+        type: boolean
+        required: false
+        default: true
+      unreached-rs-mode:
+        description: "The lint legs' check that no `.rs` file is unreached by every `mod`, `#[path]` and `include!` (such a file never compiles). `diff` fails when the change adds or modifies one, `strict` on any, `off` skips the check. Runs on the Linux lint leg only, before setup"
+        type: string
+        required: false
+        default: "diff"
+      unreached-rs-allow:
+        description: "Newline-separated globs of `.rs` files that are unreached on purpose (fixtures, generated files), matched against the repository-relative path; `**` crosses directories. The default covers fixture trees; a repository that sets this input lists them itself"
+        type: string
+        required: false
+        default: "**/fixtures/**"
+      cold-build:
+        description: "With cache-workspace-crates: restore no dependency cache and build everything from source; where the cache saves, the saving leg still writes a fresh entry (a nightly cold run is the safety net for the restored mtimes, and it starts the rolling entry afresh)"
+        type: boolean
+        required: false
+        default: false
       cache-save-on-dispatch:
         description: "Allow manually dispatched branch runs to save their branch-scoped dependency cache; pull requests never write"
         type: boolean
@@ -103,176 +243,631 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    name: gate (${{ matrix.os }})
+  # Runs only with select-os or test-shards; otherwise it is skipped and the gate runs every leg
+  # in `os`.
+  select:
+    name: select legs
+    if: (inputs.select-os != '' && inputs.select-os != '[]') || inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      os: ${{ steps.select.outputs.os }}
+      shards: ${{ steps.shards.outputs.shards }}
+      exclude: ${{ steps.shards.outputs.exclude }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # The merge commit and its first parent. Other events run every leg without a checkout.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request' && inputs.select-os != '' && inputs.select-os != '[]'
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - id: select
+        if: inputs.select-os != '' && inputs.select-os != '[]'
+        uses: storytold/craft-common-actions/actions/select-platforms@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          os: ${{ inputs.os }}
+          select-os: ${{ inputs.select-os }}
+          paths: ${{ inputs.select-paths }}
+          crates: ${{ inputs.select-crates }}
+          label: ${{ inputs.select-label }}
+      # The gate job's `shard` dimension, and the warm leg it must not repeat: that keeps one leg
+      # per runner, as shard 1.
+      - name: Shards
+        id: shards
+        if: inputs.test-shards != 0 || inputs.archive-command != '' || inputs.shard-archives
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.test-shards }}
+          SHARD: ${{ inputs.shard-command }}
+          ARCHIVE: ${{ inputs.archive-command }}
+          SHARD_ARCHIVES: ${{ inputs.shard-archives }}
+        run: |
+          set -euo pipefail
+          if [ "$SHARD_ARCHIVES" = true ] && [ -z "$ARCHIVE" ]; then
+            echo "::error::shard-archives needs archive-command: it writes the archives"
+            exit 1
+          fi
+          if [ "$SHARDS" = 0 ]; then
+            echo "::error::archive-command needs test-shards: the shard legs are what run its archive"
+            exit 1
+          fi
+          if [[ ! "$SHARDS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::test-shards must be 0 or a positive whole number, got '$SHARDS'"
+            exit 1
+          fi
+          if [ -z "$SHARD" ]; then
+            echo "::error::test-shards needs shard-command"
+            exit 1
+          fi
+          # The build job has one upload step per shard archive.
+          if [ "$SHARD_ARCHIVES" = true ] && [ "$SHARDS" -gt 8 ]; then
+            echo "::error::shard-archives uploads at most 8 archives, got test-shards: $SHARDS"
+            exit 1
+          fi
+          exclude=
+          for shard in $(seq 2 "$SHARDS"); do
+            exclude+="${exclude:+,}{\"part\":\"warm\",\"shard\":$shard}"
+          done
+          echo "shards=[$(seq -s, 1 "$SHARDS")]" >> "$GITHUB_OUTPUT"
+          echo "exclude=[$exclude]" >> "$GITHUB_OUTPUT"
+
+  # With archive-command: the tests are built once per runner into a nextest archive, which the
+  # shard legs download instead of building. Where the dependency cache saves, this job saves the
+  # gate's entry (and, with cache-workspace-crates, records the commit the entry was built from).
+  build:
+    needs: select
+    # A skipped select (no select-os) still runs the build; a failed one does not.
+    if: ${{ !cancelled() && needs.select.result != 'failure' && inputs.test-shards != 0 && inputs.archive-command != '' }}
+    name: build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
-      # A failing leg must not cancel the others and hide their failures.
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.os) }}
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 10
       RUST_BACKTRACE: 1
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &harden-runner
+        name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
-          persist-credentials: false
-
-      - name: Check out craft-fonts
-        if: inputs.craft-fonts-ref != ''
+          egress-policy: audit
+          allowed-endpoints: >
+            *.amazontrust.com:80
+            *.blob.core.windows.net:443
+            esm.ubuntu.com:443
+            motd.ubuntu.com:443
+            *.crates.io:443
+            *.github.com:443
+            *.githubusercontent.com:443
+            *.microsoft.com:443
+            *.rust-lang.org:443
+            *.ubuntu.com:80
+            *.ubuntu.com:443
+            api.github.com:443
+            archive.ubuntu.com:80
+            archive.ubuntu.com:443
+            azure.archive.ubuntu.com:80
+            azure.archive.ubuntu.com:443
+            crates.io:443
+            ftp.tu-chemnitz.de:443
+            github.com:443
+            index.crates.io:443
+            *.dotsrc.org:443
+            *.kernel.org:443
+            mirrors.dotsrc.org:443
+            mirrors.edge.kernel.org:443
+            objects.githubusercontent.com:443
+            packages.microsoft.com:443
+            release-assets.githubusercontent.com:443
+            security.ubuntu.com:80
+            security.ubuntu.com:443
+            static.crates.io:443
+            static.rust-lang.org:443
+      - &checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: storytold/craft-fonts
-          ref: ${{ inputs.craft-fonts-ref }}
-          path: craft-fonts
           persist-credentials: false
 
-      - name: Build with craft-fonts
-        if: inputs.craft-fonts-ref != ''
-        shell: bash
-        env:
-          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
-          REQUIRED: ${{ inputs.require-craft-fonts }}
-        run: |
-          echo "CRAFT_FONTS_DIR=$CRAFT_FONTS_DIR" >> "$GITHUB_ENV"
-          if [ "$REQUIRED" = true ]; then echo "CRAFT_FONTS_REQUIRED=1" >> "$GITHUB_ENV"; fi
-
-      # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
-      - name: Check out craft-i18n
-        uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
-
-      # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
-      - name: Caller environment
-        if: inputs.env != '' || inputs.linux-env != '' || inputs.windows-env != '' || inputs.dev-debug != ''
-        shell: bash
-        env:
-          ALL: ${{ inputs.env }}
-          LINUX: ${{ inputs.linux-env }}
-          WINDOWS: ${{ inputs.windows-env }}
-          DEV_DEBUG: ${{ inputs.dev-debug }}
-        run: |
-          set -euo pipefail
-          case "$RUNNER_OS" in
-            Linux) extra=$LINUX ;;
-            Windows) extra=$WINDOWS ;;
-            *) extra= ;;
-          esac
-          if [ -n "$DEV_DEBUG" ]; then echo "CARGO_PROFILE_DEV_DEBUG=$DEV_DEBUG" >> "$GITHUB_ENV"; fi
-          printf '%s\n%s\n' "$ALL" "$extra" | while IFS= read -r line; do
-            [ -n "$line" ] || continue
-            if ! [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-              echo "::error::env: expected KEY=VALUE, got '$line'"
-              exit 1
-            fi
-            echo "$line" >> "$GITHUB_ENV"
-          done
-
-      # Nothing waits on it: the space is free before the build needs it.
-      - name: Free disk space
-        if: runner.os == 'Linux' && inputs.free-disk-space
-        run: |
-          nohup sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-            /opt/hostedtoolcache/CodeQL </dev/null >/dev/null 2>&1 &
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux' && inputs.packages != ''
-        uses: storytold/craft-common-actions/actions/install-apt-packages@main
+      # Default-branch writes remain the default. Maintainers can explicitly opt manual branch runs
+      # into branch-scoped writes; pull-request runs never save a cache.
+      - name: Setup
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
+          craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+          require-craft-fonts: ${{ inputs.require-craft-fonts }}
+          env: ${{ inputs.env }}
+          linux-env: ${{ inputs.linux-env }}
+          windows-env: ${{ inputs.windows-env }}
+          dev-debug: ${{ inputs.dev-debug }}
+          dev-strip: ${{ inputs.dev-strip }}
+          free-disk-space: ${{ inputs.free-disk-space }}
           packages: ${{ inputs.packages }}
+          toolchain: ${{ inputs.toolchain }}
+          targets: ${{ inputs.targets }}
+          tools: ${{ inputs.tools }}
+          cache-version: ${{ inputs.cache-version }}
+          cache-job: ${{ inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || 'gate' }}
+          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
+          cold-build: ${{ inputs.cold-build }}
+          sccache: ${{ inputs.sccache }}
+          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          cache-paths: ${{ inputs.cache-paths }}
+          cache-key: ${{ inputs.cache-key }}
+          cache-key-files: ${{ inputs.cache-key-files }}
+          setup-command: ${{ inputs.setup-command }}
 
-      # The channel in rust-toolchain.toml wins over `toolchain`, so the gate builds with the
-      # toolchain contributors use and a new Rust release does not invalidate the cache.
-      - name: Install Rust
+      - name: Archive path
+        if: ${{ !inputs.shard-archives }}
         shell: bash
         env:
-          TOOLCHAIN: ${{ inputs.toolchain }}
-          TARGETS: ${{ inputs.targets }}
+          FILE: ${{ runner.temp }}/${{ inputs.archive-file }}
+        run: echo "NEXTEST_ARCHIVE_FILE=$FILE" >> "$GITHUB_ENV"
+
+      - name: Archive paths
+        if: inputs.shard-archives
+        shell: bash
+        env:
+          DIR: ${{ runner.temp }}/gate-archives
+          NAME: ${{ inputs.archive-file }}
+          SHARDS: ${{ inputs.test-shards }}
         run: |
-          set -euo pipefail
-          if [ -f rust-toolchain.toml ]; then
-            channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)
-            TOOLCHAIN=${channel:-$TOOLCHAIN}
-          fi
-          args=(--profile minimal --no-self-update --component clippy --component rustfmt)
-          for target in ${TARGETS//,/ }; do args+=(--target "$target"); done
-          rustup toolchain install "$TOOLCHAIN" "${args[@]}"
-          rustup default "$TOOLCHAIN"
-          rustc --version
+          {
+            echo "NEXTEST_ARCHIVE_DIR=$DIR"
+            echo "NEXTEST_ARCHIVE_NAME=$NAME"
+            echo "GATE_SHARDS=$SHARDS"
+          } >> "$GITHUB_ENV"
 
-      - name: Install cargo tools
-        if: inputs.tools != ''
-        uses: taiki-e/install-action@682ce6c3c696a4cd5168a05f98e51aa02b877941 # v2.89.1
+      - name: Build the test archive
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
         with:
-          tool: ${{ inputs.tools }}
+          command: ${{ inputs.archive-command }}
+          timeout-minutes: ${{ inputs.gate-timeout-minutes }}
 
-      # Root workspace profiles are not among rust-cache's member manifests. Hash only
-      # those profiles here: a dependency/version/comment change must not discard the
-      # fallback cache for every other dependency. rust-cache still hashes the lockfile,
-      # toolchain, member manifests and build environment, and Cargo checks fingerprints.
-      - name: Cache profile key
-        id: cache-profile
+      # The marker is saved with the cache entry in rust-cache's post step.
+      - name: Record the cache commit
+        if: inputs.cache-workspace-crates
+        uses: storytold/craft-common-actions/actions/restore-mtimes@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          mode: record
+
+      # A build that changed Cargo.lock ran against a lockfile that is not the one in the repository.
+      - name: Lockfile unchanged
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+
+      - name: Archive size
+        if: ${{ !inputs.shard-archives }}
+        shell: bash
+        run: ls -l "$NEXTEST_ARCHIVE_FILE"
+
+      - name: Archive sizes
+        if: inputs.shard-archives
         shell: bash
         run: |
-          python - <<'PYTHON'
-          import hashlib
-          import json
-          import os
-          import tomllib
-          from pathlib import Path
-          manifest = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
-          profiles = json.dumps(manifest.get("profile", {}), sort_keys=True, separators=(",", ":"))
-          key = hashlib.sha256(profiles.encode("utf-8")).hexdigest()
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              output.write(f"key={key}\n")
-          PYTHON
+          status=0
+          for shard in $(seq 1 "$GATE_SHARDS"); do
+            file="$NEXTEST_ARCHIVE_DIR/$shard/$NEXTEST_ARCHIVE_NAME"
+            if [ -f "$file" ]; then
+              ls -l "$file"
+            else
+              echo "::error::archive-command wrote no archive for shard $shard ($file)"
+              status=1
+            fi
+          done
+          exit "$status"
 
-      # Default-branch writes remain the default. Maintainers can explicitly opt manual
-      # branch runs into branch-scoped writes; pull-request runs never save a cache.
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # Uncompressed: a zstd archive barely shrinks, and level 0 uploads it in seconds.
+      - name: Upload the test archive
+        if: ${{ !inputs.shard-archives }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          prefix-key: ${{ inputs.cache-version }}-rust
-          key: ${{ steps.cache-profile.outputs.key }}
-          save-if: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
-          cache-on-failure: true
+          name: gate-archive-${{ matrix.os }}
+          path: ${{ runner.temp }}/${{ inputs.archive-file }}
+          if-no-files-found: error
+          # A re-run of the build job replaces the archive of the attempt before.
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      # With shard-archives, one artifact per shard, so each shard downloads only its own. An upload
+      # step takes one artifact name, hence one step for each of up to eight shards.
+      - name: Upload shard 1's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-1
+          path: ${{ runner.temp }}/gate-archives/1/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 2's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-2
+          path: ${{ runner.temp }}/gate-archives/2/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 3's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-3
+          path: ${{ runner.temp }}/gate-archives/3/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 4's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-4
+          path: ${{ runner.temp }}/gate-archives/4/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 5's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 5
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-5
+          path: ${{ runner.temp }}/gate-archives/5/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 6's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-6
+          path: ${{ runner.temp }}/gate-archives/6/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 7's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-7
+          path: ${{ runner.temp }}/gate-archives/7/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload shard 8's test archive
+        if: inputs.shard-archives && inputs.test-shards >= 8
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}-8
+          path: ${{ runner.temp }}/gate-archives/8/${{ inputs.archive-file }}
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 1
+
+      - name: After the archive
+        if: inputs.after-archive-command != ''
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          command: ${{ inputs.after-archive-command }}
+          timeout-minutes: ${{ inputs.gate-timeout-minutes }}
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim). actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg
+      # that saves. A trim that stops part-way has deleted only units the build did not use, so it
+      # warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@315eb1972c857c839c3abb3d9288bfd40d21b7da
+
+      # The `result` job reads it: the build job's result covers every runner.
+      - name: Record the build's result
+        if: always()
+        shell: bash
+        env:
+          RESULT: ${{ runner.temp }}/gate-result/gate-build-${{ matrix.os }}
+          STATUS: ${{ job.status }}
+        run: mkdir -p "$(dirname "$RESULT")" && echo "$STATUS" > "$RESULT"
+
+      - name: Upload the build's result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-build-${{ matrix.os }}
+          path: ${{ runner.temp }}/gate-result/gate-build-${{ matrix.os }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # With lint-command: one `lint (<os>)` leg per runner beside the gate's legs, off their critical
+  # path. It builds in check mode, so it keeps a dependency-cache entry of its own (`lint`), skips
+  # setup-command and the caller cache, and never waits for the build job.
+  lint:
+    needs: select
+    if: ${{ !cancelled() && needs.select.result != 'failure' && inputs.lint-command != '' }}
+    name: lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      RUST_BACKTRACE: 1
+    steps:
+      - *harden-runner
+      - *checkout
+
+      - name: Unreached Rust files
+        if: ${{ runner.os == 'Linux' && inputs.unreached-rs-mode != 'off' }}
+        uses: storytold/craft-common-actions/actions/unreached-rs@8830c54c077af2c6bf20833eb46252d775f7b35e
+        with:
+          mode: ${{ inputs.unreached-rs-mode }}
+          allow: ${{ inputs.unreached-rs-allow }}
+
+      - name: Setup
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+          require-craft-fonts: ${{ inputs.require-craft-fonts }}
+          env: ${{ inputs.env }}
+          linux-env: ${{ inputs.linux-env }}
+          windows-env: ${{ inputs.windows-env }}
+          dev-debug: ${{ inputs.dev-debug }}
+          dev-strip: ${{ inputs.dev-strip }}
+          free-disk-space: ${{ inputs.free-disk-space }}
+          packages: ${{ inputs.packages }}
+          toolchain: ${{ inputs.toolchain }}
+          targets: ${{ inputs.targets }}
+          tools: ${{ inputs.tools }}
+          cache-version: ${{ inputs.cache-version }}
+          rust-cache: ${{ inputs.lint-cache }}
+          cache-job: lint
+          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          sccache: ${{ inputs.sccache }}
+          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          caller-setup: "false"
 
       - name: Gate
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          command: ${{ inputs.lint-command }}
+          timeout-minutes: ${{ inputs.gate-timeout-minutes }}
+
+      - name: Lockfile unchanged
+        shell: bash
+        run: git diff --exit-code -- Cargo.lock
+
+  gate:
+    needs: [select, build]
+    # A skipped select (no select-os, no test-shards) or build (no archive-command) still runs the
+    # gate; a failed one does not.
+    if: ${{ !cancelled() && needs.select.result != 'failure' && needs.build.result != 'failure' && needs.build.result != 'cancelled' }}
+    # The test part keeps the `gate (<os>)` check name callers already know. With test-shards the
+    # shard legs take its place, and the `result` job reports `gate (<os>)`.
+    name: ${{ matrix.part == 'warm' && 'cache warm' || matrix.part == 'shard' && format('test {0}/{1}', matrix.shard, inputs.test-shards) || 'gate' }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      # A failing leg must not cancel the others and hide their failures.
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
+        # One job definition for every part, so the shared setup is written once.
+        part: ${{ fromJSON(format('["{0}"{1}]', inputs.test-shards != 0 && 'shard' || 'test', inputs.warm-command != '' && inputs.archive-command == '' && github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && ',"warm"' || '')) }}
+        # With test-shards, 1..N for the shard part; the warm leg runs once, as shard 1. Otherwise 0.
+        shard: ${{ fromJSON(needs.select.outputs.shards || '[0]') }}
+        exclude: ${{ fromJSON(needs.select.outputs.exclude || '[]') }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      RUST_BACKTRACE: 1
+    steps:
+      - *harden-runner
+      - *checkout
+
+      # Shard legs restore the test part's entry, and shard 1 alone saves it (the warm leg, when
+      # there is one), so the shards do not race each other for it. Shards that run the build
+      # job's archive build nothing and restore no cache.
+      - name: Setup
+        uses: storytold/craft-common-actions/actions/gate-setup@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          craft-fonts-ref: ${{ inputs.craft-fonts-ref }}
+          require-craft-fonts: ${{ inputs.require-craft-fonts }}
+          env: ${{ inputs.env }}
+          linux-env: ${{ inputs.linux-env }}
+          windows-env: ${{ inputs.windows-env }}
+          dev-debug: ${{ inputs.dev-debug }}
+          dev-strip: ${{ inputs.dev-strip }}
+          free-disk-space: ${{ inputs.free-disk-space }}
+          packages: ${{ inputs.packages }}
+          toolchain: ${{ inputs.toolchain }}
+          targets: ${{ inputs.targets }}
+          tools: ${{ inputs.tools }}
+          rust-cache: ${{ !(matrix.part == 'shard' && inputs.archive-command != '') }}
+          cache-version: ${{ inputs.cache-version }}
+          cache-job: ${{ inputs.cache-name != '' && format('gate-{0}', inputs.cache-name) || 'gate' }}
+          cache-save: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) && (matrix.part == 'warm' || inputs.warm-command == '' && matrix.shard <= 1) }}
+          cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
+          cold-build: ${{ inputs.cold-build }}
+          sccache: ${{ inputs.sccache }}
+          writes: ${{ github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch')) }}
+          cache-paths: ${{ inputs.cache-paths }}
+          cache-key: ${{ inputs.cache-key }}
+          cache-key-files: ${{ inputs.cache-key-files }}
+          setup-command: ${{ inputs.setup-command }}
+
+      - name: Download the test archive
+        if: matrix.part == 'shard' && inputs.archive-command != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gate-archive-${{ matrix.os }}${{ inputs.shard-archives && format('-{0}', matrix.shard) || '' }}
+          path: ${{ runner.temp }}/gate-archive
+
+      - name: Archive path
+        if: matrix.part == 'shard' && inputs.archive-command != ''
         shell: bash
         env:
-          GATE: ${{ runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
-          GATE_TIMEOUT: ${{ inputs.gate-timeout-minutes }}
+          FILE: ${{ runner.temp }}/gate-archive/${{ inputs.archive-file }}
+        run: echo "NEXTEST_ARCHIVE_FILE=$FILE" >> "$GITHUB_ENV"
+
+      # Which share of the tests a shard leg runs.
+      - name: Shard environment
+        if: matrix.part == 'shard'
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ inputs.test-shards }}
         run: |
-          printf '%s\n' "$GATE" > "$RUNNER_TEMP/gate.sh"
-          # gate-timeout-minutes: GNU timeout stops a hung command before the job's own timeout
-          # would, so the log says which processes hung instead of just "cancelled".
-          if [[ ! "$GATE_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || ! timeout --version >/dev/null 2>&1; then
-            [[ "$GATE_TIMEOUT" =~ ^0*$ ]] || echo "::warning title=Gate timeout not set::gate-timeout-minutes '$GATE_TIMEOUT' needs a whole number of minutes and GNU timeout"
-            exec bash -euo pipefail "$RUNNER_TEMP/gate.sh"
-          fi
-          snapshot() {
-            echo "::group::Processes running one minute before the gate timeout"
-            if [ "$RUNNER_OS" = Windows ]; then ps -W; else ps -eo pid,ppid,etime,args; fi || true
-            echo "::endgroup::"
-          }
-          (
-            sleep $(( GATE_TIMEOUT * 60 - 60 )) & sleeper=$!
-            trap 'kill "$sleeper" 2>/dev/null; exit 0' TERM
-            wait "$sleeper" && snapshot
-          ) &
-          watchdog=$!
-          status=0
-          timeout --kill-after=30s "${GATE_TIMEOUT}m" bash -euo pipefail "$RUNNER_TEMP/gate.sh" || status=$?
-          kill "$watchdog" 2>/dev/null || true
-          wait "$watchdog" 2>/dev/null || true
-          if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-            echo "::error title=Gate timed out::the gate command ran for over $GATE_TIMEOUT min and was stopped. The 'Processes running one minute before the gate timeout' group shows what was still running; for cargo test, the 'has been running for over 60 seconds' lines name the hung tests."
-          fi
-          exit "$status"
+          {
+            echo "GATE_SHARD=$SHARD"
+            echo "GATE_SHARDS=$SHARDS"
+            echo "NEXTEST_PARTITION=hash:$SHARD/$SHARDS"
+          } >> "$GITHUB_ENV"
+
+      - name: Gate
+        uses: storytold/craft-common-actions/actions/gate-run@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          command: >-
+            ${{ matrix.part == 'warm' && inputs.warm-command
+            || matrix.part == 'shard' && (runner.os == 'Windows' && inputs.windows-shard-command != '' && inputs.windows-shard-command || inputs.shard-command)
+            || runner.os == 'Windows' && inputs.windows-command != '' && inputs.windows-command || inputs.command }}
+          timeout-minutes: ${{ inputs.gate-timeout-minutes }}
+
+      # The marker is saved with the cache entry in rust-cache's post step, where the leg saves.
+      - name: Record the cache commit
+        if: inputs.cache-workspace-crates && !(matrix.part == 'shard' && inputs.archive-command != '')
+        uses: storytold/craft-common-actions/actions/restore-mtimes@315eb1972c857c839c3abb3d9288bfd40d21b7da
+        with:
+          mode: record
 
       # A gate that changed Cargo.lock ran against a lockfile that is not the one in the repository.
       - name: Lockfile unchanged
         shell: bash
         run: git diff --exit-code -- Cargo.lock
+
+      # Only the unsharded test/build producer uploads: warm/shard parts must not race it.
+      - name: Upload artifact
+        if: inputs.artifact-name != '' && matrix.part == 'test'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ inputs.artifact-name }}-${{ matrix.os }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: 1
+
+      # Before rust-cache's post step saves: the entry keeps only the build units this job's build
+      # recorded (actions/cache-trim), after the upload, which may read the target directory.
+      # actions/rust-cache sets CRAFT_CACHE_UNITS only in a leg that saves. A trim that stops
+      # part-way has deleted only units the build did not use, so it warns and the entry is saved.
+      - name: Trim the cache entry to this build
+        if: env.CRAFT_CACHE_UNITS != ''
+        continue-on-error: true
+        uses: storytold/craft-common-actions/actions/cache-trim@315eb1972c857c839c3abb3d9288bfd40d21b7da
+
+      # The `result` job reads these, one per shard leg: a matrix job's result covers every runner,
+      # so it cannot say which runner's shards passed. Each leg's marker holds that leg's latest
+      # status and lasts for the run: after a re-run of the failed legs the shards that passed before
+      # still count, and a shard that fails in a later attempt replaces its earlier pass.
+      - name: Record the leg's result
+        if: always() && matrix.part == 'shard'
+        shell: bash
+        env:
+          RESULT: ${{ runner.temp }}/gate-result/gate-shard-${{ matrix.os }}-${{ matrix.shard }}
+          STATUS: ${{ job.status }}
+        run: mkdir -p "$(dirname "$RESULT")" && echo "$STATUS" > "$RESULT"
+
+      - name: Upload the leg's result
+        if: always() && matrix.part == 'shard'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gate-shard-${{ matrix.os }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gate-result/gate-shard-${{ matrix.os }}-${{ matrix.shard }}
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  # With test-shards, the gate's result per runner under the `gate (<os>)` name the unsharded leg
+  # has, so required checks stay as they are: it passes only when every one of that runner's shards
+  # passed, and with archive-command its build job too. It waits for every gate leg, since a matrix
+  # job's `needs` cannot pick one runner's legs.
+  result:
+    needs: [select, build, gate]
+    if: ${{ !cancelled() && inputs.test-shards != 0 }}
+    name: gate (${{ matrix.os }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.select.outputs.os || inputs.os) }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      # Each marker is a file named after its leg, so the markers merge into one directory however
+      # many there are; a runner with no recorded leg downloads none.
+      - name: Download the shards' results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-shard-${{ matrix.os }}-*
+          path: ${{ runner.temp }}/gate-result
+          merge-multiple: true
+      - name: Download the build's result
+        if: inputs.archive-command != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: gate-build-${{ matrix.os }}
+          path: ${{ runner.temp }}/gate-result
+          merge-multiple: true
+      - name: Every leg passed
+        shell: bash
+        env:
+          RESULT: ${{ runner.temp }}/gate-result
+          OS: ${{ matrix.os }}
+          SHARDS: ${{ inputs.test-shards }}
+          BUILD: ${{ inputs.archive-command != '' }}
+        run: |
+          set -uo pipefail
+          status=0
+          if [ "${BUILD:-false}" = true ] && [ "$(cat "$RESULT/gate-build-$OS" 2>/dev/null)" != success ]; then
+            echo "::error::build ($OS) did not pass"
+            status=1
+          fi
+          for shard in $(seq 1 "$SHARDS"); do
+            if [ "$(cat "$RESULT/gate-shard-$OS-$shard" 2>/dev/null)" != success ]; then
+              echo "::error::test $shard/$SHARDS ($OS) did not pass"
+              status=1
+            fi
+          done
+          exit "$status"

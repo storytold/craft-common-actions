@@ -17,6 +17,10 @@ inputs:
     description: "SPDX license expression for the package"
     required: false
     default: "MIT OR Apache-2.0"
+  extra-depends:
+    description: "Additional Arch runtime dependencies, separated by spaces or newlines"
+    required: false
+    default: ""
   pkgrel:
     description: "Package release number"
     required: false
@@ -32,31 +36,6 @@ runs:
         TARGET_ARCH: ${{ inputs.arch }}
         OUTPUT_DIR: ${{ inputs.output-dir }}
         ARCH_LICENSE: ${{ inputs.license }}
+        ARCH_EXTRA_DEPENDS: ${{ inputs.extra-depends }}
         PKGREL: ${{ inputs.pkgrel }}
-      run: |
-        if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct 2>/dev/null || date +%s)"
-        fi
-        export SOURCE_DATE_EPOCH
-
-        if command -v makepkg >/dev/null; then
-          "$GITHUB_ACTION_PATH/arch-package.sh" "$TARBALL" "$TARGET_ARCH" "$OUTPUT_DIR"
-        elif command -v docker >/dev/null || command -v podman >/dev/null; then
-          CONTAINER_CLI="$(command -v docker || command -v podman)"
-          "$CONTAINER_CLI" run --rm \
-            --tmpfs /tmp \
-            -e TARBALL="$TARBALL" \
-            -e TARGET_ARCH="$TARGET_ARCH" \
-            -e OUTPUT_DIR="$OUTPUT_DIR" \
-            -e ARCH_LICENSE="$ARCH_LICENSE" \
-            -e PKGREL="$PKGREL" \
-            -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
-            -v "$GITHUB_WORKSPACE:/workspace" \
-            -v "$GITHUB_ACTION_PATH:/action:ro" \
-            -w /workspace \
-            archlinux:base-devel \
-            bash /action/docker-entrypoint.sh
-        else
-          echo "::error::Neither makepkg nor a container runtime (docker/podman) was found to build the Arch package"
-          exit 1
-        fi
+      run: bash "$GITHUB_ACTION_PATH/run.sh"

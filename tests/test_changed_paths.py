@@ -62,7 +62,7 @@ class ChangedPathsTests(unittest.TestCase):
         self.assertNotIn('${{', MATCH['run'])
 
     def test_checkout_is_pinned_and_keeps_no_credentials(self):
-        checkout = STEPS[0]
+        checkout = next(s for s in STEPS if s.get('uses', '').startswith('actions/checkout@'))
         self.assertRegex(checkout['uses'], r'^actions/checkout@[0-9a-f]{40}$')
         self.assertEqual(checkout['with']['persist-credentials'], 'false')
         self.assertEqual(checkout['with']['fetch-depth'], '2')
