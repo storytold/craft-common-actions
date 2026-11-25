@@ -12,7 +12,6 @@ import os
 from pathlib import Path, PurePosixPath
 import plistlib
 import re
-import shlex
 import shutil
 import stat
 import struct
@@ -29,7 +28,7 @@ MAX_METADATA = 256 * 1024
 MAX_CENTRAL_DIRECTORY = 8 * 1024 * 1024
 CHUNK = 1024 * 1024
 DEFAULT_APP = apps.DEFAULT_APP  # only when NIGHTLY_APP is unset; see nightly_app.current_name()
-# A Linux tar may start its GUI through a short launcher that adds the nightly profile.
+# A Linux tar may start its GUI through the canonical launcher (scripts/nightly-launcher.sh.in).
 MAX_LAUNCHER = 4096
 FORMATS = {"linux-x86_64": ("tar_gz", "x86_64-unknown-linux-gnu"), "macos-aarch64": ("portable_zip", "aarch64-apple-darwin")}
 
@@ -165,79 +164,11 @@ def zip_metadata_bound(stream,size):
     n.require(disk==start_disk==0 and count_disk==count and count<=MAX_MEMBERS and total<=MAX_CENTRAL_DIRECTORY and central_offset+total<=size and offset+22+comment==len(tail),"ZIP central directory exceeds bounds or unsupported ZIP64/split layout")
     stream.seek(0)
 
-LAUNCHER_SHEBANGS = ("#!/bin/sh", "#!/usr/bin/env sh", "#!/bin/bash", "#!/usr/bin/env bash")
-# A launcher is a fixed shape, not arbitrary shell. Each line must be one of:
-#   blank or a comment;  set -e / set -eu / set -euo pipefail;
-#   NAME="value" with only ${...}/$NAME expansions (no command substitution), or the one
-#     directory idiom  here="$(cd "$(dirname "$0")" && pwd)";
-#   case "$1" in / case "${1:-}" in;  esac;  a `--opt|-o)` case item;  ;;
-#   exec "$<dir var>/<binary>" --launch-profile nightly-v1 --profile-root "<value>" [--version | -- "$@"]
-#     (also as a case item, ending in ;;, and in a one-line case ... esac).
-LAUNCHER_DIR = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="\$\(cd "\$\(dirname "\$0"\)" && pwd\)"')
-LAUNCHER_VALUE = r'"(?:[^"`$\\]|\$\{[A-Za-z_][A-Za-z0-9_]*(?::-(?:[^}"`$\\]|\$[A-Za-z_][A-Za-z0-9_]*)*)?\}|\$[A-Za-z_][A-Za-z0-9_]*)*"'
-LAUNCHER_ASSIGN = re.compile(r'[A-Za-z_][A-Za-z0-9_]*=' + LAUNCHER_VALUE)
-LAUNCHER_SET = re.compile(r'set -(?:e|eu|euo pipefail)')
-LAUNCHER_CASE = re.compile(r'case "\$(?:1|\{1:-\})" in')
-LAUNCHER_ITEM = re.compile(r'(--?[A-Za-z][\w-]*(?:\|--?[A-Za-z][\w-]*)*)\)\s*(.*)')
-LAUNCHER_EXEC = re.compile(r'exec "\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/([^"$`\\]+)" --launch-profile nightly-v1 '
-                           r'--profile-root ' + LAUNCHER_VALUE + r'(?: --version| -- "\$@")?')
-
-
-def launcher_exec(statement, rel, dirs):
-    """exec "$<dir>/<binary>" --launch-profile nightly-v1 --profile-root "<value>" [--version | -- "$@"]."""
-    match = LAUNCHER_EXEC.fullmatch(statement)
-    n.require(match is not None, "nightly launcher exec must start only the GUI binary with the nightly launch profile")
-    n.require(match.group(1) in dirs, "nightly launcher may exec the GUI binary only through its own directory")
-    n.require(match.group(2) == rel, "nightly launcher may exec only the GUI binary beside it")
-
-
-def verify_launcher(text, entrypoint, binary):
-    """A short text launcher whose only command is exec'ing the GUI binary with the nightly profile."""
-    n.require(len(text) <= MAX_LAUNCHER and b"\0" not in text, "nightly launcher must be a short shebang script")
-    try:
-        script = text.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise n.InvalidNightly("nightly launcher is not UTF-8 text") from error
-    lines = script.split("\n")
-    n.require(lines[0] in LAUNCHER_SHEBANGS, "nightly launcher must be a short shebang script")
-    parent = PurePosixPath(entrypoint).parent
-    try:
-        rel = PurePosixPath(binary).relative_to(parent).as_posix() if parent != PurePosixPath(".") else binary
-    except ValueError as error:
-        raise n.InvalidNightly("the GUI binary must sit in or below the launcher's directory") from error
-    dirs, execs, depth = set(), 0, 0
-    for raw in lines[1:]:
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if match := LAUNCHER_DIR.fullmatch(line):
-            dirs.add(match.group(1)); continue
-        if LAUNCHER_SET.fullmatch(line) or LAUNCHER_ASSIGN.fullmatch(line):
-            continue
-        if LAUNCHER_CASE.fullmatch(line):
-            n.require(depth == 0, "nested case in nightly launcher"); depth = 1; continue
-        if line == "esac":
-            n.require(depth == 1, "unbalanced case in nightly launcher"); depth = 0; continue
-        if line == ";;":
-            n.require(depth == 1, "case item outside case in nightly launcher"); continue
-        one_line = line.startswith("case ") and line.endswith(" esac") and " in " in line
-        if one_line:  # case "$1" in --version|-V) exec ... ;; esac
-            head, rest = line.split(" in ", 1)
-            n.require(depth == 0 and LAUNCHER_CASE.fullmatch(head + " in") is not None, "nightly launcher may only branch on $1")
-            line = rest[:-len(" esac")].strip()
-        if match := LAUNCHER_ITEM.fullmatch(line):
-            n.require(depth == 1 or one_line, "case item outside case in nightly launcher")
-            body = match.group(2).strip()
-            if body.endswith(";;"):
-                body = body[:-2].strip()
-            if body:
-                launcher_exec(body, rel, dirs); execs += 1
-            continue
-        n.require(not one_line, "nightly launcher may only branch on $1")
-        if line.startswith("exec "):
-            launcher_exec(line, rel, dirs); execs += 1; continue
-        raise n.InvalidNightly("nightly launcher may only set its directory and profile root and exec the GUI binary")
-    n.require(execs > 0 and depth == 0, "nightly launcher must exec the GUI binary")
+def verify_launcher(text, app):
+    """The only accepted Linux launcher is scripts/nightly-launcher.sh.in rendered for this app, byte for byte."""
+    expected = apps.render_launcher(app)
+    n.require(len(text) <= MAX_LAUNCHER and text == expected,
+              "nightly launcher differs from the canonical template (render it with nightly_app.py launcher)")
     return True
 
 
@@ -344,11 +275,11 @@ def verify_archive(pending,platform,archive,version,output=None,app=None):
         n.require(binary_header is not None and binary_executable,"missing/non-executable GUI binary")
         if platform=='linux-x86_64':
             # The GUI binary named in the registry row is always an x86_64 ELF; the entrypoint is that
-            # binary or a short launcher that execs it with the nightly profile.
+            # binary or the canonical launcher rendered for this app (byte for byte).
             n.require(len(binary_header)>=64 and binary_header[:7]==b'\x7fELF\x02\x01\x01' and int.from_bytes(binary_header[16:18],'little') in (2,3) and int.from_bytes(binary_header[18:20],'little')==62,"not an x86_64 ELF payload")
             if launcher is not None:
-                n.require(launcher[1]<=MAX_LAUNCHER,"nightly launcher must be a short shebang script")
-                verify_launcher(launcher[0],row['entrypoint'],gui)
+                n.require(launcher[1]<=MAX_LAUNCHER,"nightly launcher differs from the canonical template")
+                verify_launcher(launcher[0],app)
         else:
             n.require(launcher is None,"the Mac entrypoint must be the bundle executable")
             n.require(len(entry_header)>=32 and entry_header[:4]==b'\xcf\xfa\xed\xfe' and int.from_bytes(entry_header[4:8],'little')==0x0100000c and int.from_bytes(entry_header[12:16],'little')==2,"not a thin aarch64 Mach-O payload")

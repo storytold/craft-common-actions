@@ -280,11 +280,7 @@ def second_app_registry(**row_changes):
     return registry
 
 
-LAUNCHER = ('#!/bin/sh\n'
-            'here="$(cd "$(dirname "$0")" && pwd)"\n'
-            'root="${XDG_DATA_HOME:-$HOME/.local/share}/designcraft-nightly"\n'
-            'case "${1:-}" in --version|-V) exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" --version ;; esac\n'
-            'exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" -- "$@"\n')
+LAUNCHER = names_tool.render_launcher('designcraft', registry=second_app_registry()).decode()
 
 
 class PhotoCraftUnchangedTests(unittest.TestCase):
@@ -434,24 +430,24 @@ class SecondAppTests(unittest.TestCase):
         _u.verify_archive(None, 'linux-x86_64', self.tar([('designcraft', LAUNCHER.encode(), 0o755),
                           ('lib/designcraft-nightly/designcraft', ELF, 0o755)]), VERSION, output, app='designcraft')
         self.assertEqual((output / 'lib/designcraft-nightly/designcraft').read_bytes(), ELF)
+        self.assertEqual((output / 'designcraft').read_bytes(), LAUNCHER.encode())
 
-    def test_bad_launchers_and_binaries_refuse(self):
-        here = '$here/lib/designcraft-nightly/designcraft'
-        cases = {
-            'execs another binary': LAUNCHER.replace(here, '$here/lib/designcraft-nightly/other', 1),
-            'execs a fixed path': LAUNCHER.replace(f'"{here}"', '/usr/bin/designcraft', 1),
-            'no profile arguments': LAUNCHER.replace('--launch-profile nightly-v1 --profile-root "$root" -- "$@"', '"$@"'),
-            'no exec at all': '#!/bin/sh\necho hi\n',
-            'eval': LAUNCHER + 'eval "$1"\n',
-            'pipe': LAUNCHER.replace('root=', 'x=$(echo a | tr a b)\nroot=', 1),
-            'network tool': LAUNCHER.replace('root=', 'curl -s https://example.invalid\nroot=', 1),
-            'backticks': LAUNCHER.replace('root=', 'x=`id`\nroot=', 1),
-            'no shebang': LAUNCHER.split('\n', 1)[1],
-            'too large': LAUNCHER + '#' + 'x' * 5000 + '\n',
-            'binary bytes': b'\x7fELF' + b'\x00' * 100,
+    def test_rendered_template_is_the_only_accepted_launcher(self):
+        self.assertIn('target="$dir/lib/designcraft-nightly/designcraft"\nreadonly target\n', LAUNCHER)
+        self.assertIn('/ai.storyteller.designcraft.nightly"\nreadonly profile_root\n', LAUNCHER)
+        self.assertNotIn('@BINARY@', LAUNCHER); self.assertNotIn('@APP_ID@', LAUNCHER)
+        variants = {
+            'trailing newline': LAUNCHER + '\n', 'missing final newline': LAUNCHER[:-1], 'CRLF': LAUNCHER.replace('\n', '\r\n'),
+            'extra space': LAUNCHER.replace('set -eu', 'set -eu '), 'other binary': LAUNCHER.replace('designcraft-nightly/designcraft', 'designcraft-nightly/other'),
+            'other profile root': LAUNCHER.replace('ai.storyteller.designcraft.nightly', 'designcraft'),
+            'reassigned target': LAUNCHER.replace('readonly target\n', 'readonly target\ntarget=/tmp/x\n'),
+            'extra command': LAUNCHER.replace('set -eu\n', 'set -eu\nrm -f "$HOME/x"\n'),
+            'PATH change': LAUNCHER.replace('set -eu\n', 'set -eu\nPATH="$PWD"\n'),
+            'bash shebang': LAUNCHER.replace('#!/bin/sh', '#!/bin/bash'),
+            'PhotoCraft launcher text': LAUNCHER.replace('designcraft', 'photocraft'),
         }
-        for label, launcher in cases.items():
-            with self.subTest(case=label), self.assertRaises(_n.InvalidNightly):
+        for label, launcher in variants.items():
+            with self.subTest(variant=label), self.assertRaisesRegex(_n.InvalidNightly, 'canonical template'):
                 self.linux(launcher=launcher)
         for label, kwargs in (('launcher not executable', {'launcher_mode': 0o644}),
                               ('binary not executable', {'binary_mode': 0o644}),
@@ -462,45 +458,35 @@ class SecondAppTests(unittest.TestCase):
         with self.subTest(case='missing binary'), self.assertRaises(_n.InvalidNightly):
             _u.verify_archive(None, 'linux-x86_64', self.tar([('designcraft', LAUNCHER.encode(), 0o755)]), VERSION, app='designcraft')
 
-
-    def test_launcher_grammar_refuses_any_other_command(self):
-        exec_line = 'exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" -- "$@"\n'
-        head = '#!/bin/sh\nhere="$(cd "$(dirname "$0")" && pwd)"\nroot="${XDG_DATA_HOME:-$HOME/.local/share}/designcraft-nightly"\n'
-        accepted = {
-            'multi-line case': head + 'set -eu\n# version queries need no root\ncase "$1" in\n  --version|-V)\n    exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" --version\n    ;;\nesac\n' + exec_line,
-            'plain': head + exec_line,
-        }
-        for label, launcher in accepted.items():
-            with self.subTest(accepted=label):
-                self.assertEqual(self.linux(launcher=launcher)['entrypoint'], 'designcraft')
-        refused = {
-            'rm before exec': head + 'rm -f "$HOME/important-document"\n' + exec_line,
-            'command substitution in a value': head.replace('root="${XDG', 'x="$(rm -rf ~)"\nroot="${XDG') + exec_line,
-            'command inside a default expansion': head.replace('$HOME/.local/share', '$(id)') + exec_line,
-            'backticks in a value': head + 'x="`id`"\n' + exec_line,
-            'unquoted assignment': head + 'x=$HOME\n' + exec_line,
-            'statement after exec on the same line': head + exec_line.rstrip('\n') + '; rm -f x\n',
-            'exec through an unknown directory var': head + exec_line.replace('"$here/', '"$HOME/'),
-            'export': head + 'export LD_PRELOAD="$here/evil.so"\n' + exec_line,
-            'if block': head + 'if [ -n "$1" ]; then\n' + exec_line + 'fi\n',
-            'case on another variable': head + 'case "$HOME" in\n  --x) ;;\nesac\n' + exec_line,
-            'unterminated case': head + 'case "$1" in\n' + exec_line,
-        }
-        for label, launcher in refused.items():
-            with self.subTest(refused=label), self.assertRaises(_n.InvalidNightly):
-                self.linux(launcher=launcher)
-
-    def test_admission_requires_the_binary_in_or_below_the_launcher_directory(self):
+    def test_admission_validates_the_launcher_layout_and_binary_name(self):
         for entrypoints, ok in (({'entrypoint': 'bin/launch', 'binary': 'bin/gui'}, True),
                                 ({'entrypoint': 'bin/launch', 'binary': 'bin/lib/gui'}, True),
-                                ({'entrypoint': 'launch', 'binary': 'lib/app/gui'}, True),
-                                ({'entrypoint': 'bin/launch', 'binary': 'bin/launch'}, True),
+                                ({'entrypoint': 'launch', 'binary': 'lib/app-nightly/gui'}, True),
+                                ({'entrypoint': 'gui', 'binary': 'gui'}, True),           # the ELF itself
                                 ({'entrypoint': 'bin/launch', 'binary': 'lib/app/gui'}, False),
-                                ({'entrypoint': 'bin/launch', 'binary': 'binx/gui'}, False)):
+                                ({'entrypoint': 'bin/launch', 'binary': 'binx/gui'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/a b'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/a;rm'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/$x'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/a"b'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/-gui'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/.gui'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib//gui'}, False),
+                                ({'entrypoint': 'launch', 'binary': 'lib/g\nui'}, False)):
             registry = second_app_registry()
             registry['apps']['designcraft']['entrypoints']['linux-x86_64'] = entrypoints
             with self.subTest(entrypoints=entrypoints):
                 self.assertEqual(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0], ok)
+        registry = second_app_registry()
+        registry['apps']['designcraft']['entrypoints']['macos-aarch64']['entrypoint'] = 'DesignCraft Nightly.app/run'
+        self.assertFalse(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0])
+
+    def test_launcher_cli_prints_the_rendered_template(self):
+        out = _io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(names_tool.main(['launcher', '--app-name', 'designcraft']), 0)
+        self.assertEqual(out.getvalue(), LAUNCHER)
+
 
     def test_mac_bundle_follows_the_app_and_refuses_photocraft_names(self):
         def mac(bundle='DesignCraft Nightly.app', exe='DesignCraft', changes=None):
@@ -520,6 +506,52 @@ class SecondAppTests(unittest.TestCase):
                               ('PhotoCraft version key', {'changes': {'DesignCraftVersion': None, 'PhotoCraftVersion': VERSION}})):
             with self.subTest(case=label), self.assertRaises((_n.InvalidNightly, TypeError)):
                 mac(**kwargs)
+
+
+class LauncherTemplateRuntimeTests(unittest.TestCase):
+    """The rendered launcher runs under bash and dash and passes exactly the nightly profile argv."""
+    def setUp(self):
+        self.temp = _tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'un packed'   # a directory with a space
+        (self.root / 'lib/designcraft-nightly').mkdir(parents=True)
+        self.launcher = self.root / 'designcraft'
+        self.launcher.write_text(LAUNCHER); self.launcher.chmod(0o755)
+        stub = self.root / 'lib/designcraft-nightly/designcraft'
+        stub.write_text('#!/bin/sh\nfor arg in "$@"; do printf "%s\\n" "$arg"; done\n'); stub.chmod(0o755)
+
+    def argv(self, shell, args, env, cwd=None):
+        import subprocess
+        result = subprocess.run([shell, str(self.launcher), *args], env=env, cwd=cwd or self.temp.name,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, '')
+        return result.stdout.splitlines()
+
+    def test_argv_under_bash_and_dash(self):
+        import shutil as _shutil
+        shells = [s for s in ('bash', 'dash') if _shutil.which(s)]
+        self.assertIn('bash', shells)
+        home = self.temp.name + '/home'
+        for shell in shells:
+            with self.subTest(shell=shell):
+                base = {'PATH': os.environ['PATH'], 'HOME': home}
+                root = home + '/.local/share/ai.storyteller.designcraft.nightly'
+                self.assertEqual(self.argv(shell, [], base), ['--launch-profile', 'nightly-v1', '--profile-root', root, '--'])
+                self.assertEqual(self.argv(shell, ['a b.png', '--version'], base),
+                                 ['--launch-profile', 'nightly-v1', '--profile-root', root, '--', 'a b.png', '--version'])
+                for flag in ('--version', '-V'):
+                    self.assertEqual(self.argv(shell, [flag], base), ['--launch-profile', 'nightly-v1', '--profile-root', root, '--version'])
+                xdg = {**base, 'XDG_DATA_HOME': '/data/x'}
+                self.assertEqual(self.argv(shell, ['f'], xdg)[3], '/data/x/ai.storyteller.designcraft.nightly')
+                # Started through a relative path from another directory, it still finds its own binary.
+                self.assertEqual(self.argv(shell, [], base, cwd=str(self.root.parent))[0], '--launch-profile')
+
+    def test_shellcheck_clean_when_available(self):
+        import shutil as _shutil, subprocess
+        if not _shutil.which('shellcheck'):
+            self.skipTest('shellcheck is not installed here')
+        result = subprocess.run(['shellcheck', '-s', 'sh', str(self.launcher)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 class GeneralizedWorkflowTests(unittest.TestCase):
