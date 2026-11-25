@@ -102,3 +102,52 @@ jobs:
             Write-Output "OK: a policy with $($case.change) is rejected."
           }
           $global:LASTEXITCODE = 0
+
+  reusable-workflow:
+    # The workflow itself, called the way an app calls it, on a fixture from this checkout.
+    name: Reusable workflow
+    uses: ./.github/workflows/windows-install-policy.yml
+    with:
+      packaging-directory: tests/fixtures/windows-install-policy/wixui/packaging/windows
+
+  reusable-workflow-log:
+    # Reads that job's log: the action has to be the copy GitHub downloaded at the workflow's own
+    # commit, not ./actions from the checkout, and the installer has to come from the caller's
+    # checkout of the caller's commit.
+    name: Reusable workflow resolves its action
+    needs: reusable-workflow
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Check where the action and the installer came from
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          SHA: ${{ github.sha }}
+          PACKAGING: tests/fixtures/windows-install-policy/wixui/packaging/windows
+        run: |
+          set -euo pipefail
+          job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" --paginate \
+            --jq '.jobs[] | select(.name | startswith("Reusable workflow / ")) | .id')
+          test "$(printf '%s\n' "$job" | grep -c .)" -eq 1 || { echo "Expected one reusable workflow job, got: $job"; exit 1; }
+          # A finished job's log can take a few seconds to appear.
+          for attempt in 1 2 3 4 5 6; do
+            gh api "repos/$REPO/actions/jobs/$job/logs" > job.log 2>/dev/null && break
+            sleep 10
+          done
+          test -s job.log || { echo "No log for job $job"; exit 1; }
+          expect() { grep -qF -- "$1" job.log || { echo "Not in the reusable workflow's log: $1"; exit 1; }; }
+          expect "Download action repository '$REPO@$SHA'"
+          expect "Run $REPO/actions/windows-install-policy@$SHA"
+          if grep -qF 'Run ./actions/windows-install-policy' job.log; then
+            echo 'The reusable workflow ran the action from the checkout'; exit 1
+          fi
+          expect "Syncing repository: $REPO"
+          grep -qE "Z $SHA\$" job.log || { echo "The checkout is not $SHA"; exit 1; }
+          expect "PACKAGING_DIRECTORY: $PACKAGING"
+          for arch in x86 x64 arm64; do expect "PASS $arch metadata-only package"; done
+          echo "The action ran from $REPO@$SHA, the workflow's commit; the installer came from the caller's checkout of $SHA."

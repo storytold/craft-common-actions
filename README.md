@@ -1091,8 +1091,11 @@ The reusable workflow runs the action from its own repository and commit (`uses:
 two always match: a caller that calls the workflow `@main` gets the action at the same `main`
 commit, and one that pins the workflow to a commit gets the action from that commit. A job that
 uses the action directly picks its own revision; use the same one as the workflows it calls. The
-fixture test in this repository runs the local action; the first app to move to the workflow is
-what confirms the pairing for callers.
+fixture test in this repository runs the local action on both fixtures, and also calls the
+reusable workflow on one of them, then reads that job's log to check that the action was the copy
+downloaded at the workflow's commit and the installer came from the caller's checkout. There the
+workflow and the caller are the same commit; the first app to move to the workflow is what
+confirms the pairing across repositories.
 
 The build defines `Version`, `DisplayVersion`, `BinDir` (the policy's `payloads`) and `IconPath`.
 Anything else the app's WiX reads goes in the policy's `wixVariables`: a literal value, or a
