@@ -144,6 +144,19 @@ FAKE_CLI_TEMPLATE = textwrap.dedent(
         if MODE == "noisy-stderr" and not (read_roots and write_roots):
             sys.stderr.write("x" * 65536 + "\\n")
             return 1
+        if MODE == "large-init-then-exit-nonzero" and not read_roots and not write_roots:
+            reply = {{
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {{"instructions": "A" * 12000}},
+            }}
+            sys.stdout.write(json.dumps(reply) + "\\n")
+            sys.stdout.flush()
+            return 1
+        if MODE == "stdout-flood" and not read_roots and not write_roots:
+            sys.stdout.write("Z" * 300000 + "\\n")
+            sys.stdout.flush()
+            return 1
         if MODE == "exit-zero-without-roots" and not (read_roots and write_roots):
             return 0
         if MODE == "allow-no-roots" and not read_roots and not write_roots:
@@ -347,6 +360,18 @@ class ConformanceRunnerTests(unittest.TestCase):
         cli = self.make_fake_cli("noisy-stderr")
         results = check_agent_roots.run_conformance(cli, timeout=3.0)
         self.assertTrue(all(r.passed for r in results), results)
+
+    def test_large_initialize_reply_before_nonzero_exit_is_caught(self) -> None:
+        cli = self.make_fake_cli("large-init-then-exit-nonzero")
+        results = self.by_name(check_agent_roots.run_conformance(cli, timeout=3.0))
+        self.assertFalse(results["no-roots"].passed)
+        self.assertIn("initialize", results["no-roots"].detail)
+
+    def test_stdout_flood_fails_explicitly_within_limit(self) -> None:
+        cli = self.make_fake_cli("stdout-flood")
+        results = self.by_name(check_agent_roots.run_conformance(cli, timeout=3.0))
+        self.assertFalse(results["no-roots"].passed)
+        self.assertIn("limit", results["no-roots"].detail)
 
 
 class AgentRootsWiringTests(unittest.TestCase):

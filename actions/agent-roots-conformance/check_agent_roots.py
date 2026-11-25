@@ -45,6 +45,8 @@ INIT_REQUEST = (
 )
 
 MAX_STDERR_BYTES = 8192
+MAX_STDOUT_LINE_BYTES = 262144
+MAX_STDOUT_TOTAL_BYTES = 1048576
 
 STRIPPED_ENV_SUFFIXES = (
     "_AUTOMATION_READ_ROOT",
@@ -276,8 +278,11 @@ class _PipeCollector:
         self._sel.register(self._stdout_fd, selectors.EVENT_READ, "stdout")
         self._sel.register(self._stderr_fd, selectors.EVENT_READ, "stderr")
         self._stdout_buf = b""
-        self.stdout_lines: list[str] = []
-        self.jsonrpc_msgs: list[dict[str, object]] = []
+        self._stdout_total_bytes = 0
+        self._bytes_read = 0
+        self.stdout_limit_exceeded = False
+        self.first_jsonrpc_msg: dict[str, object] | None = None
+        self.init_reply: dict[str, object] | None = None
         self.stderr_chunks: list[bytes] = []
         self._stderr_kept = 0
 
@@ -286,17 +291,21 @@ class _PipeCollector:
 
     def _consume_stdout_line(self, raw_line: bytes) -> None:
         text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
-        self.stdout_lines.append(text)
         obj = _parse_json_object(text)
         if obj is not None and _is_mcp_jsonrpc_message(obj):
-            self.jsonrpc_msgs.append(obj)
+            if self.first_jsonrpc_msg is None:
+                self.first_jsonrpc_msg = obj
+            if self.init_reply is None and obj.get("id") == 1:
+                self.init_reply = obj
 
-    def poll_once(self, wait_seconds: float) -> None:
+    def poll_once(self, wait_seconds: float) -> bool:
+        """Read ready pipe chunks once; return True if any bytes or EOF arrived."""
         if not self._sel.get_map():
             if wait_seconds > 0:
                 time.sleep(wait_seconds)
-            return
+            return False
         events = self._sel.select(timeout=max(0.0, wait_seconds))
+        progressed = False
         for key, _mask in events:
             fd = key.fd
             tag = key.data
@@ -306,37 +315,62 @@ class _PipeCollector:
                 continue
             except OSError:
                 self._sel.unregister(fd)
+                progressed = True
                 continue
             if not chunk:
                 self._sel.unregister(fd)
-                if tag == "stdout" and self._stdout_buf:
+                progressed = True
+                if tag == "stdout" and self._stdout_buf and not self.stdout_limit_exceeded:
                     self._consume_stdout_line(self._stdout_buf)
                     self._stdout_buf = b""
                 continue
+            self._bytes_read += len(chunk)
+            progressed = True
             if tag == "stdout":
+                self._stdout_total_bytes += len(chunk)
+                if self._stdout_total_bytes > MAX_STDOUT_TOTAL_BYTES:
+                    self.stdout_limit_exceeded = True
+                    self._stdout_buf = b""
+                    continue
                 self._stdout_buf += chunk
                 while b"\n" in self._stdout_buf:
                     raw_line, self._stdout_buf = self._stdout_buf.split(b"\n", 1)
+                    if len(raw_line) > MAX_STDOUT_LINE_BYTES:
+                        self.stdout_limit_exceeded = True
+                        self._stdout_buf = b""
+                        break
                     self._consume_stdout_line(raw_line)
+                if len(self._stdout_buf) > MAX_STDOUT_LINE_BYTES:
+                    self.stdout_limit_exceeded = True
+                    self._stdout_buf = b""
             else:
                 remaining = MAX_STDERR_BYTES - self._stderr_kept
                 if remaining > 0:
                     kept = chunk[:remaining]
                     self.stderr_chunks.append(kept)
                     self._stderr_kept += len(kept)
+        return progressed
 
-    def drain_briefly(self, budget_seconds: float = 0.05) -> None:
-        """Drain any already-buffered bytes after exit without hanging on inherited pipes."""
+    def drain_briefly(self, budget_seconds: float = 0.2) -> bool:
+        """Drain buffered bytes after exit; return False if stdout still looks unclassified."""
         end = time.monotonic() + budget_seconds
         while self._sel.get_map() and time.monotonic() < end:
-            before_out = len(self.stdout_lines)
-            before_err = self._stderr_kept
-            self.poll_once(min(0.01, max(0.0, end - time.monotonic())))
-            if len(self.stdout_lines) == before_out and self._stderr_kept == before_err:
+            if self.stdout_limit_exceeded:
                 break
-        if self._stdout_buf:
+            before_bytes = self._bytes_read
+            progressed = self.poll_once(min(0.01, max(0.0, end - time.monotonic())))
+            if not progressed and self._bytes_read == before_bytes:
+                break
+        if self._stdout_buf and not self.stdout_limit_exceeded:
             self._consume_stdout_line(self._stdout_buf)
             self._stdout_buf = b""
+        # If stdout stayed unreadably open past budget while actively streaming bytes,
+        # classify as incomplete so negative cases never false-pass.
+        return not (
+            self._stdout_fd in self._sel.get_map()
+            and self._bytes_read > 0
+            and time.monotonic() >= end
+        )
 
 
 def run_negative_case(
@@ -357,17 +391,22 @@ def run_negative_case(
     collector = _PipeCollector(proc)
     timed_out = False
     answered = False
+    drain_complete = True
     try:
         _send_initialize(proc)
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
-            if collector.jsonrpc_msgs:
+            if collector.stdout_limit_exceeded:
+                break
+            if collector.first_jsonrpc_msg is not None:
                 answered = True
                 break
             if proc.poll() is not None:
-                collector.drain_briefly()
-                if collector.jsonrpc_msgs:
+                drain_complete = collector.drain_briefly(
+                    budget_seconds=min(0.2, max(0.02, remaining))
+                )
+                if collector.first_jsonrpc_msg is not None:
                     answered = True
                 break
             if remaining <= 0:
@@ -381,11 +420,17 @@ def run_negative_case(
         _close_pipes(proc)
         returncode = proc.returncode
 
-    if answered or collector.jsonrpc_msgs:
+    if collector.stdout_limit_exceeded:
+        return CaseResult(
+            name=name,
+            passed=False,
+            detail=f"stdout exceeded {MAX_STDOUT_LINE_BYTES}-byte line / {MAX_STDOUT_TOTAL_BYTES}-byte total limit",
+        )
+    if answered or collector.first_jsonrpc_msg is not None:
         first = (
-            json.dumps(collector.jsonrpc_msgs[0])
-            if collector.jsonrpc_msgs
-            else (collector.stdout_lines[0] if collector.stdout_lines else "")
+            json.dumps(collector.first_jsonrpc_msg)
+            if collector.first_jsonrpc_msg is not None
+            else ""
         )
         return CaseResult(
             name=name,
@@ -397,6 +442,12 @@ def run_negative_case(
             name=name,
             passed=False,
             detail=f"did not refuse startup within {timeout:.1f}s (stderr: {_stderr_snippet(collector.stderr_chunks)})",
+        )
+    if not drain_complete:
+        return CaseResult(
+            name=name,
+            passed=False,
+            detail="stdout kept streaming after exit; could not verify startup refusal",
         )
     if returncode == 0:
         return CaseResult(
@@ -427,23 +478,16 @@ def run_positive_initialize_case(
         start_new_session=(os.name == "posix"),
     )
     collector = _PipeCollector(proc)
-    reply: dict[str, object] | None = None
     try:
         _send_initialize(proc)
         deadline = time.monotonic() + timeout
         while True:
-            for msg in collector.jsonrpc_msgs:
-                if msg.get("id") == 1:
-                    reply = msg
-                    break
-            if reply is not None:
+            if collector.stdout_limit_exceeded or collector.init_reply is not None:
                 break
             if proc.poll() is not None:
-                collector.drain_briefly()
-                for msg in collector.jsonrpc_msgs:
-                    if msg.get("id") == 1:
-                        reply = msg
-                        break
+                collector.drain_briefly(
+                    budget_seconds=min(0.2, max(0.02, deadline - time.monotonic()))
+                )
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -461,6 +505,13 @@ def run_positive_initialize_case(
         _close_pipes(proc)
         rc = proc.returncode
 
+    if collector.stdout_limit_exceeded:
+        return CaseResult(
+            name=name,
+            passed=False,
+            detail=f"stdout exceeded {MAX_STDOUT_LINE_BYTES}-byte line / {MAX_STDOUT_TOTAL_BYTES}-byte total limit",
+        )
+    reply = collector.init_reply
     if reply is None:
         return CaseResult(
             name=name,
