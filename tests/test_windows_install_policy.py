@@ -10,13 +10,19 @@ WORKFLOW = yaml.load((ROOT / ".github/workflows/windows-install-policy.yml").rea
 
 
 class WindowsInstallPolicyWorkflowTests(unittest.TestCase):
-    # The workflow can only call the action at @main, which the Windows fixture test can't reach,
-    # so a renamed input in one file would otherwise break callers unnoticed.
+    # The Windows fixture test runs the local action, not the reusable workflow, so a renamed input
+    # in one file would otherwise break callers unnoticed.
     def test_the_workflow_passes_only_inputs_the_action_defines(self):
         call = next(step for step in WORKFLOW["jobs"]["policy"]["steps"]
-                    if step.get("uses") == "storytold/craft-common-actions/actions/windows-install-policy@main")
+                    if step.get("uses") == "$/actions/windows-install-policy")
         self.assertTrue(call.get("with"))
         self.assertLessEqual(set(call["with"]), set(ACTION["inputs"]))
+
+    def test_the_workflow_runs_the_action_from_its_own_revision(self):
+        # Not @main: a caller that pins the workflow to a commit must get the action from that commit.
+        uses = [step.get("uses", "") for step in WORKFLOW["jobs"]["policy"]["steps"]]
+        self.assertNotIn("storytold/craft-common-actions/actions/windows-install-policy@main", uses)
+        self.assertEqual([u for u in uses if "windows-install-policy" in u], ["$/actions/windows-install-policy"])
 
     def test_the_packaging_directory_defaults_agree(self):
         self.assertEqual(WORKFLOW["on"]["workflow_call"]["inputs"]["packaging-directory"]["default"],

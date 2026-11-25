@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: storytold/craft-common-actions/actions/windows-install-policy@main
+      # $/ is this workflow's own repository and commit, so a caller always runs the action from
+      # the same revision as the workflow, whether it calls @main or pins a commit.
+      - uses: $/actions/windows-install-policy
         with:
           packaging-directory: ${{ inputs.packaging-directory }}

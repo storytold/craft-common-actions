@@ -1074,8 +1074,25 @@ payloads) for x86, x64 and ARM64 from the app's own WiX sources, and checks thei
 upgrade identity, registry entries and wizard. Nothing is installed and the app isn't built. Paths in
 the policy are relative to the packaging directory (`packaging-directory`, default
 `packaging/windows`), and the icon to the app root two levels above it. An app's
-`test-legacy-fixture.ps1` there runs first, if it has one. To check an MSI it already built, a
-Windows job uses the action with `msi-path`.
+`test-legacy-fixture.ps1` there runs first, if it has one.
+
+This checks an app's own installer against its own policy. It is for MSIs from the caller's own
+build, or for this repository's fixtures, and is not a general inspector for third-party MSI
+packages. To check the MSI an app's packaging job just built, that job uses the action with
+`msi-path`:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/windows-install-policy@main
+  with:
+    msi-path: dist/MyApp-x64.msi
+```
+
+The reusable workflow runs the action from its own repository and commit (`uses: $/...`), so the
+two always match: a caller that calls the workflow `@main` gets the action at the same `main`
+commit, and one that pins the workflow to a commit gets the action from that commit. A job that
+uses the action directly picks its own revision; use the same one as the workflows it calls. The
+fixture test in this repository runs the local action; the first app to move to the workflow is
+what confirms the pairing for callers.
 
 The build defines `Version`, `DisplayVersion`, `BinDir` (the policy's `payloads`) and `IconPath`.
 Anything else the app's WiX reads goes in the policy's `wixVariables`: a literal value, or a

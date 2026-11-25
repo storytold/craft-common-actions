@@ -6,7 +6,11 @@ inputs:
     description: App packaging directory containing install-policy.json and WiX sources
     default: packaging/windows
   msi-path:
-    description: Existing MSI to check; empty builds fixtures for x86, x64 and ARM64
+    description: >-
+      An MSI the caller's own build just produced, to check against its install-policy.json;
+      empty builds metadata-only fixtures for x86, x64 and ARM64 instead. Only for the caller's
+      own trusted build output or this repository's fixtures: this is not an inspector for
+      third-party MSI packages
     default: ""
 
 runs:
