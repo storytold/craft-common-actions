@@ -69,7 +69,8 @@ class RepositoryBindingTests(unittest.TestCase):
         with self.assertRaises(ValueError): p.trusted_repository(bad,self.app,self.env)
     def test_real_second_identity_does_not_pass_photo_installable_validation(self):
         with self.assertRaises(ValueError): p.validate_prepared(self.registry,self.prepared,self.policy,self.env,self.case.config)
-        self.assertEqual(self.registry['apps'][self.app]['targets'],[])
+        # GridCraft now has only its Linux nightly tar row; the old Photo route still refuses it above.
+        self.assertTrue(all(row['target']['os']=='linux' for row in self.registry['apps'][self.app]['targets']))
     def test_current_nonphoto_prepare_cli_still_refuses_before_token_or_transport(self):
         self.refused_without_credentials(p,['prepare','--registry',str(self.registry_path),'--config',str(self.local.config),'--app',self.app,'--identity','unused','--policy','unused'])
     def test_current_nonphoto_attestation_cli_still_refuses_before_token_or_transport(self):

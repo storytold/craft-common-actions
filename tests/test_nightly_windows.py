@@ -77,7 +77,9 @@ class WindowsCandidateTests(unittest.TestCase):
         self.assertEqual([row for row in live if row["target"]["os"] == "windows"], [golden])
         self.assertEqual(sorted(row["target"]["os"] for row in live), ["linux", "macos", "windows"])
         self.assertEqual(len(self.live_registry["apps"]), 19)
-        self.assertTrue(all(not row["targets"] for app, row in self.live_registry["apps"].items() if app != "photocraft"))
+        # No other app has a Windows row; some hold a Linux nightly tar row only.
+        self.assertTrue(all(row["target"]["os"] == "linux" for app, record in self.live_registry["apps"].items()
+                            if app != "photocraft" for row in record["targets"]))
         # The Windows adapter accepts its exact row beside reviewed platform rows, never a changed one.
         self.check(registry=self.live_registry)
         changed = copy.deepcopy(self.live_registry)

@@ -253,12 +253,14 @@ import nightly_windows as _w
 import nightly_release_platforms as _plat
 
 VERSION = '1.2.3-nightly.20261122.100.1.gaaaaaaaaaaaa'
+# Apps admitted with a Linux nightly tar row only (their launcher-template PRs record these rows).
+LINUX_ROWS = ('anicraft', 'cadcraft', 'deckcraft', 'designcraft', 'effectcraft', 'figcraft', 'filmcraft', 'gridcraft', 'lightcraft', 'materialcraft', 'soundcraft', 'texturecraft', 'vectorcraft', 'wordcraft')
 ELF = b'\x7fELF\x02\x01\x01' + b'\x00' * 9 + _struct.pack('<HHI', 2, 62, 1) + b'\x00' * 40
 MACHO = _struct.pack('<8I', 0xfeedfacf, 0x0100000c, 0, 2, 0, 0, 0, 0)
 
 
 def second_app_registry(**row_changes):
-    """The live registry plus a synthetic reviewed DesignCraft row with all three targets."""
+    """The live registry with DesignCraft's real Linux row plus synthetic Windows and macOS targets."""
     registry = _copy.deepcopy(REGISTRY)
     ident = 'ai.storyteller.designcraft.nightly'
     isolation = {'associations': 'none', 'package_identity': ident, 'profile_contract': 'nightly', 'profile_version': 1}
@@ -272,7 +274,7 @@ def second_app_registry(**row_changes):
          'target': {'arch': 'aarch64', 'format': 'portable_zip', 'os': 'macos'}}],
         'entrypoints': {
             # A launcher in the tar starts the GUI binary with the nightly profile.
-            'linux-x86_64': {'entrypoint': 'designcraft', 'binary': 'lib/designcraft-nightly/designcraft'},
+            'linux-x86_64': {'entrypoint': 'designcraft', 'binary': 'designcraft-bin'},  # as the live row
             'macos-aarch64': {'entrypoint': 'DesignCraft Nightly.app/Contents/MacOS/DesignCraft',
                               'binary': 'DesignCraft Nightly.app/Contents/MacOS/DesignCraft'},
             'windows-x86_64': {'entrypoint': 'designcraft.exe', 'binary': 'designcraft.exe'}}})
@@ -323,9 +325,9 @@ class PhotoCraftUnchangedTests(unittest.TestCase):
         base = json.loads((ROOT / 'tests/fixtures/nightly-apps-photocraft-targets-8f58b6d0.json').read_text())['photocraft']
         live = REGISTRY['apps']['photocraft']
         self.assertEqual({k: v for k, v in live.items() if k not in ('display_name', 'env_prefix', 'entrypoints')}, base)
-        # No other app gained targets or the new name fields.
+        # Apps without an admitted Linux row still have no targets and none of the name fields.
         for app, row in REGISTRY['apps'].items():
-            if app != 'photocraft':
+            if app != 'photocraft' and app not in LINUX_ROWS:
                 with self.subTest(app=app):
                     self.assertEqual(row['targets'], [])
                     self.assertFalse({'display_name', 'env_prefix', 'entrypoints'} & set(row))
@@ -348,8 +350,8 @@ class SecondAppTests(unittest.TestCase):
         refused = [('designcraft', 'storytold/photocraft', 'refs/heads/main', self.registry),
                    ('designcraft', 'someone/designcraft', 'refs/heads/main', self.registry),
                    ('designcraft', 'storytold/designcraft', 'refs/heads/feature', self.registry),
-                   ('designcraft', 'storytold/designcraft', 'refs/heads/main', REGISTRY),          # no targets yet
-                   ('lightcraft', 'storytold/lightcraft', 'refs/heads/main', self.registry),        # no targets
+                   ('pdfcraft', 'storytold/pdfcraft', 'refs/heads/main', REGISTRY),                 # no targets
+                   ('pdfcraft', 'storytold/pdfcraft', 'refs/heads/main', self.registry),            # no targets
                    ('not-an-app', 'storytold/not-an-app', 'refs/heads/main', self.registry),
                    ('../x', 'storytold/x', 'refs/heads/main', self.registry)]
         for args in refused:
@@ -392,7 +394,7 @@ class SecondAppTests(unittest.TestCase):
         out = _io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(names_tool.main(['path', '--app-name', 'designcraft', '--platform', 'linux-x86_64', '--kind', 'binary']), 0)
-        self.assertEqual(out.getvalue().strip(), 'lib/designcraft-nightly/designcraft')
+        self.assertEqual(out.getvalue().strip(), 'designcraft-bin')
 
     def test_version_check_and_smoke_use_the_app_and_strip_its_env(self):
         _u.verify_version_output(f'DesignCraft {VERSION} (nightly-v1)\n', VERSION, 'designcraft')
@@ -420,26 +422,26 @@ class SecondAppTests(unittest.TestCase):
 
     def linux(self, launcher=LAUNCHER, binary=ELF, launcher_mode=0o755, binary_mode=0o755, extra=()):
         members = [('designcraft', launcher.encode() if isinstance(launcher, str) else launcher, launcher_mode),
-                   ('lib/designcraft-nightly/designcraft', binary, binary_mode), ('LICENSE', b'synthetic notice', 0o644), *extra]
+                   ('designcraft-bin', binary, binary_mode), ('LICENSE', b'synthetic notice', 0o644), *extra]
         return _u.verify_archive(None, 'linux-x86_64', self.tar(members), VERSION, app='designcraft')
 
     def test_launcher_entrypoint_with_elf_binary_is_accepted(self):
         result = self.linux()
-        self.assertEqual((result['entrypoint'], result['binary']), ('designcraft', 'lib/designcraft-nightly/designcraft'))
+        self.assertEqual((result['entrypoint'], result['binary']), ('designcraft', 'designcraft-bin'))
         output = self.root / 'unpacked'
         _u.verify_archive(None, 'linux-x86_64', self.tar([('designcraft', LAUNCHER.encode(), 0o755),
-                          ('lib/designcraft-nightly/designcraft', ELF, 0o755)]), VERSION, output, app='designcraft')
-        self.assertEqual((output / 'lib/designcraft-nightly/designcraft').read_bytes(), ELF)
+                          ('designcraft-bin', ELF, 0o755)]), VERSION, output, app='designcraft')
+        self.assertEqual((output / 'designcraft-bin').read_bytes(), ELF)
         self.assertEqual((output / 'designcraft').read_bytes(), LAUNCHER.encode())
 
     def test_rendered_template_is_the_only_accepted_launcher(self):
-        self.assertIn('target="$dir/lib/designcraft-nightly/designcraft"\nreadonly target\n', LAUNCHER)
+        self.assertIn('target="$dir/designcraft-bin"\nreadonly target\n', LAUNCHER)
         self.assertIn('/ai.storyteller.designcraft.nightly"\nreadonly profile_root\n', LAUNCHER)
         self.assertIn('  --launch-profile) exec "$target" "$@" ;;\n', LAUNCHER)
         self.assertNotIn('@BINARY@', LAUNCHER); self.assertNotIn('@APP_ID@', LAUNCHER)
         variants = {
             'trailing newline': LAUNCHER + '\n', 'missing final newline': LAUNCHER[:-1], 'CRLF': LAUNCHER.replace('\n', '\r\n'),
-            'extra space': LAUNCHER.replace('set -eu', 'set -eu '), 'other binary': LAUNCHER.replace('designcraft-nightly/designcraft', 'designcraft-nightly/other'),
+            'extra space': LAUNCHER.replace('set -eu', 'set -eu '), 'other binary': LAUNCHER.replace('/designcraft-bin"', '/designcraft-other"'),
             'other profile root': LAUNCHER.replace('ai.storyteller.designcraft.nightly', 'designcraft'),
             'reassigned target': LAUNCHER.replace('readonly target\n', 'readonly target\ntarget=/tmp/x\n'),
             'extra command': LAUNCHER.replace('set -eu\n', 'set -eu\nrm -f "$HOME/x"\n'),
@@ -561,10 +563,10 @@ class LauncherTemplateRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temp = _tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'un packed'   # a directory with a space
-        (self.root / 'lib/designcraft-nightly').mkdir(parents=True)
+        self.root.mkdir(parents=True)
         self.launcher = self.root / 'designcraft'
         self.launcher.write_text(LAUNCHER); self.launcher.chmod(0o755)
-        stub = self.root / 'lib/designcraft-nightly/designcraft'
+        stub = self.root / 'designcraft-bin'
         stub.write_text('#!/bin/sh\nfor arg in "$@"; do printf "%s\\n" "$arg"; done\n'); stub.chmod(0o755)
 
     def argv(self, shell, args, env, cwd=None):
@@ -662,6 +664,46 @@ class GeneralizedWorkflowTests(unittest.TestCase):
         self.assertNotIn('photocraft', text)
         validate = self.RELEASE['jobs']['validate']['steps']
         self.assertTrue(any('nightly_app.py admit --require --release-ref' in s.get('run', '') for s in validate))
+
+
+class RegistryRowsTests(unittest.TestCase):
+    """Every admitted registry row validates and renders; names never collide."""
+    def admitted(self):
+        return sorted(app for app, row in REGISTRY['apps'].items() if row['targets'])
+
+    def test_every_admitted_row_validates_and_its_launcher_renders(self):
+        self.assertEqual(self.admitted(), sorted(('photocraft',) + LINUX_ROWS))
+        for app in self.admitted():
+            with self.subTest(app=app):
+                names = names_tool.App(app, REGISTRY)
+                self.assertEqual(names.identity, f'ai.storyteller.{app}.nightly')
+                self.assertEqual(names.record['repository'], f'storytold/{app}')
+                for platform in names.platforms:
+                    if names.entrypoint(platform) != names.binary(platform):
+                        rendered = names_tool.render_launcher(app, platform, REGISTRY).decode()
+                        self.assertIn(f'target="$dir/{names.binary(platform)}"\n', rendered)
+                        self.assertIn(f'/{names.identity}"\n', rendered)
+        for app in LINUX_ROWS:
+            with self.subTest(row=app):
+                row = REGISTRY['apps'][app]
+                self.assertEqual(row['entrypoints'], {'linux-x86_64': {'entrypoint': app, 'binary': f'{app}-bin'}})
+                self.assertEqual([t['target'] for t in row['targets']], [{'os': 'linux', 'arch': 'x86_64', 'format': 'tar_gz'}])
+                self.assertEqual(row['targets'][0]['asset_pattern'], f'{app}-{{version}}-linux-x86_64-nightly.tar.gz')
+
+    def test_no_two_apps_share_an_identity_env_prefix_or_display_name(self):
+        rows = [names_tool.App(app, REGISTRY) for app in self.admitted()]
+        for field in ('identity', 'prefix', 'display'):
+            values = [getattr(row, field) for row in rows]
+            with self.subTest(field=field):
+                self.assertEqual(len(values), len(set(values)))
+                self.assertEqual(len(values), len({value.lower() for value in values}))
+
+    def test_designcraft_fixture_matches_the_live_row(self):
+        live = REGISTRY['apps']['designcraft']
+        synthetic = second_app_registry()['apps']['designcraft']
+        self.assertEqual(synthetic['entrypoints']['linux-x86_64'], live['entrypoints']['linux-x86_64'])
+        self.assertEqual([t for t in synthetic['targets'] if t['target']['os'] == 'linux'], live['targets'])
+        self.assertEqual((synthetic['display_name'], synthetic['env_prefix']), (live['display_name'], live['env_prefix']))
 
 
 if __name__ == '__main__':
