@@ -48,7 +48,7 @@ class Fixture:
         self.analysis = {'key': 'analysis-C', 'date': ANALYZED, 'revision': C}
         self.gate = {'status': 'ERROR', 'ignoredConditions': False, 'conditions': [{'metricKey': 'new_security_rating', 'comparator': 'GT', 'errorThreshold': '1', 'actualValue': '3', 'status': 'ERROR'}, {'metricKey': 'coverage', 'comparator': 'LT', 'errorThreshold': '80', 'actualValue': '100', 'status': 'OK'}]}
         self.task = {'id': 'task-C', 'analysisId': 'analysis-C', 'organization': 'storytold', 'componentKey': PROJECT, 'branch': 'main', 'branchType': 'LONG', 'type': 'REPORT', 'status': 'SUCCESS', 'warningCount': 0, 'warnings': [], 'submittedAt': CREATED, 'startedAt': CREATED, 'executedAt': DONE, 'scannerContext': 'diagnostic only'}
-        self.issues = [{**issue, 'project': PROJECT, 'organization': 'storytold', 'status': 'OPEN', 'creationDate': CREATED} for issue in self.debt]
+        self.issues = [{**issue, 'project': PROJECT, 'organization': 'storytold', 'status': 'OPEN', 'creationDate': CREATED, 'updateDate': CREATED} for issue in self.debt]
         self.closed = {}; self.changes = {}; self.measure_count = 2; self.queue = []
         self.source = b'fixed source\n'
         self.run = {'id': 600, 'run_attempt': 1, 'run_number': 20, 'workflow_id': 60, 'path': '.github/workflows/ci.yml', 'head_sha': C, 'head_branch': 'main', 'event': 'push', 'repository': {'full_name': REPO}, 'head_repository': {'full_name': REPO}, 'created_at': CREATED, 'status': 'completed', 'conclusion': 'success'}
@@ -110,7 +110,7 @@ class Fixture:
                     return page('issues', sorted(self.closed.values(), key=lambda i: i.get('updateDate', ''), reverse=True))
                 assert q['resolved'] == ['false']
                 return page('issues', self.issues)
-            if path == '/api/issues/changelog': return {'changelog': self.changes[q['issue'][0]]}
+            if path == '/api/issues/changelog': return {'changelog': self.changes.get(q['issue'][0], [])}
             if path == '/api/measures/search_history':
                 assert q['from'] == q['to'] and q['branch'] == ['main']
                 at = q['from'][0]
@@ -131,6 +131,7 @@ class Fixture:
 class CandidateTests(unittest.TestCase):
     def setUp(self):
         self.f = Fixture()
+        nap = patch.object(c, 'RETRY_DELAY', 0, create=True); nap.start(); self.addCleanup(nap.stop)
 
     def admit(self, now=NOW):
         return c.admit_candidate(self.f.policy, self.f.producer, self.f.github, self.f.sonar, now=now)
@@ -308,9 +309,67 @@ class CandidateTests(unittest.TestCase):
                 count[0] += 1
                 if count[0] == 2: self.later(M)
         self.f.hook = hook
-        with self.assertRaisesRegex(c.n.Unavailable, 'new Sonar main analysis landed'): self.admit()
-        self.f.hook = None
-        self.assertEqual(self.admit()['sonar']['latest']['revision'], M)  # The retry admits C.
+        with patch.object(c.time, 'sleep') as nap:
+            self.assertEqual(self.admit()['sonar']['latest']['revision'], M)  # collected again, then admitted
+        nap.assert_called_once_with(c.RETRY_DELAY)
+        # An analysis landing on every attempt stays a bounded, retryable Unavailable, never a refusal.
+        attempts = [0]
+        def always(provider, path):
+            if provider == 'sonar' and path.startswith('/api/project_analyses/search') and 'ps=1&' in path:
+                attempts[0] += 1
+                self.later(*([M] * (attempts[0] % 2 + 1)))
+        self.f.hook = always
+        with self.assertRaises(c.Retry) as raised: self.admit()
+        self.assertIsInstance(raised.exception, c.n.Unavailable)
+
+    def test_inventory_drift_from_a_new_analysis_is_a_retry(self):
+        # A descendant analysis fixes an issue between the inventory read and its reread.
+        seen = [0]
+        def hook(provider, path):
+            if provider == 'sonar' and path.startswith('/api/issues/search') and 'resolved=false' in path:
+                seen[0] += 1
+                if seen[0] == 2:
+                    self.later(M); self.f.issues.pop(1)
+        self.f.hook = hook
+        self.assertEqual(self.admit()['sonar']['latest']['revision'], M)
+        # The same drift with no new analysis is still a refusal.
+        self.f = Fixture(); seen[0] = 0
+        def drift(provider, path):
+            if provider == 'sonar' and path.startswith('/api/issues/search') and 'resolved=false' in path:
+                seen[0] += 1
+                if seen[0] == 2: self.f.issues[0]['severity'] = 'CRITICAL'
+        self.f.hook = drift
+        with self.assertRaisesRegex(c.n.InvalidNightly, 'Sonar issue inventory changed'): self.admit()
+
+    def test_short_pages_must_match_their_declared_totals(self):
+        self.later(M)
+        original = self.f.reply
+        def short(field):
+            def reply(provider, suffix):
+                data = original(provider, suffix)
+                if field in suffix: data['paging']['total'] += 1
+                return data
+            return reply
+        with patch.object(self.f, 'reply', side_effect=short('resolved=true')), self.assertRaisesRegex(ValueError, 'resolved-issue page is short'): self.admit()
+        with patch.object(self.f, 'reply', side_effect=short('ps=100&p=1')), self.assertRaisesRegex(ValueError, 'history page is short'): self.admit()
+        # An empty history (C's only analysis removed) is the caller's `missing` class: expiry at publish time.
+        receipt = self.admit(); self.f.history = []
+        with self.assertRaisesRegex(c.n.Unavailable, 'no Sonar main analysis of exact candidate C'): self.revalidate(receipt)
+        with self.assertRaisesRegex(c.n.InvalidNightly, 'no Sonar main analysis of exact candidate C'): self.admit()
+
+    def test_severity_or_type_edited_after_C_refuses(self):
+        # CRITICAL at C, lowered to the approved MAJOR afterwards: the current fingerprint proves nothing.
+        self.later(M)
+        self.f.issues[0]['updateDate'] = '2026-11-22T12:10:00+0000'
+        self.f.changes['issue-1'] = [{'creationDate': '2026-11-22T12:10:00+0000', 'diffs': [{'key': 'severity', 'oldValue': 'CRITICAL', 'newValue': 'MAJOR'}]}]
+        with self.assertRaisesRegex(ValueError, 'fingerprint at C is unproven'): self.admit()
+        # Edits before C's analysis, or other edits after it, are fine.
+        self.f.changes['issue-1'] = [{'creationDate': '2026-11-22T11:00:00+0000', 'diffs': [{'key': 'severity', 'newValue': 'MAJOR'}]},
+                                     {'creationDate': '2026-11-22T12:10:00+0000', 'diffs': [{'key': 'assignee', 'newValue': 'someone'}]}]
+        self.assertTrue(self.admit())
+        # An issue untouched since C needs no changelog read.
+        self.f.issues[0]['updateDate'] = CREATED; self.f.calls.clear(); self.admit()
+        self.assertFalse(any(path.startswith('/api/issues/changelog') for _, path in self.f.calls))
 
     def test_20_hours_policy_needs_no_review_renewal(self):
         result = self.admit(now=NOW + 20 * 3600)  # C's analysis must stay within Sonar's ~1-day intraday retention

@@ -40,6 +40,12 @@ ISSUE_METRICS = {'BUG': 'bugs', 'VULNERABILITY': 'vulnerabilities', 'CODE_SMELL'
 ACCEPTED_METRICS = {'bugs': 'BUG', 'vulnerabilities': 'VULNERABILITY', 'code_smells': 'CODE_SMELL', 'security_rating': 'VULNERABILITY', 'new_security_rating': 'VULNERABILITY'}
 FINGERPRINT = {'key', 'rule', 'component', 'type', 'severity', 'hash'}
 RECEIPT = 'craft-nightly-candidate-receipt/v4'
+RETRIES = 3          # collections per admission or revalidation when a new main analysis lands
+RETRY_DELAY = 20     # seconds between them
+
+
+class Retry(n.Unavailable):
+    """A new Sonar main analysis landed during collection: collect again, never a refusal by itself."""
 # Revalidation's fixed reads, one page each, on the normal path where main's latest analysis L is a
 # later commit than C: the Sonar snapshot (C's analysis, gate, latest analysis, the C-in-L compare,
 # C's measures, unresolved and updated-since issue pages, Sonar check list and reread, then the
@@ -320,7 +326,9 @@ def _exact(reads, s, source, now, missing=n.InvalidNightly):
     for page in range(1, MAX_PAGES + 1):
         reply = reads.get('sonar', '/api/project_analyses/search?' + urlencode({'project': s['project'], 'branch': 'main', 'ps': PAGE_SIZE, 'p': page}))
         rows = reply.get('analyses'); paging = reply.get('paging', {})
-        n.require(isinstance(rows, list) and len(rows) <= PAGE_SIZE and paging.get('pageIndex') == page and paging.get('pageSize') == PAGE_SIZE and type(paging.get('total')) is int and paging['total'] >= 1, 'missing/invalid Sonar main analysis page')
+        n.require(isinstance(rows, list) and len(rows) <= PAGE_SIZE and paging.get('pageIndex') == page and paging.get('pageSize') == PAGE_SIZE and type(paging.get('total')) is int and paging['total'] >= 0, 'missing/invalid Sonar main analysis page')
+        # A short page must have consumed every declared analysis (an empty history is total 0).
+        n.require(len(rows) == PAGE_SIZE or (page - 1) * PAGE_SIZE + len(rows) == paging['total'], 'Sonar analysis history page is short of its declared total')
         for row in rows:
             _analysis_row(row, now)
             n.require(row['key'] not in seen, 'duplicate Sonar analysis in history pages'); seen.add(row['key'])
@@ -428,6 +436,8 @@ def _closed_since(reads, s, analysis, collect=None):
             found.append(item)
             if collect is not None: collect.append(issue)
         if len(rows) < PAGE_SIZE:
+            # Only a page that ends the declared rows may end the scan; a short page early would skip issues.
+            n.require((page - 1) * PAGE_SIZE + len(rows) == paging['total'], 'Sonar resolved-issue page is short of its declared total')
             return sorted(found, key=lambda i: i['key'])
     raise n.Unavailable('Sonar resolved-issue bound reached before candidate C')
 
@@ -442,6 +452,23 @@ def _resolved_at(reads, issue):
              if isinstance(change, dict) and any(isinstance(d, dict) and d.get('key') in ('status', 'resolution', 'issueStatus') for d in change.get('diffs') or [])]
     n.require(times, 'manual resolution without a dated changelog transition')
     return max(times)
+
+
+def _unchanged_since(reads, issue, since):
+    """Refuse an issue open at C whose severity or type was edited after C's analysis.
+
+    Its current fingerprint then doesn't prove the fingerprint at C (for example CRITICAL at C,
+    lowered to the approved MAJOR later). An issue not updated since C needs no read.
+    """
+    if provider_time(issue.get('updateDate')) <= since:
+        return
+    changes = reads.get('sonar', '/api/issues/changelog?' + urlencode({'issue': issue['key']})).get('changelog')
+    n.require(isinstance(changes, list) and len(changes) <= MAX_ITEMS, 'missing/bounded issue changelog')
+    for change in changes:
+        n.require(isinstance(change, dict) and isinstance(change.get('diffs'), list), 'incomplete issue changelog record')
+        if provider_time(change.get('creationDate')) > since:
+            n.require(not any(isinstance(d, dict) and d.get('key') in ('severity', 'type', 'impactSeverity', 'cleanCodeAttribute') for d in change['diffs']),
+                      'issue severity/type changed after candidate C; its fingerprint at C is unproven')
 
 
 def _open_at(reads, issue, since):
@@ -461,6 +488,8 @@ def _measures_at(reads, s, analysis, covered):
     """
     since = provider_time(analysis['date'])
     covered = [issue for issue in covered if _open_at(reads, issue, since)]
+    for issue in covered:
+        _unchanged_since(reads, issue, since)
     metrics = [ISSUE_METRICS[t] for t in s['issue_types']]
     reply = reads.get('sonar', '/api/measures/search_history?' + urlencode({'component': s['project'], 'branch': 'main', 'metrics': ','.join(metrics), 'from': analysis['date'], 'to': analysis['date'], 'ps': PAGE_SIZE, 'p': 1}))
     rows = reply.get('measures'); paging = reply.get('paging', {})
@@ -510,10 +539,13 @@ def _snapshot(reads, s, producer, now, missing=n.InvalidNightly):
     covered = list({i['key']: i for i in rows + resolved}.values())
     measures = _measures_at(reads, s, analysis, covered)  # Historical: no reread needed.
     check_id = _sonar_check(reads, s, producer, gate, analysis, now)
-    n.require(_issue_rows(reads, s) == rows and _closed_since(reads, s, analysis) == closed, 'Sonar issue inventory changed during proof collection')
-    n.require(_gate(reads, s, analysis) == gate, 'Sonar selected gate changed')
+    stable = _issue_rows(reads, s) == rows and _closed_since(reads, s, analysis) == closed
+    gate_stable = _gate(reads, s, analysis) == gate
+    # A new analysis explains any drift, so check it before classifying drift as a refusal.
     if _identity(_latest(reads, s, now)) != latest or _identity(_exact(reads, s, source, now, missing)) != analysis:
-        raise n.Unavailable('a new Sonar main analysis landed during collection; retry')
+        raise Retry('a new Sonar main analysis landed during collection; retry')
+    n.require(stable, 'Sonar issue inventory changed during proof collection')
+    n.require(gate_stable, 'Sonar selected gate changed')
     return {'analysis': analysis, 'latest': latest, 'check_id': check_id, 'gate': gate, 'measures': measures, 'remaining': remaining, 'closed_since': closed, 'scope_trust': 'provider-resolved', 'issue_count': len(rows), 'issues_sha256': digest(remaining), 'closed_sha256': digest(closed)}
 
 
@@ -529,13 +561,37 @@ def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
     """
     for final in (False, True):
         if _identity(_latest(reads, s, now)) != snapshot['latest']:
-            raise n.Unavailable('a new Sonar main analysis landed before ' + stage + ' completed; retry')
-        _same_issues(reads, s, snapshot)
+            raise Retry('a new Sonar main analysis landed before ' + stage + ' completed; retry')
+        try:
+            _same_issues(reads, s, snapshot)
+        except n.InvalidNightly:
+            if _identity(_latest(reads, s, now)) != snapshot['latest']:
+                raise Retry('a new Sonar main analysis landed before ' + stage + ' completed; retry') from None
+            raise
         if not final:
             _fresh_workflows(reads, policy, producer, workflows)
 
 
+def _retrying(collect):
+    """Run a whole collection again when a new main analysis lands; give up after RETRIES."""
+    for attempt in range(1, RETRIES + 1):
+        try:
+            return collect()
+        except Retry:
+            if attempt == RETRIES:
+                raise
+            time.sleep(RETRY_DELAY)
+
+
 def admit_candidate(policy, producer, github, sonar, *, now):
+    return _retrying(lambda: _admit_once(policy, producer, github, sonar, now=now))
+
+
+def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
+    return _retrying(lambda: _revalidate_once(policy, producer, receipt, github, sonar, now=now))
+
+
+def _admit_once(policy, producer, github, sonar, *, now):
     """Read candidate quality first; caller must separately admit P/bootstrap."""
     s = contract(policy, producer)
     n.require(type(now) in (int, float) and now >= legacy.timestamp(producer['created_at']), 'invalid current admission time')
@@ -549,7 +605,7 @@ def admit_candidate(policy, producer, github, sonar, *, now):
     return {'schema': RECEIPT, 'policy_sha256': digest(policy), 'producer_sha256': digest(producer), 'source_commit': producer['source_commit'], 'sonar': snapshot, 'workflows': workflows, 'main_at_admission': ancestry['main']}
 
 
-def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
+def _revalidate_once(policy, producer, receipt, github, sonar, *, now):
     """Only trusted retained facts, rechecked against a fresh snapshot.
 
     A newer main or a newer Sonar analysis of a later commit is fine: C's own analysis, its gate
