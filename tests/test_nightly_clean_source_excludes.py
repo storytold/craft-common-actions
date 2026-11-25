@@ -1,4 +1,5 @@
 """Shared helper checkouts must not make the app's own clean-source check fail."""
+import os
 import pathlib
 import re
 import subprocess
@@ -12,6 +13,13 @@ WORKFLOW = ROOT / ".github/workflows/nightly-unsigned.yml"
 STEP = "Keep the shared helper checkouts out of the app's clean-source check"
 EXPECTED = ["/.nightly-tools/", "/.unsigned-plan", "/.unsigned-plan/", "/.unsigned-handoff/", "/craft-fonts/", "/craft-i18n/"]
 BUILD_JOBS = ("build", "build-macos", "build-linux", "build-linux-packages")
+
+
+def clean_env():
+    """Git must act only on the temporary repository and need no signing key or user config."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", HOME=os.environ.get("HOME", "/tmp"))
+    return env
 
 
 def jobs():
@@ -41,14 +49,15 @@ class CleanSourceExcludeTests(unittest.TestCase):
         script = step("build-linux")[1]["run"]
         with tempfile.TemporaryDirectory() as tmp:
             repo = pathlib.Path(tmp)
-            run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True, text=True).stdout
+            env = clean_env()
+            run = lambda *a: subprocess.run(a, cwd=repo, env=env, check=True, capture_output=True, text=True).stdout
             run("git", "init", "-q")
-            run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
+            run("git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--no-gpg-sign", "--allow-empty", "-m", "x")
             for helper in (".nightly-tools/x", ".unsigned-plan", ".unsigned-handoff/a", "craft-fonts/fonts/f", "craft-i18n/i"):
                 p = repo / helper
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("x")
-            subprocess.run(["bash", "-c", script], cwd=repo, check=True)
+            subprocess.run(["bash", "-c", script], cwd=repo, env=env, check=True)
             self.assertEqual(run("git", "status", "--porcelain"), "")
             # Anything else, including a file that only looks like a helper, is still seen.
             (repo / "src-change.txt").write_text("x")
