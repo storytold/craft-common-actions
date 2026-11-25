@@ -505,6 +505,10 @@ class SecondAppTests(unittest.TestCase):
         # 7: Windows signs only a flat exe.
         refused(set_entry(win, 'bin/designcraft.exe', 'bin/designcraft.exe'), 'nested windows exe')
         refused(set_entry(win, 'designcraft', 'designcraft'), 'windows without .exe')
+        # The whole member name, .exe included, fits windows_unpack's 128 characters.
+        refused(set_entry(win, 'a' * 125 + '.exe', 'a' * 125 + '.exe'), '129-character exe')
+        registry = second_app_registry(); registry['apps']['designcraft']['entrypoints'][win] = {'entrypoint': 'a' * 124 + '.exe', 'binary': 'a' * 124 + '.exe'}
+        self.assertTrue(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0], '128-character exe')
         # Valid shapes still pass.
         for label, mutate in (('sibling GUI', set_entry(lin, 'bin/start', 'bin/start-bin')),
                               ('libexec GUI', set_entry(lin, 'bin/start', 'bin/libexec/gui'))):

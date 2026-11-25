@@ -62,8 +62,15 @@ class StableReleaseGuardTests(unittest.TestCase):
         steps = self.RELEASE['jobs']['version']['steps']
         names = [step.get('name') or step.get('uses') or step.get('id') for step in steps]
         guard = next(step for step in steps if step.get('name') == 'Stable releases run only on refs/heads/release')
-        self.assertEqual(guard['if'], "${{ !inputs.dry-run && github.ref != 'refs/heads/release' }}")
-        self.assertIn('exit 1', guard['run'])
+        self.assertEqual(guard['if'], "${{ !inputs.dry-run }}")  # every real run; the ref check is in the shell
+        self.assertEqual(guard['env']['REF'], '${{ github.ref }}')
+        import subprocess
+        for ref, code in (('refs/heads/release', 0), ('refs/heads/Release', 1), ('refs/heads/RELEASE', 1),
+                          ('refs/heads/nightly-signer', 1), ('refs/heads/main', 1), ('refs/tags/release', 1), ('', 1)):
+            with self.subTest(ref=ref):
+                result = subprocess.run(['bash', '--noprofile', '--norc', '-eo', 'pipefail', '-c', guard['run']],
+                                        env={'PATH': os.environ['PATH'], 'REF': ref}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, code, result.stdout)
         self.assertLess(names.index('Stable releases run only on refs/heads/release'), names.index('Resolve version'))
         # Every other job waits for version (directly or through a job that does).
         jobs = self.RELEASE['jobs']
@@ -75,6 +82,21 @@ class StableReleaseGuardTests(unittest.TestCase):
             if name not in ('git-sources', 'version'):
                 with self.subTest(job=name):
                     self.assertTrue(reaches(name))
+
+    def test_failed_ref_check_keeps_every_environment_job_from_running(self):
+        # Expression `==` ignores case, so the environment expressions alone would pick `release` on
+        # refs/heads/Release. Every job that binds the environment needs `version` directly and runs only if
+        # it succeeded: either its `if` has no status function (implicit success()) or it refuses any failed need.
+        for name, job in self.RELEASE['jobs'].items():
+            if 'environment' not in job:
+                continue
+            with self.subTest(job=name):
+                needs = job['needs'] if isinstance(job['needs'], list) else [job['needs']]
+                self.assertIn('version', needs)
+                condition = job.get('if', '')
+                if any(word in condition for word in ('always()', 'cancelled()', 'failure()', 'success()')):
+                    self.assertIn("!contains(needs.*.result, 'failure')", condition)
+                    self.assertNotIn('always()', condition)
 
     def test_only_the_two_shared_signing_workflows_name_the_release_environment(self):
         named = set()

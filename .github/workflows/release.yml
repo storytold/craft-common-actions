@@ -225,12 +225,15 @@ jobs:
       # nightly signer's branch). A stable build binds it only on refs/heads/release (see each job's
       # `environment:`), and a real (non-dry) stable run anywhere else stops here, before any build.
       - name: Stable releases run only on refs/heads/release
-        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/release' }}
+        # Expression `==` ignores case, so the exact ref check is done in the shell, for every real run.
+        if: ${{ !inputs.dry-run }}
         env:
           REF: ${{ github.ref }}
         run: |
-          echo "::error::stable releases run only on refs/heads/release, not $REF; use dry-run elsewhere"
-          exit 1
+          if [ "$REF" != "refs/heads/release" ]; then
+            echo "::error::stable releases run only on refs/heads/release, not $REF; use dry-run elsewhere"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

@@ -40,7 +40,8 @@ PLATFORMS = {"linux-x86_64": ("linux", "x86_64"), "macos-aarch64": ("macos", "aa
 EXTENSIONS = {"linux-x86_64": ".tar.gz", "macos-aarch64": ".zip", "windows-x86_64": ".zip"}
 # The only target format each release-ref plug-in signs (nightly_release_platforms / nightly_release_linux).
 FORMATS = {"linux-x86_64": "tar_gz", "macos-aarch64": "portable_zip", "windows-x86_64": "portable_zip"}
-WINDOWS_EXE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}[.]exe")
+# The whole ZIP member name, ".exe" included, must fit windows_unpack's 128-character limit.
+WINDOWS_EXE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}[.]exe")
 CHANNEL = "nightly-v1"
 
 
