@@ -66,5 +66,19 @@ class CleanSourceExcludeTests(unittest.TestCase):
             self.assertEqual(sorted(run("git", "status", "--porcelain").split()), sorted(["??", "nested/", "??", "src-change.txt"]))
 
 
+class NightlyRunnerTests(unittest.TestCase):
+    def test_no_nightly_workflow_uses_a_larger_paid_runner(self):
+        # Larger macOS runners bill at a higher rate and aren't used anywhere else; nightlies stay on standard runners.
+        for path in sorted((ROOT / ".github/workflows").glob("nightly*.yml")):
+            for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
+                runner = str(job.get("runs-on", ""))
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertNotIn("xlarge", runner)
+                    self.assertNotIn("large", runner)
+
+    def test_the_macos_producer_runs_on_the_standard_macos_15_runner(self):
+        self.assertEqual(jobs()["build-macos"]["runs-on"], "macos-15")
+
+
 if __name__ == "__main__":
     unittest.main()

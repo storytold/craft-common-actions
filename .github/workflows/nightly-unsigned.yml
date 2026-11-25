@@ -335,7 +335,7 @@ jobs:
     needs: [admit-app, git-sources, select-platforms]
     if: needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'macos-aarch64')
     # Same larger Arm runner as the stable macOS build; no secrets, environment, OIDC or cache.
-    runs-on: macos-15-xlarge
+    runs-on: macos-15
     timeout-minutes: 90
     permissions:
       contents: read
