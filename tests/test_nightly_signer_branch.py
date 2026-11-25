@@ -100,5 +100,72 @@ class OciRecheckBranchTests(unittest.TestCase):
             oci.recheck_publication(API(), {"producer": {}, "signer": {"source_commit": "d" * 40}}, "main")
 
 
+class OciSignerBranchBindingTests(unittest.TestCase):
+    """OCI publication follows the completed signer run's reviewed policy branch, and only it."""
+    POLICY = {"release_branch": "release"}
+
+    def test_policy_step_requires_the_policy_branch(self):
+        import nightly_oci as oci
+        for policy_branch, run_branch, ok in (("nightly-signer", "nightly-signer", True), ("release", "release", True),
+                                              ("release", "nightly-signer", False), ("nightly-signer", "release", False),
+                                              ("nightly-signer", "main", False), ("release", None, False)):
+            with self.subTest(policy=policy_branch, run=run_branch):
+                if ok:
+                    self.assertEqual(oci.require_policy_branch({"release_branch": policy_branch}, run_branch), policy_branch)
+                else:
+                    with self.assertRaises(ValueError):
+                        oci.require_policy_branch({"release_branch": policy_branch}, run_branch)
+        with self.assertRaisesRegex(ValueError, "unreviewed release policy"):
+            oci.require_policy_branch({"release_branch": "main"}, "main")
+
+    def run_push(self, policy_branch, run_branch, sha="d" * 40):
+        """push_completed_publication with fixture files; returns True if it reached the push."""
+        import json, os, tempfile
+        from unittest.mock import patch
+        import nightly_oci as oci
+        signer = {"run_id": 200, "run_attempt": 1, "source_commit": "d" * 40}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".release-source/.github").mkdir(parents=True)
+            (root / ".release-source/.github/nightly-signing-policy.json").write_text(json.dumps(
+                {"release_branch": policy_branch, "platforms": {"linux-x86_64": {"trust": {"fingerprint": "A" * 40}}}}))
+            (root / "oci-release-state.json").write_text(json.dumps(
+                {"repository": "storytold/photocraft", "release_id": 1, "tag": "v1", "version": "1", "source_commit": "a" * 40,
+                 "checksum_sha256": "e" * 64, "release_support": {}, "roles": {"producer": {}, "signer": signer}}))
+            class API:
+                def __init__(self, repository): pass
+                def request(self, method, path):
+                    assert method == "GET" and path == "/actions/runs/200/attempts/1"
+                    return {"id": 200, "head_sha": sha, "head_branch": run_branch}
+            pushed = []
+            cwd = os.getcwd(); os.chdir(root)
+            try:
+                with patch.object(oci, "ReadOnlyGitHub", API), \
+                        patch.object(oci, "verify_and_push_oci", side_effect=lambda **kw: pushed.append(kw)):
+                    oci.push_completed_publication()
+            finally:
+                os.chdir(cwd)
+            return bool(pushed)
+
+    def test_push_is_bound_to_the_policy_branch_before_any_push(self):
+        self.assertTrue(self.run_push("nightly-signer", "nightly-signer"))
+        self.assertTrue(self.run_push("release", "release"))
+        for policy_branch, run_branch in (("release", "nightly-signer"), ("nightly-signer", "release"),
+                                          ("nightly-signer", "main"), ("release", "feature")):
+            with self.subTest(policy=policy_branch, run=run_branch), self.assertRaises(ValueError):
+                self.run_push(policy_branch, run_branch)
+        with self.assertRaisesRegex(ValueError, "signer run differs"):
+            self.run_push("nightly-signer", "nightly-signer", sha="f" * 40)
+
+    def test_workflow_gate_accepts_both_signer_refs_and_passes_the_branch(self):
+        text = (WORKFLOWS / "nightly-oci.yml").read_text()
+        gate = " ".join(load("nightly-oci.yml")["jobs"]["push-oci"]["if"].split())
+        self.assertIn("(github.event.workflow_run.head_branch == 'release' || github.event.workflow_run.head_branch == 'nightly-signer')", gate)
+        self.assertEqual(len(re.findall(r"head_branch ==", gate)), 2)
+        step = next(s for s in load("nightly-oci.yml")["jobs"]["push-oci"]["steps"] if s.get("id") == "target")
+        self.assertEqual(step["env"]["SIGNER_BRANCH"], "${{ github.event.workflow_run.head_branch }}")
+        self.assertIn("nightly_oci.py policy", step["run"])
+
+
 if __name__ == '__main__':
     unittest.main()
