@@ -264,7 +264,7 @@ jobs:
       bundle-sha256: ${{ steps.sign.outputs.bundle-sha256 }}
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
@@ -344,7 +344,7 @@ jobs:
       asset: ${{ steps.verify.outputs.asset }}
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
@@ -398,7 +398,7 @@ jobs:
       contents: read
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
@@ -461,7 +461,7 @@ jobs:
       final-sha256: ${{ steps.sign.outputs.final-sha256 }}
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Check out only the actual release execution source
@@ -536,7 +536,7 @@ jobs:
       final-sha256: ${{ steps.verify.outputs.final-sha256 }}
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Check out only the actual release execution source
@@ -666,7 +666,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'fresh native signature or publication preflight refused' }
       - name: Attest actual final signed-output bytes from trusted publisher
         timeout-minutes: 5
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ${{ steps.final.outputs.subject-path }}
       - name: Publish the signed nightly and preserve ownership
