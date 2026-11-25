@@ -137,9 +137,10 @@ class PublisherTests(unittest.TestCase):
         with patch.object(n, "build_feed", side_effect=AssertionError("asset I/O forbidden")):
             for app, record in self.registry["apps"].items():
                 if app == "photocraft": continue
-                self.assertEqual(record["targets"], [])
                 env = {**self.env, "GITHUB_REPOSITORY": record["repository"]}
-                with self.subTest(app=app), self.assertRaises(n.Unavailable):
+                # No targets: no adapter at all. Linux-tar-only rows (release-ref route) still refuse here.
+                refusal = n.Unavailable if not record["targets"] else n.InvalidNightly
+                with self.subTest(app=app), self.assertRaises(refusal):
                     p.prepare_packet(self.registry, {**self.prepared, "app": app}, "DO_NOT_READ", env)
         self.assertEqual(self.api.calls, [])
 
