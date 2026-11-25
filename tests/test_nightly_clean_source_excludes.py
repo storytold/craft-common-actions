@@ -66,15 +66,39 @@ class CleanSourceExcludeTests(unittest.TestCase):
             self.assertEqual(sorted(run("git", "status", "--porcelain").split()), sorted(["??", "nested/", "??", "src-change.txt"]))
 
 
+def resolved_runners(job):
+    """Every runner label a job can use, with ${{ matrix.<key> }} expanded from its strategy matrix."""
+    raw = job.get("runs-on", "")
+    labels = raw if isinstance(raw, list) else [raw]
+    out = []
+    matrix = (job.get("strategy") or {}).get("matrix") or {}
+    for label in map(str, labels):
+        m = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", label.strip())
+        if not m:
+            assert "${{" not in label, f"unsupported runner expression {label!r}"
+            out.append(label)
+            continue
+        key = m.group(1)
+        values = [str(v) for v in matrix.get(key, []) if not isinstance(v, dict)]
+        values += [str(row[key]) for row in matrix.get("include", []) if isinstance(row, dict) and key in row]
+        assert values, f"matrix.{key} has no values to check"
+        out.extend(values)
+    return out
+
+
 class NightlyRunnerTests(unittest.TestCase):
+    def test_matrix_runner_values_are_resolved(self):
+        job = {"runs-on": "${{ matrix.runner }}", "strategy": {"matrix": {"include": [{"runner": "ubuntu-22.04"}, {"runner": "macos-15-xlarge"}]}}}
+        self.assertEqual(resolved_runners(job), ["ubuntu-22.04", "macos-15-xlarge"])
+        self.assertEqual(resolved_runners(jobs()["build-linux-packages"]) != [], True)
+
     def test_no_nightly_workflow_uses_a_larger_paid_runner(self):
         # Larger macOS runners bill at a higher rate and aren't used anywhere else; nightlies stay on standard runners.
         for path in sorted((ROOT / ".github/workflows").glob("nightly*.yml")):
             for name, job in (yaml.safe_load(path.read_text()).get("jobs") or {}).items():
-                runner = str(job.get("runs-on", ""))
-                with self.subTest(workflow=path.name, job=name):
-                    self.assertNotIn("xlarge", runner)
-                    self.assertNotIn("large", runner)
+                for runner in resolved_runners(job):
+                    with self.subTest(workflow=path.name, job=name, runner=runner):
+                        self.assertNotIn("large", runner)
 
     def test_the_macos_producer_runs_on_the_standard_macos_15_runner(self):
         self.assertEqual(jobs()["build-macos"]["runs-on"], "macos-15")
