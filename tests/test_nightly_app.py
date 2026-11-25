@@ -462,6 +462,46 @@ class SecondAppTests(unittest.TestCase):
         with self.subTest(case='missing binary'), self.assertRaises(_n.InvalidNightly):
             _u.verify_archive(None, 'linux-x86_64', self.tar([('designcraft', LAUNCHER.encode(), 0o755)]), VERSION, app='designcraft')
 
+
+    def test_launcher_grammar_refuses_any_other_command(self):
+        exec_line = 'exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" -- "$@"\n'
+        head = '#!/bin/sh\nhere="$(cd "$(dirname "$0")" && pwd)"\nroot="${XDG_DATA_HOME:-$HOME/.local/share}/designcraft-nightly"\n'
+        accepted = {
+            'multi-line case': head + 'set -eu\n# version queries need no root\ncase "$1" in\n  --version|-V)\n    exec "$here/lib/designcraft-nightly/designcraft" --launch-profile nightly-v1 --profile-root "$root" --version\n    ;;\nesac\n' + exec_line,
+            'plain': head + exec_line,
+        }
+        for label, launcher in accepted.items():
+            with self.subTest(accepted=label):
+                self.assertEqual(self.linux(launcher=launcher)['entrypoint'], 'designcraft')
+        refused = {
+            'rm before exec': head + 'rm -f "$HOME/important-document"\n' + exec_line,
+            'command substitution in a value': head.replace('root="${XDG', 'x="$(rm -rf ~)"\nroot="${XDG') + exec_line,
+            'command inside a default expansion': head.replace('$HOME/.local/share', '$(id)') + exec_line,
+            'backticks in a value': head + 'x="`id`"\n' + exec_line,
+            'unquoted assignment': head + 'x=$HOME\n' + exec_line,
+            'statement after exec on the same line': head + exec_line.rstrip('\n') + '; rm -f x\n',
+            'exec through an unknown directory var': head + exec_line.replace('"$here/', '"$HOME/'),
+            'export': head + 'export LD_PRELOAD="$here/evil.so"\n' + exec_line,
+            'if block': head + 'if [ -n "$1" ]; then\n' + exec_line + 'fi\n',
+            'case on another variable': head + 'case "$HOME" in\n  --x) ;;\nesac\n' + exec_line,
+            'unterminated case': head + 'case "$1" in\n' + exec_line,
+        }
+        for label, launcher in refused.items():
+            with self.subTest(refused=label), self.assertRaises(_n.InvalidNightly):
+                self.linux(launcher=launcher)
+
+    def test_admission_requires_the_binary_in_or_below_the_launcher_directory(self):
+        for entrypoints, ok in (({'entrypoint': 'bin/launch', 'binary': 'bin/gui'}, True),
+                                ({'entrypoint': 'bin/launch', 'binary': 'bin/lib/gui'}, True),
+                                ({'entrypoint': 'launch', 'binary': 'lib/app/gui'}, True),
+                                ({'entrypoint': 'bin/launch', 'binary': 'bin/launch'}, True),
+                                ({'entrypoint': 'bin/launch', 'binary': 'lib/app/gui'}, False),
+                                ({'entrypoint': 'bin/launch', 'binary': 'binx/gui'}, False)):
+            registry = second_app_registry()
+            registry['apps']['designcraft']['entrypoints']['linux-x86_64'] = entrypoints
+            with self.subTest(entrypoints=entrypoints):
+                self.assertEqual(names_tool.admit('designcraft', 'storytold/designcraft', 'refs/heads/main', registry)[0], ok)
+
     def test_mac_bundle_follows_the_app_and_refuses_photocraft_names(self):
         def mac(bundle='DesignCraft Nightly.app', exe='DesignCraft', changes=None):
             destination = self.root / f'designcraft-{VERSION}-macos-aarch64-nightly.zip'

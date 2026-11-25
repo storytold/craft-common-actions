@@ -71,6 +71,11 @@ def sha(path):
     return n.digest_file(path.parent, path.name)[1]
 
 
+def pending_metadata(path):
+    """PhotoCraft's old pending file when given (validated against the registry row), else None."""
+    return n.bounded_json(path) if path else None
+
+
 def windows_names():
     app = apps.current()
     return app.binary('windows-x86_64'), app.product_name
@@ -496,9 +501,10 @@ def main():
         n.require(Path(args.archive).name == unsigned_name and args.asset == asset, 'signing asset differs from immutable identity')
         n.require(a.SHA256.fullmatch(args.unsigned_sha256 or '') and sha(args.archive) == args.unsigned_sha256,
                   'unsigned bytes differ from independent build output')
+        # Optional: without --pending the app's registry row is the producer contract.
+        pending = pending_metadata(args.pending)
         if args.platform in ('linux-x86_64', 'macos-aarch64'):
-            u.verify_archive(n.bounded_json(args.pending) if args.pending else None, args.platform, args.archive, args.version,
-                             app=apps.current_name())
+            u.verify_archive(pending, args.platform, args.archive, args.version, app=apps.current_name())
         output = n.owned_path(args.output)
         receipt_directory = n.owned_path(args.receipt_directory)
         n.require(not output.exists() and output.name == asset, 'final signed output must be new and exact-named')
@@ -512,7 +518,7 @@ def main():
                      '--arch', 'aarch64', '--input', Path(args.archive).resolve(), '--output', output.resolve()], env=dict(os.environ),
                     timeout=5400)
             with tempfile.TemporaryDirectory(prefix='nightly-mac-verify-', dir=n.owned_path(os.environ['RUNNER_TEMP'])) as temporary:
-                signer = mac_verify(output, args.version, n.bounded_json(args.pending), os.environ, Path(temporary)/'payload')
+                signer = mac_verify(output, args.version, pending, os.environ, Path(temporary)/'payload')
         n.require(sha(args.archive) == args.unsigned_sha256, 'original unsigned build bytes changed during signing')
         final = sha(output)
         if args.platform != 'linux-x86_64': n.require(final != args.unsigned_sha256, 'signing did not change package; unsigned fallback refused')
