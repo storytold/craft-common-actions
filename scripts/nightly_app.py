@@ -86,6 +86,11 @@ def row(app, registry=None):
     for platform, value in entrypoints.items():
         n.fields(value, {"entrypoint", "binary"}, f"{app} {platform} entrypoint")
         relative(value["entrypoint"], "entrypoint"); relative(value["binary"], "binary")
+        # A launcher entrypoint execs the binary through its own directory, so the binary must sit
+        # in or below that directory (the archive check derives the exec path the same way).
+        home = value["entrypoint"].rsplit("/", 1)[0] if "/" in value["entrypoint"] else ""
+        n.require(value["binary"] == value["entrypoint"] or not home or value["binary"].startswith(home + "/"),
+                  f"{app} {platform} binary must sit in or below its launcher's directory")
     return record
 
 
