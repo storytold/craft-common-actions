@@ -204,6 +204,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         shell: pwsh
@@ -363,6 +373,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         shell: bash
@@ -526,6 +546,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         env:
@@ -690,6 +720,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity
         id: plan
         env:
