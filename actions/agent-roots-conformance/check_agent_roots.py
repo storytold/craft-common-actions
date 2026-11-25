@@ -12,7 +12,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import selectors
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -41,6 +43,8 @@ INIT_REQUEST = (
     )
     + "\n"
 )
+
+MAX_STDERR_BYTES = 8192
 
 STRIPPED_ENV_SUFFIXES = (
     "_AUTOMATION_READ_ROOT",
@@ -190,67 +194,34 @@ def _is_mcp_jsonrpc_message(obj: dict[str, object]) -> bool:
     )
 
 
-def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
+def _signal_group(pid: int, sig: int) -> None:
+    if os.name != "posix":
         return
     try:
-        proc.terminate()
-        proc.wait(timeout=0.5)
-    except (OSError, subprocess.TimeoutExpired):
+        os.killpg(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def _terminate_process(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        _signal_group(proc.pid, signal.SIGTERM)
         try:
-            proc.kill()
+            proc.terminate()
+        except OSError:
+            pass
+        try:
             proc.wait(timeout=0.5)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-
-
-def _start_readers(
-    proc: subprocess.Popen[bytes],
-) -> tuple[
-    list[str],
-    list[dict[str, object]],
-    threading.Event,
-    list[bytes],
-    threading.Thread,
-    threading.Thread,
-]:
-    stdout_lines: list[str] = []
-    jsonrpc_msgs: list[dict[str, object]] = []
-    jsonrpc_event = threading.Event()
-    stderr_chunks: list[bytes] = []
-
-    def read_stdout() -> None:
-        assert proc.stdout is not None
-        try:
-            for raw in proc.stdout:
-                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                stdout_lines.append(text)
-                obj = _parse_json_object(text)
-                if obj is not None and _is_mcp_jsonrpc_message(obj):
-                    jsonrpc_msgs.append(obj)
-                    jsonrpc_event.set()
-        except OSError:
-            pass
-
-    def read_stderr() -> None:
-        assert proc.stderr is not None
-        total = 0
-        try:
-            while total < 8192:
-                chunk = proc.stderr.read(1024)
-                if not chunk:
-                    break
-                stderr_chunks.append(chunk)
-                total += len(chunk)
-            proc.stderr.read()
-        except OSError:
-            pass
-
-    t_out = threading.Thread(target=read_stdout, daemon=True)
-    t_err = threading.Thread(target=read_stderr, daemon=True)
-    t_out.start()
-    t_err.start()
-    return stdout_lines, jsonrpc_msgs, jsonrpc_event, stderr_chunks, t_out, t_err
+        except subprocess.TimeoutExpired:
+            _signal_group(proc.pid, signal.SIGKILL)
+            try:
+                proc.kill()
+                proc.wait(timeout=0.5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        # Clean up any descendants still in the child's process group.
+        _signal_group(proc.pid, signal.SIGTERM)
 
 
 def _send_initialize(proc: subprocess.Popen[bytes]) -> None:
@@ -292,6 +263,82 @@ def _stderr_snippet(chunks: Sequence[bytes]) -> str:
     return snippet[:240]
 
 
+class _PipeCollector:
+    """Deadline-bounded, lock-free non-blocking reader for child stdout/stderr."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        assert proc.stdout is not None and proc.stderr is not None
+        self._stdout_fd = proc.stdout.fileno()
+        self._stderr_fd = proc.stderr.fileno()
+        os.set_blocking(self._stdout_fd, False)
+        os.set_blocking(self._stderr_fd, False)
+        self._sel = selectors.DefaultSelector()
+        self._sel.register(self._stdout_fd, selectors.EVENT_READ, "stdout")
+        self._sel.register(self._stderr_fd, selectors.EVENT_READ, "stderr")
+        self._stdout_buf = b""
+        self.stdout_lines: list[str] = []
+        self.jsonrpc_msgs: list[dict[str, object]] = []
+        self.stderr_chunks: list[bytes] = []
+        self._stderr_kept = 0
+
+    def close(self) -> None:
+        self._sel.close()
+
+    def _consume_stdout_line(self, raw_line: bytes) -> None:
+        text = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        self.stdout_lines.append(text)
+        obj = _parse_json_object(text)
+        if obj is not None and _is_mcp_jsonrpc_message(obj):
+            self.jsonrpc_msgs.append(obj)
+
+    def poll_once(self, wait_seconds: float) -> None:
+        if not self._sel.get_map():
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            return
+        events = self._sel.select(timeout=max(0.0, wait_seconds))
+        for key, _mask in events:
+            fd = key.fd
+            tag = key.data
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                continue
+            except OSError:
+                self._sel.unregister(fd)
+                continue
+            if not chunk:
+                self._sel.unregister(fd)
+                if tag == "stdout" and self._stdout_buf:
+                    self._consume_stdout_line(self._stdout_buf)
+                    self._stdout_buf = b""
+                continue
+            if tag == "stdout":
+                self._stdout_buf += chunk
+                while b"\n" in self._stdout_buf:
+                    raw_line, self._stdout_buf = self._stdout_buf.split(b"\n", 1)
+                    self._consume_stdout_line(raw_line)
+            else:
+                remaining = MAX_STDERR_BYTES - self._stderr_kept
+                if remaining > 0:
+                    kept = chunk[:remaining]
+                    self.stderr_chunks.append(kept)
+                    self._stderr_kept += len(kept)
+
+    def drain_briefly(self, budget_seconds: float = 0.05) -> None:
+        """Drain any already-buffered bytes after exit without hanging on inherited pipes."""
+        end = time.monotonic() + budget_seconds
+        while self._sel.get_map() and time.monotonic() < end:
+            before_out = len(self.stdout_lines)
+            before_err = self._stderr_kept
+            self.poll_once(min(0.01, max(0.0, end - time.monotonic())))
+            if len(self.stdout_lines) == before_out and self._stderr_kept == before_err:
+                break
+        if self._stdout_buf:
+            self._consume_stdout_line(self._stdout_buf)
+            self._stdout_buf = b""
+
+
 def run_negative_case(
     name: str,
     cmd: Sequence[str],
@@ -299,45 +346,47 @@ def run_negative_case(
     env: dict[str, str],
 ) -> CaseResult:
     """Require the CLI to exit non-zero before answering MCP initialize."""
-    with subprocess.Popen(
+    proc = subprocess.Popen(
         list(cmd),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-    ) as proc:
-        stdout_lines, jsonrpc_msgs, jsonrpc_event, stderr_chunks, t_out, t_err = (
-            _start_readers(proc)
-        )
+        start_new_session=(os.name == "posix"),
+    )
+    collector = _PipeCollector(proc)
+    timed_out = False
+    answered = False
+    try:
         _send_initialize(proc)
-
         deadline = time.monotonic() + timeout
-        timed_out = False
-        answered = False
         while True:
-            if jsonrpc_event.is_set():
+            remaining = deadline - time.monotonic()
+            if collector.jsonrpc_msgs:
                 answered = True
                 break
             if proc.poll() is not None:
+                collector.drain_briefly()
+                if collector.jsonrpc_msgs:
+                    answered = True
                 break
-            if time.monotonic() >= deadline:
+            if remaining <= 0:
                 timed_out = True
                 break
-            time.sleep(0.01)
-
-        if answered or timed_out:
-            _close_stdin(proc)
-            _terminate_process(proc)
-        else:
-            _close_stdin(proc)
-
-        t_out.join(timeout=0.5)
-        t_err.join(timeout=0.5)
+            collector.poll_once(min(0.02, remaining))
+    finally:
+        collector.close()
+        _close_stdin(proc)
+        _terminate_process(proc)
         _close_pipes(proc)
         returncode = proc.returncode
 
-    if answered or jsonrpc_msgs:
-        first = json.dumps(jsonrpc_msgs[0]) if jsonrpc_msgs else (stdout_lines[0] if stdout_lines else "")
+    if answered or collector.jsonrpc_msgs:
+        first = (
+            json.dumps(collector.jsonrpc_msgs[0])
+            if collector.jsonrpc_msgs
+            else (collector.stdout_lines[0] if collector.stdout_lines else "")
+        )
         return CaseResult(
             name=name,
             passed=False,
@@ -347,13 +396,13 @@ def run_negative_case(
         return CaseResult(
             name=name,
             passed=False,
-            detail=f"did not refuse startup within {timeout:.1f}s (stderr: {_stderr_snippet(stderr_chunks)})",
+            detail=f"did not refuse startup within {timeout:.1f}s (stderr: {_stderr_snippet(collector.stderr_chunks)})",
         )
     if returncode == 0:
         return CaseResult(
             name=name,
             passed=False,
-            detail=f"exited 0 instead of non-zero refusal (stderr: {_stderr_snippet(stderr_chunks)})",
+            detail=f"exited 0 instead of non-zero refusal (stderr: {_stderr_snippet(collector.stderr_chunks)})",
         )
     return CaseResult(
         name=name,
@@ -369,49 +418,48 @@ def run_positive_initialize_case(
     env: dict[str, str],
 ) -> CaseResult:
     """Require the CLI to accept both valid roots and answer MCP initialize."""
-    with subprocess.Popen(
+    proc = subprocess.Popen(
         list(cmd),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
-    ) as proc:
-        _stdout_lines, jsonrpc_msgs, jsonrpc_event, stderr_chunks, t_out, t_err = (
-            _start_readers(proc)
-        )
+        start_new_session=(os.name == "posix"),
+    )
+    collector = _PipeCollector(proc)
+    reply: dict[str, object] | None = None
+    try:
         _send_initialize(proc)
-
         deadline = time.monotonic() + timeout
-        reply: dict[str, object] | None = None
         while True:
-            for msg in list(jsonrpc_msgs):
+            for msg in collector.jsonrpc_msgs:
                 if msg.get("id") == 1:
                     reply = msg
                     break
             if reply is not None:
                 break
             if proc.poll() is not None:
+                collector.drain_briefly()
+                for msg in collector.jsonrpc_msgs:
+                    if msg.get("id") == 1:
+                        reply = msg
+                        break
                 break
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 break
-            jsonrpc_event.wait(timeout=0.02)
-
+            collector.poll_once(min(0.02, remaining))
+    finally:
+        collector.close()
         _close_stdin(proc)
         if proc.poll() is None:
             try:
                 proc.wait(timeout=min(timeout, 1.0))
             except subprocess.TimeoutExpired:
-                _terminate_process(proc)
-        t_out.join(timeout=0.5)
-        t_err.join(timeout=0.5)
+                pass
+        _terminate_process(proc)
         _close_pipes(proc)
         rc = proc.returncode
-
-    if reply is None:
-        for msg in jsonrpc_msgs:
-            if msg.get("id") == 1:
-                reply = msg
-                break
 
     if reply is None:
         return CaseResult(
@@ -419,7 +467,7 @@ def run_positive_initialize_case(
             passed=False,
             detail=(
                 f"did not answer MCP initialize with both valid roots "
-                f"(exit {rc}, stderr: {_stderr_snippet(stderr_chunks)})"
+                f"(exit {rc}, stderr: {_stderr_snippet(collector.stderr_chunks)})"
             ),
         )
     if "error" in reply or "result" not in reply:
@@ -447,9 +495,10 @@ def run_conformance(
     env: dict[str, str] | None = None,
 ) -> list[CaseResult]:
     """Run all Rule 18 startup confinement cases against ``binary``."""
-    if not binary.is_file():
+    resolved_binary = binary.resolve()
+    if not resolved_binary.is_file():
         raise FileNotFoundError(f"binary not found: {binary}")
-    if not os.access(binary, os.X_OK):
+    if not os.access(resolved_binary, os.X_OK):
         raise PermissionError(f"binary is not executable: {binary}")
     if timeout < 0.5 or timeout > 60.0:
         raise ValueError(f"timeout must be between 0.5 and 60.0 seconds, got {timeout}")
@@ -459,7 +508,7 @@ def run_conformance(
         )
 
     child_env = sanitized_env(env)
-    base_cmd = [str(binary), *subcommand]
+    base_cmd = [str(resolved_binary), *subcommand]
     headless_base = [*base_cmd, *extra_args]
     results: list[CaseResult] = []
 

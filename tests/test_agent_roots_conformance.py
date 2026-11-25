@@ -8,6 +8,7 @@ import stat
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -131,6 +132,18 @@ FAKE_CLI_TEMPLATE = textwrap.dedent(
         if MODE == "hang-without-roots" and not (read_roots and write_roots):
             time.sleep(30)
             return 0
+        if MODE == "spawn-detached-pipe-holder" and not (read_roots and write_roots):
+            import subprocess
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                start_new_session=True,
+                close_fds=False,
+            )
+            sys.stderr.write("refused with detached helper\\n")
+            return 1
+        if MODE == "noisy-stderr" and not (read_roots and write_roots):
+            sys.stderr.write("x" * 65536 + "\\n")
+            return 1
         if MODE == "exit-zero-without-roots" and not (read_roots and write_roots):
             return 0
         if MODE == "allow-no-roots" and not read_roots and not write_roots:
@@ -308,6 +321,32 @@ class ConformanceRunnerTests(unittest.TestCase):
                 check_agent_roots.main(["--binary", str(bad), "--timeout", "3"]),
                 1,
             )
+
+    def test_relative_dot_slash_binary_executes_without_path_lookup(self) -> None:
+        cli = self.make_fake_cli("compliant")
+        prev_cwd = os.getcwd()
+        try:
+            os.chdir(cli.parent)
+            results = check_agent_roots.run_conformance(
+                Path(f"./{cli.name}"), timeout=3.0
+            )
+        finally:
+            os.chdir(prev_cwd)
+        self.assertEqual(len(results), 6)
+        self.assertTrue(all(r.passed for r in results), results)
+
+    def test_detached_descendant_holding_pipes_does_not_hang_cleanup(self) -> None:
+        cli = self.make_fake_cli("spawn-detached-pipe-holder")
+        started = time.monotonic()
+        results = check_agent_roots.run_conformance(cli, timeout=2.0)
+        elapsed = time.monotonic() - started
+        self.assertTrue(all(r.passed for r in results), results)
+        self.assertLess(elapsed, 5.0)
+
+    def test_noisy_stderr_is_drained_with_bounded_retention(self) -> None:
+        cli = self.make_fake_cli("noisy-stderr")
+        results = check_agent_roots.run_conformance(cli, timeout=3.0)
+        self.assertTrue(all(r.passed for r in results), results)
 
 
 class AgentRootsWiringTests(unittest.TestCase):
