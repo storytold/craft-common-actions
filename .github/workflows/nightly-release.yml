@@ -25,31 +25,31 @@ on:
         required: false
       APPLE_CERTIFICATE_PASSWORD:
         required: false
-      KEYCHAIN_PASSWORD:
-        required: false
       APPLE_ID:
         required: false
       APPLE_PASSWORD:
         required: false
       APPLE_TEAM_ID:
         required: false
-      WINDOWS_CERTIFICATE:
-        required: false
-      WINDOWS_CERTIFICATE_PASSWORD:
-        required: false
-      AZURE_TENANT_ID:
+      AZURE_CERT_PROFILE:
         required: false
       AZURE_CLIENT_ID:
         required: false
       AZURE_CLIENT_SECRET:
         required: false
-      AZURE_SIGNING_ENDPOINT:
-        required: false
       AZURE_SIGNING_ACCOUNT:
         required: false
-      AZURE_CERT_PROFILE:
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      KEYCHAIN_PASSWORD:
         required: false
       LINUX_SIGNING_KEY:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
         required: false
     outputs:
       admitted:
@@ -218,7 +218,6 @@ jobs:
     if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: windows-latest
     timeout-minutes: 20
-    environment: release
     permissions:
       contents: read
       actions: read
@@ -297,7 +296,6 @@ jobs:
     # Same Apple route and `release` environment as the stable macOS job.
     runs-on: macos-15
     timeout-minutes: 120
-    environment: release
     permissions:
       contents: read
       actions: read
@@ -493,7 +491,6 @@ jobs:
       github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
     timeout-minutes: 20
-    environment: release
     permissions:
       contents: read
       actions: read

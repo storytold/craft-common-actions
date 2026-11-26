@@ -99,7 +99,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for name, key, leaf_name, foreign in (("sign-windows", "secrets.WINDOWS_CERTIFICATE", "- name: Sign data only", "APPLE_"),
                                               ("sign-macos", "secrets.APPLE_CERTIFICATE", "- name: Sign, notarize and staple data only", "WINDOWS_")):
             signer = graph[name]
-            self.assertIn("environment: release", signer)
+            self.assertNotIn("environment:", signer)
             self.assertNotIn("id-token:", signer)
             self.assertNotIn("contents: write", signer)
             self.assertNotIn(foreign, signer)
