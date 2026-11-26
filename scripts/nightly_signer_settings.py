@@ -38,7 +38,7 @@ PINNED_TOOLING = ("nightly-release.yml", "nightly-unsigned.yml")
 MAX_CALL_DEPTH = 4  # GitHub allows ten levels; craft-common-actions nests at most two.
 # --require-pinned-release: also require release.yml callers to pin a full SHA. Off by default while every app
 # calls release.yml@main; its environment bindings are checked at the called ref either way.
-OPTIONS = {"require_pinned_release": False}
+OPTIONS = {"require_pinned_release": False, "accept_unverified_secrets": False}
 MAX_FIRST_PARENT_STEPS = 500
 MAX_CANCEL_ROUNDS = 5
 ACTIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
@@ -106,17 +106,36 @@ def required_secrets(row):
 
 
 def check_secrets(app, row):
-    """The release environment must hold every signing secret its targets need; repo-level copies don't count."""
-    names = lambda path: {s["name"] for s in gh("GET", path)["secrets"]}
-    have = names(f"repos/{ORG}/{app}/environments/{ENV}/secrets?per_page=100")
-    missing = sorted(required_secrets(row) - have)
-    if missing:
-        repo_level = sorted(set(missing) & names(f"repos/{ORG}/{app}/actions/secrets?per_page=100"))
-        detail = f" ({', '.join(repo_level)} exists only as a repo-level secret; the signer reads the {ENV} environment)" if repo_level else ""
-        raise Refuse(f"{app} {ENV} environment lacks signing secrets {missing}{detail}")
-    print(f"  ok     {app} {ENV} environment holds all {len(required_secrets(row))} signing secret names its targets need")
+    """Every signing secret must be readable where the caller reads it: repository scope, which is checkable.
 
+    Org-scope secrets are not readable with this token, and a name that exists only on the release
+    environment can never reach a caller that forwards `NAME: ${{ secrets.NAME }}`. So repo-scope presence
+    passes, and anything else is UNVERIFIED: refused unless the operator passes
+    --accept-unverified-secrets, which is recorded in the output rather than passed silently.
+    """
+    wanted = required_secrets(row)
+    repo_level = {s["name"] for s in gh("GET", f"repos/{ORG}/{app}/actions/secrets?per_page=100")["secrets"]}
+    missing = sorted(wanted - repo_level)
+    if not missing:
+        print(f"  ok     {app} signing secrets readable by the caller: {len(wanted)} names at repository scope")
+        return
+    environment_only = sorted(set(missing) & {s["name"] for s in
+        gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/secrets?per_page=100")["secrets"]})
+    detail = (f"; {', '.join(environment_only)} exist only on the {ENV} environment, which a caller cannot read"
+              if environment_only else "; they may be org-scope, which this token cannot read")
+    if OPTIONS["accept_unverified_secrets"]:
+        print(f"  UNVERIFIED  {app} signing secrets not visible at repository scope: {missing}{detail} "
+              "(accepted with --accept-unverified-secrets; the signer may still receive them empty)")
+        return
+    raise Refuse(f"{app} signing secrets are UNVERIFIED: {missing} are not at repository scope{detail}. "
+                 "Stop the advance here, or pass --accept-unverified-secrets to record that you accepted it.")
 
+def org_secret_names():
+    """Org secrets visible to these repos, if this token may read them; empty when it may not."""
+    try:
+        return {s["name"] for s in gh("GET", f"orgs/{ORG}/actions/secrets?per_page=100")["secrets"]}
+    except Exception:
+        return set()
 def main_tip(app):
     return gh("GET", f"repos/{ORG}/{app}/branches/main")["commit"]["sha"]
 
@@ -589,6 +608,23 @@ def rollback(app, apply, wait=None):
             failures.append(f"{ENV} environment still trusts more than release")
     except Refuse as error:
         failures.append(f"revoking the {BRANCH} trust: {error}")
+    # Signing no longer depends on the environment trust: the signer's caller forwards repository-scope
+    # secrets and no job declares the environment, so the branch is the emergency stop. Close it first;
+    # if it cannot be closed, refuse outright rather than cancel runs and leave it dispatchable.
+    try:
+        if gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True) is not None:
+            if apply:
+                gh("DELETE", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", write=True, apply=apply)
+                if gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True) is not None:
+                    raise Refuse(f"could not delete {BRANCH} (the rulesets may forbid it): signing would remain "
+                                 "dispatchable, so this rollback stopped here. Re-run once the branch can be deleted.")
+                print(f"  done   deleted {app} {BRANCH}; re-creating it is the next `advance`")
+            else:
+                print(f"  would  delete {app} {BRANCH} (the emergency stop: a dispatcher could otherwise sign)")
+    except Refuse as error:
+        # Stop here rather than cancel runs and leave the signer dispatchable.
+        raise Refuse(f"could not delete {BRANCH}, which is the emergency stop now: {error}. "
+                     "Signing would remain dispatchable, so nothing else was changed.")
     active = cancel_round(app, apply, failures)
     rounds = 1
     while apply and active and rounds < MAX_CANCEL_ROUNDS:
@@ -615,8 +651,12 @@ def main():
     parser.add_argument("--sha"); parser.add_argument("--apply", action="store_true")
     parser.add_argument("--require-pinned-release", action="store_true",
                         help="also refuse release.yml callers that do not pin a full SHA (every app calls @main today)")
+    parser.add_argument("--accept-unverified-secrets", action="store_true",
+                        help="record that signing secrets which are not visible at repository scope were accepted; "
+                             "the advance is then allowed and the names remain UNVERIFIED in the output")
     args = parser.parse_args()
     OPTIONS["require_pinned_release"] = args.require_pinned_release
+    OPTIONS["accept_unverified_secrets"] = args.accept_unverified_secrets
     reg = registry()
     admitted = registry_apps(reg)
     # Every value that reaches a gh argument comes from the registry or is rebuilt from a parsed number: the

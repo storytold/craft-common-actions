@@ -60,7 +60,7 @@ class FakeGitHub:
                     "nightly-apps.json": json.dumps({"apps": {"gridcraft": LINUX_ROW, "photocraft": PHOTO_ROW}}),
                     ".github/workflows/nightly-release.yml": CALLEE}
         self.cca[".nightly-apps.fixture"] = ""
-        self.env_secrets, self.repo_secrets = ["LINUX_SIGNING_KEY"], []
+        self.env_secrets, self.repo_secrets = [], ["LINUX_SIGNING_KEY"]
         self.policies, self.branch, self.on_main = [("release", 1)], None, True
         self.rulesets, self.rulesets_readable = existing_rulesets(["gridcraft"]), True
         self.ruleset_hook = None  # called on every single-ruleset read: a concurrent apply's writes
@@ -70,6 +70,7 @@ class FakeGitHub:
         self.sticky = set()       # run ids a force-cancel does not stop
         self.fail_cancel = set()  # run ids whose force-cancel errors
         self.keep_policy = False  # a DELETE that GitHub accepts but does not apply
+        self.branch_delete_blocked = False
         self.large = set()        # paths returned without base64 content (over 1 MB)
         self.__dict__.update(overrides)
         self.writes, self.reads = [], []
@@ -143,6 +144,10 @@ class FakeGitHub:
             self.policies.append((body["name"], 99))
         elif method == "POST" and path.endswith("/git/refs"):
             self.branch = body["sha"]
+        elif method == "DELETE" and path.endswith("/git/refs/heads/" + s.BRANCH):
+            if self.branch_delete_blocked:
+                raise s.Refuse(f"failed: DELETE {path}: gh: Cannot delete protected branch (HTTP 422)")
+            self.branch = None
         elif method == "PATCH" and "/git/refs/heads/" in path:
             self.branch = body["sha"]
         elif method == "POST" and path.endswith("/force-cancel"):
@@ -318,16 +323,29 @@ class SettingsTests(unittest.TestCase):
             self.run_setup(fake, owned=False)
         self.assertEqual(fake.writes, [])
 
-    def test_signing_secrets_must_be_in_the_environment(self):
+    def test_signing_secrets_must_be_readable_by_the_caller(self):
         self.assertEqual(s.required_secrets(LINUX_ROW), {"LINUX_SIGNING_KEY"})
         three = {"targets": [{"target": {"os": os}} for os in ("windows", "linux", "macos")]}
         self.assertEqual(len(s.required_secrets(three)), 13)  # PhotoCraft's set
-        fake = FakeGitHub(env_secrets=ALL[:3], repo_secrets=["LINUX_SIGNING_KEY"])
-        with self.assertRaisesRegex(s.Refuse, "LINUX_SIGNING_KEY exists only as a repo-level secret"):
+        # Present at repository scope: the caller can forward it, which is what the sign steps read.
+        self.run_setup(FakeGitHub(repo_secrets=["LINUX_SIGNING_KEY"]))
+        # Only on the environment: UNVERIFIED and refused, because a caller cannot read it.
+        fake = FakeGitHub(env_secrets=["LINUX_SIGNING_KEY"], repo_secrets=[])
+        with self.assertRaisesRegex(s.Refuse, r"UNVERIFIED.*exist only on the release environment"):
             self.run_setup(fake)
         self.assertEqual(fake.writes, [])
-        with self.assertRaisesRegex(s.Refuse, r"lacks signing secrets \['LINUX_SIGNING_KEY'\]$"):
-            self.run_setup(FakeGitHub(env_secrets=[]))
+        # Absent everywhere and unreadable at org scope: still UNVERIFIED, not a pass.
+        with self.assertRaisesRegex(s.Refuse, r"UNVERIFIED.*may be org-scope"):
+            self.run_setup(FakeGitHub(env_secrets=[], repo_secrets=[]))
+        # The operator may accept it explicitly; the output records the names and the scope it looked in.
+        buffer = io.StringIO()
+        fake2 = FakeGitHub(env_secrets=["LINUX_SIGNING_KEY"], repo_secrets=[])
+        with patch.dict(s.OPTIONS, {"accept_unverified_secrets": True}), \
+                patch.object(s, "gh", fake2), contextlib.redirect_stdout(buffer):
+            s.setup_repo("gridcraft", True, True, LINUX_ROW)
+        out = buffer.getvalue()
+        self.assertIn("UNVERIFIED", out)
+        self.assertIn("repository scope", out)
 
     def test_extra_environment_trust_refuses(self):
         with self.assertRaisesRegex(s.Refuse, "expected only release"):
@@ -490,10 +508,21 @@ class RollbackTests(unittest.TestCase):
         fake = self.trusted(runs={"queued": [5], "in_progress": [6]})
         self.rollback(fake)
         self.assertEqual(fake.writes[0], ("DELETE", "repos/storytold/gridcraft/environments/release/deployment-branch-policies/2", None))
-        self.assertEqual(sorted(w[1] for w in fake.writes[1:]), ["repos/storytold/gridcraft/actions/runs/5/force-cancel",
+        # The branch is closed before any cancellation: it is the emergency stop now.
+        self.assertEqual(fake.writes[1], ("DELETE", "repos/storytold/gridcraft/git/refs/heads/nightly-signer", None))
+        self.assertEqual(sorted(w[1] for w in fake.writes[2:]), ["repos/storytold/gridcraft/actions/runs/5/force-cancel",
                                                                  "repos/storytold/gridcraft/actions/runs/6/force-cancel"])
+        self.assertIsNone(fake.branch)
         self.assertEqual(fake.policies, [("release", 1)])
         self.assertEqual(fake.runs, {"queued": [], "in_progress": []})
+
+    def test_a_branch_that_cannot_be_closed_refuses_before_cancelling(self):
+        # The branch is the emergency stop now: if it cannot be deleted, stop rather than cancel and
+        # leave a dispatchable signer behind.
+        fake = self.trusted(branch_delete_blocked=True, runs={"queued": [5]})
+        with self.assertRaisesRegex(s.Refuse, "cannot delete|could not delete"):
+            self.rollback(fake)
+        self.assertEqual(fake.runs, {"queued": [5]})
 
     def test_unverified_revocation_refuses_but_still_cancels(self):
         fake = self.trusted(keep_policy=True, runs={"queued": [5]})
