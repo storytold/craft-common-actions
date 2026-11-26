@@ -35,6 +35,9 @@ GUARDED = "jobs:\n  linux:\n    runs-on: ubuntu-24.04\n    environment: " + s.GU
 POLICY = {"release_branch": "nightly-signer", "producer_tooling_revision": PIN, "signer_tooling_revision": PIN}
 ALL = sorted(s.SECRETS["linux"] | s.SECRETS["macos"] | s.SECRETS["windows"])
 LINUX_ROW = {"targets": [{"target": {"os": "linux", "arch": "x86_64", "format": "tar_gz"}}]}
+CALLEE = ("on:\n  workflow_call:\n    secrets:\n" +
+          "".join(f"      {name}:\n        required: false\n" for name in sorted(s.SECRETS["linux"] | s.SECRETS["macos"] | s.SECRETS["windows"])) +
+          "jobs:\n  validate:\n    runs-on: ubuntu-24.04\n    steps: []\n")
 PHOTO_ROW = {"targets": [{"target": {"os": os_, "arch": "x86_64", "format": "tar_gz"}} for os_ in ("linux", "macos", "windows")]}
 LINUX_BLOCK = "    secrets:\n      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}\n"
 TEAM = 19837241
@@ -54,7 +57,8 @@ class FakeGitHub:
                       ".github/workflows/release.yml": RELEASE_CALLER.format(ref="main"), ".github/workflows/ci.yml": CI,
                       ".github/nightly-signing-policy.json": json.dumps(POLICY)}
         self.cca = {".github/workflows/release.yml": GUARDED, ".github/workflows/gate.yml": "jobs:\n  t:\n    runs-on: x\n    steps: []\n",
-                    "nightly-apps.json": json.dumps({"apps": {"gridcraft": LINUX_ROW, "photocraft": PHOTO_ROW}})}
+                    "nightly-apps.json": json.dumps({"apps": {"gridcraft": LINUX_ROW, "photocraft": PHOTO_ROW}}),
+                    ".github/workflows/nightly-release.yml": CALLEE}
         self.cca[".nightly-apps.fixture"] = ""
         self.env_secrets, self.repo_secrets = ["LINUX_SIGNING_KEY"], []
         self.policies, self.branch, self.on_main = [("release", 1)], None, True
@@ -279,6 +283,14 @@ class SettingsTests(unittest.TestCase):
             with self.subTest(case=label), self.assertRaisesRegex(s.Refuse, message):
                 self.run_setup(fake, owned=False)
             self.assertEqual(fake.writes, [], label)
+
+    def test_a_pin_that_does_not_declare_a_forwarded_secret_refuses(self):
+        # Forwarding a name the callee does not declare would silently do nothing.
+        fake = FakeGitHub()
+        fake.cca[".github/workflows/nightly-release.yml"] = CALLEE.replace("      LINUX_SIGNING_KEY:\n        required: false\n", "")
+        with patch.object(s, "gh", fake):
+            with self.assertRaisesRegex(s.Refuse, r"does not declare \['LINUX_SIGNING_KEY'\]"):
+                s.check_tree("gridcraft", MAIN)
 
     def test_clean_tree_passes_and_local_callees_are_checked_in_the_listing(self):
         fake = FakeGitHub()

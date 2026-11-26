@@ -209,7 +209,23 @@ def signer_job_problems(app, jobs, pin):
     if CCA_CALL.fullmatch(job["uses"]).group(2) != pin or inputs.get("tooling-revision") != pin:
         problems.append(f"nightly-sign.yml job {name} does not call nightly-release.yml and pass tooling-revision at {pin}")
     problems += forwarded_secrets_problems(app, job, name)
+    problems += declared_secrets_problems(app, pin)
     return problems
+
+
+def declared_secrets_problems(app, pin):
+    """The pinned signer must declare every secret this app forwards, or the forwarding silently does nothing."""
+    wanted = required_secrets(registry()["apps"][app])
+    where = f"{CCA} nightly-release.yml@{pin}"
+    document = yaml.safe_load(text_at(CCA, ".github/workflows/nightly-release.yml", pin)) or {}
+    on = document.get(True) if True in document else document.get("on")
+    call = on.get("workflow_call") if isinstance(on, dict) else None
+    spec = call.get("secrets") if isinstance(call, dict) else None
+    declared = set(spec) if isinstance(spec, dict) else set()
+    missing = sorted(wanted - declared)
+    if missing:
+        return [f"{where} does not declare {missing}, which this app forwards; the pin must name a callee that declares them"]
+    return []
 
 
 def forwarded_secrets_problems(app, job, name):
