@@ -1,0 +1,42 @@
+name: nightly feed reads on Windows
+
+# bounded_bytes/bounded_json run in the signer's Windows validate job (windows-latest, Python 3.13).
+# This reads real files through that platform's stat/fstat APIs, not a simulation.
+on:
+  pull_request:
+    paths:
+      - scripts/nightly_feed.py
+      - scripts/nightly_unix.py
+      - tests/test_nightly_feed_windows.py
+      - .github/workflows/test-nightly-feed-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/nightly_feed.py
+      - scripts/nightly_unix.py
+      - tests/test_nightly_feed_windows.py
+      - .github/workflows/test-nightly-feed-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reads:
+    name: real-file reads (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13 (as the signer)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: bounded_json and bounded_bytes on real files
+        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
