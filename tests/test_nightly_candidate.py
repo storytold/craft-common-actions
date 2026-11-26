@@ -307,6 +307,19 @@ class CandidateTests(unittest.TestCase):
         self.f.changes['issue-2'] = [{'creationDate': '2026-11-22T12:20:00+0000', 'diffs': []}] * c.MAX_ITEMS
         with self.assertRaisesRegex(ValueError, 'possibly truncated issue changelog'): self.admit()
 
+    def test_issue_status_only_transition_after_C_refuses(self):
+        # SonarCloud MQR mode may record a transition only as issueStatus: the walk-back can't use it.
+        self.later(M)
+        self.f.issues[0]['updateDate'] = '2026-11-22T12:10:00+0000'
+        self.f.changes['issue-1'] = [{'creationDate': '2026-11-22T12:10:00+0000', 'diffs': [{'key': 'issueStatus', 'oldValue': 'FIXED', 'newValue': 'OPEN'}]}]
+        with self.assertRaisesRegex(c.n.InvalidNightly, 'issueStatus-only transition'): self.admit()
+        # With the classic status diff alongside it, the walk-back applies as usual.
+        self.f.changes['issue-1'][0]['diffs'].append({'key': 'status', 'oldValue': 'OPEN', 'newValue': 'OPEN'})
+        self.assertTrue(self.admit())
+        # Before C's analysis it is irrelevant.
+        self.f.changes['issue-1'] = [{'creationDate': '2026-11-22T11:00:00+0000', 'diffs': [{'key': 'issueStatus', 'oldValue': 'FIXED', 'newValue': 'OPEN'}]}]
+        self.assertTrue(self.admit())
+
     def test_later_analysis_in_C_s_second_is_a_retry(self):
         self.f.history = [{'key': 'analysis-M', 'date': ANALYZED, 'revision': M}, dict(self.f.analysis)]
         with self.assertRaisesRegex(c.n.Unavailable, "shares candidate C's timestamp"): self.admit()

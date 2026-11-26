@@ -488,6 +488,9 @@ def _open_at(reads, issue, since):
     after = _changes_after(reads, issue, since)
     status, resolution = issue.get('status'), issue.get('resolution')
     for change in after:
+        keys = {diff.get('key') for diff in change['diffs']}
+        # MQR mode can record a transition only as issueStatus; its mapping is unreviewed, so refuse.
+        n.require('issueStatus' not in keys or 'status' in keys, 'issue changelog after candidate C has an issueStatus-only transition; its state at C is unproven')
         for diff in change['diffs']:
             if diff.get('key') == 'status':
                 n.require(isinstance(diff.get('oldValue'), str), 'issue status history before candidate C is unknown')
