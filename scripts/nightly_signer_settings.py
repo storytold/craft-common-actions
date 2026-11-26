@@ -718,11 +718,13 @@ def advance(app, sha, apply, enable=False):
         else:
             try:
                 gh("PUT", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/enable", write=True, apply=apply)
-                if apply and (workflow_state(app) != "active" or gh("GET", path)["object"]["sha"] != sha):
-                    raise Refuse("workflow activation or reviewed head did not read back exactly")
+                if apply:
+                    if workflow_state(app) != "active" or gh("GET", path)["object"]["sha"] != sha:
+                        raise Refuse("workflow activation or reviewed head did not read back exactly")
+                    check_admission(app)  # Rollback may have revoked trust during the enable write.
             except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
                 containment = disable_after_uncertain_enable(app) if apply else "no runtime write attempted"
-                raise Refuse(f"PARTIAL: enable attempted; activation and reviewed head are not verified: {error}; "
+                raise Refuse(f"PARTIAL: enable attempted; activation, reviewed head or signer admission is not verified: {error}; "
                              f"{containment}; an intervening dispatch or credential-bearing run remains possible; run rollback")
     elif resume:
         print(f"  exact  {REF} already at reviewed {sha[:10]}; workflow remains {state}")

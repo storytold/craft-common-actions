@@ -772,7 +772,7 @@ class AdvanceTests(unittest.TestCase):
             self.assertEqual(fake.writes, [])
 
     def test_uncertain_enable_attempts_disable_and_reports_remaining_run_risk(self):
-        for fault in ("head drift", "head unreadable", "activation response lost"):
+        for fault in ("head drift", "head unreadable", "activation response lost", "admission revoked"):
             fake = self.fake(branch="b" * 40, workflow_state="disabled_manually")
             attempted = False
             def api(method, path, *args, **kwargs):
@@ -784,13 +784,17 @@ class AdvanceTests(unittest.TestCase):
                         fake.branch = MAIN
                     if fault == "activation response lost":
                         raise s.Refuse("HTTP 502")
+                    if fault == "admission revoked":
+                        fake.policies = [("release", 1)]
                     return result
                 if attempted and fault == "head unreadable" and path.endswith("/git/ref/heads/nightly-signer"):
                     return {}
                 return fake(method, path, *args, **kwargs)
             with self.subTest(fault=fault), patch.object(s, "gh", api), quiet():
-                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*disabled_manually.*intervening dispatch.*run rollback"):
+                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*disabled_manually.*intervening dispatch.*run rollback") as refusal:
                     s.advance("gridcraft", "b" * 40, True, enable=True)
+                if fault == "admission revoked":
+                    self.assertIn("does not admit exactly", str(refusal.exception))
             self.assertEqual(fake.workflow_state, "disabled_manually")
             self.assertTrue(any(path.endswith("/disable") for _, path, _ in fake.writes))
 
@@ -943,14 +947,18 @@ class RollbackTests(unittest.TestCase):
                         return {"workflow_runs": []}
                     if fault == "malformed row":
                         return {"workflow_runs": [{"id": 5, "status": "queued"}, {"id": "untrusted", "status": "queued"}]}
-                if "status=in_progress" in path or (fault == "later page" and "status=queued" in path and "&page=2" in path):
+                if fault == "later page" and "status=queued" in path and "&page=2" in path:
+                    return {}
+                if "status=in_progress" in path and (fault != "later page" or inventories > 1):
                     if fault == "transport":
                         raise s.Refuse("HTTP 503")
                     return {}
                 return fake(method, path, *args, **kwargs)
             with self.subTest(fault=fault), patch.object(s, "gh", api), quiet():
-                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*listing signer runs.*known runs not verified stopped"):
+                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*listing signer runs.*known runs not verified stopped") as refusal:
                     s.rollback("gridcraft", True, wait=lambda _: None)
+                if fault == "later page":
+                    self.assertIn("queued page 2: UNVERIFIED", str(refusal.exception))
             self.assertEqual(fake.workflow_state, "disabled_manually")
             self.assertEqual(set(fake.cancels), set(ids))
             self.assertTrue(all(count == s.MAX_CANCEL_ROUNDS for count in fake.cancels.values()))
