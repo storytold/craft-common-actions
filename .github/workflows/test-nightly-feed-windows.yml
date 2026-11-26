@@ -1,0 +1,99 @@
+name: nightly feed reads on Windows
+
+# A real-platform smoke test for bounded_bytes/bounded_json, which run in the signer's Windows
+# validate job (windows-latest, Python 3.13) on the workspace volume. The files have the shapes that
+# job reads: written in the workspace, written by another process, checked out by git, and extracted
+# from a zip. It also records whether the path and handle stats agree on the
+# runner image, and runs the strict-comparison build over just-arrived files so the drift, when this
+# runner exposes it, is visible in the same run.
+on:
+  pull_request:
+    paths:
+      - scripts/nightly_feed.py
+      - tests/test_nightly_feed_windows.py
+      - .github/workflows/test-nightly-feed-windows.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/nightly_feed.py
+      - tests/test_nightly_feed_windows.py
+      - .github/workflows/test-nightly-feed-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reads:
+    name: real-file reads (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    env:
+      NIGHTLY_FEED_TEST_ROOT: ${{ github.workspace }}/.feed-test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13 (as the signer)
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Create the downloaded shape locally (no artifact service)
+        shell: bash
+        run: |
+          # download-artifact extracts a zip; making one here gives the same file shape without
+          # depending on GitHub's artifact service, which has been failing intermittently.
+          mkdir -p .downloaded
+          python -I -B -c "import zipfile; z=zipfile.ZipFile('artifact.zip','w'); z.writestr('artifact.json','{\"artifact\": \"downloaded\"}'); z.close()"
+          python -I -B -c "import zipfile; zipfile.ZipFile('artifact.zip').extractall('.downloaded')"
+          cat .downloaded/artifact.json
+          rm -f artifact.zip
+      - name: Record the volume and whether path and handle stats agree here
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: | head -5 || true; fi
+          python -I -B - <<'EOF'
+          import os
+          fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+          for path in ("nightly-apps.json", ".downloaded/artifact.json"):
+              with open(path, "rb") as stream:
+                  handle = os.fstat(stream.fileno())
+              entry = os.lstat(path)
+              agree = all(getattr(entry, k) == getattr(handle, k) for k in fields)
+              print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in fields})
+          EOF
+      - name: This commit's code on real files (must pass)
+        shell: bash
+        env:
+          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
+        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
+      - name: The strict comparison must refuse a just-arrived file (gate)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 644556de is the diagnostics-only build: the strict five-field comparison. Reading
+          # just-arrived files with it must fail here, otherwise this run did not reproduce the
+          # signer's refusal and says nothing about the fix. discover -k keeps the test importable
+          # under -I, which implies -P and therefore leaves the checkout off sys.path.
+          gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
+          # Without the module there is nothing to compare, so refuse rather than run an empty file.
+          grep -q 'def bounded_bytes' "$RUNNER_TEMP/nightly_feed_strict.py" || { echo "::error::could not fetch the pre-fix module, so this gate proves nothing"; exit 1; }
+          set +e
+          NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover \
+            -s tests -p test_nightly_feed_windows.py -k test_a_just_written_or_extracted_json_reads -v 2>&1 | tee "$RUNNER_TEMP/strict.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          # The gate only means anything if that one test actually ran.
+          grep -Eq '^Ran 1 test' "$RUNNER_TEMP/strict.log" || { echo "::error::the strict comparison's test did not run, so this run proves nothing"; exit 1; }
+          if [ "$status" -eq 0 ]; then
+            echo "::error::the strict comparison accepted just-arrived files on this run, so the reproduction is not established here"
+            exit 1
+          fi
+          grep -E "refused a just-arrived|st_ctime_ns" "$RUNNER_TEMP/strict.log" || true
+          echo "strict comparison refused a just-arrived file, as the signer did"
