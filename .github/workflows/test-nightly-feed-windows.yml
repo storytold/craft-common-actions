@@ -86,7 +86,7 @@ jobs:
           # 644556de is the diagnostics-only build: the strict five-field comparison. Whether it
           # refuses here says whether this runner exposes the drift on this run.
           gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
-          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v; then
+          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v 2>&1 | tee "$RUNNER_TEMP/strict.log"; then
             echo "strict comparison: passed here (drift not observed on this run)"
           else
             echo "strict comparison: refused here (the drift occurred, as in the signer)"

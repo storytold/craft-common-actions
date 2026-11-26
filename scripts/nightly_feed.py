@@ -96,7 +96,9 @@ IDENTITY = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
 # windows-latest by reading a just-written JSON: gridcraft probe runs 45757755536, 45757906994 and the
 # settling probe. So ctime is not compared across those two APIs; it is still compared handle-to-handle
 # across the read, and no other field or platform is treated differently.
-PATH_HANDLE_IDENTITY = tuple(key for key in IDENTITY if not (os.name == "nt" and key == "st_ctime_ns"))
+def path_handle_identity():
+    """The fields compared between a path's stat and the opened handle's stat."""
+    return tuple(key for key in IDENTITY if not (os.name == "nt" and key == "st_ctime_ns"))
 
 
 def differences(first, second, keys=IDENTITY):
@@ -107,8 +109,13 @@ def differences(first, second, keys=IDENTITY):
 def bounded_bytes(path, limit, kind):
     """Read a stable regular input without following a leaf link or waiting on a FIFO.
 
-    The identity comparison is the same on every platform; a refusal names the file and the fields
-    that disagreed, so a real refusal identifies itself instead of needing a guess.
+    The identity comparison covers device, inode, size and modification time on every platform, and
+    ctime everywhere except between a path and an opened handle on Windows, where the two APIs can
+    report a ctime about 0.3 ms apart for a file written moments earlier. The cost of that exception on
+    Windows: an in-place rewrite between the path check and the open that preserves both size and
+    modification time is not caught by ctime there (a replaced file is still caught by device and
+    inode, and any change during the read by all five fields, because the handle is compared with
+    itself). A refusal names the file and the fields that disagreed.
     """
     path = owned_path(path)
     before = path.lstat()  # Type and size precheck only, before anything is opened.
@@ -117,7 +124,7 @@ def bounded_bytes(path, limit, kind):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        changed = differences(before, opened, PATH_HANDLE_IDENTITY)
+        changed = differences(before, opened, path_handle_identity())
         require(not changed, f"{kind} changed before read ({path.name}: {changed or 'path and handle disagree'})")
         raw = stream.read(limit + 1)
         after = os.fstat(stream.fileno())

@@ -77,43 +77,57 @@ class RealFileReadTests(unittest.TestCase):
 
 
 class JustWrittenJsonTests(unittest.TestCase):
-    """A JSON written moments earlier must read: that is what the signer's validate step does."""
+    """A JSON written or extracted moments earlier must read: that is what the signer's validate step does."""
 
     def setUp(self):
         self.root = job_root()
         self.addCleanup(shutil.rmtree, self.root, True)
         ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(self.root), "RUNNER_TEMP": str(self.root)})
         ownership.start(); self.addCleanup(ownership.stop)
-
-    def test_a_just_written_json_reads(self):
-        # A plain write, and the same content extracted from a zip the way download-artifact extracts:
-        # the extraction path is where the directory entry's ctime lags the handle's.
-        archive = self.root / "artifact.zip"
-        with zipfile.ZipFile(archive, "w") as bundle:
+        self.archive = self.root / "artifact.zip"
+        with zipfile.ZipFile(self.archive, "w") as bundle:
             bundle.writestr("unsigned.json", '{"admitted": true}')
-        deltas = {}
+
+    def fresh(self, attempt):
+        """A JSON as it arrives: half plain writes, half extracted the way download-artifact extracts."""
+        path = self.root / f"fresh-{attempt}.json"
+        if attempt % 2:
+            with zipfile.ZipFile(self.archive) as bundle:
+                bundle.extract("unsigned.json", self.root)
+            (self.root / "unsigned.json").rename(path)
+        else:
+            path.write_text('{"admitted": true}', encoding="utf-8")
+        return path
+
+    def test_a_just_written_or_extracted_json_reads(self):
+        # Read first, probe afterwards: probing first would settle the directory entry and hide the case.
         for attempt in range(50):
-            path = self.root / f"just-written-{attempt}.json"
-            if attempt % 2:
-                with zipfile.ZipFile(archive) as bundle:
-                    bundle.extract("unsigned.json", self.root)
-                (self.root / "unsigned.json").rename(path)
-            else:
-                path.write_text('{"admitted": true}', encoding="utf-8")
-            # What the strict comparison would have seen between the path and the opened handle.
-            entry = os.lstat(path)
-            with open(path, "rb") as stream:
-                handle = os.fstat(stream.fileno())
-            for key in n.IDENTITY:
-                if getattr(entry, key) != getattr(handle, key):
-                    deltas[key] = (getattr(entry, key), getattr(handle, key))
+            path = self.fresh(attempt)
             try:
                 self.assertEqual(n.bounded_json(path), {"admitted": True})
             except n.InvalidNightly as error:
-                self.fail(f"attempt {attempt} refused a just-written file: {error}; path/handle deltas seen: {deltas}")
-        if not deltas:
-            raise unittest.SkipTest("the path/handle ctime disagreement was not observed on this run")
-        print(f"observed path/handle deltas: {deltas}")
+                self.fail(f"attempt {attempt} refused a just-arrived file: {error}")
+
+    @unittest.skipUnless(os.name == "nt", "the directory-entry ctime lag is a Windows behaviour")
+    def test_the_strict_comparison_must_refuse_a_just_arrived_json(self):
+        # The pre-fix rule: compare every field between the path and the handle. If this run's runner
+        # doesn't expose the lag, the reproduction is not established here and the job must say so.
+        strict = n.IDENTITY
+        seen = []
+        with patch.object(n, "path_handle_identity", return_value=strict):
+            for attempt in range(200):
+                path = self.fresh(attempt)
+                entry = os.lstat(path)
+                with open(path, "rb") as stream:
+                    handle = os.fstat(stream.fileno())
+                delta = {k: (getattr(entry, k), getattr(handle, k)) for k in strict if getattr(entry, k) != getattr(handle, k)}
+                try:
+                    n.bounded_json(path)
+                except n.InvalidNightly as error:
+                    seen.append((attempt, str(error), delta))
+                    break
+        self.assertTrue(seen, "the strict comparison accepted every just-arrived file on this run, so the drift was not observed")
+        print("strict comparison refused:", seen[0])
 
 
 class CheckedOutAndDownloadedTests(unittest.TestCase):
