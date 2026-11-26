@@ -2,19 +2,23 @@ name: nightly feed reads on Windows
 
 # A real-platform smoke test for bounded_bytes/bounded_json, which run in the signer's Windows
 # validate job (windows-latest, Python 3.13) on the workspace volume. The files have the shapes that
-# job reads: written in the workspace, written by another process, checked out by git, extracted by
-# download-artifact. It also records whether the path and handle stats agree on the runner image.
+# job reads: written in the workspace, written by another process, checked out by git, extracted the
+# way download-artifact extracts. It also records whether the path and handle stats agree on the
+# runner image, and runs the same tests against the strict-comparison build so the drift, when this
+# runner exposes it, is visible in the same run.
 on:
   pull_request:
     paths:
       - scripts/nightly_feed.py
       - tests/test_nightly_feed_windows.py
+      - tests/test_nightly_feed.py
       - .github/workflows/test-nightly-feed-windows.yml
   push:
     branches: [main]
     paths:
       - scripts/nightly_feed.py
       - tests/test_nightly_feed_windows.py
+      - tests/test_nightly_feed.py
       - .github/workflows/test-nightly-feed-windows.yml
   workflow_dispatch:
 
@@ -40,7 +44,7 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - name: Write a JSON artifact
+      - name: Make an artifact to download
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/up"
@@ -54,7 +58,7 @@ jobs:
         with:
           name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/.downloaded
-      - name: Report the volume and whether the path and handle stats agree here
+      - name: Record the volume and whether path and handle stats agree here
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: | head -5 || true; fi
@@ -68,7 +72,22 @@ jobs:
               agree = all(getattr(entry, k) == getattr(handle, k) for k in fields)
               print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in fields})
           EOF
-      - name: Report whether the strict comparison refused here
-        if: always()
+      - name: This commit's code on real files (must pass)
         shell: bash
-        run: cat "$RUNNER_TEMP/strict.outcome" || echo "strict comparison did not run"
+        env:
+          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
+        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
+      - name: The strict comparison on the same tests (evidence, not a gate)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
+        run: |
+          # 644556de is the diagnostics-only build: the strict five-field comparison. Whether it
+          # refuses here says whether this runner exposes the drift on this run.
+          gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
+          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v; then
+            echo "strict comparison: passed here (drift not observed on this run)"
+          else
+            echo "strict comparison: refused here (the drift occurred, as in the signer)"
+          fi

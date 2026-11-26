@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,10 +86,20 @@ class JustWrittenJsonTests(unittest.TestCase):
         ownership.start(); self.addCleanup(ownership.stop)
 
     def test_a_just_written_json_reads(self):
+        # A plain write, and the same content extracted from a zip the way download-artifact extracts:
+        # the extraction path is where the directory entry's ctime lags the handle's.
+        archive = self.root / "artifact.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("unsigned.json", '{"admitted": true}')
         deltas = {}
         for attempt in range(50):
             path = self.root / f"just-written-{attempt}.json"
-            path.write_text('{"admitted": true}', encoding="utf-8")
+            if attempt % 2:
+                with zipfile.ZipFile(archive) as bundle:
+                    bundle.extract("unsigned.json", self.root)
+                (self.root / "unsigned.json").rename(path)
+            else:
+                path.write_text('{"admitted": true}', encoding="utf-8")
             # What the strict comparison would have seen between the path and the opened handle.
             entry = os.lstat(path)
             with open(path, "rb") as stream:
