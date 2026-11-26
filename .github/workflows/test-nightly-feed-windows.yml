@@ -2,8 +2,8 @@ name: nightly feed reads on Windows
 
 # A real-platform smoke test for bounded_bytes/bounded_json, which run in the signer's Windows
 # validate job (windows-latest, Python 3.13) on the workspace volume. The files have the shapes that
-# job reads: written in the workspace, written by another process, checked out by git, extracted the
-# way download-artifact extracts. It also records whether the path and handle stats agree on the
+# job reads: written in the workspace, written by another process, checked out by git, and extracted
+# from a zip. It also records whether the path and handle stats agree on the
 # runner image, and runs the same tests against the strict-comparison build so the drift, when this
 # runner exposes it, is visible in the same run.
 on:
@@ -44,20 +44,15 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - name: Make an artifact to download
+      - name: Create the downloaded shape locally (no artifact service)
         shell: bash
         run: |
-          mkdir -p "$RUNNER_TEMP/up"
-          printf '%s' '{"artifact": "downloaded"}' > "$RUNNER_TEMP/up/artifact.json"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/up/artifact.json
-          retention-days: 1
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/.downloaded
+          # download-artifact extracts a zip; making one here gives the same file shape without
+          # depending on GitHub's artifact service, which has been failing intermittently.
+          mkdir -p .downloaded
+          python -I -B -c "import zipfile; z=zipfile.ZipFile('artifact.zip','w'); z.writestr('artifact.json','{\"artifact\": \"downloaded\"}'); z.close()"
+          python -I -B -c "import zipfile; zipfile.ZipFile('artifact.zip').extractall('.downloaded')"
+          cat .downloaded/artifact.json
       - name: Record the volume and whether path and handle stats agree here
         shell: bash
         run: |

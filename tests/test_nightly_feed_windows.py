@@ -138,7 +138,7 @@ class CheckedOutAndDownloadedTests(unittest.TestCase):
             os.environ.pop("RUNNER_TEMP", None)
             self.assertIn("photocraft", n.bounded_json(ROOT / "nightly-apps.json")["apps"])
 
-    @unittest.skipUnless(os.environ.get("NIGHTLY_FEED_DOWNLOADED"), "needs a file extracted by actions/download-artifact")
+    @unittest.skipUnless(os.environ.get("NIGHTLY_FEED_DOWNLOADED"), "needs a file extracted from a zip by the job (NIGHTLY_FEED_DOWNLOADED)")
     def test_downloaded_artifact_json_reads(self):
         path = Path(os.environ["NIGHTLY_FEED_DOWNLOADED"]).resolve()
         with patch.dict(os.environ, {"GITHUB_WORKSPACE": str(path.parent), "RUNNER_TEMP": str(path.parent)}):
