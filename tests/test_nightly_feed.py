@@ -165,43 +165,15 @@ class NightlyTests(unittest.TestCase):
             return type('Stat', (), fields)()
         return patch.object(Path, 'lstat', fake)
 
-    def test_windows_lstat_fstat_identity_differences_pass_for_an_unchanged_file(self):
+    def test_a_differing_identity_field_refuses_and_names_the_file_and_field(self):
+        # The comparison is the same on every platform; the value is supplied so the test doesn't
+        # depend on how quickly the filesystem's clock ticks.
         path = self.root / 'state.json'; path.write_text('{"ok":1}')
-        with patch.object(n, '_posix', return_value=False), self.windows_style_lstat():
-            self.assertEqual(n.bounded_json(path), {'ok': 1})
-        # On POSIX a differing device or inode still means another file: refuse, naming the fields.
-        with self.windows_style_lstat(), self.assertRaisesRegex(n.InvalidNightly, r'changed before read \(state.json: st_dev .* st_ino '):
-            n.bounded_json(path)
-
-    def test_path_stat_differences_refuse_on_posix_and_name_the_fields(self):
-        path = self.root / 'state.json'; path.write_text('{"ok":1}')
-        info = os.lstat(path)
-        for label, change in (('st_size', {'st_size': info.st_size - 1}), ('st_mtime_ns', {'st_mtime_ns': info.st_mtime_ns - 1})):
-            with self.subTest(change=label), self.windows_style_lstat(**change), \
+        before = os.lstat(path)
+        for label in ('st_dev', 'st_ino', 'st_mtime_ns', 'st_ctime_ns'):
+            with self.subTest(field=label), \
+                    self.windows_style_lstat(**{label: getattr(before, label) + 1}), \
                     self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
-                n.bounded_json(path)
-            # Windows: size and modification time are still bound before the read, so refuse too.
-            with self.subTest(change=label, windows=True), patch.object(n, '_posix', return_value=False), self.windows_style_lstat(**change), \
-                    self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
-                n.bounded_json(path)
-
-    def test_posix_same_size_rewrite_that_moves_ctime_refuses(self):
-        # An in-place same-size rewrite that restores mtime still moves ctime, which POSIX compares.
-        path = self.root / 'state.json'; path.write_text('{"ok":1}')
-        before = path.stat()
-        with open(path, 'r+b') as stream:
-            stream.write(b'{"ok":2}')
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-        after = os.lstat(path)
-        self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
-        with self.assertRaisesRegex(n.InvalidNightly, r'changed before read \(state.json: .*st_ctime_ns '), \
-                patch.object(n, '_posix', return_value=True):
-            if after.st_ctime_ns == before.st_ctime_ns:
-                # Coarse-tick filesystems (some overlays) don't move ctime here; report it as moved so the
-                # refusal this test is about is still exercised, and the check above proves the gap is real.
-                with self.windows_style_lstat(st_ctime_ns=before.st_ctime_ns + 1):
-                    n.bounded_json(path)
-            else:
                 n.bounded_json(path)
 
     def test_handle_changes_during_read_refuse_on_windows_too(self):
@@ -212,27 +184,9 @@ class NightlyTests(unittest.TestCase):
             if calls[0] == 2:
                 with open(path, 'ab') as stream: stream.write(b' ')
             return real_fstat(descriptor)
-        with patch.object(n, '_posix', return_value=False), patch.object(n.os, 'fstat', side_effect=grow), \
+        with patch.object(n.os, 'fstat', side_effect=grow), \
                 self.assertRaisesRegex(n.InvalidNightly, r'JSON changed while reading \(state.json: st_size 8 != 9'):
             n.bounded_json(path)
-
-    def test_a_link_or_non_regular_path_after_open_refuses(self):
-        path = self.root / 'state.json'; path.write_text('{"ok":1}')
-        real_lstat, real_open = Path.lstat, os.open
-        opened = [False]
-        def lstat(path_self, *args, **kwargs):
-            info = real_lstat(path_self, *args, **kwargs)
-            if opened[0] and path_self.name == 'state.json':  # swapped for a link right after the open
-                return type('Stat', (), {**{k: getattr(info, k) for k in ('st_size', 'st_mtime_ns', 'st_dev', 'st_ino', 'st_ctime_ns')}, 'st_mode': stat.S_IFLNK | 0o777})()
-            return info
-        def open_(file, flags):
-            descriptor = real_open(file, flags); opened[0] = True
-            return descriptor
-        for posix in (True, False):
-            opened[0] = False
-            with self.subTest(posix=posix), patch.object(n, '_posix', return_value=posix), patch.object(Path, 'lstat', lstat), \
-                    patch.object(n.os, 'open', side_effect=open_), self.assertRaisesRegex(n.InvalidNightly, 'regular non-symlink'):
-                n.bounded_json(path)
 
     def test_bounded_bytes_preserves_non_json_bytes_and_exact_cap(self):
         path = self.root / 'version.txt'

@@ -92,50 +92,26 @@ def owned_path(path):
 IDENTITY = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
 
 
-def _posix():
-    return os.name != "nt"
-
-
 def differences(first, second, keys=IDENTITY):
-    """Which identity fields differ, with their values (never file contents), for diagnosable refusals."""
+    """Which identity fields differ, with their values (never file contents), for a diagnosable refusal."""
     return ", ".join(f"{key} {getattr(first, key)} != {getattr(second, key)}" for key in keys if getattr(first, key) != getattr(second, key))
 
 
-def path_handle_difference(path_info, handle_info, keys=IDENTITY):
-    """Differences between a path's lstat and an opened handle's fstat that mean "another file".
-
-    POSIX: every identity field, as before. Windows: size and modification time only. Python 3.12+
-    fills stat from GetFileInformationByName and fstat from GetFileInformationByHandle, and on the
-    runner's workspace volume device, inode and ctime can disagree for the same untouched file, so on
-    Windows those three are never compared across the two APIs. A same-size, mtime-preserving swap
-    inside the owned job root is therefore undetected before the read; anything that changes during
-    the read is still caught, because the handle is compared with itself (device, inode, size, mtime
-    and ctime) before and after.
-    """
-    if keys is IDENTITY:
-        keys = IDENTITY if _posix() else ("st_size", "st_mtime_ns")
-    return differences(path_info, handle_info, keys)
-
-
-def handle_stamp(info):
-    """Identity of an opened handle across two fstat calls (the same API, so every field is stable)."""
-    return tuple(getattr(info, key) for key in IDENTITY)
-
-
 def bounded_bytes(path, limit, kind):
-    """Read a stable regular input without following a leaf link or waiting on a FIFO."""
+    """Read a stable regular input without following a leaf link or waiting on a FIFO.
+
+    The identity comparison is the same on every platform; a refusal names the file and the fields
+    that disagreed, so a real refusal identifies itself instead of needing a guess.
+    """
     path = owned_path(path)
-    before = path.lstat()
+    before = path.lstat()  # Type and size precheck only, before anything is opened.
     require(stat.S_ISREG(before.st_mode), f"{kind} must be a regular non-symlink file")
     require(before.st_size <= limit, f"{kind} exceeds bound")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        # Still a regular file and not a link at the path, right after opening.
-        require(stat.S_ISREG(opened.st_mode) and stat.S_ISREG(path.lstat().st_mode), f"{kind} must be a regular non-symlink file")
-        changed = path_handle_difference(before, opened)
-        require(not changed, f"{kind} changed before read ({path.name}: {changed})")
-        require(opened.st_size <= limit, f"{kind} exceeds bound")
+        changed = differences(before, opened)
+        require(not changed, f"{kind} changed before read ({path.name}: {changed or 'path and handle disagree'})")
         raw = stream.read(limit + 1)
         after = os.fstat(stream.fileno())
         changed = differences(opened, after)

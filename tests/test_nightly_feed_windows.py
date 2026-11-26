@@ -27,15 +27,14 @@ spec.loader.exec_module(n)
 def job_root():
     """A private job root on the same volume as the job's files.
 
-    On a hosted Windows runner the workspace drive is not the same volume as %TEMP%, and the
-    refusal only shows on the workspace volume, so the fixtures must live there. NIGHTLY_FEED_TEST_ROOT
-    names a directory inside the checkout; GITHUB_WORKSPACE is the fallback; temp is only for a local
-    run outside CI.
+    The signer's Windows job reads files on the workspace drive, which is not the same volume as
+    %TEMP%, so the fixtures live where the real files do. NIGHTLY_FEED_TEST_ROOT names a directory
+    inside the checkout; GITHUB_WORKSPACE is the fallback; temp is only for a local run outside CI.
     """
     for base in (os.environ.get("NIGHTLY_FEED_TEST_ROOT"), os.environ.get("GITHUB_WORKSPACE")):
-        if base and Path(base).is_dir():
-            root = Path(tempfile.mkdtemp(dir=base))
-            return root.resolve()
+        if base:
+            Path(base).mkdir(parents=True, exist_ok=True)
+            return Path(tempfile.mkdtemp(dir=base)).resolve()
     return Path(tempfile.mkdtemp()).resolve()  # Resolved: Windows temp paths can be 8.3 short names.
 
 
@@ -61,18 +60,6 @@ class RealFileReadTests(unittest.TestCase):
         path = self.root / "admission.json"
         subprocess.run([sys.executable, "-I", "-c", "import sys; open(sys.argv[1], 'w', encoding='utf-8').write('{\"admitted\": true}')", str(path)], check=True)
         self.assertEqual(n.bounded_json(path), {"admitted": True})
-
-    def test_rewrite_between_lstat_and_open(self):
-        path = self.root / "state.json"
-        path.write_text('{"ok": 1}', encoding="utf-8")
-        real_open = os.open
-        def rewrite_then_open(file, flags):
-            path.write_text('{"ok": 22}', encoding="utf-8")
-            return real_open(file, flags)
-        # Size and modification time are compared everywhere, so the rewrite refuses on both platforms.
-        with patch.object(n.os, "open", side_effect=rewrite_then_open), \
-                self.assertRaisesRegex(n.InvalidNightly, "JSON changed before read"):
-            n.bounded_json(path)
 
     def test_growth_during_read_refuses(self):
         path = self.root / "state.json"

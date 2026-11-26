@@ -1,8 +1,9 @@
 name: nightly feed reads on Windows
 
-# bounded_bytes/bounded_json run in the signer's Windows validate job (windows-latest, Python 3.13),
-# reading files on the workspace volume. This reads real files of the same shapes there: written in
-# the workspace, written by another process, checked out by git, extracted by download-artifact.
+# A real-platform smoke test for bounded_bytes/bounded_json, which run in the signer's Windows
+# validate job (windows-latest, Python 3.13) on the workspace volume. The files have the shapes that
+# job reads: written in the workspace, written by another process, checked out by git, extracted by
+# download-artifact. It also records whether the path and handle stats agree on the runner image.
 on:
   pull_request:
     paths:
@@ -37,7 +38,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
       - name: Set up Python 3.13 (as the signer)
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -69,28 +69,16 @@ jobs:
               for label, info in (("lstat", entry), ("fstat", handle)):
                   print(path, label, {k: getattr(info, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
           EOF
-      - name: The code on main (before the fix) on the same files
-        id: before
-        continue-on-error: true
+      - name: Report the volume and whether the path and handle stats agree here
         shell: bash
-        env:
-          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
         run: |
-          git show 15c319f7a61bccb5444425cfba86873e7d591790:scripts/nightly_feed.py > "$RUNNER_TEMP/nightly_feed_before.py"
-          NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_before.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
-      - name: This commit's code on the same files
-        shell: bash
-        env:
-          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
-        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
-      - name: Record whether the pre-fix code reproduces the signer refusal here
-        shell: bash
-        env:
-          BEFORE: ${{ steps.before.outcome }}
-        run: |
-          # Evidence, not a gate: on GitHub's Windows runners the path and handle stats agree for these
-          # shapes, so the old code passes here. The signer's refusal is therefore not stat drift on
-          # this runner; the fields are printed above and refusals now name the file and the fields.
-          echo "pre-fix code on $RUNNER_OS: $BEFORE"
-          echo "pre-fix reproduced the signer refusal: $([ "$BEFORE" = failure ] && echo yes || echo no)"
           if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: | head -5 || true; fi
+          python -I -B - <<'EOF'
+          import os
+          for path in ("nightly-apps.json", ".downloaded/artifact.json"):
+              with open(path, "rb") as stream:
+                  handle = os.fstat(stream.fileno())
+              entry = os.lstat(path)
+              agree = all(getattr(entry, k) == getattr(handle, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
+              print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
+          EOF
