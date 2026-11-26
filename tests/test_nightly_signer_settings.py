@@ -4,6 +4,7 @@ import base64
 import contextlib
 import io
 import json
+import re
 from pathlib import Path
 import sys
 import unittest
@@ -71,6 +72,8 @@ class FakeGitHub:
         self.fail_cancel = set()  # run ids whose force-cancel errors
         self.keep_policy = False  # a DELETE that GitHub accepts but does not apply
         self.branch_delete_blocked = False
+        self.workflow_state = "active"   # the signer workflow's state
+        self.workflow_sticky = False    # a disable that GitHub accepts but does not apply
         self.large = set()        # paths returned without base64 content (over 1 MB)
         self.__dict__.update(overrides)
         self.writes, self.reads = [], []
@@ -101,6 +104,8 @@ class FakeGitHub:
             return {"branch_policies": [{"name": n, "id": i, "type": "branch"} for n, i in self.policies]}
         if "/environments/release/secrets" in path: return {"secrets": [{"name": n} for n in self.env_secrets]}
         if "/actions/secrets" in path: return {"secrets": [{"name": n} for n in self.repo_secrets]}
+        if re.fullmatch(r"repos/[^/]+/[^/]+/actions/workflows\?per_page=100", path):
+            return {"workflows": [{"id": 11, "path": ".github/workflows/nightly-sign.yml", "state": self.workflow_state}]}
         if path.endswith("/git/ref/heads/nightly-signer"): return {"object": {"sha": self.branch}} if self.branch else None
         if path.endswith("/branches/main"): return {"commit": {"sha": MAIN}}
         if "/compare/" in path: return self.compare(path)
@@ -144,10 +149,10 @@ class FakeGitHub:
             self.policies.append((body["name"], 99))
         elif method == "POST" and path.endswith("/git/refs"):
             self.branch = body["sha"]
-        elif method == "DELETE" and path.endswith("/git/refs/heads/" + s.BRANCH):
-            if self.branch_delete_blocked:
-                raise s.Refuse(f"failed: DELETE {path}: gh: Cannot delete protected branch (HTTP 422)")
-            self.branch = None
+        elif method == "PUT" and "/actions/workflows/" in path and path.endswith(("/disable", "/enable")):
+            if self.workflow_sticky:
+                return None
+            self.workflow_state = "disabled_manually" if path.endswith("/disable") else "active"
         elif method == "PATCH" and "/git/refs/heads/" in path:
             self.branch = body["sha"]
         elif method == "POST" and path.endswith("/force-cancel"):
@@ -464,6 +469,12 @@ class AdvanceTests(unittest.TestCase):
             s.advance("gridcraft", sha, apply)
         return fake.writes
 
+    def test_advance_re_enables_a_disabled_signer(self):
+        fake = FakeGitHub(branch="a" * 40, workflow_state="disabled_manually")
+        self.advance(fake, "b" * 40)
+        self.assertEqual(fake.workflow_state, "active")
+        self.assertIn(("PUT", "repos/storytold/gridcraft/actions/workflows/11/enable", None), fake.writes)
+
     def test_fast_forward_to_a_first_parent_main_commit(self):
         fake = FakeGitHub(branch="a" * 40)
         self.assertEqual(self.advance(fake, "b" * 40),
@@ -508,19 +519,28 @@ class RollbackTests(unittest.TestCase):
         fake = self.trusted(runs={"queued": [5], "in_progress": [6]})
         self.rollback(fake)
         self.assertEqual(fake.writes[0], ("DELETE", "repos/storytold/gridcraft/environments/release/deployment-branch-policies/2", None))
-        # The branch is closed before any cancellation: it is the emergency stop now.
-        self.assertEqual(fake.writes[1], ("DELETE", "repos/storytold/gridcraft/git/refs/heads/nightly-signer", None))
+        # The signer workflow is disabled before any cancellation: that is the emergency stop now, and the
+        # no-deletion ruleset (no bypass, by design) means the branch cannot be the lever.
+        self.assertEqual(fake.writes[1], ("PUT", "repos/storytold/gridcraft/actions/workflows/11/disable", None))
         self.assertEqual(sorted(w[1] for w in fake.writes[2:]), ["repos/storytold/gridcraft/actions/runs/5/force-cancel",
                                                                  "repos/storytold/gridcraft/actions/runs/6/force-cancel"])
-        self.assertIsNone(fake.branch)
+        self.assertEqual(fake.workflow_state, "disabled_manually")
         self.assertEqual(fake.policies, [("release", 1)])
         self.assertEqual(fake.runs, {"queued": [], "in_progress": []})
 
-    def test_a_branch_that_cannot_be_closed_refuses_before_cancelling(self):
-        # The branch is the emergency stop now: if it cannot be deleted, stop rather than cancel and
-        # leave a dispatchable signer behind.
-        fake = self.trusted(branch_delete_blocked=True, runs={"queued": [5]})
-        with self.assertRaisesRegex(s.Refuse, "cannot delete|could not delete"):
+    def test_the_installed_ruleset_forbids_deletion_so_the_switch_is_the_stop(self):
+        # canonical() installs a no-deletion rule with no bypass on the signer branch. That is why rollback
+        # must not rely on closing the branch, and why the workflow switch is the stop it uses.
+        writers, history = s.canonical(["gridcraft"], 1)
+        rules = {rule["type"] for rule in history["rules"]}
+        self.assertIn("deletion", rules)
+        self.assertEqual(history["bypass_actors"], [])
+        self.assertEqual(history["conditions"]["ref_name"]["include"], [s.REF])
+
+    def test_a_signer_that_stays_enabled_refuses_before_cancelling(self):
+        # If the workflow cannot be switched off, stop rather than cancel runs and leave a dispatchable signer.
+        fake = self.trusted(workflow_sticky=True, runs={"queued": [5]})
+        with self.assertRaisesRegex(s.Refuse, "could not disable"):
             self.rollback(fake)
         self.assertEqual(fake.runs, {"queued": [5]})
 

@@ -573,6 +573,12 @@ def advance(app, sha, apply):
     check_tree(app, sha)
     print(f"  review first: https://github.com/{ORG}/{app}/compare/{head}...{sha} (all of .github/ and packaging/)")
     gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
+    if apply and workflow_state(app) == "disabled_manually":
+        # A rollback disabled the signer; advancing re-enables it so the printed recovery can finish the job.
+        set_workflow_enabled(app, True)
+        if workflow_state(app) != "active":
+            raise Refuse(f"{SIGNER_WORKFLOW} is still disabled after enabling it")
+        print(f"  done   re-enabled {app} {SIGNER_WORKFLOW}")
 
 
 def cancel_round(app, apply, failures):
@@ -592,11 +598,36 @@ def cancel_round(app, apply, failures):
     return len(runs)
 
 
+SIGNER_WORKFLOW = ".github/workflows/nightly-sign.yml"
+
+
+def workflow_state(app):
+    """The signer workflow's state: 'active', 'disabled_manually', or 'missing'."""
+    listed = gh("GET", f"repos/{ORG}/{app}/actions/workflows?per_page=100")["workflows"]
+    found = [w for w in listed if w["path"] == SIGNER_WORKFLOW]
+    if len(found) != 1:
+        return "missing"
+    return find_state(found[0])
+
+
+def find_state(workflow):
+    return workflow.get("state", "active")
+
+
+def set_workflow_enabled(app, enabled):
+    listed = gh("GET", f"repos/{ORG}/{app}/actions/workflows?per_page=100")["workflows"]
+    found = [w for w in listed if w["path"] == SIGNER_WORKFLOW]
+    if len(found) != 1:
+        raise Refuse(f"{SIGNER_WORKFLOW} is not a single workflow entry")
+    gh("PUT", f"repos/{ORG}/{app}/actions/workflows/{found[0]['id']}/" + ("enable" if enabled else "disable"),
+       write=True, apply=True)
+
+
 def rollback(app, apply, wait=None):
-    """Revoke the environment trust first and verify it, so no run can enter the environment from here on. Then
-    cancel the active signer runs, each on its own, and list again until none is left (force-cancel is
-    asynchronous). Every failure is reported. The branch and rulesets stay on purpose: the security-relevant state
-    is the environment trusting release only, and deleting the branch needs the no-bypass history ruleset off."""
+    """Disable the signer workflow first, since a disabled workflow cannot be dispatched from any ref, then cancel
+    the active signer runs, each on its own, and list again until none is left (force-cancel is asynchronous). Every
+    failure is reported. The branch and rulesets stay: the no-deletion ruleset has no bypass by design, so the
+    branch cannot be closed, and the workflow switch is the stop that actually holds."""
     import time
     wait = time.sleep if wait is None else wait
     failures = []
@@ -608,22 +639,21 @@ def rollback(app, apply, wait=None):
             failures.append(f"{ENV} environment still trusts more than release")
     except Refuse as error:
         failures.append(f"revoking the {BRANCH} trust: {error}")
-    # Signing no longer depends on the environment trust: the signer's caller forwards repository-scope
-    # secrets and no job declares the environment, so the branch is the emergency stop. Close it first;
-    # if it cannot be closed, refuse outright rather than cancel runs and leave it dispatchable.
+    # Signing no longer depends on the environment trust, and the no-deletion ruleset deliberately has no
+    # bypass, so the branch cannot be closed. The emergency stop is the workflow switch: a disabled
+    # workflow cannot be dispatched at all, from any ref.
     try:
-        if gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True) is not None:
-            if apply:
-                gh("DELETE", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", write=True, apply=apply)
-                if gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True) is not None:
-                    raise Refuse(f"could not delete {BRANCH} (the rulesets may forbid it): signing would remain "
-                                 "dispatchable, so this rollback stopped here. Re-run once the branch can be deleted.")
-                print(f"  done   deleted {app} {BRANCH}; re-creating it is the next `advance`")
-            else:
-                print(f"  would  delete {app} {BRANCH} (the emergency stop: a dispatcher could otherwise sign)")
+        if apply:
+            if workflow_state(app) != "disabled_manually":
+                set_workflow_enabled(app, False)
+                if workflow_state(app) != "disabled_manually":
+                    raise Refuse("the signer workflow is still enabled after disabling it")
+            print(f"  done   disabled {app} .github/workflows/{SIGNER_WORKFLOW}; nothing can be dispatched, "
+                  "and `advance` re-enables it")
+        else:
+            print(f"  would  disable {app} .github/workflows/{SIGNER_WORKFLOW} (a dispatcher could otherwise sign)")
     except Refuse as error:
-        # Stop here rather than cancel runs and leave the signer dispatchable.
-        raise Refuse(f"could not delete {BRANCH}, which is the emergency stop now: {error}. "
+        raise Refuse(f"could not disable {SIGNER_WORKFLOW}, which is the emergency stop now: {error}. "
                      "Signing would remain dispatchable, so nothing else was changed.")
     active = cancel_round(app, apply, failures)
     rounds = 1
