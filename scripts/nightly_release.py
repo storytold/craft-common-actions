@@ -270,10 +270,12 @@ def previous_publication(api, registry, policy, current_request, rows):
     """Authenticate historical protected-release evidence; never execute old code.
 
     Like v1 ownership evidence, Actions metadata is source-owned evidence, not an
-    independent tag-creator signature. Verify the listed release and current tag
-    and asset digests; this cannot prove that repository writers never changed
-    them or removed an entire release. A mutable-release pilot must not infer
-    permission to publish again from an empty listing. Pruning is separate.
+    independent tag-creator signature. For v2 and marked v1 history, verify
+    the listed release, current tag, and recorded asset digests. Markerless
+    history checks release policy, run provenance, and tag, not asset digests.
+    None proves that a repository writer never changed or removed a release.
+    A mutable-release pilot must not infer permission to publish again from
+    an empty listing. Pruning is separate.
     """
     release = p.newest_nightly(rows)
     if release is None:

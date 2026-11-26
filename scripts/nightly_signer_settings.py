@@ -70,14 +70,20 @@ def gh(method, path, body=None, write=False, apply=False, ok404=False):
     if write and not apply:
         print("  WOULD ", shown); return None
     print("  WRITE " if write else "  READ  ", shown)
-    run = subprocess.run(["gh", "api", "-X", method, path, "-H", "Accept: application/vnd.github+json"]
-                         + (["--input", "-"] if body is not None else []),
-                         input=json.dumps(body) if body is not None else None, capture_output=True, text=True)
+    try:
+        run = subprocess.run(["gh", "api", "-X", method, path, "-H", "Accept: application/vnd.github+json"]
+                             + (["--input", "-"] if body is not None else []),
+                             input=json.dumps(body) if body is not None else None, capture_output=True, text=True)
+    except (OSError, UnicodeError) as error:
+        raise Refuse(f"failed: {method} {path}: could not read GitHub CLI result ({type(error).__name__})") from error
     if run.returncode:
         if ok404 and "HTTP 404" in run.stderr:
             return None
         raise Refuse(f"failed: {shown}: {run.stderr.strip().splitlines()[-1] if run.stderr.strip() else 'error'}")
-    return json.loads(run.stdout) if run.stdout.strip() else None
+    try:
+        return json.loads(run.stdout) if run.stdout.strip() else None
+    except json.JSONDecodeError as error:
+        raise Refuse(f"failed: {method} {path}: invalid JSON from GitHub CLI") from error
 
 
 def text_at(repo, path, ref, ok404=False):
@@ -95,8 +101,8 @@ def ancestor(repo, older, newer):
     return data.get("status") in ("ahead", "identical") and data.get("behind_by") == 0
 
 
-def registry():
-    return json.loads(text_at(CCA, "nightly-apps.json", "main"))
+def registry(ref="main"):
+    return json.loads(text_at(CCA, "nightly-apps.json", ref))
 
 
 def registry_apps(data=None):
@@ -105,7 +111,13 @@ def registry_apps(data=None):
 
 
 def required_secrets(row):
-    return set().union(*(SECRETS[t["target"]["os"]] for t in row["targets"]))
+    targets = row.get("targets") if isinstance(row, dict) else None
+    if not isinstance(targets, list) or not targets or any(
+            not isinstance(item, dict) or not isinstance(item.get("target"), dict)
+            or not isinstance(item["target"].get("os"), str) or item["target"]["os"] not in SECRETS
+            for item in targets):
+        raise Refuse("UNVERIFIED signing targets in the reviewed registry row")
+    return set().union(*(SECRETS[t["target"]["os"]] for t in targets))
 
 
 def metadata_list(path, key):
@@ -142,7 +154,7 @@ def secret_names(path):
 def check_secrets(app, row):
     """Read names only: signing credentials belong exclusively to the release environment.
 
-    The exact 13-name identity map is a reusable-workflow interface, not permission to create caller-scope
+    The target-specific identity map is a reusable-workflow interface, not permission to create caller-scope
     copies. Environment secrets resolve on the callee's signing jobs. Org metadata is the repository's
     effective inventory (including selected/private visibility), not every secret in the organization.
     """
@@ -248,7 +260,7 @@ def callee_problems(callee, ref, seen, depth=1, nightly=False, signer=False):
     return problems
 
 
-def signer_job_problems(app, jobs, pin):
+def signer_job_problems(app, jobs, pin, row):
     """nightly-sign.yml must be one job that calls the pinned signer for this app, guarded to the signer branch."""
     signer = {name: job for name, job in jobs.items()
               if (CCA_CALL.fullmatch(job.get("uses") or "") or [None])[0] is not None
@@ -267,7 +279,7 @@ def signer_job_problems(app, jobs, pin):
         problems.append(f"nightly-sign.yml does not pass app-name: {app}")
     if CCA_CALL.fullmatch(job["uses"]).group(2) != pin or inputs.get("tooling-revision") != pin:
         problems.append(f"nightly-sign.yml job {name} does not call nightly-release.yml and pass tooling-revision at {pin}")
-    problems += forwarded_secrets_problems(app, job, name)
+    problems += forwarded_secrets_problems(app, job, name, row)
     problems += declared_secrets_problems(app, pin)
     return problems
 
@@ -297,13 +309,13 @@ def declared_secrets_problems(app, pin):
     return problems
 
 
-def forwarded_secrets_problems(app, job, name):
-    """The exact 13-name identity interface; credentials resolve from native callee environments, not copies."""
-    wanted = SIGNING_NAMES
+def forwarded_secrets_problems(app, job, name, row):
+    """Only the pinned app targets' identity names; credentials resolve from callee environments, not copies."""
+    wanted = required_secrets(row)
     if "environment" in job:
         return [f"nightly-sign.yml job {name} binds an environment; only native callee signing jobs may bind {ENV}"]
     if "secrets" not in job:
-        return [f"nightly-sign.yml job {name} forwards no secrets; the exact 13-name identity mapping is required"]
+        return [f"nightly-sign.yml job {name} forwards no secrets; the exact target-specific identity mapping is required"]
     spec = job["secrets"]
     if not isinstance(spec, dict):
         return [f"nightly-sign.yml job {name} passes non-mapping secrets; only an identity mapping of the reviewed names is allowed"]
@@ -315,7 +327,7 @@ def forwarded_secrets_problems(app, job, name):
     if extra:
         problems.append(f"nightly-sign.yml job {name} forwards secrets outside the reviewed set: {extra}")
     if missing:
-        problems.append(f"nightly-sign.yml job {name} does not forward {missing}, required by the 13-name identity interface")
+        problems.append(f"nightly-sign.yml job {name} does not forward {missing}, required by the pinned app targets")
     return problems
 
 
@@ -381,12 +393,18 @@ def check_tree(app, sha):
         problems.append(f"caller and policy pins differ: {sorted(map(str, pins))}")
     else:
         pin = next(iter(pins))
-        problems += signer_job_problems(app, sign_jobs or {}, pin)
         if not (SHA40.fullmatch(pin) and ancestor(CCA, pin, "main") and ancestor(CCA, SIGNER_BRANCH_SUPPORT, pin)):
             problems.append(f"pin {pin} is not a craft-common-actions main commit that includes #364")
+        else:
+            data = registry(pin)
+            rows = data.get("apps") if isinstance(data, dict) else None
+            row = rows.get(app) if isinstance(rows, dict) else None
+            required_secrets(row)  # Refuse missing, empty or unsupported target needs before any mutation.
+            problems += signer_job_problems(app, sign_jobs or {}, pin, row)
     if problems:
         raise Refuse("trust-closure check refused at " + sha[:10] + ":\n      " + "\n      ".join(problems))
     print(f"  ok     {app} main {sha[:10]}: switched on, pinned {next(iter(pins))[:10]}, signer branch {BRANCH}, trust closure clean")
+    return row
 
 
 def canonical(apps, team):
@@ -447,6 +465,7 @@ def env_trust(app):
     if mode != {"protected_branches": False, "custom_branch_policies": True}:
         raise Refuse(f"{app} {ENV} environment branch mode is {mode}, expected custom policies only")
     policies = metadata_list(f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies", "branch_policies")
+    # This endpoint lists branches and tags; without type a name-only row proves neither kind. Fail closed.
     if any(not isinstance(p, dict) or not isinstance(p.get("name"), str) or p.get("type") not in ("branch", "tag") for p in policies):
         raise Refuse(f"{app} UNVERIFIED environment branch admission metadata")
     return sorted((p["name"], p["type"]) for p in policies)
@@ -518,16 +537,16 @@ def owned_before(app, before):
     return all(app in before.get(name, set()) for name in (RULESET_WRITERS, RULESET_HISTORY))
 
 
-def setup_repo(app, apply, owned, row):
+def setup_repo(app, apply, owned):
     """Per repo: secrets, branch at the switched-on main tip, then environment trust. Skip exact, refuse anything else."""
     trust = env_trust(app)
-    check_secrets(app, row)
     if trust not in ([("release", "branch")], [("nightly-signer", "branch"), ("release", "branch")]):
         raise Refuse(f"{app} {ENV} environment trusts {trust}; expected only release")
     branch = gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True)
     if branch is None:
         tip = main_tip(app)
-        check_tree(app, tip)
+        row = check_tree(app, tip)
+        check_secrets(app, row)
         gh("POST", f"repos/{ORG}/{app}/git/refs", {"ref": REF, "sha": tip}, write=True, apply=apply)
     else:
         head = branch["object"]["sha"]
@@ -537,7 +556,8 @@ def setup_repo(app, apply, owned, row):
             raise Refuse(f"{REF} already exists at {head[:10]}; whether an earlier apply made it is undetermined without the org rulesets")
         if not owned or not ancestor(f"{ORG}/{app}", head, main_tip(app)):
             raise Refuse(f"{REF} already exists at {head[:10]} and is not ours: it may be hostile. Delete it; never adopt it.")
-        check_tree(app, head)
+        row = check_tree(app, head)
+        check_secrets(app, row)
         print(f"  exact  {app} {REF} at {head[:10]}")
     # Trust (new or kept) only for a repo the live rulesets cover now, read after every ruleset write of this run.
     if apply and app not in live_coverage():
@@ -548,7 +568,7 @@ def setup_repo(app, apply, owned, row):
         gh("POST", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies", {"name": BRANCH, "type": "branch"}, write=True, apply=apply)
 
 
-def readback(apps, registry_rows):
+def readback(apps):
     team = gh("GET", f"orgs/{ORG}/teams/{TEAM}")["id"]
     problems, current = [], org_rulesets()
     for body in canonical(apps, team):
@@ -563,7 +583,6 @@ def readback(apps, registry_rows):
     for app in apps:
         try:
             trust = env_trust(app)
-            check_secrets(app, registry_rows[app])
             if trust != [("nightly-signer", "branch"), ("release", "branch")]:
                 problems.append(f"{app}: {ENV} environment trusts {trust}")
             branch = gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}", ok404=True)
@@ -572,6 +591,7 @@ def readback(apps, registry_rows):
             elif not ancestor(f"{ORG}/{app}", branch["object"]["sha"], main_tip(app)):
                 problems.append(f"{app}: {REF} at {branch['object']['sha'][:10]} is not on main")
             else:
+                check_secrets(app, check_tree(app, branch["object"]["sha"]))
                 print(f"  ok     {app} {REF} at {branch['object']['sha'][:10]}")
         except Refuse as error:
             problems.append(f"{app}: {error}")
@@ -579,24 +599,42 @@ def readback(apps, registry_rows):
     return 1 if problems else 0
 
 
-def queued_signer_runs(app, max_pages=20):
-    """Every active signer run on the branch: each active status asked for separately, every page, deduplicated."""
-    found = set()
+def active_signer_run_inventory(app, max_pages=20):
+    """Validated IDs and separate errors: incomplete evidence helps rollback but never grants admission."""
+    found, errors = set(), []
     for status in ACTIVE_RUN_STATUSES:
         for page in range(1, max_pages + 1):
-            data = gh("GET", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/runs?branch={BRANCH}&status={status}"
-                             f"&per_page=100&page={page}")
-            runs = data.get("workflow_runs") if isinstance(data, dict) else None
-            if not isinstance(runs, list) or len(runs) > 100 or any(
-                    not isinstance(r, dict) or type(r.get("id")) is not int or r["id"] <= 0
-                    or not isinstance(r.get("status"), str) for r in runs):
-                raise Refuse("UNVERIFIED active signer-run inventory")
-            found |= {r["id"] for r in runs if r["status"] in ACTIVE_RUN_STATUSES}
+            try:
+                data = gh("GET", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/runs?branch={BRANCH}&status={status}"
+                                 f"&per_page=100&page={page}")
+                runs = data.get("workflow_runs") if isinstance(data, dict) else None
+                if not isinstance(runs, list) or len(runs) > 100:
+                    raise Refuse("UNVERIFIED active signer-run inventory")
+                invalid = False
+                for run in runs:
+                    if (not isinstance(run, dict) or type(run.get("id")) is not int or run["id"] <= 0
+                            or not isinstance(run.get("status"), str)):
+                        invalid = True
+                    elif run["status"] in ACTIVE_RUN_STATUSES:
+                        found.add(run["id"])
+                if invalid:
+                    raise Refuse("UNVERIFIED active signer-run inventory entry")
+            except Refuse as error:
+                errors.append(f"{status} page {page}: {error}")
+                break
             if len(runs) < 100:
                 break
         else:
-            raise Refuse(f"more than {max_pages * 100} {status} signer runs: refusing to guess which are active")
-    return sorted(found)
+            errors.append(f"more than {max_pages * 100} {status} signer runs: refusing to guess which are active")
+    return sorted(found), errors
+
+
+def queued_signer_runs(app, max_pages=20):
+    """Complete active inventory for advance/enable: any incomplete read fails closed."""
+    runs, errors = active_signer_run_inventory(app, max_pages)
+    if errors:
+        raise Refuse("; ".join(errors))
+    return runs
 
 
 def first_parent_of_main(app, sha, head):
@@ -667,10 +705,9 @@ def advance(app, sha, apply, enable=False):
     if state not in ("active", "disabled_manually"):
         raise Refuse(f"{SIGNER_WORKFLOW} state {state!r} cannot be verified for advance/enable")
     check_admission(app)
-    check_secrets(app, registry()["apps"][app])
     if queued_signer_runs(app):
         raise Refuse("a nightly-sign run is queued or running; it would fail closed after the move. Wait for it.")
-    check_tree(app, sha)
+    check_secrets(app, check_tree(app, sha))
     # Reads above can take time. Refuse a concurrent move or workflow-state change before any mutation.
     if gh("GET", path)["object"]["sha"] != head or workflow_state(app) != state:
         raise Refuse("signer branch head or workflow state changed during preflight; review again")
@@ -684,7 +721,9 @@ def advance(app, sha, apply, enable=False):
                 if apply and (workflow_state(app) != "active" or gh("GET", path)["object"]["sha"] != sha):
                     raise Refuse("workflow activation or reviewed head did not read back exactly")
             except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
-                raise Refuse(f"PARTIAL: enable attempted; activation and reviewed head are not verified: {error}; run rollback")
+                containment = disable_after_uncertain_enable(app) if apply else "no runtime write attempted"
+                raise Refuse(f"PARTIAL: enable attempted; activation and reviewed head are not verified: {error}; "
+                             f"{containment}; an intervening dispatch or credential-bearing run remains possible; run rollback")
     elif resume:
         print(f"  exact  {REF} already at reviewed {sha[:10]}; workflow remains {state}")
     else:
@@ -698,13 +737,14 @@ def advance(app, sha, apply, enable=False):
         print(f"  note   workflow remains {state}; use explicit enable --sha after recovery if disabled")
 
 
-def cancel_round(app, apply, failures):
-    """Ask once to cancel every active signer run; returns how many were active."""
-    try:
-        runs = queued_signer_runs(app)
-    except Refuse as error:
-        failures.append(f"listing signer runs: {error}"); return 0
-    for run_id in runs:  # Running jobs keep secrets they already read.
+def cancel_round(app, apply, failures, pending):
+    """Cancel checked IDs, retaining earlier IDs until a complete inventory proves them gone."""
+    runs, errors = active_signer_run_inventory(app)
+    if not errors:
+        pending.clear()
+    pending.update(runs)
+    failures.extend(f"listing signer runs: {error}" for error in errors)
+    for run_id in sorted(pending):  # Running jobs keep secrets they already read.
         try:
             gh("POST", f"repos/{ORG}/{app}/actions/runs/{run_id}/force-cancel", write=True, apply=apply)
         except Refuse as error:
@@ -712,7 +752,7 @@ def cancel_round(app, apply, failures):
                 print(f"  note   run {run_id} could not be cancelled because it is no longer running (HTTP 409)")
             else:
                 failures.append(f"cancelling run {run_id}: {error}")
-    return len(runs)
+    return len(pending), not errors
 
 
 SIGNER_WORKFLOW = ".github/workflows/nightly-sign.yml"
@@ -735,6 +775,24 @@ def set_workflow_enabled(app, enabled):
         raise Refuse(f"{SIGNER_WORKFLOW} is not a workflow in this repository")
     gh("PUT", f"repos/{ORG}/{app}/actions/workflows/{workflow['id']}/" + ("enable" if enabled else "disable"),
        write=True, apply=True)
+
+
+def disable_after_uncertain_enable(app):
+    """Two best-effort disable/readback attempts, not a lock against operators or dispatched runs."""
+    failures = []
+    for _ in range(2):
+        try:
+            gh("PUT", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/disable", write=True, apply=True)
+        except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
+            failures.append(f"disable request: {error}")
+        try:
+            state = workflow_state(app)
+            if state == "disabled_manually":
+                return "best-effort disable read back disabled_manually (not an atomic guarantee)"
+            failures.append(f"disable readback state {state!r}")
+        except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
+            failures.append(f"disable readback: {error}")
+    return "disable remains UNVERIFIED; signer may remain dispatchable: " + "; ".join(failures)
 
 
 def rollback(app, apply, wait=None):
@@ -771,20 +829,23 @@ def rollback(app, apply, wait=None):
             print(f"  would  disable {app} {SIGNER_WORKFLOW} (a dispatcher could otherwise sign)")
     except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
         failures.append(f"could not disable {SIGNER_WORKFLOW}: {error}; signer may remain dispatchable")
-    active = cancel_round(app, apply, failures)
+    pending = set()
+    active, complete = cancel_round(app, apply, failures, pending)
     rounds = 1
-    while apply and active and rounds < MAX_CANCEL_ROUNDS:
+    while apply and (active or not complete) and rounds < MAX_CANCEL_ROUNDS:
         wait(10)
-        active, rounds = cancel_round(app, apply, failures), rounds + 1
-    if apply and active:
+        active, complete = cancel_round(app, apply, failures, pending)
+        rounds += 1
+    if apply and (active or not complete):
         # The last round's count was read before its cancellations: read once more before calling it a failure.
         wait(10)
         try:
             active = len(queued_signer_runs(app))
         except Refuse as error:
-            failures.append(f"listing signer runs: {error}")
-        if active:
-            failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
+            failures.append(f"listing signer runs: {error}; known runs not verified stopped: {sorted(pending)}")
+        else:
+            if active:
+                failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
     print("  Keep the rulesets until the environment is verified; if compromise is suspected, rotate the release secrets.")
     if failures:
         raise Refuse("PARTIAL rollback; containment is not fully verified: " + "; ".join(failures))
@@ -825,7 +886,7 @@ def main():
             sys.exit(f"refused: {error}")
         return
     if args.mode == "readback":
-        sys.exit(readback(apps, reg["apps"]))
+        sys.exit(readback(apps))
     apply = args.mode == "apply"
     print(f"== org rulesets for {REF} over {len(apps)} repos")
     try:
@@ -837,7 +898,7 @@ def main():
         print(f"== {app}")
         try:
             # Rulesets exist (or are created above) before any branch, so a new branch is protected from its first moment.
-            setup_repo(app, apply, owned_before(app, existed), reg["apps"][app])
+            setup_repo(app, apply, owned_before(app, existed))
             ready.append(app)
         except Refuse as error:
             print(f"  REFUSED {app}: {error}"); blocked.append(app)
@@ -846,7 +907,7 @@ def main():
             print(f"  REFUSED {app}: unexpected GitHub response ({type(error).__name__}: {error})"); blocked.append(app)
     print(f"== {'applied' if apply else 'would apply'}: {', '.join(ready) or 'none'}; refused: {', '.join(blocked) or 'none'}")
     # A failed readback after apply is a failed apply.
-    verified = readback(ready, reg["apps"]) if apply and ready else 0
+    verified = readback(ready) if apply and ready else 0
     if apply:
         # Across every admitted repo, not just this run's: trust must never outlive ruleset coverage.
         exposed = uncovered_trust(admitted)

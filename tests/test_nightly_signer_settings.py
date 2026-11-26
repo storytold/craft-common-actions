@@ -61,6 +61,7 @@ class FakeGitHub:
                     ".github/workflows/nightly-release.yml": CALLEE,
                     ".github/workflows/nightly-unsigned.yml": "jobs:\n  build:\n    runs-on: native\n    steps: []\n"}
         self.cca[".nightly-apps.fixture"] = ""
+        self.cca_refs = {("nightly-apps.json", PIN): json.dumps({"apps": {"gridcraft": PHOTO_ROW, "photocraft": PHOTO_ROW}})}
         self.env_secrets, self.repo_secrets, self.org_secrets = ALL[:], [], []
         self.policies, self.branch, self.on_main = [("release", 1)], None, True
         self.rulesets, self.rulesets_readable = existing_rulesets(["gridcraft"]), True
@@ -89,6 +90,8 @@ class FakeGitHub:
         self.reads.append(path)
         if path.startswith(f"repos/{CCA}/contents/"):
             name = path.split("/contents/", 1)[1].split("?", 1)[0]
+            ref = path.split("?ref=", 1)[1]
+            if (name, ref) in self.cca_refs: return content(self.cca_refs[name, ref])
             if name in self.cca: return content(self.cca[name])
             raise s.Refuse("404 " + name)
         if "/contents/.github/workflows?" in path:
@@ -206,9 +209,9 @@ def existing_rulesets(apps, **changes):
 
 
 class SettingsTests(unittest.TestCase):
-    def run_setup(self, fake, owned=True, row=LINUX_ROW, apply=True):
+    def run_setup(self, fake, owned=True, apply=True):
         with patch.object(s, "gh", fake), quiet():
-            s.setup_repo("gridcraft", apply, owned, row)
+            s.setup_repo("gridcraft", apply, owned)
         return fake.writes
 
     def closure(self, fake, sha=MAIN):
@@ -362,6 +365,15 @@ class SettingsTests(unittest.TestCase):
             self.assertIsNone(s.gh("POST", "repos/x/y", {"a": 1}, write=True, apply=False))
             proc.run.assert_not_called()
 
+    def test_api_transport_and_json_errors_use_the_rollback_refusal_path(self):
+        with patch.object(s.subprocess, "run", side_effect=OSError("CLI I/O failed")), quiet():
+            with self.assertRaisesRegex(s.Refuse, "could not read GitHub CLI result"):
+                s.gh("GET", "repos/storytold/gridcraft")
+        result = s.subprocess.CompletedProcess([], 0, stdout="not JSON", stderr="")
+        with patch.object(s.subprocess, "run", return_value=result), quiet():
+            with self.assertRaisesRegex(s.Refuse, "invalid JSON"):
+                s.gh("GET", "repos/storytold/gridcraft")
+
     def test_api_arguments_cannot_become_options(self):
         for method, path in (("GET", "--hostname=evil"), ("GET", "-Xrepos/x"), ("GET", "repos/x/../../user"),
                              ("GET", "repos/x y"), ("GET", "user"), ("get", "repos/x"), ("HEAD", "repos/x"),
@@ -440,7 +452,7 @@ class RulesetTests(unittest.TestCase):
                           branch=MAIN, policies=[("release", 1), ("nightly-signer", 2)])
         out = io.StringIO()
         with patch.object(s, "gh", fake), contextlib.redirect_stdout(out):
-            self.assertEqual(s.readback(["gridcraft"], {"gridcraft": LINUX_ROW}), 1)
+            self.assertEqual(s.readback(["gridcraft"]), 1)
         self.assertIn(f"{s.RULESET_HISTORY!r} differs", out.getvalue())
 
     def test_unreadable_rulesets_plan_proposes_nothing_and_apply_refuses(self):
@@ -460,7 +472,7 @@ class RulesetTests(unittest.TestCase):
         with patch.object(s, "gh", fake), quiet():
             before = s.ensure_rulesets(["gridcraft", "photocraft"], True)
             with self.assertRaisesRegex(s.Refuse, "not ours"):
-                s.setup_repo("gridcraft", True, s.owned_before("gridcraft", before), LINUX_ROW)
+                s.setup_repo("gridcraft", True, s.owned_before("gridcraft", before))
         self.assertFalse([w for w in fake.writes if "deployment-branch-policies" in w[1]])
 
 
@@ -521,7 +533,7 @@ class CredentialBoundaryTests(unittest.TestCase):
             with self.subTest(declaration=declaration), self.assertRaises(s.Refuse):
                 self.run_setup(fake)
             self.assertEqual(fake.writes, [])
-        # A Linux-only row still uses the complete identity interface, not a platform-dependent subset.
+        # The shared declaration set stays broad; the three-platform pilot forwards every needed name.
         fake = FakeGitHub()
         fake.cca[".github/workflows/nightly-release.yml"] = CALLEE.replace("      APPLE_ID:\n        required: false\n", "")
         with self.assertRaisesRegex(s.Refuse, "does not declare.*APPLE_ID"):
@@ -531,13 +543,60 @@ class CredentialBoundaryTests(unittest.TestCase):
         with self.assertRaisesRegex(s.Refuse, "does not forward.*APPLE_ID"):
             self.run_setup(fake)
 
+    def test_forwarding_matches_pinned_app_targets_not_live_registry_or_shared_declarations(self):
+        linux_block = "    secrets:\n      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}\n"
+        fake = FakeGitHub(env_secrets=["LINUX_SIGNING_KEY"])
+        # Live main can differ in either direction; only the validated signer pin supplies target needs.
+        fake.cca["nightly-apps.json"] = json.dumps({"apps": {"gridcraft": PHOTO_ROW}})
+        fake.cca_refs["nightly-apps.json", PIN] = json.dumps({"apps": {"gridcraft": LINUX_ROW}})
+        fake.files[".github/workflows/nightly-sign.yml"] = SIGN.replace(IDENTITY_BLOCK, linux_block)
+        self.run_setup(fake)
+        self.assertIn(f"repos/{CCA}/contents/nightly-apps.json?ref={PIN}", fake.reads)
+        fake.writes.clear()
+        fake.files[".github/workflows/nightly-sign.yml"] += "      APPLE_ID: ${{ secrets.APPLE_ID }}\n"
+        with self.assertRaisesRegex(s.Refuse, "outside the reviewed set.*APPLE_ID"):
+            self.run_setup(fake)
+        self.assertEqual(fake.writes, [])
+        # Default fixture: main is Linux-only, but the pinned GridCraft pilot admits all three platforms.
+        self.run_setup(FakeGitHub())
+
+    def test_missing_pinned_platform_credentials_refuse_setup_and_readback(self):
+        fake = FakeGitHub(env_secrets=["LINUX_SIGNING_KEY"])
+        with self.assertRaisesRegex(s.Refuse, "missing signing secret names.*APPLE_ID"):
+            self.run_setup(fake)
+        self.assertEqual(fake.writes, [])
+        fake.branch, fake.policies = MAIN, [("release", 1), ("nightly-signer", 2)]
+        out = io.StringIO()
+        with patch.object(s, "gh", fake), contextlib.redirect_stdout(out):
+            self.assertEqual(s.readback(["gridcraft"]), 1)
+        self.assertIn("missing signing secret names", out.getvalue())
+        self.assertEqual(fake.writes, [])
+
+    def test_unverified_pinned_targets_refuse_before_writes(self):
+        for row in (None, {}, {"targets": []}, {"targets": [None]}, {"targets": [{"target": {"os": "unknown"}}]}):
+            fake = FakeGitHub()
+            fake.cca_refs["nightly-apps.json", PIN] = json.dumps({"apps": {"gridcraft": row}})
+            with self.subTest(row=row), self.assertRaisesRegex(s.Refuse, "UNVERIFIED signing targets"):
+                self.run_setup(fake)
+            self.assertEqual(fake.writes, [])
+
+    def test_name_only_environment_policy_does_not_prove_branch_admission(self):
+        fake = FakeGitHub()
+        def api(method, path, *args, **kwargs):
+            if "deployment-branch-policies?" in path:
+                return {"total_count": 1, "branch_policies": [{"id": 1, "name": "release"}]}
+            return fake(method, path, *args, **kwargs)
+        with patch.object(s, "gh", api), self.assertRaisesRegex(s.Refuse, "UNVERIFIED environment branch admission"):
+            s.env_trust("gridcraft")
+        self.assertEqual(fake.writes, [])
+
     def test_names_only_and_all_pilot_platforms_are_required_at_environment_scope(self):
         fake = FakeGitHub(env_secrets=ALL[:])
-        self.run_setup(fake, row=PHOTO_ROW)
+        self.run_setup(fake)
         for name in ALL:
             fake = FakeGitHub(env_secrets=[value for value in ALL if value != name])
             with self.subTest(name=name), self.assertRaisesRegex(s.Refuse, "missing signing secret names"):
-                self.run_setup(fake, row=PHOTO_ROW)
+                self.run_setup(fake)
             self.assertEqual(fake.writes, [])
         self.assertTrue(all("public-key" not in path for path in fake.reads))
 
@@ -562,7 +621,7 @@ class CredentialBoundaryTests(unittest.TestCase):
                     return fake(method, path, *args, **kwargs)
                 with self.subTest(scope=scope, reply=reply), patch.object(s, "gh", api), quiet():
                     with self.assertRaisesRegex(s.Refuse, "UNVERIFIED"):
-                        s.setup_repo("gridcraft", True, True, PHOTO_ROW)
+                        s.setup_repo("gridcraft", True, True)
                 self.assertEqual(fake.writes, [])
             fake = FakeGitHub()
             def denied(method, path, *args, **kwargs):
@@ -571,7 +630,7 @@ class CredentialBoundaryTests(unittest.TestCase):
                 return fake(method, path, *args, **kwargs)
             with self.subTest(scope=scope), patch.object(s, "gh", denied), quiet():
                 with self.assertRaisesRegex(s.Refuse, "UNVERIFIED"):
-                    s.setup_repo("gridcraft", True, True, PHOTO_ROW)
+                    s.setup_repo("gridcraft", True, True)
             self.assertEqual(fake.writes, [])
 
 
@@ -678,6 +737,7 @@ class AdvanceTests(unittest.TestCase):
                 fake = self.fake(branch="b" * 40 if enable else "a" * 40)
                 def checked_tree(*args):
                     setattr(fake, field, value)
+                    return PHOTO_ROW
                 with self.subTest(enable=enable, field=field), patch.object(s, "check_tree", side_effect=checked_tree):
                     with self.assertRaisesRegex(s.Refuse, "changed during preflight"):
                         self.advance(fake, "b" * 40, enable=enable)
@@ -691,6 +751,95 @@ class AdvanceTests(unittest.TestCase):
         fake = self.fake(branch="b" * 40, workflow_state="disabled_manually", workflow_sticky=True)
         with self.assertRaisesRegex(s.Refuse, "PARTIAL"):
             self.advance(fake, "b" * 40, enable=True)
+
+    def test_advance_and_enable_use_pinned_targets_for_metadata(self):
+        for enable in (False, True):
+            fake = self.fake(branch="b" * 40 if enable else "a" * 40, env_secrets=["LINUX_SIGNING_KEY"])
+            with self.subTest(enable=enable), self.assertRaisesRegex(s.Refuse, "missing signing secret names.*APPLE_ID"):
+                self.advance(fake, "b" * 40, enable=enable)
+            self.assertEqual(fake.writes, [])
+
+    def test_incomplete_run_inventory_refuses_advance_and_enable_without_writes(self):
+        for enable in (False, True):
+            fake = self.fake(branch="b" * 40 if enable else "a" * 40)
+            def api(method, path, *args, **kwargs):
+                if "status=in_progress" in path:
+                    return {}
+                return fake(method, path, *args, **kwargs)
+            with self.subTest(enable=enable), patch.object(s, "gh", api), quiet():
+                with self.assertRaisesRegex(s.Refuse, "UNVERIFIED active signer-run inventory"):
+                    s.advance("gridcraft", "b" * 40, True, enable=enable)
+            self.assertEqual(fake.writes, [])
+
+    def test_uncertain_enable_attempts_disable_and_reports_remaining_run_risk(self):
+        for fault in ("head drift", "head unreadable", "activation response lost"):
+            fake = self.fake(branch="b" * 40, workflow_state="disabled_manually")
+            attempted = False
+            def api(method, path, *args, **kwargs):
+                nonlocal attempted
+                if path.endswith("/enable"):
+                    attempted = True
+                    result = fake(method, path, *args, **kwargs)
+                    if fault == "head drift":
+                        fake.branch = MAIN
+                    if fault == "activation response lost":
+                        raise s.Refuse("HTTP 502")
+                    return result
+                if attempted and fault == "head unreadable" and path.endswith("/git/ref/heads/nightly-signer"):
+                    return {}
+                return fake(method, path, *args, **kwargs)
+            with self.subTest(fault=fault), patch.object(s, "gh", api), quiet():
+                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*disabled_manually.*intervening dispatch.*run rollback"):
+                    s.advance("gridcraft", "b" * 40, True, enable=True)
+            self.assertEqual(fake.workflow_state, "disabled_manually")
+            self.assertTrue(any(path.endswith("/disable") for _, path, _ in fake.writes))
+
+    def test_failed_enable_containment_is_bounded_and_reports_dispatch_risk(self):
+        for fault in ("disable refused", "disable ignored", "disable readback unreadable"):
+            fake = self.fake(branch="b" * 40, workflow_state="disabled_manually")
+            disables = 0
+            def api(method, path, *args, **kwargs):
+                nonlocal disables
+                if path.endswith("/enable"):
+                    result = fake(method, path, *args, **kwargs)
+                    fake.branch = MAIN
+                    return result
+                if path.endswith("/disable"):
+                    disables += 1
+                    if fault == "disable refused":
+                        raise s.Refuse("HTTP 403")
+                    if fault == "disable ignored":
+                        return None
+                if disables and fault == "disable readback unreadable" and path.endswith("/actions/workflows/nightly-sign.yml"):
+                    raise s.Refuse("HTTP 503")
+                return fake(method, path, *args, **kwargs)
+            with self.subTest(fault=fault), patch.object(s, "gh", api), quiet():
+                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*disable remains UNVERIFIED; signer may remain dispatchable"):
+                    s.advance("gridcraft", "b" * 40, True, enable=True)
+            self.assertEqual(disables, 2)
+            if fault != "disable readback unreadable":
+                self.assertEqual(fake.workflow_state, "active")
+
+    def test_enable_containment_retries_and_reads_back_even_after_disable_error(self):
+        fake = self.fake(branch="b" * 40, workflow_state="disabled_manually")
+        disables = 0
+        def api(method, path, *args, **kwargs):
+            nonlocal disables
+            if path.endswith("/enable"):
+                result = fake(method, path, *args, **kwargs)
+                fake.branch = MAIN
+                return result
+            if path.endswith("/disable"):
+                disables += 1
+                if disables == 1:
+                    raise s.Refuse("HTTP 503")
+                fake(method, path, *args, **kwargs)
+                raise s.Refuse("response lost after disable")
+            return fake(method, path, *args, **kwargs)
+        with patch.object(s, "gh", api), quiet(), self.assertRaisesRegex(s.Refuse, "best-effort disable read back disabled_manually"):
+            s.advance("gridcraft", "b" * 40, True, enable=True)
+        self.assertEqual(fake.workflow_state, "disabled_manually")
+        self.assertEqual(disables, 2)
 
     def test_active_runs_are_found_on_every_page_and_status(self):
         fake = self.fake(runs={"queued": list(range(1, 151)), "waiting": [500, 3], "in_progress": [501]})
@@ -780,6 +929,49 @@ class RollbackTests(unittest.TestCase):
         fake = self.trusted(runs={"queued": [5], "waiting": [8]})
         self.assertEqual(self.rollback(fake), [10])  # one wait, then a round that finds nothing
 
+    def test_incomplete_inventory_preserves_known_ids_and_retries_within_bound(self):
+        for fault in ("later status", "later page", "malformed row", "transport"):
+            ids = list(range(1, 101)) if fault == "later page" else [5]
+            fake = self.trusted(runs={"queued": ids}, sticky=set(ids))
+            inventories = 0
+            def api(method, path, *args, **kwargs):
+                nonlocal inventories
+                if "status=queued" in path and "&page=1" in path:
+                    inventories += 1
+                    # Later incomplete rounds omit the previously checked IDs, not evidence they stopped.
+                    if inventories > 1:
+                        return {"workflow_runs": []}
+                    if fault == "malformed row":
+                        return {"workflow_runs": [{"id": 5, "status": "queued"}, {"id": "untrusted", "status": "queued"}]}
+                if "status=in_progress" in path or (fault == "later page" and "status=queued" in path and "&page=2" in path):
+                    if fault == "transport":
+                        raise s.Refuse("HTTP 503")
+                    return {}
+                return fake(method, path, *args, **kwargs)
+            with self.subTest(fault=fault), patch.object(s, "gh", api), quiet():
+                with self.assertRaisesRegex(s.Refuse, "PARTIAL.*listing signer runs.*known runs not verified stopped"):
+                    s.rollback("gridcraft", True, wait=lambda _: None)
+            self.assertEqual(fake.workflow_state, "disabled_manually")
+            self.assertEqual(set(fake.cancels), set(ids))
+            self.assertTrue(all(count == s.MAX_CANCEL_ROUNDS for count in fake.cancels.values()))
+            self.assertEqual(inventories, s.MAX_CANCEL_ROUNDS + 1)
+
+    def test_empty_incomplete_inventory_is_retried_and_later_runs_are_cancelled(self):
+        fake = self.trusted(runs={"waiting": [8]})
+        inventories = 0
+        def api(method, path, *args, **kwargs):
+            nonlocal inventories
+            if "status=queued" in path:
+                inventories += 1
+            if inventories == 1 and "/runs?" in path:
+                return {}
+            return fake(method, path, *args, **kwargs)
+        with patch.object(s, "gh", api), quiet(), self.assertRaisesRegex(s.Refuse, "PARTIAL.*UNVERIFIED"):
+            s.rollback("gridcraft", True, wait=lambda _: None)
+        self.assertEqual(fake.cancels, {8: 1})
+        self.assertGreater(inventories, 1)
+        self.assertLessEqual(inventories, s.MAX_CANCEL_ROUNDS + 1)
+
     def test_one_failed_cancellation_does_not_stop_the_others(self):
         fake = self.trusted(runs={"queued": [5, 6]}, fail_cancel={5}, sticky={5})
         with self.assertRaisesRegex(s.Refuse, "cancelling run 5"):
@@ -798,7 +990,7 @@ class RollbackTests(unittest.TestCase):
 class StrictParsingTests(unittest.TestCase):
     def setup(self, fake):
         with patch.object(s, "gh", fake), quiet():
-            s.setup_repo("gridcraft", True, False, LINUX_ROW)
+            s.setup_repo("gridcraft", True, False)
 
     def test_duplicate_keys_are_refused(self):
         doubled = SIGN + "    with:\n      tooling-revision: " + PIN + "\n      app-name: gridcraft\n"
@@ -856,12 +1048,12 @@ class ConcurrencyTests(unittest.TestCase):
         for label, overrides in (("new trust", {}), ("kept trust", {"branch": MAIN, "policies": [("release", 1), ("nightly-signer", 2)]})):
             fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]), **overrides)
             with self.subTest(case=label), patch.object(s, "gh", fake), quiet(), self.assertRaisesRegex(s.Refuse, "do not cover gridcraft now"):
-                s.setup_repo("gridcraft", True, True, LINUX_ROW)
+                s.setup_repo("gridcraft", True, True)
             self.assertFalse([w for w in fake.writes if "deployment-branch-policies" in w[1]], label)
         # A plan does not need the rulesets to exist yet.
         fake = FakeGitHub(rulesets={})
         with patch.object(s, "gh", fake), quiet():
-            s.setup_repo("gridcraft", False, False, LINUX_ROW)
+            s.setup_repo("gridcraft", False, False)
 
     def test_trusted_but_uncovered_repos_are_found_across_all_apps(self):
         fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]), policies=[("release", 1), ("nightly-signer", 2)])
