@@ -71,18 +71,20 @@ jobs:
         shell: bash
         env:
           NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
-        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
-      - name: The strict comparison on the same tests (evidence, not a gate)
+        run: python -I -B -m unittest discover -s tests -p 'test_nightly_feed*.py' -v
+      - name: The strict comparison must refuse a just-arrived file (gate)
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
         run: |
-          # 644556de is the diagnostics-only build: the strict five-field comparison. Whether it
-          # refuses here says whether this runner exposes the drift on this run.
+          # 644556de is the diagnostics-only build: the strict five-field comparison. Reading
+          # just-arrived files with it must fail here, otherwise this run did not reproduce the
+          # signer's refusal and says nothing about the fix.
           gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
-          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v 2>&1 | tee "$RUNNER_TEMP/strict.log"; then
-            echo "strict comparison: passed here (drift not observed on this run)"
-          else
-            echo "strict comparison: refused here (the drift occurred, as in the signer)"
+          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest -v \
+              tests.test_nightly_feed_windows.JustWrittenJsonTests.test_a_just_written_or_extracted_json_reads 2>&1 | tee "$RUNNER_TEMP/strict.log"; then
+            echo "::error::the strict comparison accepted just-arrived files on this run, so the reproduction is not established here"
+            exit 1
           fi
+          grep -E "refused a just-arrived|st_ctime_ns" "$RUNNER_TEMP/strict.log" || true
+          echo "strict comparison refused a just-arrived file, as the signer did"
