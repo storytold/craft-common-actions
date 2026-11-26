@@ -25,10 +25,17 @@ spec.loader.exec_module(n)
 
 
 def job_root():
-    base = os.environ.get("NIGHTLY_FEED_TEST_ROOT")
-    if base:
-        Path(base).mkdir(parents=True, exist_ok=True)
-        return Path(tempfile.mkdtemp(dir=base)).resolve()
+    """A private job root on the same volume as the job's files.
+
+    On a hosted Windows runner the workspace (D:\a\...) is not the same volume as %TEMP%, and the
+    refusal only shows on the workspace volume, so the fixtures must live there. NIGHTLY_FEED_TEST_ROOT
+    names a directory inside the checkout; GITHUB_WORKSPACE is the fallback; temp is only for a local
+    run outside CI.
+    """
+    for base in (os.environ.get("NIGHTLY_FEED_TEST_ROOT"), os.environ.get("GITHUB_WORKSPACE")):
+        if base and Path(base).is_dir():
+            root = Path(tempfile.mkdtemp(dir=base))
+            return root.resolve()
     return Path(tempfile.mkdtemp()).resolve()  # Resolved: Windows temp paths can be 8.3 short names.
 
 

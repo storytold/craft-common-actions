@@ -180,9 +180,29 @@ class NightlyTests(unittest.TestCase):
             with self.subTest(change=label), self.windows_style_lstat(**change), \
                     self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
                 n.bounded_json(path)
-            # Windows: the handle is the only identity, so path-side differences are not a refusal.
-            with self.subTest(change=label, windows=True), patch.object(n, '_posix', return_value=False), self.windows_style_lstat(**change):
-                self.assertEqual(n.bounded_json(path), {'ok': 1})
+            # Windows: size and modification time are still bound before the read, so refuse too.
+            with self.subTest(change=label, windows=True), patch.object(n, '_posix', return_value=False), self.windows_style_lstat(**change), \
+                    self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
+                n.bounded_json(path)
+
+    def test_posix_same_size_rewrite_that_moves_ctime_refuses(self):
+        # An in-place same-size rewrite that restores mtime still moves ctime, which POSIX compares.
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        before = path.stat()
+        with open(path, 'r+b') as stream:
+            stream.write(b'{"ok":2}')
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.lstat(path)
+        self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+        with self.assertRaisesRegex(n.InvalidNightly, r'changed before read \(state.json: .*st_ctime_ns '), \
+                patch.object(n, '_posix', return_value=True):
+            if after.st_ctime_ns == before.st_ctime_ns:
+                # Coarse-tick filesystems (some overlays) don't move ctime here; report it as moved so the
+                # refusal this test is about is still exercised, and the check above proves the gap is real.
+                with self.windows_style_lstat(st_ctime_ns=before.st_ctime_ns + 1):
+                    n.bounded_json(path)
+            else:
+                n.bounded_json(path)
 
     def test_handle_changes_during_read_refuse_on_windows_too(self):
         path = self.root / 'state.json'; path.write_text('{"ok":1}')

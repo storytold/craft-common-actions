@@ -104,12 +104,17 @@ def differences(first, second, keys=IDENTITY):
 def path_handle_difference(path_info, handle_info, keys=IDENTITY):
     """Differences between a path's lstat and an opened handle's fstat that mean "another file".
 
-    POSIX: every identity field, as before. Windows: none. Python 3.12+ fills stat from
-    GetFileInformationByName and fstat from GetFileInformationByHandle, and on the runner's workspace
-    volume they can disagree for the same untouched file, so there identity and change checks come
-    only from the handle (fstat before and after the read).
+    POSIX: every identity field, as before. Windows: size and modification time only. Python 3.12+
+    fills stat from GetFileInformationByName and fstat from GetFileInformationByHandle, and on the
+    runner's workspace volume device, inode and ctime can disagree for the same untouched file, so on
+    Windows those three are never compared across the two APIs. A same-size, mtime-preserving swap
+    inside the owned job root is therefore undetected before the read; anything that changes during
+    the read is still caught, because the handle is compared with itself (device, inode, size, mtime
+    and ctime) before and after.
     """
-    return differences(path_info, handle_info, keys) if _posix() else ""
+    if keys is IDENTITY:
+        keys = IDENTITY if _posix() else ("st_size", "st_mtime_ns")
+    return differences(path_info, handle_info, keys)
 
 
 def handle_stamp(info):
