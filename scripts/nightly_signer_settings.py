@@ -299,6 +299,20 @@ def org_rulesets():
     return {item["name"]: gh("GET", f"orgs/{ORG}/rulesets/{item['id']}") for item in found if item["name"] in (RULESET_WRITERS, RULESET_HISTORY)}
 
 
+# Rule parameters GitHub stores but leaves out of a ruleset it returns when they hold their default value: an
+# `update` rule created with update_allows_fetch_and_merge false reads back with no parameters at all.
+DEFAULT_RULE_PARAMETERS = {"update": {"update_allows_fetch_and_merge": False}}
+
+
+def rule_parameters(rule):
+    """A rule's parameters without the ones at GitHub's default, so a sent rule and its read-back compare equal."""
+    defaults = DEFAULT_RULE_PARAMETERS.get(rule.get("type"), {})
+    parameters = rule.get("parameters")
+    if not isinstance(parameters, dict):
+        return parameters  # Anything but a mapping is compared as it is, so it differs instead of vanishing.
+    return {k: v for k, v in parameters.items() if not (k in defaults and v == defaults[k])}
+
+
 def shape(ruleset):
     """Everything but the covered repo names. Another repository selector (repository_id, a property) stays in the
     conditions, so it differs from the canonical shape instead of failing to read."""
@@ -307,7 +321,7 @@ def shape(ruleset):
     conditions = copy.deepcopy(ruleset.get("conditions") or {})
     if isinstance(conditions.get("repository_name"), dict):
         conditions["repository_name"].pop("include", None)
-    rules = sorted(json.dumps({"type": r.get("type"), **({"parameters": r["parameters"]} if r.get("parameters") else {})}, sort_keys=True)
+    rules = sorted(json.dumps({"type": r.get("type"), **({"parameters": p} if (p := rule_parameters(r)) else {})}, sort_keys=True)
                    for r in ruleset.get("rules") or [])
     return {"target": ruleset.get("target"), "enforcement": ruleset.get("enforcement"), "conditions": conditions, "rules": rules, "bypass": bypass}
 
