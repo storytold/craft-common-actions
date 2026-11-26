@@ -74,6 +74,7 @@ class FakeGitHub:
         self.branch_delete_blocked = False
         self.workflow_state = "active"   # the signer workflow's state
         self.workflow_sticky = False    # a disable that GitHub accepts but does not apply
+        self.workflow_missing = False   # the signer workflow is not in this repository
         self.large = set()        # paths returned without base64 content (over 1 MB)
         self.__dict__.update(overrides)
         self.writes, self.reads = [], []
@@ -104,8 +105,9 @@ class FakeGitHub:
             return {"branch_policies": [{"name": n, "id": i, "type": "branch"} for n, i in self.policies]}
         if "/environments/release/secrets" in path: return {"secrets": [{"name": n} for n in self.env_secrets]}
         if "/actions/secrets" in path: return {"secrets": [{"name": n} for n in self.repo_secrets]}
-        if re.fullmatch(r"repos/[^/]+/[^/]+/actions/workflows\?per_page=100", path):
-            return {"workflows": [{"id": 11, "path": ".github/workflows/nightly-sign.yml", "state": self.workflow_state}]}
+        if path.endswith("/actions/workflows/nightly-sign.yml"):
+            if self.workflow_missing and ok404: return None
+            return {"id": 11, "path": ".github/workflows/nightly-sign.yml", "state": self.workflow_state}
         if path.endswith("/git/ref/heads/nightly-signer"): return {"object": {"sha": self.branch}} if self.branch else None
         if path.endswith("/branches/main"): return {"commit": {"sha": MAIN}}
         if "/compare/" in path: return self.compare(path)
@@ -469,6 +471,21 @@ class AdvanceTests(unittest.TestCase):
             s.advance("gridcraft", sha, apply)
         return fake.writes
 
+    def test_activation_resumes_when_the_branch_already_moved(self):
+        # A disable that could not be re-enabled leaves head == sha; the retry must still activate.
+        fake = FakeGitHub(branch="b" * 40, workflow_state="disabled_manually")
+        writes = self.advance(fake, "b" * 40)
+        self.assertEqual(fake.workflow_state, "active")
+        self.assertIn(("PUT", "repos/storytold/gridcraft/actions/workflows/11/enable", None), writes)
+        self.assertNotIn("PATCH", [w[0] for w in writes])
+
+    def test_the_signer_workflow_is_found_by_filename(self):
+        # A long workflow list cannot hide it: the lookup is by filename, not by the first page.
+        fake = FakeGitHub(branch="a" * 40)
+        with patch.object(s, "gh", fake):
+            self.assertEqual(s.workflow_state("gridcraft"), "active")
+        self.assertIn("repos/storytold/gridcraft/actions/workflows/nightly-sign.yml", fake.reads)
+
     def test_advance_re_enables_a_disabled_signer(self):
         fake = FakeGitHub(branch="a" * 40, workflow_state="disabled_manually")
         self.advance(fake, "b" * 40)
@@ -484,7 +501,7 @@ class AdvanceTests(unittest.TestCase):
     def test_refusals_write_nothing(self):
         dormant = SIGN.replace("github.repository ==", "false && github.repository ==")
         cases = {
-            "same commit": (dict(branch="b" * 40), "b" * 40, "fast-forwards"),
+            "backwards to a sibling": (dict(branch="b" * 40), "9" * 40, "fast-forwards"),
             "backwards": (dict(branch="b" * 40), "a" * 40, "fast-forwards"),
             "off main": (dict(branch="a" * 40, on_main=False), "b" * 40, "fast-forwards"),
             "inside a merged branch": (dict(branch="a" * 40), "f" * 40, "first-parent"),

@@ -563,22 +563,34 @@ def first_parent_of_main(app, sha, head):
 
 
 def advance(app, sha, apply):
+    """Fast-forward the signer branch to a reviewed main commit, or resume activation when it is already there.
+
+    A rollback disables the signer workflow, so the same call also re-enables it. If enable fails after the
+    branch moved, the retry finds head == sha: that path keeps every check, skips the redundant update, and
+    retries activation, so recovery is resumable instead of stuck behind the fast-forward guard.
+    """
     head = gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}")["object"]["sha"]
-    if not (ancestor(f"{ORG}/{app}", sha, main_tip(app)) and ancestor(f"{ORG}/{app}", head, sha) and head != sha):
+    resume = head == sha
+    if not resume and not (ancestor(f"{ORG}/{app}", sha, main_tip(app)) and ancestor(f"{ORG}/{app}", head, sha)):
         raise Refuse(f"{sha} is not a main commit that fast-forwards {REF} from {head}")
-    if not first_parent_of_main(app, sha, head):
+    if not first_parent_of_main(app, sha, head if not resume else sha):
         raise Refuse(f"{sha} is not on main's first-parent history (a commit from inside a merged branch, never main's tip)")
     if queued_signer_runs(app):
         raise Refuse("a nightly-sign run is queued or running; it would fail closed after the move. Wait for it.")
     check_tree(app, sha)
-    print(f"  review first: https://github.com/{ORG}/{app}/compare/{head}...{sha} (all of .github/ and packaging/)")
-    gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
+    if resume:
+        print(f"  note   {REF} is already at {sha[:10]}; resuming activation only")
+    else:
+        print(f"  review first: https://github.com/{ORG}/{app}/compare/{head}...{sha} (all of .github/ and packaging/)")
+        gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
     if apply and workflow_state(app) == "disabled_manually":
-        # A rollback disabled the signer; advancing re-enables it so the printed recovery can finish the job.
+        # A rollback disabled the signer; this re-enables it so the recovery can finish the job.
         set_workflow_enabled(app, True)
         if workflow_state(app) != "active":
             raise Refuse(f"{SIGNER_WORKFLOW} is still disabled after enabling it")
         print(f"  done   re-enabled {app} {SIGNER_WORKFLOW}")
+    elif apply and workflow_state(app) == "missing":
+        raise Refuse(f"{SIGNER_WORKFLOW} is missing, so activation cannot be verified; the switch-on PR must merge first")
 
 
 def cancel_round(app, apply, failures):
@@ -601,25 +613,22 @@ def cancel_round(app, apply, failures):
 SIGNER_WORKFLOW = ".github/workflows/nightly-sign.yml"
 
 
+def signer_workflow(app):
+    """The signer workflow, looked up by filename so a long workflow list cannot hide it."""
+    return gh("GET", f"repos/{ORG}/{app}/actions/workflows/{SIGNER_WORKFLOW.rsplit('/', 1)[1]}", ok404=True)
+
+
 def workflow_state(app):
     """The signer workflow's state: 'active', 'disabled_manually', or 'missing'."""
-    listed = gh("GET", f"repos/{ORG}/{app}/actions/workflows?per_page=100")["workflows"]
-    found = [w for w in listed if w["path"] == SIGNER_WORKFLOW]
-    if len(found) != 1:
-        return "missing"
-    return find_state(found[0])
-
-
-def find_state(workflow):
-    return workflow.get("state", "active")
+    workflow = signer_workflow(app)
+    return "missing" if workflow is None else workflow.get("state", "active")
 
 
 def set_workflow_enabled(app, enabled):
-    listed = gh("GET", f"repos/{ORG}/{app}/actions/workflows?per_page=100")["workflows"]
-    found = [w for w in listed if w["path"] == SIGNER_WORKFLOW]
-    if len(found) != 1:
-        raise Refuse(f"{SIGNER_WORKFLOW} is not a single workflow entry")
-    gh("PUT", f"repos/{ORG}/{app}/actions/workflows/{found[0]['id']}/" + ("enable" if enabled else "disable"),
+    workflow = signer_workflow(app)
+    if workflow is None:
+        raise Refuse(f"{SIGNER_WORKFLOW} is not a workflow in this repository")
+    gh("PUT", f"repos/{ORG}/{app}/actions/workflows/{workflow['id']}/" + ("enable" if enabled else "disable"),
        write=True, apply=True)
 
 
