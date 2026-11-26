@@ -154,6 +154,35 @@ class NightlyTests(unittest.TestCase):
             with self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
                 n.bounded_json(path)
 
+    def windows_style_lstat(self, **changes):
+        """Path.lstat as Python 3.12+ on Windows may report it: other st_dev/st_ino/ctime than fstat."""
+        real = Path.lstat
+        def fake(path_self, *args, **kwargs):
+            info = real(path_self, *args, **kwargs)
+            fields = {key: getattr(info, key) for key in ('st_mode', 'st_size', 'st_mtime_ns')}
+            fields.update(st_dev=info.st_dev + 7, st_ino=info.st_ino + 11, st_ctime_ns=info.st_ctime_ns + 13)
+            fields.update(changes)
+            return type('Stat', (), fields)()
+        return patch.object(Path, 'lstat', fake)
+
+    def test_windows_lstat_fstat_identity_differences_pass_for_an_unchanged_file(self):
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        with patch.object(n, '_posix', return_value=False), self.windows_style_lstat():
+            self.assertEqual(n.bounded_json(path), {'ok': 1})
+        # On POSIX a differing device or inode still means another file: refuse.
+        with self.windows_style_lstat(), self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
+            n.bounded_json(path)
+
+    def test_file_modified_between_lstat_and_open_refuses_on_windows_and_posix(self):
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        info = os.lstat(path)
+        for posix in (True, False):
+            for label, change in (('size', {'st_size': info.st_size - 1}), ('mtime', {'st_mtime_ns': info.st_mtime_ns - 1})):
+                # Windows-style identity noise plus a real size or mtime difference: always refuse.
+                with self.subTest(posix=posix, change=label), patch.object(n, '_posix', return_value=posix), \
+                        self.windows_style_lstat(**change), self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
+                    n.bounded_json(path)
+
     def test_bounded_bytes_preserves_non_json_bytes_and_exact_cap(self):
         path = self.root / 'version.txt'
         payload = b'1.2.3\r\n'

@@ -89,20 +89,38 @@ def owned_path(path):
     return resolved
 
 
+def _posix():
+    return os.name != "nt"
+
+
+def same_file(path_info, handle_info):
+    """Bind a path's lstat to an opened handle's fstat.
+
+    Size and modification time everywhere. Device and inode only on POSIX: on Windows, Python
+    3.12+ fills stat from GetFileInformationByName and fstat from GetFileInformationByHandle, so
+    st_dev, st_ino and st_ctime_ns can differ for the same untouched file.
+    """
+    keys = ("st_size", "st_mtime_ns") + (("st_dev", "st_ino") if _posix() else ())
+    return all(getattr(path_info, key) == getattr(handle_info, key) for key in keys)
+
+
+def handle_stamp(info):
+    """Identity of an opened handle across two fstat calls (same API, so every field is stable)."""
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def bounded_bytes(path, limit, kind):
     """Read a stable regular input without following a leaf link or waiting on a FIFO."""
     path = owned_path(path)
-    before = path.lstat()
+    before = path.lstat()  # Type and size precheck only, before anything is opened.
     require(stat.S_ISREG(before.st_mode), f"{kind} must be a regular non-symlink file")
     require(before.st_size <= limit, f"{kind} exceeds bound")
-    def stamp(info):
-        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        require(stamp(before) == stamp(opened), f"{kind} changed before read")
+        require(stat.S_ISREG(opened.st_mode) and same_file(before, opened), f"{kind} changed before read")
         raw = stream.read(limit + 1)
-        require(stamp(opened) == stamp(os.fstat(stream.fileno())) and len(raw) == opened.st_size,
+        require(handle_stamp(opened) == handle_stamp(os.fstat(stream.fileno())) and len(raw) == opened.st_size,
                 f"{kind} changed while reading")
     require(len(raw) <= limit, f"{kind} exceeds bound")
     return raw

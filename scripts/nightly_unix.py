@@ -291,7 +291,8 @@ def verify_archive(pending,platform,archive,version,output=None,app=None):
                       'Apple numeric versions must use the prepared stable base, not Cargo/fallback')
             n.require(not any(plist.get(key) for key in ('CFBundleDocumentTypes','CFBundleURLTypes','UTExportedTypeDeclarations','UTImportedTypeDeclarations')),"Mac document/URL associations forbidden")
         after=archive.stat(follow_symlinks=False)
-        n.require((info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns),"archive changed during inspection")
+        # info is the opened handle's fstat, after is the path's lstat: bind them portably.
+        n.require(n.same_file(after,info),"archive changed during inspection")
         if staging is not None:
             n.require(not out.exists() and not out.is_symlink(),"unpack output must remain a new directory")
             staging.rename(n.owned_path(out))
