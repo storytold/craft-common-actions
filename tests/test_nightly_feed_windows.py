@@ -1,6 +1,6 @@
 """bounded_bytes/bounded_json on the real platform, with real files and no simulation.
 
-The signer's Windows validate job reads files under the workspace (D:\a\... on GitHub's Windows
+The signer's Windows validate job reads files under the workspace (the D: drive on GitHub's Windows
 runners): git-checked-out sources, JSON written by an earlier step's process, and artifacts
 extracted by actions/download-artifact. These tests read exactly those shapes. In CI the job root is
 a directory inside the checkout (NIGHTLY_FEED_TEST_ROOT), so files sit on the workspace volume.
@@ -27,7 +27,7 @@ spec.loader.exec_module(n)
 def job_root():
     """A private job root on the same volume as the job's files.
 
-    On a hosted Windows runner the workspace (D:\a\...) is not the same volume as %TEMP%, and the
+    On a hosted Windows runner the workspace drive is not the same volume as %TEMP%, and the
     refusal only shows on the workspace volume, so the fixtures must live there. NIGHTLY_FEED_TEST_ROOT
     names a directory inside the checkout; GITHUB_WORKSPACE is the fallback; temp is only for a local
     run outside CI.
@@ -69,13 +69,10 @@ class RealFileReadTests(unittest.TestCase):
         def rewrite_then_open(file, flags):
             path.write_text('{"ok": 22}', encoding="utf-8")
             return real_open(file, flags)
-        with patch.object(n.os, "open", side_effect=rewrite_then_open):
-            if os.name == "nt" and hasattr(n, "path_handle_difference"):
-                # Windows: the handle is the only identity; a whole file present at open is read consistently.
-                self.assertEqual(n.bounded_json(path), {"ok": 22})
-            else:
-                with self.assertRaisesRegex(n.InvalidNightly, "JSON changed"):
-                    n.bounded_json(path)
+        # Size and modification time are compared everywhere, so the rewrite refuses on both platforms.
+        with patch.object(n.os, "open", side_effect=rewrite_then_open), \
+                self.assertRaisesRegex(n.InvalidNightly, "JSON changed before read"):
+            n.bounded_json(path)
 
     def test_growth_during_read_refuses(self):
         path = self.root / "state.json"
