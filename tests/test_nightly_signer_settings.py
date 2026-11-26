@@ -143,14 +143,24 @@ class FakeGitHub:
             if run_id not in self.sticky and self.cancels[run_id] >= self.stop_after.get(run_id, 1):
                 self.runs = {k: [i for i in v if i != run_id] for k, v in self.runs.items()}
         elif method == "POST" and path == f"orgs/{s.ORG}/rulesets":
-            self.rulesets[body["name"]] = {**json.loads(json.dumps(body)), "id": 100 + len(self.rulesets)}
+            self.rulesets[body["name"]] = {**as_github_returns(body), "id": 100 + len(self.rulesets)}
         elif method == "PUT" and path.startswith(f"orgs/{s.ORG}/rulesets/"):
             name = next(n for n, r in self.rulesets.items() if str(r["id"]) == path.rsplit("/", 1)[1])
-            self.rulesets[name] = {**json.loads(json.dumps(body)), "id": self.rulesets[name]["id"]}
+            self.rulesets[name] = {**as_github_returns(body), "id": self.rulesets[name]["id"]}
 
 
 def quiet():
     return contextlib.redirect_stdout(io.StringIO())
+
+
+def as_github_returns(body):
+    """A ruleset body as GitHub stores and returns it: a rule parameter at its default value is left out, so the
+    canonical update rule (update_allows_fetch_and_merge false) reads back with no parameters."""
+    stored = json.loads(json.dumps(body))
+    for rule in stored.get("rules") or []:
+        if rule.get("type") == "update" and rule.get("parameters") == {"update_allows_fetch_and_merge": False}:
+            rule.pop("parameters")
+    return stored
 
 
 def existing_rulesets(apps, **changes):
@@ -158,7 +168,7 @@ def existing_rulesets(apps, **changes):
     writers, history = s.canonical(apps, TEAM)
     result = {}
     for index, body in enumerate((writers, history)):
-        result[body["name"]] = {**json.loads(json.dumps(body)), "id": 10 + index}
+        result[body["name"]] = {**as_github_returns(body), "id": 10 + index}
     for name, change in changes.items():
         change(result[name])
     return result
@@ -336,6 +346,29 @@ class RulesetTests(unittest.TestCase):
             self.assertEqual(s.shape(body), s.shape(s.canonical(["gridcraft"], TEAM)[0 if body["name"] == s.RULESET_WRITERS else 1]))
         self.assertEqual(s.owned_before("gridcraft", before), False)
         self.assertEqual(s.owned_before("photocraft", before), True)
+
+    def test_rulesets_read_back_without_default_parameters_are_canonical(self):
+        # GitHub returns the canonical writers ruleset's update rule with no parameters: that is the same ruleset.
+        writers = s.canonical(["gridcraft"], TEAM)[0]
+        self.assertEqual(s.shape(as_github_returns(writers)), s.shape(writers))
+        # A parameter away from its default still differs, so a weakened update rule is never adopted.
+        def fetch_and_merge(r):
+            next(rule for rule in r["rules"] if rule["type"] == "update")["parameters"] = {"update_allows_fetch_and_merge": True}
+        fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"], **{s.RULESET_WRITERS: fetch_and_merge}))
+        with self.assertRaisesRegex(s.Refuse, "differs from the canonical one"):
+            self.ensure(fake, ["gridcraft"])
+        self.assertEqual([w for w in fake.writes if w[0] == "PUT"], [])
+
+    def test_rulesets_created_by_an_earlier_apply_are_resumed(self):
+        # The rulesets an apply creates, read back as GitHub returns them, cover the repos on the next run.
+        fake = FakeGitHub(rulesets={})
+        self.ensure(fake, ["gridcraft", "photocraft"])
+        fake.writes.clear()
+        with patch.object(s, "gh", fake), quiet():
+            self.assertEqual(s.live_coverage(), {"gridcraft", "photocraft"})
+        self.assertEqual(self.ensure(fake, ["gridcraft", "photocraft"]),
+                         {s.RULESET_WRITERS: {"gridcraft", "photocraft"}, s.RULESET_HISTORY: {"gridcraft", "photocraft"}})
+        self.assertEqual(fake.writes, [])
 
     def test_exact_rulesets_write_nothing(self):
         fake = FakeGitHub(rulesets=existing_rulesets(["gridcraft"]))
