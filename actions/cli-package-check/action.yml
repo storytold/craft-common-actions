@@ -5,7 +5,7 @@ description: >-
 
 inputs:
   package:
-    description: "The package archive: a tar archive, a FreeBSD .pkg, a .deb or an .rpm"
+    description: "The package archive: a tar archive of any compression, a FreeBSD .pkg, a .deb or an .rpm"
     required: true
   cli:
     description: "The binary name, for example photocraft-cli"
@@ -15,7 +15,7 @@ inputs:
     required: false
     default: ""
   binary:
-    description: "A built CLI whose --help lists the subcommands (added to subcommands). Optional"
+    description: "A built CLI whose --help lists its subcommands under 'Commands:' (they are added to subcommands). Optional"
     required: false
     default: ""
 
@@ -32,12 +32,26 @@ runs:
         BINARY: ${{ inputs.binary }}
       run: |
         set -euo pipefail
-        args=(python3 "$CHECK_PATH" --cli "$CLI" --package "$PACKAGE")
         read -r -d '' -a subs <<< "$SUBCOMMANDS" || true
+        if [ -n "$BINARY" ]; then
+          # clap prints "Commands:", then one command per line, indented, until a blank line;
+          # its own `help` command has no man page of its own.
+          help=$("$BINARY" --help)
+          found=$(awk '/^Commands:[[:space:]]*$/ {on=1; next} on && NF==0 {exit} on && $1 != "help" {print $1}' <<< "$help")
+          if [ -z "$found" ]; then
+            echo "::error::no 'Commands:' block in '$BINARY --help'"
+            exit 1
+          fi
+          read -r -d '' -a more <<< "$found" || true
+          subs+=("${more[@]}")
+        fi
+        args=(python3 "$CHECK_PATH" --cli "$CLI")
         for s in "${subs[@]}"; do
           args+=(--subcommand "$s")
         done
-        if [ -n "$BINARY" ]; then
-          args+=(--binary "$BINARY")
-        fi
-        "${args[@]}"
+        case "$PACKAGE" in
+          *.deb) list=$(dpkg-deb --fsys-tarfile "$PACKAGE" | tar -t) ;;
+          *.rpm) list=$(rpm -qlp "$PACKAGE") ;;
+          *)     list=$(tar -tf "$PACKAGE") ;;
+        esac
+        "${args[@]}" <<< "$list"

@@ -2,10 +2,6 @@
 from pathlib import Path
 import importlib.util
 import io
-import os
-import stat
-import tarfile
-import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -26,29 +22,13 @@ FULL = [
     'usr/share/man/man1/app-cli-convert.1.gz',
     'usr/share/man/man1/app-cli-info.1.gz',
 ]
-HELP = """Usage: app-cli <COMMAND>
-
-Commands:
-  convert  Convert a file
-  info     Show details
-  help     Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
-"""
 
 
-def run(argv):
+def run(argv, listing):
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
-        code = CHECK.main(argv)
+        code = CHECK.main(argv, stdin=io.StringIO('\n'.join(listing)))
     return code, out.getvalue(), err.getvalue()
-
-
-def write(directory, name, text):
-    path = Path(directory) / name
-    path.write_text(text)
-    return str(path)
 
 
 class MissingFiles(unittest.TestCase):
@@ -89,59 +69,28 @@ class MissingFiles(unittest.TestCase):
         self.assertEqual(len(CHECK.missing_files(['usr/share/man/man1/app-cli.1/'], 'app-cli', [])), 4)
 
 
-class Subcommands(unittest.TestCase):
-    def test_help_block_names_the_commands_without_clap_help(self):
-        self.assertEqual(CHECK.subcommands_from_help(HELP), ['convert', 'info'])
-
-    def test_no_commands_block_gives_nothing(self):
-        self.assertEqual(CHECK.subcommands_from_help('Usage: app-cli\n'), [])
-
-
 class Command(unittest.TestCase):
-    def test_a_listing_file_passes_and_fails(self):
-        with tempfile.TemporaryDirectory() as d:
-            good = write(d, 'good.txt', '\n'.join(FULL))
-            bad = write(d, 'bad.txt', '\n'.join(FULL[:3]))
-            code, out, _ = run(['--cli', 'app-cli', '--listing', good, '--subcommand', 'convert'])
-            self.assertEqual(code, 0)
-            self.assertIn('2 man pages', out)
-            code, _, err = run(['--cli', 'app-cli', '--listing', bad])
-            self.assertEqual(code, 1)
-            self.assertIn('fish completion', err)
+    def test_a_complete_list_passes(self):
+        code, out, _ = run(['--cli', 'app-cli', '--subcommand', 'convert'], FULL)
+        self.assertEqual(code, 0)
+        self.assertIn('2 man pages', out)
 
-    def test_a_tar_archive_is_read(self):
-        with tempfile.TemporaryDirectory() as d:
-            archive = os.path.join(d, 'app.tar.gz')
-            with tarfile.open(archive, 'w:gz') as tar:
-                for name in FULL:
-                    info = tarfile.TarInfo(name)
-                    tar.addfile(info, io.BytesIO(b''))
-            code, _, _ = run(['--cli', 'app-cli', '--package', archive, '--subcommand', 'info'])
-            self.assertEqual(code, 0)
-            code, _, err = run(['--cli', 'app-cli', '--package', archive, '--subcommand', 'run'])
-            self.assertEqual(code, 1)
-            self.assertIn('app-cli-run.1', err)
+    def test_a_missing_file_fails_and_is_named(self):
+        code, _, err = run(['--cli', 'app-cli'], FULL[:3])
+        self.assertEqual(code, 1)
+        self.assertIn('fish completion', err)
+        self.assertIn('man page share/man/man1/app-cli.1', err)
 
-    def test_the_binary_help_adds_subcommands(self):
-        with tempfile.TemporaryDirectory() as d:
-            binary = Path(d) / 'app-cli'
-            binary.write_text(f"#!/bin/sh\ncat <<'EOF'\n{HELP}EOF\n")
-            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-            listing = write(d, 'l.txt', '\n'.join(p for p in FULL if 'app-cli-info' not in p))
-            code, _, err = run(['--cli', 'app-cli', '--listing', listing, '--binary', str(binary)])
-            self.assertEqual(code, 1)
-            self.assertIn('app-cli-info.1', err)
-            self.assertNotIn('app-cli-convert.1', err)
+    def test_a_subcommand_without_a_man_page_fails(self):
+        code, _, err = run(['--cli', 'app-cli', '--subcommand', 'info', '--subcommand', 'run'], FULL)
+        self.assertEqual(code, 1)
+        self.assertIn('app-cli-run.1', err)
+        self.assertNotIn('app-cli-info.1', err)
 
-    def test_a_binary_without_a_commands_block_fails(self):
-        with tempfile.TemporaryDirectory() as d:
-            binary = Path(d) / 'app-cli'
-            binary.write_text('#!/bin/sh\necho "Usage: app-cli"\n')
-            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
-            listing = write(d, 'l.txt', '\n'.join(FULL))
-            code, _, err = run(['--cli', 'app-cli', '--listing', listing, '--binary', str(binary)])
-            self.assertEqual(code, 1)
-            self.assertIn('Commands:', err)
+    def test_an_empty_list_fails_rather_than_passing(self):
+        code, _, err = run(['--cli', 'app-cli'], [])
+        self.assertEqual(code, 1)
+        self.assertIn('empty', err)
 
 
 class ActionFile(unittest.TestCase):
@@ -154,6 +103,11 @@ class ActionFile(unittest.TestCase):
         used = ' '.join(env.values())
         for name in ACTION['inputs']:
             self.assertIn(f'inputs.{name}', used)
+
+    def test_the_script_opens_no_file_and_starts_no_process(self):
+        source = (ROOT / 'actions/cli-package-check/check_cli_package.py').read_text()
+        for word in ('subprocess', 'open(', 'os.system'):
+            self.assertNotIn(word, source)
 
 
 if __name__ == '__main__':

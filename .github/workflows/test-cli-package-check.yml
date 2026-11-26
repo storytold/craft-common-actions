@@ -37,3 +37,53 @@ jobs:
           persist-credentials: false
       - name: CLI package check unit tests
         run: python3 -m unittest tests/test_cli_package_check.py
+      - name: A package with its files
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/pkg"
+          mkdir -p "$root/usr/share/bash-completion/completions" "$root/usr/share/zsh/site-functions" \
+            "$root/usr/share/fish/vendor_completions.d" "$root/usr/share/man/man1"
+          touch "$root/usr/share/bash-completion/completions/demo-cli" "$root/usr/share/zsh/site-functions/_demo-cli" \
+            "$root/usr/share/fish/vendor_completions.d/demo-cli.fish" "$root/usr/share/man/man1/demo-cli.1.gz" \
+            "$root/usr/share/man/man1/demo-cli-run.1.gz"
+          tar -czf "$RUNNER_TEMP/demo-full.tar.gz" -C "$root" usr
+          rm "$root/usr/share/man/man1/demo-cli-run.1.gz"
+          tar -czf "$RUNNER_TEMP/demo-no-run-page.tar.gz" -C "$root" usr
+          rm "$root/usr/share/zsh/site-functions/_demo-cli"
+          tar -czf "$RUNNER_TEMP/demo-no-zsh.tar.gz" -C "$root" usr
+          printf '#!/bin/sh\nprintf "Usage: demo-cli <COMMAND>\\n\\nCommands:\\n  run   Run it\\n  help  Print help\\n\\nOptions:\\n  -h, --help\\n"\n' > "$RUNNER_TEMP/demo-cli"
+          chmod +x "$RUNNER_TEMP/demo-cli"
+      - name: A complete package passes
+        uses: ./actions/cli-package-check
+        with:
+          package: ${{ runner.temp }}/demo-full.tar.gz
+          cli: demo-cli
+          subcommands: run
+      - name: The subcommands come from the binary's --help
+        uses: ./actions/cli-package-check
+        with:
+          package: ${{ runner.temp }}/demo-full.tar.gz
+          cli: demo-cli
+          binary: ${{ runner.temp }}/demo-cli
+      - name: A missing subcommand man page fails
+        id: no-man
+        continue-on-error: true
+        uses: ./actions/cli-package-check
+        with:
+          package: ${{ runner.temp }}/demo-no-run-page.tar.gz
+          cli: demo-cli
+          binary: ${{ runner.temp }}/demo-cli
+      - name: A missing completion fails
+        id: no-zsh
+        continue-on-error: true
+        uses: ./actions/cli-package-check
+        with:
+          package: ${{ runner.temp }}/demo-no-zsh.tar.gz
+          cli: demo-cli
+      - name: Check the outcomes
+        env:
+          NO_MAN: ${{ steps.no-man.outcome }}
+          NO_ZSH: ${{ steps.no-zsh.outcome }}
+        run: |
+          test "$NO_MAN" = failure
+          test "$NO_ZSH" = failure
