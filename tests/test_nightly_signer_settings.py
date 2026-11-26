@@ -52,7 +52,10 @@ class FakeGitHub:
         self.cca = {".github/workflows/release.yml": GUARDED, ".github/workflows/gate.yml": "jobs:\n  t:\n    runs-on: x\n    steps: []\n"}
         self.env_secrets, self.repo_secrets = ["LINUX_SIGNING_KEY"], []
         self.policies, self.branch, self.on_main = [("release", 1)], None, True
-        self.rulesets, self.rulesets_readable = {}, True
+        self.rulesets, self.rulesets_readable = existing_rulesets(["gridcraft"]), True
+        self.ruleset_hook = None  # called on every single-ruleset read: a concurrent apply's writes
+        self.stop_after = {}      # run id -> force-cancels it takes to stop
+        self.cancels = {}
         self.runs = {}            # status -> [run ids]
         self.sticky = set()       # run ids a force-cancel does not stop
         self.fail_cancel = set()  # run ids whose force-cancel errors
@@ -104,6 +107,7 @@ class FakeGitHub:
             if not self.rulesets_readable: raise s.Refuse("HTTP 403")
             return [{"id": r["id"], "name": n} for n, r in self.rulesets.items()]
         if path.startswith(f"orgs/{s.ORG}/rulesets/"):
+            if self.ruleset_hook: self.ruleset_hook(self)
             return json.loads(json.dumps(next(r for r in self.rulesets.values() if str(r["id"]) == path.rsplit("/", 1)[1])))
         raise AssertionError("unexpected read " + path)
 
@@ -135,7 +139,8 @@ class FakeGitHub:
             run_id = int(path.split("/runs/", 1)[1].split("/", 1)[0])
             if run_id in self.fail_cancel:
                 raise s.Refuse(f"failed: POST {path}: gh: Server Error (HTTP 500)")
-            if run_id not in self.sticky:
+            self.cancels[run_id] = self.cancels.get(run_id, 0) + 1
+            if run_id not in self.sticky and self.cancels[run_id] >= self.stop_after.get(run_id, 1):
                 self.runs = {k: [i for i in v if i != run_id] for k, v in self.runs.items()}
         elif method == "POST" and path == f"orgs/{s.ORG}/rulesets":
             self.rulesets[body["name"]] = {**json.loads(json.dumps(body)), "id": 100 + len(self.rulesets)}
@@ -316,7 +321,7 @@ class RulesetTests(unittest.TestCase):
             return s.ensure_rulesets(apps, apply)
 
     def test_absent_rulesets_are_created_from_the_canonical_bodies(self):
-        fake = FakeGitHub()
+        fake = FakeGitHub(rulesets={})
         self.assertEqual(self.ensure(fake, ["gridcraft"]), {})
         self.assertEqual(fake.writes, [("POST", "orgs/storytold/rulesets", body) for body in s.canonical(["gridcraft"], TEAM)])
 
@@ -464,12 +469,101 @@ class RollbackTests(unittest.TestCase):
         self.assertEqual(fake.policies, [("release", 1), ("nightly-signer", 2)])  # Nothing changed.
 
 
+
+class StrictParsingTests(unittest.TestCase):
+    def setup(self, fake):
+        with patch.object(s, "gh", fake), quiet():
+            s.setup_repo("gridcraft", True, False, LINUX_ROW)
+
+    def test_duplicate_keys_are_refused(self):
+        doubled = SIGN + "    with:\n      tooling-revision: " + PIN + "\n      app-name: gridcraft\n"
+        for label, files in (("two with", {".github/workflows/nightly-sign.yml": doubled}),
+                             ("two jobs keys", {".github/workflows/ci.yml": CI + "jobs:\n  y:\n    runs-on: x\n"}),
+                             ("two jobs", {".github/workflows/ci.yml": CI + "  gate:\n    runs-on: x\n"})):
+            fake = FakeGitHub(); fake.files.update(files)
+            with self.subTest(case=label), self.assertRaisesRegex(s.Refuse, "duplicate"):
+                self.setup(fake)
+            self.assertEqual(fake.writes, [], label)
+        self.assertEqual(sorted(s.parse_workflow(SIGN, "x")), ["release"])  # A valid file still parses.
+
+    def test_wrong_types_are_refusals_not_crashes(self):
+        for label, text in (("uses list", "jobs:\n  x:\n    uses: []\n"), ("if mapping", "jobs:\n  x:\n    if: {a: b}\n"),
+                            ("with list", "jobs:\n  x:\n    uses: ./.github/workflows/ci.yml\n    with: [a]\n"),
+                            ("environment list", "jobs:\n  x:\n    environment: [release]\n")):
+            fake = FakeGitHub(); fake.files[".github/workflows/x.yml"] = text
+            with self.subTest(case=label), self.assertRaisesRegex(s.Refuse, "must be strings"):
+                self.setup(fake)
+            self.assertEqual(fake.writes, [], label)
+
+
+class ConcurrencyTests(unittest.TestCase):
+    """Trust never outlives coverage, and one apply never drops another's additions."""
+    def ensure(self, fake, apps):
+        with patch.object(s, "gh", fake), quiet():
+            return s.ensure_rulesets(apps, True)
+
+    def test_a_list_changed_since_the_read_is_not_overwritten(self):
+        fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]))
+        def other_apply(f):  # Another run adds wordcraft between this run's read and its PUT.
+            f.ruleset_hook = None
+            for r in f.rulesets.values(): r["conditions"]["repository_name"]["include"].append("wordcraft")
+        reads = {"n": 0}
+        def hook(f):
+            reads["n"] += 1
+            if reads["n"] == 3: other_apply(f)  # 2 reads by org_rulesets, then the re-read before the PUT
+        fake.ruleset_hook = hook
+        with self.assertRaisesRegex(s.Refuse, "changed since this run read it"):
+            self.ensure(fake, ["gridcraft"])
+        self.assertEqual([w for w in fake.writes if w[0] == "PUT"], [])
+
+    def test_a_put_that_another_run_overwrote_is_caught(self):
+        fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]))
+        reads = {"n": 0}
+        def hook(f):
+            reads["n"] += 1
+            if reads["n"] == 4:  # Right after this run's PUT, another run PUTs its own older list back.
+                for r in f.rulesets.values(): r["conditions"]["repository_name"]["include"] = ["photocraft", "wordcraft"]
+        fake.ruleset_hook = hook
+        with self.assertRaisesRegex(s.Refuse, "lost repos right after"):
+            self.ensure(fake, ["gridcraft"])
+
+    def test_no_trust_without_live_coverage(self):
+        for label, overrides in (("new trust", {}), ("kept trust", {"branch": MAIN, "policies": [("release", 1), ("nightly-signer", 2)]})):
+            fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]), **overrides)
+            with self.subTest(case=label), patch.object(s, "gh", fake), quiet(), self.assertRaisesRegex(s.Refuse, "do not cover gridcraft now"):
+                s.setup_repo("gridcraft", True, True, LINUX_ROW)
+            self.assertFalse([w for w in fake.writes if "deployment-branch-policies" in w[1]], label)
+        # A plan does not need the rulesets to exist yet.
+        fake = FakeGitHub(rulesets={})
+        with patch.object(s, "gh", fake), quiet():
+            s.setup_repo("gridcraft", False, False, LINUX_ROW)
+
+    def test_trusted_but_uncovered_repos_are_found_across_all_apps(self):
+        fake = FakeGitHub(rulesets=existing_rulesets(["photocraft"]), policies=[("release", 1), ("nightly-signer", 2)])
+        with patch.object(s, "gh", fake), quiet():
+            self.assertEqual(s.uncovered_trust(["gridcraft", "photocraft"]), ["gridcraft"])
+            fake.rulesets = existing_rulesets(["gridcraft", "photocraft"])
+            self.assertEqual(s.uncovered_trust(["gridcraft", "photocraft"]), [])
+            fake.rulesets = existing_rulesets(["gridcraft"], **{s.RULESET_HISTORY: lambda r: r.update(enforcement="evaluate")})
+            self.assertEqual(s.uncovered_trust(["gridcraft"]), ["gridcraft"])  # A drifted ruleset is no coverage.
+
+
+class RollbackFinalReadTests(unittest.TestCase):
+    def test_a_run_stopped_by_the_last_round_is_not_reported_active(self):
+        fake = FakeGitHub(branch=MAIN, policies=[("release", 1), ("nightly-signer", 2)], runs={"queued": [5]},
+                          stop_after={5: s.MAX_CANCEL_ROUNDS})
+        with patch.object(s, "gh", fake), quiet():
+            s.rollback("gridcraft", True, wait=lambda seconds: None)
+        self.assertEqual(fake.cancels, {5: s.MAX_CANCEL_ROUNDS})
+        self.assertEqual(fake.runs["queued"], [])
+
 class MainTests(unittest.TestCase):
     REG = {"apps": {"gridcraft": LINUX_ROW}}
 
-    def main(self, argv, readback_result=0, setup=None):
+    def main(self, argv, readback_result=0, setup=None, exposed=()):
         with patch.object(s, "registry", return_value=self.REG), patch.object(s, "ensure_rulesets", return_value={}), \
              patch.object(s, "setup_repo", side_effect=setup), patch.object(s, "readback", return_value=readback_result) as rb, \
+             patch.object(s, "uncovered_trust", return_value=list(exposed)), \
              patch.object(sys, "argv", ["nightly_signer_settings.py", *argv]), quiet(), self.assertRaises(SystemExit) as code:
             s.main()
         return code.exception.code, rb
@@ -483,6 +577,33 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 0); rb.assert_not_called()
         def refuse(*args): raise s.Refuse("no")
         self.assertEqual(self.main(["apply", "--repos", "gridcraft"], setup=refuse)[0], 1)
+
+    def test_apply_fails_when_any_repo_is_trusted_without_coverage(self):
+        self.assertEqual(self.main(["apply", "--repos", "gridcraft"], exposed=["wordcraft"])[0], 1)
+
+    def test_an_unexpected_response_refuses_that_repo_and_the_run_goes_on(self):
+        self.REG = {"apps": {"anicraft": LINUX_ROW, "gridcraft": LINUX_ROW}}
+        seen = []
+        def setup(app, *rest):
+            seen.append(app)
+            if app == "anicraft": raise KeyError("object")
+        self.assertEqual(self.main(["apply", "--repos", "all"], setup=setup)[0], 1)
+        self.assertEqual(seen, ["anicraft", "gridcraft"])
+
+    def test_repos_and_sha_are_taken_from_trusted_values(self):
+        self.REG = {"apps": {"gridcraft": LINUX_ROW, "wordcraft": LINUX_ROW}}
+        with patch.object(s, "registry", return_value=self.REG), patch.object(sys, "argv", ["x", "plan", "--repos", "gridcraft,evil;rm"]), \
+             quiet(), self.assertRaises(SystemExit) as code:
+            s.main()
+        self.assertIn("not admitted", str(code.exception.code))
+        got = []
+        with patch.object(s, "registry", return_value=self.REG), patch.object(s, "advance", side_effect=lambda *a: got.append(a)), \
+             patch.object(sys, "argv", ["x", "advance", "--repos", "gridcraft", "--sha", "A" * 40]), quiet(), self.assertRaises(SystemExit):
+            s.main()
+        with patch.object(s, "registry", return_value=self.REG), patch.object(s, "advance", side_effect=lambda *a: got.append(a)), \
+             patch.object(sys, "argv", ["x", "advance", "--repos", "gridcraft", "--sha", "ab" * 20]), quiet():
+            s.main()
+        self.assertEqual(got, [("gridcraft", "ab" * 20, False)])
 
     def test_flag_sets_the_option_for_the_run(self):
         seen = []

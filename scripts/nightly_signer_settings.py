@@ -121,15 +121,40 @@ def main_tip(app):
     return gh("GET", f"repos/{ORG}/{app}/branches/main")["commit"]["sha"]
 
 
+class StrictLoader(yaml.BaseLoader):
+    """BaseLoader (every scalar a string) that refuses a duplicate mapping key: GitHub rejects those files, and
+    BaseLoader alone would keep the last value and check something GitHub never runs."""
+
+
+def _unique_mapping(loader, node):
+    seen = set()
+    for key_node, _ in node.value:
+        key = loader.construct_object(key_node, deep=True)
+        if not isinstance(key, str) or key in seen:
+            raise yaml.constructor.ConstructorError(None, None, f"duplicate or non-string key {key!r}", key_node.start_mark)
+        seen.add(key)
+    return loader.construct_mapping(node, deep=True)
+
+
+StrictLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
 def parse_workflow(text, where):
-    """A workflow's jobs as parsed mappings (string scalars only), or a refusal."""
+    """A workflow's jobs as parsed mappings (string scalars only), or a refusal. Every key the checks read has
+    the type GitHub requires, so a check never meets a list where it expects a string."""
     try:
-        doc = yaml.load(text, Loader=yaml.BaseLoader)
+        doc = yaml.load(text, Loader=StrictLoader)
     except yaml.YAMLError as error:
         raise Refuse(f"{where} is not valid YAML: {str(error).splitlines()[0]}")
     jobs = doc.get("jobs") if isinstance(doc, dict) else None
     if not isinstance(jobs, dict) or not all(isinstance(job, dict) for job in jobs.values()):
         raise Refuse(f"{where} has no mapping of jobs")
+    for name, job in jobs.items():
+        env = job.get("environment")
+        if any(key in job and not isinstance(job[key], str) for key in ("uses", "if")) or \
+                ("with" in job and not isinstance(job["with"], dict)) or \
+                (env is not None and not isinstance(env, str) and not (isinstance(env, dict) and isinstance(env.get("name"), str))):
+            raise Refuse(f"{where} job {name}: uses and if must be strings, with a mapping, environment a name")
     return jobs
 
 
@@ -327,9 +352,38 @@ def ensure_rulesets(apps, apply):
         if not missing:
             print(f"  exact  org ruleset {body['name']!r} already covers {len(apps)} repos"); continue
         update = {k: copy.deepcopy(have[k]) for k in ("name", "target", "enforcement", "conditions", "rules", "bypass_actors")}
-        update["conditions"]["repository_name"]["include"] = sorted(before[body["name"]] | set(apps))  # Only the repo list changes.
+        wanted = before[body["name"]] | set(apps)
+        update["conditions"]["repository_name"]["include"] = sorted(wanted)  # Only the repo list changes.
+        if apply:
+            # GitHub has no conditional ruleset update. Re-read just before the PUT and refuse a list another run
+            # changed, so this PUT never drops its additions; read again after, so a concurrent PUT that dropped
+            # ours is caught before any trust is granted.
+            if covered(gh("GET", f"orgs/{ORG}/rulesets/{have['id']}")) != before[body["name"]]:
+                raise Refuse(f"org ruleset {body['name']!r} changed since this run read it; is another apply running? Re-run alone")
         gh("PUT", f"orgs/{ORG}/rulesets/{have['id']}", update, write=True, apply=apply)
+        if apply and not wanted <= covered(gh("GET", f"orgs/{ORG}/rulesets/{have['id']}")):
+            raise Refuse(f"org ruleset {body['name']!r} lost repos right after this run's update; is another apply running? Re-run alone")
     return before
+
+
+def live_coverage():
+    """The repos both canonical rulesets cover right now (an empty set if either is missing or differs)."""
+    team, current = gh("GET", f"orgs/{ORG}/teams/{TEAM}")["id"], org_rulesets()
+    sets = []
+    for body in canonical([], team):
+        have = current.get(body["name"])
+        sets.append(covered(have) if have is not None and shape(have) == shape(body) else set())
+    return sets[0] & sets[1]
+
+
+def uncovered_trust(apps):
+    """Apps whose release environment trusts the signer branch although the live rulesets don't cover them."""
+    live, found = live_coverage(), []
+    for app in sorted(set(apps) - live):
+        policies = gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies?per_page=100", ok404=True) or {}
+        if any(p.get("name") == BRANCH for p in policies.get("branch_policies") or []):
+            found.append(app)
+    return found
 
 
 def owned_before(app, before):
@@ -361,6 +415,9 @@ def setup_repo(app, apply, owned, row):
             raise Refuse(f"{REF} already exists at {head[:10]} and is not ours: it may be hostile. Delete it; never adopt it.")
         check_tree(app, head)
         print(f"  exact  {app} {REF} at {head[:10]}")
+    # Trust (new or kept) only for a repo the live rulesets cover now, read after every ruleset write of this run.
+    if apply and app not in live_coverage():
+        raise Refuse(f"the org rulesets do not cover {app} now; not granting or keeping {BRANCH} trust (run rollback if it is trusted)")
     if ("nightly-signer", "branch") in trust:
         print(f"  exact  {app} {ENV} environment already trusts {BRANCH}")
     else:
@@ -482,7 +539,14 @@ def rollback(app, apply, wait=None):
         wait(10)
         active, rounds = cancel_round(app, apply, failures), rounds + 1
     if apply and active:
-        failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
+        # The last round's count was read before its cancellations: read once more before calling it a failure.
+        wait(10)
+        try:
+            active = len(queued_signer_runs(app))
+        except Refuse as error:
+            failures.append(f"listing signer runs: {error}")
+        if active:
+            failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
     print("  Keep the rulesets until the environment is verified; if compromise is suspected, rotate the release secrets.")
     if failures:
         raise Refuse("; ".join(failures))
@@ -499,17 +563,21 @@ def main():
     OPTIONS["require_pinned_release"] = args.require_pinned_release
     reg = registry()
     admitted = registry_apps(reg)
-    apps = admitted if args.repos == "all" else sorted(set(args.repos.split(",")))
-    unknown = [a for a in apps if a not in admitted or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", a)]
+    # Every value that reaches a gh argument comes from the registry or is rebuilt from a parsed number: the
+    # command line only selects among the admitted names, never supplies one.
+    requested = set(admitted) if args.repos == "all" else set(args.repos.split(","))
+    unknown = sorted(requested - set(admitted))
     if unknown:
         sys.exit(f"not admitted in craft-common-actions main nightly-apps.json: {unknown}")
+    apps = [app for app in admitted if app in requested and re.fullmatch(r"[a-z0-9][a-z0-9-]*", app)]
     if args.mode in ("advance", "rollback"):
         if len(apps) != 1:
             sys.exit(f"{args.mode} takes exactly one repo")
         if args.mode == "advance" and not re.fullmatch(r"[0-9a-f]{40}", args.sha or ""):
             sys.exit("advance needs --sha <full reviewed main commit>")
+        sha = format(int(args.sha, 16), "040x") if args.mode == "advance" else None
         try:
-            advance(apps[0], args.sha, args.apply) if args.mode == "advance" else rollback(apps[0], args.apply)
+            advance(apps[0], sha, args.apply) if args.mode == "advance" else rollback(apps[0], args.apply)
         except Refuse as error:
             sys.exit(f"refused: {error}")
         return
@@ -530,9 +598,18 @@ def main():
             ready.append(app)
         except Refuse as error:
             print(f"  REFUSED {app}: {error}"); blocked.append(app)
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            # An unexpected response shape refuses this repo, never the remaining ones.
+            print(f"  REFUSED {app}: unexpected GitHub response ({type(error).__name__}: {error})"); blocked.append(app)
     print(f"== {'applied' if apply else 'would apply'}: {', '.join(ready) or 'none'}; refused: {', '.join(blocked) or 'none'}")
     # A failed readback after apply is a failed apply.
     verified = readback(ready, reg["apps"]) if apply and ready else 0
+    if apply:
+        # Across every admitted repo, not just this run's: trust must never outlive ruleset coverage.
+        exposed = uncovered_trust(admitted)
+        if exposed:
+            print(f"  EXPOSED {', '.join(exposed)}: {ENV} trusts {BRANCH} without the rulesets; run rollback for each now")
+            verified = 1
     sys.exit(1 if blocked or verified else 0)
 
 
