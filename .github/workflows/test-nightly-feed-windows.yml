@@ -51,6 +51,7 @@ jobs:
           python -I -B -c "import zipfile; z=zipfile.ZipFile('artifact.zip','w'); z.writestr('artifact.json','{\"artifact\": \"downloaded\"}'); z.close()"
           python -I -B -c "import zipfile; zipfile.ZipFile('artifact.zip').extractall('.downloaded')"
           cat .downloaded/artifact.json
+          rm -f artifact.zip
       - name: Record the volume and whether path and handle stats agree here
         shell: bash
         run: |
@@ -71,16 +72,24 @@ jobs:
           NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
         run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
       - name: The strict comparison must refuse a just-arrived file (gate)
+        if: matrix.os == 'windows-latest'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           # 644556de is the diagnostics-only build: the strict five-field comparison. Reading
           # just-arrived files with it must fail here, otherwise this run did not reproduce the
-          # signer's refusal and says nothing about the fix.
+          # signer's refusal and says nothing about the fix. discover -k keeps the test importable
+          # under -I, which implies -P and therefore leaves the checkout off sys.path.
           gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
-          if NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest -v \
-              tests.test_nightly_feed_windows.JustWrittenJsonTests.test_a_just_written_or_extracted_json_reads 2>&1 | tee "$RUNNER_TEMP/strict.log"; then
+          set +e
+          NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover \
+            -s tests -p test_nightly_feed_windows.py -k test_a_just_written_or_extracted_json_reads -v 2>&1 | tee "$RUNNER_TEMP/strict.log"
+          status="${PIPESTATUS[0]}"
+          set -e
+          # The gate only means anything if that one test actually ran.
+          grep -Eq '^Ran 1 test' "$RUNNER_TEMP/strict.log" || { echo "::error::the strict comparison's test did not run, so this run proves nothing"; exit 1; }
+          if [ "$status" -eq 0 ]; then
             echo "::error::the strict comparison accepted just-arrived files on this run, so the reproduction is not established here"
             exit 1
           fi
