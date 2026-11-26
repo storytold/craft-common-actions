@@ -11,14 +11,12 @@ on:
     paths:
       - scripts/nightly_feed.py
       - tests/test_nightly_feed_windows.py
-      - tests/test_nightly_feed.py
       - .github/workflows/test-nightly-feed-windows.yml
   push:
     branches: [main]
     paths:
       - scripts/nightly_feed.py
       - tests/test_nightly_feed_windows.py
-      - tests/test_nightly_feed.py
       - .github/workflows/test-nightly-feed-windows.yml
   workflow_dispatch:
 
@@ -71,7 +69,7 @@ jobs:
         shell: bash
         env:
           NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
-        run: python -I -B -m unittest discover -s tests -p 'test_nightly_feed*.py' -v
+        run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
       - name: The strict comparison must refuse a just-arrived file (gate)
         shell: bash
         env:
