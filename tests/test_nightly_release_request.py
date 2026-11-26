@@ -172,6 +172,48 @@ class RequestTests(unittest.TestCase):
         self.api.rows['/actions/runs/100/attempts/1']['triggering_actor']={'login':'different'}
         with self.assertRaisesRegex(ValueError,'metadata changed'): self.invoke()
 
+    def test_first_signer_attempt_accepts_exact_api_creation_skew(self):
+        # Synthetic times reproduce GitHub's observed row shape: root creation equals start,
+        # and only the exact attempt's creation field is one second later.
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows['/actions/runs/200/attempts/1']['created_at'] = '2026-11-22T00:00:02Z'
+        request = self.invoke()
+        self.assertEqual(request['signer']['created_at'], request['signer']['run_started_at'])
+        r.request_contract(self.policy, request)
+
+    def test_signer_timestamp_exception_does_not_mask_attempt_or_identity_drift(self):
+        path = '/actions/runs/200/attempts/1'
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows[path]['created_at'] = '2026-11-22T00:00:02Z'
+        for key, value in [('created_at', '2026-11-22T00:00:03Z'),
+                           ('created_at', '2026-11-22T00:00:00Z'),
+                           ('created_at', 'not a timestamp'),
+                           ('run_started_at', '2026-11-22T00:00:02Z'),
+                           ('head_sha', 'e'*40), ('workflow_id', 93), ('run_attempt', 2)]:
+            with self.subTest(key=key, value=value):
+                saved = copy.deepcopy(self.api.rows[path])
+                self.api.rows[path][key] = value
+                try:
+                    with self.assertRaises(ValueError): self.invoke()
+                finally:
+                    self.api.rows[path] = saved
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:02Z')
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'): self.invoke()
+
+    def test_timestamp_exception_does_not_apply_to_producer_or_rerun(self):
+        self.modify_run(100, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows['/actions/runs/100/attempts/1']['created_at'] = '2026-11-22T00:00:02Z'
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'): self.invoke()
+
+        self.policy['manual_actors'] = ['approved']
+        signer = self.api.rows['/actions/runs/200']
+        signer.update(run_attempt=2, triggering_actor={'login': 'approved'},
+                      created_at=signer['run_started_at'])
+        self.api.rows['/actions/runs/200/attempts/2'] = {
+            **signer, 'created_at': '2026-11-22T00:00:02Z'}
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'):
+            r.read_role(self.api, self.policy, 200, 2, signer=True)
+
     def test_manual_producer_and_all_reruns_use_current_not_original_actor(self):
         self.modify_run(100,'event','workflow_dispatch'); self.modify_run(100,'actor',{'login':'approved'})
         self.modify_run(100,'triggering_actor',{'login':'unapproved'})

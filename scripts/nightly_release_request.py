@@ -293,8 +293,15 @@ def role(policy, row, run_id, attempt, *, signer=False, producer=None):
 def read_role(api, policy, run_id, attempt, *, signer=False, producer=None):
     # Root is current attempt authority; attempts endpoint is exact-attempt evidence.
     root = role(policy, api.request('GET', f'/actions/runs/{run_id}'), run_id, attempt, signer=signer, producer=producer)
-    exact = role(policy, api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}'),
-        run_id, attempt, signer=signer, producer=producer)
+    row = api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}')
+    # GitHub can report first-attempt creation a second after the shared start time
+    # while the current run's creation and start agree. Normalize only that field;
+    # role() below still validates the exact attempt before comparing both views.
+    if (signer and attempt == 1 and isinstance(row, dict) and
+            root['created_at'] == root['run_started_at'] == row.get('run_started_at') and
+            p.timestamp(row.get('created_at')) == p.timestamp(root['created_at']) + 1):
+        row = {**row, 'created_at': root['created_at']}
+    exact = role(policy, row, run_id, attempt, signer=signer, producer=producer)
     n.require(root == exact, 'root/exact-attempt run metadata changed')
     return root
 
