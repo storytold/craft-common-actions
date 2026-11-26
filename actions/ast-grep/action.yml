@@ -3,9 +3,13 @@ description: "Runs the caller's ast-grep rule tests and scan with a pinned, chec
 
 inputs:
   config:
-    description: "The repository's sgconfig.yml (its ruleDirs, and testConfigs if any), relative to the repository root"
+    description: "The repository's sgconfig.yml (its ruleDirs, and testConfigs if any), relative to the repository root. Empty with shared-rules set: the shared rules are the only ones"
     required: false
     default: "sgconfig.yml"
+  shared-rules:
+    description: "Rule sets from this repository's actions/ast-grep/shared, separated by spaces: rfc-0018 (args-os, clap-error-message, clap-error-message-variable) and rfc-0018-string-error (string-error, which an app turns on once it has no Result<_, String> left). Their tests run before the scan"
+    required: false
+    default: ""
   paths:
     description: "Paths to scan, relative to the repository root, separated by spaces or newlines"
     required: false
@@ -55,6 +59,7 @@ runs:
       shell: bash
       env:
         CONFIG: ${{ inputs.config }}
+        SHARED: ${{ inputs.shared-rules }}
         PATHS: ${{ inputs.paths }}
       run: |
         set -euo pipefail
@@ -66,10 +71,6 @@ runs:
           real=$(realpath -e -- "$1" 2>/dev/null) || return 1
           [[ "$real" == "$root" || "$real" == "$root"/* ]]
         }
-        if ! inside "$CONFIG" || [ ! -f "$CONFIG" ]; then
-          echo "::error::config: '$CONFIG' is not a file inside the repository"
-          exit 1
-        fi
         read -r -d '' -a paths <<< "$PATHS" || true
         for p in "${paths[@]}"; do
           if ! inside "$p" || [ ! -e "$p" ]; then
@@ -77,6 +78,18 @@ runs:
             exit 1
           fi
         done
+        if [ -z "$CONFIG" ]; then
+          if [ -z "$SHARED" ]; then
+            echo "::error::config is empty and shared-rules names no rule set: nothing to scan with"
+            exit 1
+          fi
+          echo "No repository config: only the shared rules apply."
+          exit 0
+        fi
+        if ! inside "$CONFIG" || [ ! -f "$CONFIG" ]; then
+          echo "::error::config: '$CONFIG' is not a file inside the repository"
+          exit 1
+        fi
         # Rules are checked against their tests before they judge the code (with no testConfigs
         # there are none to run).
         ast-grep test --config "$CONFIG" --skip-snapshot-tests
@@ -85,5 +98,40 @@ runs:
         # name looks like an option (a file called --update-all, say) stays a path.
         if ! ast-grep scan --config "$CONFIG" --format github -- "${paths[@]}"; then
           ast-grep scan --config "$CONFIG" --report-style short -- "${paths[@]}" || true
+          exit 1
+        fi
+
+    - name: Shared rules
+      if: inputs.shared-rules != ''
+      shell: bash
+      env:
+        SHARED: ${{ inputs.shared-rules }}
+        PATHS: ${{ inputs.paths }}
+        SHARED_DIR: ${{ github.action_path }}/shared
+      run: |
+        set -euo pipefail
+        # Each named set is a directory of this action with rules/ and rule-tests/. One generated
+        # config lists them, so the sets' own tests run before they judge the caller's code.
+        # The caller's paths were checked in the step above, which also ran when config is empty.
+        config="$RUNNER_TEMP/shared-sgconfig.yml"
+        read -r -d '' -a sets <<< "$SHARED" || true
+        {
+          echo "ruleDirs:"
+          for name in "${sets[@]}"; do
+            if [[ ! "$name" =~ ^[a-z0-9][a-z0-9-]*$ || ! -d "$SHARED_DIR/$name/rules" ]]; then
+              echo "::error::shared-rules: '$name' is not a rule set of this action" >&2
+              exit 1
+            fi
+            echo "  - $SHARED_DIR/$name/rules"
+          done
+          echo "testConfigs:"
+          for name in "${sets[@]}"; do
+            echo "  - testDir: $SHARED_DIR/$name/rule-tests"
+          done
+        } > "$config"
+        read -r -d '' -a paths <<< "$PATHS" || true
+        ast-grep test --config "$config" --skip-snapshot-tests
+        if ! ast-grep scan --config "$config" --format github -- "${paths[@]}"; then
+          ast-grep scan --config "$config" --report-style short -- "${paths[@]}" || true
           exit 1
         fi

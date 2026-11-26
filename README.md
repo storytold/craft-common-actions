@@ -838,6 +838,31 @@ Findings show up as annotations on the pull request; a failing scan also lists e
 error-severity finding fails the job. ast-grep is pinned and its download checked against a
 SHA256 kept in the action, since its releases publish none; pass `sha256` with another `version`.
 
+The rules of [RFC-0018](https://github.com/storytold/craft-contrib/blob/main/rfcs/0018-cli-conventions.md)
+(Craft CLI conventions) are kept here, so an app does not copy them. `shared-rules` names the sets to
+apply, separated by spaces; each set's own rule tests run before the scan, and the scan uses the same
+paths as the app's own config:
+
+| Set | Rules |
+|---|---|
+| `rfc-0018` | `args-os` (no `std::env::args()`, rule 1.5), `clap-error-message` and `clap-error-message-variable` (no string passed to clap's `Command::error`, rule 2.2) |
+| `rfc-0018-string-error` | `string-error` (no `Result<_, String>`, rule 2.2). It is a separate set because most apps return `Result<_, String>` somewhere today: an app turns it on once it has none left |
+
+An app with no rules of its own passes `config: ""`:
+
+```yaml
+jobs:
+  ast-grep:
+    uses: storytold/craft-common-actions/.github/workflows/ast-grep.yml@main
+    with:
+      config: ""
+      shared-rules: rfc-0018
+      paths: apps/photocraft-cli
+```
+
+With a `config` as well, both run. Existing callers that pass only `config` and `paths` are unchanged. A
+rule that is only specific to one app stays in that app's `sgconfig.yml`.
+
 #### Caller Example:
 ```yaml
 jobs:
@@ -1012,7 +1037,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/packaging-lint`: Steps for packaging linter.
 - `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see "Windows installation policy").
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
-- `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
+- `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` and the shared RFC-0018 rule sets it names in `shared-rules` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
 - `actions/check-git-sources`: The check `git-sources.yml` runs, for a job that has already checked out the app; `allowed-prefix` changes where git dependencies may come from (default `git+https://github.com/storytold/`).
 - `actions/rust-cache`: The gate's rust-cache dependency cache, with the key formula in one place. It hashes the canonical root `[profile]` table, then rust-cache keys on the lockfile, member manifests, toolchain, environment, OS and architecture (see "Gate cache reuse"). `save-if` defaults to `false`, so it restores without writing, and only an accepted `true` writes: an empty, whitespace-only or unrecognized value (for example the text of an expression rather than its value) restores only; `job` selects the entry to use, which is the calling job unless an app's own job names the gate's (`job: gate`); `align-environment` keeps the `CARGO_HOME` a toolchain action exports out of the key, and refuses a cargo home other than `~/.cargo`. A self-hosted runner whose `CARGO_HOME` is a crate cache of its own (the cluster runners' node cache) names that directory in `CRAFT_RUNNER_CARGO_HOME`; when the job's `CARGO_HOME` is that directory, with or without `align-environment`, rust-cache gets a job-private directory instead, so it never restores into, prunes or saves the runner's cache, and the entry holds only the target directory. Those entries are keyed apart from GitHub-hosted legs' entries. A `CARGO_HOME` the job sets itself is still refused with `align-environment`. A `CARGO_TARGET_DIR` outside the checkout (such as a short `D:\t` on Windows) is passed to rust-cache as a relative path, so it still restores and saves. A failed job saves nothing unless `cache-on-failure: true`: a job that fails before its test build would otherwise leave a half-filled entry that rust-cache never replaces. `cache-workspace-crates: "true"` uses a rolling entry that also keeps the workspace crates' compiled libraries and unit-test executables: it restores the newest entry under the job's prefix and, where `save-if` allows, saves an entry of the run's own, named after the entry it restored (`<job>-crates-<os>-<arch>-<parent run id>-0`, so a second child of one entry is refused), since rust-cache never replaces an existing key; a saving leg also gets `CRAFT_CACHE_UNITS` for `actions/cache-trim`; `restore: "false"` skips the restore. Pair it with `actions/restore-mtimes`. Use it instead of calling `rust-cache` directly, so a job cannot drift from the gate's key:

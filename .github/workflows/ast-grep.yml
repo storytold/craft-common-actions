@@ -11,6 +11,11 @@ on:
         type: string
         required: false
         default: "sgconfig.yml"
+      shared-rules:
+        description: "Rule sets of the action's shared rules, separated by spaces: rfc-0018 and rfc-0018-string-error. Set config to an empty string to use them alone"
+        type: string
+        required: false
+        default: ""
       paths:
         description: "Paths to scan, relative to the repository root, separated by spaces or newlines"
         type: string
@@ -56,6 +61,7 @@ jobs:
         uses: $/actions/ast-grep
         with:
           config: ${{ inputs.config }}
+          shared-rules: ${{ inputs.shared-rules }}
           paths: ${{ inputs.paths }}
           version: ${{ inputs.version }}
           sha256: ${{ inputs.sha256 }}
