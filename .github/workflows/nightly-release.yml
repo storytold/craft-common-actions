@@ -217,6 +217,7 @@ jobs:
     needs: validate
     if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'windows-x86_64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: windows-latest
+    environment: release
     timeout-minutes: 20
     permissions:
       contents: read
@@ -295,6 +296,7 @@ jobs:
     if: needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'macos-aarch64') && github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     # Same Apple route and `release` environment as the stable macOS job.
     runs-on: macos-15
+    environment: release
     timeout-minutes: 120
     permissions:
       contents: read
@@ -490,6 +492,7 @@ jobs:
       needs.validate.outputs.admitted == 'true' && contains(fromJSON(needs.validate.outputs.platforms), 'linux-x86_64') &&
       github.repository == format('storytold/{0}', inputs.app-name) && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/release' || github.ref == 'refs/heads/nightly-signer') && github.ref_type == 'branch'
     runs-on: ubuntu-22.04
+    environment: release
     timeout-minutes: 20
     permissions:
       contents: read

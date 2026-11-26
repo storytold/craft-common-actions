@@ -93,13 +93,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
     def test_only_signer_has_release_environment_and_only_leaf_step_exports_keys(self):
         graph = jobs(self.release)
-        for name in ("validate", "verify-macos", "smoke-macos", "publish"):
+        bound = {name: re.findall(r"(?m)^    environment: (.+)$", block)
+                 for name, block in graph.items() if re.search(r"(?m)^    environment:", block)}
+        self.assertEqual(bound, {name: ["release"] for name in ("sign-windows", "sign-macos", "sign-linux")})
+        for name in ("validate", "verify-macos", "smoke-macos", "verify-linux", "publish"):
             self.assertNotRegex(graph[name], r"(?m)^    environment:")
             self.assertNotRegex(graph[name], r"\$\{\{\s*secrets\.")
         for name, key, leaf_name, foreign in (("sign-windows", "secrets.WINDOWS_CERTIFICATE", "- name: Sign data only", "APPLE_"),
                                               ("sign-macos", "secrets.APPLE_CERTIFICATE", "- name: Sign, notarize and staple data only", "WINDOWS_")):
             signer = graph[name]
-            self.assertNotIn("environment:", signer)
+            self.assertIn("    environment: release\n", signer)
             self.assertNotIn("id-token:", signer)
             self.assertNotIn("contents: write", signer)
             self.assertNotIn(foreign, signer)

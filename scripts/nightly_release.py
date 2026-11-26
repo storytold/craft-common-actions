@@ -270,8 +270,10 @@ def previous_publication(api, registry, policy, current_request, rows):
     """Authenticate historical protected-release evidence; never execute old code.
 
     Like v1 ownership evidence, Actions metadata is source-owned evidence, not an
-    independent tag-creator signature. Immutable nightly tags/releases are an
-    activation prerequisite. Pruning remains off and has no path through here.
+    independent tag-creator signature. Verify the listed release and current tag
+    and asset digests; this cannot prove that repository writers never changed
+    them or removed an entire release. A mutable-release pilot must not infer
+    permission to publish again from an empty listing. Pruning is separate.
     """
     release = p.newest_nightly(rows)
     if release is None:
@@ -641,7 +643,7 @@ def combine(state, directories, output):
 
 
 def publish(policy, state, combined, packet, ownership, api, guard, registry):
-    """Only new immutable nightlies; public-but-unreconciled state is never retried."""
+    """Publish a new tag and prerelease; never retry a public-but-unreconciled write."""
     packet = owned_output(packet)
     ownership = owned_output(ownership)
     plan = state["plan"]; prepared = plan["identity"]

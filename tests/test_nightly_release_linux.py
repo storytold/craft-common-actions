@@ -368,9 +368,8 @@ class LinuxReleaseWorkflowTests(unittest.TestCase):
     def test_linux_secret_reaches_only_the_single_protected_sign_step(self):
         self.assertEqual(self.release.count('secrets.LINUX_SIGNING_KEY'), 1)
         sign = job_block(self.release, 'sign-linux')
-        # The key arrives through workflow_call secrets the caller forwards; no job binds an
-        # environment, so no reviewer prompt sits between a dispatcher and a nightly.
-        self.assertNotIn('environment:', sign)
+        # The signer uses the stable release environment; the fresh verifier remains keyless.
+        self.assertIn('    environment: release\n', sign)
         declared = self.release.split('workflow_call', 1)[1].split('jobs:', 1)[0]
         self.assertIn('      LINUX_SIGNING_KEY:\n        required: false\n', declared)
         self.assertIn('runs-on: ubuntu-', sign)

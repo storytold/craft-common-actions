@@ -86,7 +86,7 @@ def absent(api, suffix):
     except APIError as error:
         if error.status == 404: return
         raise
-    raise n.InvalidNightly("immutable tag or release already exists; no clobber")
+    raise n.InvalidNightly("nightly tag or release already exists; no clobber")
 
 
 def prepare_packet(registry, prepared, directory, environment, *, signed=False):

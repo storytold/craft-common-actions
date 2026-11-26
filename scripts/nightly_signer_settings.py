@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Settings for `refs/heads/nightly-signer` across the nightly apps. Read-only unless `apply`/`advance`/`rollback --apply`.
+"""Settings for `refs/heads/nightly-signer` across the nightly apps. Read-only unless `apply` or `advance`/`enable`/`rollback --apply`.
 
   plan     --repos all|a,b,...        read everything and print every write `apply` would make (needs admin:org)
   apply    --repos all|a,b,...        make them; per repo, skip what is already exact and refuse anything else
   readback --repos all|a,b,...        check every setting exactly
   advance  --repos <one> --sha S [--apply]   fast-forward one repo's branch to a reviewed main commit
-  rollback --repos <one> [--apply]           drop the environment trust (verified), then cancel its signer runs
+  enable   --repos <one> --sha S [--apply]   explicitly re-enable only the fully checked, reviewed branch head
+  rollback --repos <one> [--apply]           revoke environment trust, disable workflow and cancel signer runs
   --require-pinned-release                   also refuse release.yml callers not pinned to a full SHA (default: warn)
 
 `all` means every app with targets in craft-common-actions main's nightly-apps.json. Two org rulesets, because a
@@ -28,6 +29,8 @@ SECRETS = {"linux": {"LINUX_SIGNING_KEY"},
            "macos": {"APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_ID", "APPLE_PASSWORD", "APPLE_TEAM_ID", "KEYCHAIN_PASSWORD"},
            "windows": {"AZURE_CERT_PROFILE", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SIGNING_ACCOUNT",
                        "AZURE_SIGNING_ENDPOINT", "AZURE_TENANT_ID"}}
+SIGNING_NAMES = set().union(*SECRETS.values())
+SIGNING_JOBS = {"sign-windows", "sign-macos", "sign-linux"}
 GUARD = "${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}"
 SHA40 = re.compile(r"[0-9a-f]{40}")
 # The only reusable workflows an app may call: craft-common-actions' own, at a plain ref (local ./ calls are
@@ -38,7 +41,7 @@ PINNED_TOOLING = ("nightly-release.yml", "nightly-unsigned.yml")
 MAX_CALL_DEPTH = 4  # GitHub allows ten levels; craft-common-actions nests at most two.
 # --require-pinned-release: also require release.yml callers to pin a full SHA. Off by default while every app
 # calls release.yml@main; its environment bindings are checked at the called ref either way.
-OPTIONS = {"require_pinned_release": False, "accept_unverified_secrets": False}
+OPTIONS = {"require_pinned_release": False}
 MAX_FIRST_PARENT_STEPS = 500
 MAX_CANCEL_ROUNDS = 5
 ACTIVE_RUN_STATUSES = ("queued", "in_progress", "waiting", "pending", "requested")
@@ -105,37 +108,61 @@ def required_secrets(row):
     return set().union(*(SECRETS[t["target"]["os"]] for t in row["targets"]))
 
 
+def metadata_list(path, key):
+    """Read a bounded, complete metadata inventory; missing counts or changing pages are not evidence."""
+    found, total = [], None
+    for page in range(1, 21):
+        data = gh("GET", f"{path}?per_page=100&page={page}")
+        if not isinstance(data, dict) or not isinstance(data.get(key), list) or type(data.get("total_count")) is not int:
+            raise Refuse(f"UNVERIFIED metadata inventory: {path}")
+        batch, count = data[key], data["total_count"]
+        total = count if total is None else total
+        if count != total or not 0 <= total <= 2000 or len(batch) > 100:
+            raise Refuse(f"UNVERIFIED changing or unbounded metadata: {path}")
+        found.extend(batch)
+        if len(found) > total:
+            raise Refuse(f"UNVERIFIED metadata count: {path}")
+        if len(found) == total:
+            return found
+        if len(batch) < 100:
+            raise Refuse(f"UNVERIFIED incomplete metadata: {path}")
+    raise Refuse(f"UNVERIFIED metadata pagination exhausted: {path}")
+
+
+def secret_names(path):
+    items = metadata_list(path, "secrets")
+    if any(not isinstance(item, dict) or not isinstance(item.get("name"), str) for item in items):
+        raise Refuse(f"UNVERIFIED secret-name metadata: {path}")
+    names = [item["name"] for item in items]
+    if len(set(names)) != len(names):
+        raise Refuse(f"UNVERIFIED duplicate secret-name metadata: {path}")
+    return set(names)
+
+
 def check_secrets(app, row):
-    """Every signing secret must be readable where the caller reads it: repository scope, which is checkable.
+    """Read names only: signing credentials belong exclusively to the release environment.
 
-    Org-scope secrets are not readable with this token, and a name that exists only on the release
-    environment can never reach a caller that forwards `NAME: ${{ secrets.NAME }}`. So repo-scope presence
-    passes, and anything else is UNVERIFIED: refused unless the operator passes
-    --accept-unverified-secrets, which is recorded in the output rather than passed silently.
+    The exact 13-name identity map is a reusable-workflow interface, not permission to create caller-scope
+    copies. Environment secrets resolve on the callee's signing jobs. Org metadata is the repository's
+    effective inventory (including selected/private visibility), not every secret in the organization.
     """
-    wanted = required_secrets(row)
-    repo_level = {s["name"] for s in gh("GET", f"repos/{ORG}/{app}/actions/secrets?per_page=100")["secrets"]}
-    missing = sorted(wanted - repo_level)
-    if not missing:
-        print(f"  ok     {app} signing secrets readable by the caller: {len(wanted)} names at repository scope")
-        return
-    environment_only = sorted(set(missing) & {s["name"] for s in
-        gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/secrets?per_page=100")["secrets"]})
-    detail = (f"; {', '.join(environment_only)} exist only on the {ENV} environment, which a caller cannot read"
-              if environment_only else "; they may be org-scope, which this token cannot read")
-    if OPTIONS["accept_unverified_secrets"]:
-        print(f"  UNVERIFIED  {app} signing secrets not visible at repository scope: {missing}{detail} "
-              "(accepted with --accept-unverified-secrets; the signer may still receive them empty)")
-        return
-    raise Refuse(f"{app} signing secrets are UNVERIFIED: {missing} are not at repository scope{detail}. "
-                 "Stop the advance here, or pass --accept-unverified-secrets to record that you accepted it.")
-
-def org_secret_names():
-    """Org secrets visible to these repos, if this token may read them; empty when it may not."""
+    repo = f"repos/{ORG}/{app}"
     try:
-        return {s["name"] for s in gh("GET", f"orgs/{ORG}/actions/secrets?per_page=100")["secrets"]}
-    except Exception:
-        return set()
+        environment = secret_names(f"{repo}/environments/{ENV}/secrets")
+        repository = secret_names(f"{repo}/actions/secrets")
+        organization = secret_names(f"{repo}/actions/organization-secrets")
+    except Refuse as error:
+        raise Refuse(f"{app} signing-secret metadata UNVERIFIED: {error}")
+    copies = sorted(SIGNING_NAMES & (repository | organization))
+    if copies:
+        raise Refuse(f"{app} signing credential names at repository or effective organization scope: {copies}; "
+                     f"only the {ENV} environment may hold them")
+    missing = sorted(required_secrets(row) - environment)
+    if missing:
+        raise Refuse(f"{app} {ENV} environment is missing signing secret names: {missing}")
+    print(f"  ok     {app} signing credential names verified at {ENV} environment scope only (values never read)")
+
+
 def main_tip(app):
     return gh("GET", f"repos/{ORG}/{app}/branches/main")["commit"]["sha"]
 
@@ -182,20 +209,33 @@ def environment_name(job):
     return env.get("name") if isinstance(env, dict) else env
 
 
-def callee_problems(callee, ref, seen, depth=1):
-    """Every job a craft-common-actions callee runs, down its whole call chain: an environment only behind the
-    stable-only guard, and no call outside craft-common-actions."""
+def callee_problems(callee, ref, seen, depth=1, nightly=False, signer=False):
+    """Resolve the whole chain, allowing release credentials only on the pinned native signer jobs.
+
+    The stable release chain retains its existing stable-only guard; nightly producers and nested callees
+    have no environment admission, even with that guard. Context is part of the visited key.
+    """
     where = f"{CCA} {callee}@{ref}"
-    if (callee, ref) in seen:
+    key = (callee, ref, nightly, signer)
+    if key in seen:
         return []
-    seen.add((callee, ref))
     if depth > MAX_CALL_DEPTH:
         return [f"{where}: reusable call chain deeper than {MAX_CALL_DEPTH}"]
+    seen.add(key)
     problems = []
-    for name, job in parse_workflow(text_at(CCA, f".github/workflows/{callee}", ref), where).items():
+    jobs = parse_workflow(text_at(CCA, f".github/workflows/{callee}", ref), where)
+    if signer:
+        missing = sorted(SIGNING_JOBS - set(jobs))
+        if missing:
+            problems.append(f"{where}: missing native signing jobs {missing}")
+    for name, job in jobs.items():
         env = environment_name(job)
-        if env is not None and env != GUARD:
-            problems.append(f"{where} job {name} binds environment {env!r} without the stable-only guard")
+        if signer and name in SIGNING_JOBS:
+            if env != ENV or "uses" in job:
+                problems.append(f"{where} job {name} must bind environment {ENV!r} on a native signing job")
+        elif env is not None and (nightly or env != GUARD):
+            problems.append(f"{where} job {name} binds environment {env!r} without the stable-only guard"
+                            if not nightly else f"{where} job {name} binds an environment outside native signing jobs")
         uses = job.get("uses")
         if uses is None:
             continue
@@ -204,7 +244,7 @@ def callee_problems(callee, ref, seen, depth=1):
         if nested is None:
             problems.append(f"{where} job {name} calls {uses!r}, outside {CCA}")
         else:
-            problems += callee_problems(*nested, seen, depth + 1)
+            problems += callee_problems(*nested, seen, depth + 1, nightly=nightly)
     return problems
 
 
@@ -233,44 +273,49 @@ def signer_job_problems(app, jobs, pin):
 
 
 def declared_secrets_problems(app, pin):
-    """The pinned signer must declare every secret this app forwards, or the forwarding silently does nothing."""
-    wanted = required_secrets(registry()["apps"][app])
+    """Require the 13 identity names; retain only the shared callee's optional, unforwarded PFX route."""
     where = f"{CCA} nightly-release.yml@{pin}"
-    document = yaml.safe_load(text_at(CCA, ".github/workflows/nightly-release.yml", pin)) or {}
-    on = document.get(True) if True in document else document.get("on")
+    try:
+        document = yaml.load(text_at(CCA, ".github/workflows/nightly-release.yml", pin), Loader=StrictLoader)
+    except yaml.YAMLError as error:
+        raise Refuse(f"{where} is not valid YAML: {str(error).splitlines()[0]}")
+    on = document.get("on") if isinstance(document, dict) else None
     call = on.get("workflow_call") if isinstance(on, dict) else None
     spec = call.get("secrets") if isinstance(call, dict) else None
     declared = set(spec) if isinstance(spec, dict) else set()
-    missing = sorted(wanted - declared)
+    missing = sorted(SIGNING_NAMES - declared)
+    extra = sorted(declared - SIGNING_NAMES - {"WINDOWS_CERTIFICATE", "WINDOWS_CERTIFICATE_PASSWORD"})
+    problems = []
     if missing:
-        return [f"{where} does not declare {missing}, which this app forwards; the pin must name a callee that declares them"]
-    return []
+        problems.append(f"{where} does not declare {missing}, required by the identity mapping")
+    if extra:
+        problems.append(f"{where} declares secrets outside the reviewed set: {extra}")
+    if isinstance(spec, dict):
+        for name, declaration in spec.items():
+            if not isinstance(declaration, dict) or declaration.get("required") != "false":
+                problems.append(f"{where} declaration {name} must be optional (environment supplies credentials)")
+    return problems
 
 
 def forwarded_secrets_problems(app, job, name):
-    """A caller may forward the reviewable signing secrets, an identity mapping of exactly the names its targets need.
-
-    The callee cannot read the release environment (an environment does not reach a cross-repo reusable
-    workflow), so the caller forwards them. Anything else stays refused: `inherit`, a value taken from a
-    different secret, an extra or missing name, and an environment on the calling job.
-    """
-    wanted = required_secrets(registry()["apps"][app])
+    """The exact 13-name identity interface; credentials resolve from native callee environments, not copies."""
+    wanted = SIGNING_NAMES
     if "environment" in job:
-        return [f"nightly-sign.yml job {name} binds an environment; the caller forwards the {ENV} secrets by name instead"]
+        return [f"nightly-sign.yml job {name} binds an environment; only native callee signing jobs may bind {ENV}"]
     if "secrets" not in job:
-        return [f"nightly-sign.yml job {name} forwards no secrets; the callee cannot read the {ENV} environment"]
+        return [f"nightly-sign.yml job {name} forwards no secrets; the exact 13-name identity mapping is required"]
     spec = job["secrets"]
     if not isinstance(spec, dict):
-        return [f"nightly-sign.yml job {name} passes secrets: {spec!r}; only an identity mapping of the reviewed names is allowed"]
+        return [f"nightly-sign.yml job {name} passes non-mapping secrets; only an identity mapping of the reviewed names is allowed"]
     problems = []
     for key, value in spec.items():
         if value != "${{ secrets." + key + " }}":
-            problems.append(f"nightly-sign.yml job {name} forwards {key} from {value!r}, not from secrets.{key}")
+            problems.append(f"nightly-sign.yml job {name} forwards {key} not from secrets.{key}; identity expression required")
     extra, missing = sorted(set(spec) - wanted), sorted(wanted - set(spec))
     if extra:
         problems.append(f"nightly-sign.yml job {name} forwards secrets outside the reviewed set: {extra}")
     if missing:
-        problems.append(f"nightly-sign.yml job {name} does not forward {missing}, which this app's targets need")
+        problems.append(f"nightly-sign.yml job {name} does not forward {missing}, required by the 13-name identity interface")
     return problems
 
 
@@ -322,6 +367,8 @@ def check_tree(app, sha):
                 pins.add(pin)
                 if not SHA40.fullmatch(pin):
                     problems.append(f"{item['name']} calls {callee}@{pin}, not a full SHA")
+                problems += callee_problems(callee, pin, seen, nightly=True,
+                                            signer=callee == "nightly-release.yml" and item["name"] == "nightly-sign.yml")
             else:
                 if callee == "release.yml" and not SHA40.fullmatch(pin):
                     if OPTIONS["require_pinned_release"]:
@@ -329,7 +376,7 @@ def check_tree(app, sha):
                     else:
                         print(f"  WARN   {app} {item['name']} calls release.yml@{pin}, not a full SHA: its environment guard is "
                               f"checked at today's {pin} only (pass --require-pinned-release to refuse)")
-                problems += callee_problems(callee, pin, seen)
+                problems += callee_problems(callee, pin, seen, nightly=item["name"] in ("nightly.yml", "nightly-sign.yml"))
     if len(pins) != 1:
         problems.append(f"caller and policy pins differ: {sorted(map(str, pins))}")
     else:
@@ -399,8 +446,10 @@ def env_trust(app):
     mode = env.get("deployment_branch_policy") or {}
     if mode != {"protected_branches": False, "custom_branch_policies": True}:
         raise Refuse(f"{app} {ENV} environment branch mode is {mode}, expected custom policies only")
-    policies = gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies?per_page=100")["branch_policies"]
-    return sorted((p["name"], p.get("type", "branch")) for p in policies)
+    policies = metadata_list(f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies", "branch_policies")
+    if any(not isinstance(p, dict) or not isinstance(p.get("name"), str) or p.get("type") not in ("branch", "tag") for p in policies):
+        raise Refuse(f"{app} UNVERIFIED environment branch admission metadata")
+    return sorted((p["name"], p["type"]) for p in policies)
 
 
 def ensure_rulesets(apps, apply):
@@ -536,9 +585,13 @@ def queued_signer_runs(app, max_pages=20):
     for status in ACTIVE_RUN_STATUSES:
         for page in range(1, max_pages + 1):
             data = gh("GET", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/runs?branch={BRANCH}&status={status}"
-                             f"&per_page=100&page={page}", ok404=True) or {"workflow_runs": []}
-            runs = data.get("workflow_runs") or []
-            found |= {r["id"] for r in runs if r.get("status") in ACTIVE_RUN_STATUSES}
+                             f"&per_page=100&page={page}")
+            runs = data.get("workflow_runs") if isinstance(data, dict) else None
+            if not isinstance(runs, list) or len(runs) > 100 or any(
+                    not isinstance(r, dict) or type(r.get("id")) is not int or r["id"] <= 0
+                    or not isinstance(r.get("status"), str) for r in runs):
+                raise Refuse("UNVERIFIED active signer-run inventory")
+            found |= {r["id"] for r in runs if r["status"] in ACTIVE_RUN_STATUSES}
             if len(runs) < 100:
                 break
         else:
@@ -562,35 +615,87 @@ def first_parent_of_main(app, sha, head):
     raise Refuse(f"{sha[:10]} is more than {MAX_FIRST_PARENT_STEPS} first-parent commits below main; advance in smaller steps")
 
 
-def advance(app, sha, apply):
-    """Fast-forward the signer branch to a reviewed main commit, or resume activation when it is already there.
+def check_admission(app):
+    """Verify canonical organization rules, their actual branch application, and environment admission."""
+    team = gh("GET", f"orgs/{ORG}/teams/{TEAM}")["id"]
+    current = org_rulesets()
+    expected = {}
+    for body in canonical([], team):
+        have = current.get(body["name"])
+        if have is None or shape(have) != shape(body) or app not in covered(have):
+            raise Refuse(f"canonical org ruleset {body['name']!r} does not protect {app}")
+        if type(have.get("id")) is not int or have["id"] <= 0:
+            raise Refuse("UNVERIFIED canonical ruleset identity")
+        expected[have["id"]] = {rule["type"] for rule in body["rules"]}
+    applied = []
+    for page in range(1, 21):
+        batch = gh("GET", f"repos/{ORG}/{app}/rules/branches/{BRANCH}?per_page=100&page={page}")
+        if not isinstance(batch, list) or len(batch) > 100 or any(not isinstance(rule, dict) for rule in batch):
+            raise Refuse("UNVERIFIED applied branch rules")
+        applied.extend(batch)
+        if len(batch) < 100:
+            break
+    else:
+        raise Refuse("UNVERIFIED applied branch rules pagination")
+    for ruleset_id, types in expected.items():
+        actual = {rule.get("type") for rule in applied if rule.get("ruleset_id") == ruleset_id
+                  and rule.get("ruleset_source_type") == "Organization" and rule.get("ruleset_source") == ORG}
+        if not types <= actual:
+            raise Refuse(f"canonical ruleset {ruleset_id} is not applied to {REF}")
+    if env_trust(app) != [(BRANCH, "branch"), ("release", "branch")]:
+        raise Refuse(f"{ENV} environment does not admit exactly release and {BRANCH} branches")
 
-    A rollback disables the signer workflow, so the same call also re-enables it. If enable fails after the
-    branch moved, the retry finds head == sha: that path keeps every check, skips the redundant update, and
-    retries activation, so recovery is resumable instead of stuck behind the fast-forward guard.
+
+def advance(app, sha, apply, enable=False):
+    """Review and fast-forward without changing workflow state; explicit enable requires the reviewed head.
+
+    A same-head retry retains every preflight. Enabling is deliberately separate from moving the branch,
+    and does not restore revoked environment trust: settings must already admit the reviewed signer.
     """
-    head = gh("GET", f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}")["object"]["sha"]
+    if not SHA40.fullmatch(sha or ""):
+        raise Refuse("a full reviewed main commit SHA is required")
+    path = f"repos/{ORG}/{app}/git/ref/heads/{BRANCH}"
+    head = gh("GET", path)["object"]["sha"]
     resume = head == sha
-    if not resume and not (ancestor(f"{ORG}/{app}", sha, main_tip(app)) and ancestor(f"{ORG}/{app}", head, sha)):
+    if enable and not resume:
+        raise Refuse("enable requires --sha to match the current reviewed signer branch head; advance separately")
+    if not ancestor(f"{ORG}/{app}", sha, main_tip(app)) or (not resume and not ancestor(f"{ORG}/{app}", head, sha)):
         raise Refuse(f"{sha} is not a main commit that fast-forwards {REF} from {head}")
-    if not first_parent_of_main(app, sha, head if not resume else sha):
+    if not first_parent_of_main(app, sha, head):
         raise Refuse(f"{sha} is not on main's first-parent history (a commit from inside a merged branch, never main's tip)")
+    state = workflow_state(app)
+    if state not in ("active", "disabled_manually"):
+        raise Refuse(f"{SIGNER_WORKFLOW} state {state!r} cannot be verified for advance/enable")
+    check_admission(app)
+    check_secrets(app, registry()["apps"][app])
     if queued_signer_runs(app):
         raise Refuse("a nightly-sign run is queued or running; it would fail closed after the move. Wait for it.")
     check_tree(app, sha)
-    if resume:
-        print(f"  note   {REF} is already at {sha[:10]}; resuming activation only")
+    # Reads above can take time. Refuse a concurrent move or workflow-state change before any mutation.
+    if gh("GET", path)["object"]["sha"] != head or workflow_state(app) != state:
+        raise Refuse("signer branch head or workflow state changed during preflight; review again")
+    check_admission(app)
+    if enable:
+        if state == "active":
+            print(f"  exact  {app} {SIGNER_WORKFLOW} is already active at reviewed {sha[:10]}")
+        else:
+            try:
+                gh("PUT", f"repos/{ORG}/{app}/actions/workflows/nightly-sign.yml/enable", write=True, apply=apply)
+                if apply and (workflow_state(app) != "active" or gh("GET", path)["object"]["sha"] != sha):
+                    raise Refuse("workflow activation or reviewed head did not read back exactly")
+            except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
+                raise Refuse(f"PARTIAL: enable attempted; activation and reviewed head are not verified: {error}; run rollback")
+    elif resume:
+        print(f"  exact  {REF} already at reviewed {sha[:10]}; workflow remains {state}")
     else:
         print(f"  review first: https://github.com/{ORG}/{app}/compare/{head}...{sha} (all of .github/ and packaging/)")
-        gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
-    if apply and workflow_state(app) == "disabled_manually":
-        # A rollback disabled the signer; this re-enables it so the recovery can finish the job.
-        set_workflow_enabled(app, True)
-        if workflow_state(app) != "active":
-            raise Refuse(f"{SIGNER_WORKFLOW} is still disabled after enabling it")
-        print(f"  done   re-enabled {app} {SIGNER_WORKFLOW}")
-    elif apply and workflow_state(app) == "missing":
-        raise Refuse(f"{SIGNER_WORKFLOW} is missing, so activation cannot be verified; the switch-on PR must merge first")
+        try:
+            gh("PATCH", f"repos/{ORG}/{app}/git/refs/heads/{BRANCH}", {"sha": sha, "force": False}, write=True, apply=apply)
+            if apply and (gh("GET", path)["object"]["sha"] != sha or workflow_state(app) != state):
+                raise Refuse("reviewed head or unchanged workflow state did not read back exactly")
+        except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
+            raise Refuse(f"PARTIAL: advance attempted; branch/workflow state is not verified: {error}; run rollback")
+        print(f"  note   workflow remains {state}; use explicit enable --sha after recovery if disabled")
 
 
 def cancel_round(app, apply, failures):
@@ -621,7 +726,7 @@ def signer_workflow(app):
 def workflow_state(app):
     """The signer workflow's state: 'active', 'disabled_manually', or 'missing'."""
     workflow = signer_workflow(app)
-    return "missing" if workflow is None else workflow.get("state", "active")
+    return "missing" if workflow is None else workflow.get("state", "unverified")
 
 
 def set_workflow_enabled(app, enabled):
@@ -633,37 +738,39 @@ def set_workflow_enabled(app, enabled):
 
 
 def rollback(app, apply, wait=None):
-    """Disable the signer workflow first, since a disabled workflow cannot be dispatched from any ref, then cancel
-    the active signer runs, each on its own, and list again until none is left (force-cancel is asynchronous). Every
-    failure is reported. The branch and rulesets stay: the no-deletion ruleset has no bypass by design, so the
-    branch cannot be closed, and the workflow switch is the stop that actually holds."""
+    """Attempt independent containment: revoke environment trust, disable dispatch, and cancel every active run.
+    Failures never short-circuit later containment; report partial state rather than claiming a complete stop.
+    The branch and rulesets remain, and force-cancel is asynchronous so cancellation is checked repeatedly."""
     import time
     wait = time.sleep if wait is None else wait
     failures = []
     try:
-        for policy in gh("GET", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies?per_page=100")["branch_policies"]:
-            if policy["name"] == BRANCH:
-                gh("DELETE", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies/{policy['id']}", write=True, apply=apply)
+        for policy in metadata_list(f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies", "branch_policies"):
+            if policy.get("name") == BRANCH:
+                try:
+                    policy_id = policy.get("id")
+                    if type(policy_id) is not int or policy_id <= 0:
+                        raise Refuse("unverified environment policy id")
+                    gh("DELETE", f"repos/{ORG}/{app}/environments/{ENV}/deployment-branch-policies/{policy_id}", write=True, apply=apply)
+                except Refuse as error:
+                    failures.append(f"revoking policy: {error}")
         if apply and env_trust(app) != [("release", "branch")]:
             failures.append(f"{ENV} environment still trusts more than release")
-    except Refuse as error:
+    except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
         failures.append(f"revoking the {BRANCH} trust: {error}")
-    # Signing no longer depends on the environment trust, and the no-deletion ruleset deliberately has no
-    # bypass, so the branch cannot be closed. The emergency stop is the workflow switch: a disabled
-    # workflow cannot be dispatched at all, from any ref.
+    # Revocation blocks new credential acquisition, but running jobs may already hold credentials.
+    # Independently disable dispatch and cancel every run even if either containment attempt failed.
     try:
         if apply:
             if workflow_state(app) != "disabled_manually":
                 set_workflow_enabled(app, False)
                 if workflow_state(app) != "disabled_manually":
                     raise Refuse("the signer workflow is still enabled after disabling it")
-            print(f"  done   disabled {app} .github/workflows/{SIGNER_WORKFLOW}; nothing can be dispatched, "
-                  "and `advance` re-enables it")
+            print(f"  done   disabled {app} {SIGNER_WORKFLOW}; explicit enable --sha is required for recovery")
         else:
-            print(f"  would  disable {app} .github/workflows/{SIGNER_WORKFLOW} (a dispatcher could otherwise sign)")
-    except Refuse as error:
-        raise Refuse(f"could not disable {SIGNER_WORKFLOW}, which is the emergency stop now: {error}. "
-                     "Signing would remain dispatchable, so nothing else was changed.")
+            print(f"  would  disable {app} {SIGNER_WORKFLOW} (a dispatcher could otherwise sign)")
+    except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
+        failures.append(f"could not disable {SIGNER_WORKFLOW}: {error}; signer may remain dispatchable")
     active = cancel_round(app, apply, failures)
     rounds = 1
     while apply and active and rounds < MAX_CANCEL_ROUNDS:
@@ -680,22 +787,18 @@ def rollback(app, apply, wait=None):
             failures.append(f"{active} signer runs still active after {MAX_CANCEL_ROUNDS} cancellation rounds")
     print("  Keep the rulesets until the environment is verified; if compromise is suspected, rotate the release secrets.")
     if failures:
-        raise Refuse("; ".join(failures))
+        raise Refuse("PARTIAL rollback; containment is not fully verified: " + "; ".join(failures))
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=("plan", "apply", "readback", "advance", "rollback"))
+    parser.add_argument("mode", choices=("plan", "apply", "readback", "advance", "enable", "rollback"))
     parser.add_argument("--repos", required=True, help="all, or a comma-separated list of app names")
     parser.add_argument("--sha"); parser.add_argument("--apply", action="store_true")
     parser.add_argument("--require-pinned-release", action="store_true",
                         help="also refuse release.yml callers that do not pin a full SHA (every app calls @main today)")
-    parser.add_argument("--accept-unverified-secrets", action="store_true",
-                        help="record that signing secrets which are not visible at repository scope were accepted; "
-                             "the advance is then allowed and the names remain UNVERIFIED in the output")
     args = parser.parse_args()
     OPTIONS["require_pinned_release"] = args.require_pinned_release
-    OPTIONS["accept_unverified_secrets"] = args.accept_unverified_secrets
     reg = registry()
     admitted = registry_apps(reg)
     # Every value that reaches a gh argument comes from the registry or is rebuilt from a parsed number: the
@@ -705,15 +808,20 @@ def main():
     if unknown:
         sys.exit(f"not admitted in craft-common-actions main nightly-apps.json: {unknown}")
     apps = [app for app in admitted if app in requested and re.fullmatch(r"[a-z0-9][a-z0-9-]*", app)]
-    if args.mode in ("advance", "rollback"):
+    if args.mode in ("advance", "enable", "rollback"):
         if len(apps) != 1:
             sys.exit(f"{args.mode} takes exactly one repo")
-        if args.mode == "advance" and not re.fullmatch(r"[0-9a-f]{40}", args.sha or ""):
-            sys.exit("advance needs --sha <full reviewed main commit>")
-        sha = format(int(args.sha, 16), "040x") if args.mode == "advance" else None
+        if args.mode != "rollback" and not re.fullmatch(r"[0-9a-f]{40}", args.sha or ""):
+            sys.exit(f"{args.mode} needs --sha <full reviewed main commit>")
+        sha = format(int(args.sha, 16), "040x") if args.mode != "rollback" else None
         try:
-            advance(apps[0], sha, args.apply) if args.mode == "advance" else rollback(apps[0], args.apply)
-        except Refuse as error:
+            if args.mode == "enable":
+                advance(apps[0], sha, args.apply, enable=True)
+            elif args.mode == "advance":
+                advance(apps[0], sha, args.apply)
+            else:
+                rollback(apps[0], args.apply)
+        except (Refuse, KeyError, TypeError, ValueError, AttributeError) as error:
             sys.exit(f"refused: {error}")
         return
     if args.mode == "readback":

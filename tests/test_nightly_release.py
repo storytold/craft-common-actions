@@ -30,7 +30,7 @@ class PacketAPI(fixtures.API):
         self.calls.append((method, suffix))
         if method != "GET": self.writes.append((method, suffix, copy.deepcopy(data)))
         if method == "POST" and suffix == "/releases":
-            self.release = {**data, "id": 7, "published_at": None}
+            self.release = {**data, "id": 7, "published_at": None, "immutable": False}
             return copy.deepcopy(self.release)
         if method == "PATCH" and suffix == "/releases/7":
             self.release.update(data, published_at="2026-11-21T00:00:00Z" if self.bad_timestamp else "2026-11-22T02:00:00Z")
