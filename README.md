@@ -1010,6 +1010,7 @@ Individual actions are also available for composing custom pipelines:
 - `actions/import-signing-key`: Imports an ASCII-armored OpenPGP signing key into a private `GNUPGHOME` and exports `GNUPGHOME`, `SIGNING_FPR` and `SIGNING_PUBKEY`; an empty key does nothing.
 - `actions/import-macos-certificate`: Imports a Developer ID Application certificate into a private temporary keychain and exports `MACOS_SIGN_IDENTITY` and `MACOS_KEYCHAIN` (see "macOS code signing").
 - `actions/packaging-lint`: Steps for packaging linter.
+- `actions/windows-install-policy`: Builds and checks metadata-only Windows installer fixtures, or checks an existing MSI against the caller's installation policy (see "Windows installation policy").
 - `actions/setup-windows-signing`: Exports the shared Authenticode signing script (`CRAFT_SIGN_SCRIPT`) for the app's packaging step (see "Windows code signing").
 - `actions/ast-grep`: Installs a pinned ast-grep, runs the caller's rule tests and scans with its `sgconfig.yml` (see `ast-grep.yml`).
 - `actions/export-app-build-env`: Sets the app's own `<PREFIX>_VERSION`, `<PREFIX>_BUILD_DATE` and `<PREFIX>_BUILD_SHA` for the steps after it, with the prefix its `packaging/env.sh` reads (or `env-prefix`); its `names` output lists them for a VM's `envs`.
@@ -1058,6 +1059,66 @@ checks (fuzzing, corpora, web builds, installer probes) become shared workflows 
 inputs here. Jobs that apps still run themselves move here without being dropped:
 an app removes one only once a shared workflow runs it.
 
+## Windows installation policy
+
+An app with `packaging/windows/install-policy.json` checks its installer with:
+
+```yaml
+jobs:
+  windows-install-policy:
+    uses: storytold/craft-common-actions/.github/workflows/windows-install-policy.yml@main
+```
+
+It installs WiX 5.0.2 and the extensions the policy lists, builds metadata-only MSIs (plain-text
+payloads) for x86, x64 and ARM64 from the app's own WiX sources, and checks their scope, folders,
+upgrade identity, registry entries and wizard. Nothing is installed and the app isn't built. Paths in
+the policy are relative to the packaging directory (`packaging-directory`, default
+`packaging/windows`), and the icon to the app root two levels above it. An app's
+`test-legacy-fixture.ps1` there runs first, if it has one.
+
+This checks an app's own installer against its own policy. It is for MSIs from the caller's own
+build, or for this repository's fixtures, and is not a general inspector for third-party MSI
+packages. To check the MSI an app's packaging job just built, that job uses the action with
+`msi-path`:
+
+```yaml
+- uses: storytold/craft-common-actions/actions/windows-install-policy@main
+  with:
+    msi-path: dist/MyApp-x64.msi
+```
+
+The reusable workflow runs the action from its own repository and commit (`uses: $/...`), so the
+two always match: a caller that calls the workflow `@main` gets the action at the same `main`
+commit, and one that pins the workflow to a commit gets the action from that commit. A job that
+uses the action directly picks its own revision; use the same one as the workflows it calls. The
+fixture test in this repository runs the local action on both fixtures, and also calls the
+reusable workflow on one of them, then reads that job's log to check that the action was the copy
+downloaded at the workflow's commit and the installer came from the caller's checkout. There the
+workflow and the caller are the same commit; the first app to move to the workflow is what
+confirms the pairing across repositories.
+
+The build defines `Version`, `DisplayVersion`, `BinDir` (the policy's `payloads`) and `IconPath`.
+Anything else the app's WiX reads goes in the policy's `wixVariables`: a literal value, or a
+placeholder the build creates, `@folder [file ...]`, `@bitmap WIDTHxHEIGHT` or `@rtf`:
+
+```json
+"wixVariables": { "DocsDir": "@folder", "BannerBmp": "@bitmap 493x58", "HasCli": "1" }
+```
+
+Optional policy keys; nothing here knows about particular apps:
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `suiteFolder` | Folder that groups the suite's apps under Program Files and the per-user programs folder | `ArtCraft` |
+| `skipsLicencePage` | The wizard goes straight from Welcome to the install folder; the checker verifies that routing in both directions | `false` |
+| `mode` | Only `dualScope` (the wizard offers per-user or per-machine) is checked; a per-user-only installer keeps its own check for now | `dualScope` |
+
+When an app moves to the shared workflow it replaces only its `windows-install-policy` job, and keeps
+the pre-signing check in its `package.ps1` until its packaging calls the shared checker.
+
+The test workflow builds two made-up apps in `tests/fixtures/windows-install-policy` (one with its
+own wizard, one with the WiX UI wizard) and checks that mismatched or incomplete policies fail.
+
 ## macOS code signing
 
 Every app used to carry its own copy of `packaging/macos/import-cert.sh`, and the copies drifted:
@@ -1090,6 +1151,7 @@ using `uses` cannot set `timeout-minutes`.
 | Work | Limit (minutes) |
 | --- | ---: |
 | Packaging lint | 15 |
+| Windows installation policy | 10 |
 | Release version / draft publication | 10 |
 | Release macOS, Windows, Linux, Flatpak, web, RISC-V and server builds | 90 |
 | Release FreeBSD | 300 |
