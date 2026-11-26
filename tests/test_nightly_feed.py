@@ -170,7 +170,7 @@ class NightlyTests(unittest.TestCase):
         # depend on how quickly the filesystem's clock ticks.
         path = self.root / 'state.json'; path.write_text('{"ok":1}')
         before = os.lstat(path)
-        for label in ('st_dev', 'st_ino', 'st_mtime_ns', 'st_ctime_ns'):
+        for label in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'):
             with self.subTest(field=label), \
                     self.windows_style_lstat(**{label: getattr(before, label) + 1}), \
                     self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):

@@ -8,14 +8,12 @@ on:
   pull_request:
     paths:
       - scripts/nightly_feed.py
-      - scripts/nightly_unix.py
       - tests/test_nightly_feed_windows.py
       - .github/workflows/test-nightly-feed-windows.yml
   push:
     branches: [main]
     paths:
       - scripts/nightly_feed.py
-      - scripts/nightly_unix.py
       - tests/test_nightly_feed_windows.py
       - .github/workflows/test-nightly-feed-windows.yml
   workflow_dispatch:
@@ -56,29 +54,18 @@ jobs:
         with:
           name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
           path: ${{ github.workspace }}/.downloaded
-      - name: Record the volume and the stat/fstat fields (diagnostic)
-        shell: bash
-        run: |
-          if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: || true; fsutil fsinfo volumeinfo C: || true; fi
-          python -I -B - <<'EOF'
-          import os
-          for path in ("nightly-apps.json", ".downloaded/artifact.json"):
-              with open(path, "rb") as stream:
-                  handle = os.fstat(stream.fileno())
-              entry = os.lstat(path)
-              for label, info in (("lstat", entry), ("fstat", handle)):
-                  print(path, label, {k: getattr(info, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
-          EOF
       - name: Report the volume and whether the path and handle stats agree here
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: | head -5 || true; fi
           python -I -B - <<'EOF'
           import os
+          fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
           for path in ("nightly-apps.json", ".downloaded/artifact.json"):
               with open(path, "rb") as stream:
                   handle = os.fstat(stream.fileno())
               entry = os.lstat(path)
-              agree = all(getattr(entry, k) == getattr(handle, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
-              print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
+              agree = all(getattr(entry, k) == getattr(handle, k) for k in fields)
+              print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in fields})
           EOF
+

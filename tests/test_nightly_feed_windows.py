@@ -4,8 +4,7 @@ The signer's Windows validate job reads files under the workspace (the D: drive 
 runners): git-checked-out sources, JSON written by an earlier step's process, and artifacts
 extracted by actions/download-artifact. These tests read exactly those shapes. In CI the job root is
 a directory inside the checkout (NIGHTLY_FEED_TEST_ROOT), so files sit on the workspace volume.
-NIGHTLY_FEED_MODULE can point at another copy of nightly_feed.py, so the same tests can prove the
-old code refuses on that runner.
+NIGHTLY_FEED_MODULE can point at another copy of nightly_feed.py.
 """
 import importlib.util
 import os
