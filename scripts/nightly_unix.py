@@ -292,7 +292,8 @@ def verify_archive(pending,platform,archive,version,output=None,app=None):
             n.require(not any(plist.get(key) for key in ('CFBundleDocumentTypes','CFBundleURLTypes','UTExportedTypeDeclarations','UTImportedTypeDeclarations')),"Mac document/URL associations forbidden")
         after=archive.stat(follow_symlinks=False)
         # info is the opened handle's fstat, after is the path's lstat: bind them portably.
-        n.require(n.same_file(after,info),"archive changed during inspection")
+        changed=n.path_handle_difference(after,info,('st_dev','st_ino','st_size','st_mtime_ns'))
+        n.require(not changed and stat.S_ISREG(after.st_mode),f"archive changed during inspection ({archive.name}: {changed or 'not a regular file'})")
         if staging is not None:
             n.require(not out.exists() and not out.is_symlink(),"unpack output must remain a new directory")
             staging.rename(n.owned_path(out))

@@ -1,7 +1,8 @@
 name: nightly feed reads on Windows
 
-# bounded_bytes/bounded_json run in the signer's Windows validate job (windows-latest, Python 3.13).
-# This reads real files through that platform's stat/fstat APIs, not a simulation.
+# bounded_bytes/bounded_json run in the signer's Windows validate job (windows-latest, Python 3.13),
+# reading files on the workspace volume. This reads real files of the same shapes there: written in
+# the workspace, written by another process, checked out by git, extracted by download-artifact.
 on:
   pull_request:
     paths:
@@ -25,18 +26,71 @@ jobs:
   reads:
     name: real-file reads (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-24.04]
+    env:
+      NIGHTLY_FEED_TEST_ROOT: ${{ github.workspace }}/.feed-test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Set up Python 3.13 (as the signer)
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - name: bounded_json and bounded_bytes on real files
+      - name: Write a JSON artifact
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/up"
+          printf '%s' '{"artifact": "downloaded"}' > "$RUNNER_TEMP/up/artifact.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/up/artifact.json
+          retention-days: 1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: feed-read-${{ matrix.os }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/.downloaded
+      - name: Record the volume and the stat/fstat fields (diagnostic)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then fsutil fsinfo volumeinfo D: || true; fsutil fsinfo volumeinfo C: || true; fi
+          python -I -B - <<'EOF'
+          import os
+          for path in ("nightly-apps.json", ".downloaded/artifact.json"):
+              with open(path, "rb") as stream:
+                  handle = os.fstat(stream.fileno())
+              entry = os.lstat(path)
+              for label, info in (("lstat", entry), ("fstat", handle)):
+                  print(path, label, {k: getattr(info, k) for k in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")})
+          EOF
+      - name: The code on main (before the fix) on the same files
+        id: before
+        continue-on-error: true
+        shell: bash
+        env:
+          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
+        run: |
+          git show 15c319f7a61bccb5444425cfba86873e7d591790:scripts/nightly_feed.py > "$RUNNER_TEMP/nightly_feed_before.py"
+          NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_before.py" python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
+      - name: This commit's code on the same files
+        shell: bash
+        env:
+          NIGHTLY_FEED_DOWNLOADED: ${{ github.workspace }}/.downloaded/artifact.json
         run: python -I -B -m unittest discover -s tests -p test_nightly_feed_windows.py -v
+      - name: Require the pre-fix code to reproduce the signer refusal on Windows
+        shell: bash
+        env:
+          BEFORE: ${{ steps.before.outcome }}
+        run: |
+          echo "pre-fix code on $RUNNER_OS: $BEFORE"
+          # The fix is only proven if the old comparison really refuses these files on this runner.
+          if [ "$RUNNER_OS" = Windows ] && [ "$BEFORE" != failure ]; then
+            echo "::error::the pre-fix code passed on Windows, so this run does not prove the fix"
+            exit 1
+          fi

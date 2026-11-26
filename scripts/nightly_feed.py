@@ -89,39 +89,53 @@ def owned_path(path):
     return resolved
 
 
+IDENTITY = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+
 def _posix():
     return os.name != "nt"
 
 
-def same_file(path_info, handle_info):
-    """Bind a path's lstat to an opened handle's fstat.
+def differences(first, second, keys=IDENTITY):
+    """Which identity fields differ, with their values (never file contents), for diagnosable refusals."""
+    return ", ".join(f"{key} {getattr(first, key)} != {getattr(second, key)}" for key in keys if getattr(first, key) != getattr(second, key))
 
-    Size and modification time everywhere. Device and inode only on POSIX: on Windows, Python
-    3.12+ fills stat from GetFileInformationByName and fstat from GetFileInformationByHandle, so
-    st_dev, st_ino and st_ctime_ns can differ for the same untouched file.
+
+def path_handle_difference(path_info, handle_info, keys=IDENTITY):
+    """Differences between a path's lstat and an opened handle's fstat that mean "another file".
+
+    POSIX: every identity field, as before. Windows: none. Python 3.12+ fills stat from
+    GetFileInformationByName and fstat from GetFileInformationByHandle, and on the runner's workspace
+    volume they can disagree for the same untouched file, so there identity and change checks come
+    only from the handle (fstat before and after the read).
     """
-    keys = ("st_size", "st_mtime_ns") + (("st_dev", "st_ino") if _posix() else ())
-    return all(getattr(path_info, key) == getattr(handle_info, key) for key in keys)
+    return differences(path_info, handle_info, keys) if _posix() else ""
 
 
 def handle_stamp(info):
-    """Identity of an opened handle across two fstat calls (same API, so every field is stable)."""
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    """Identity of an opened handle across two fstat calls (the same API, so every field is stable)."""
+    return tuple(getattr(info, key) for key in IDENTITY)
 
 
 def bounded_bytes(path, limit, kind):
     """Read a stable regular input without following a leaf link or waiting on a FIFO."""
     path = owned_path(path)
-    before = path.lstat()  # Type and size precheck only, before anything is opened.
+    before = path.lstat()
     require(stat.S_ISREG(before.st_mode), f"{kind} must be a regular non-symlink file")
     require(before.st_size <= limit, f"{kind} exceeds bound")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        require(stat.S_ISREG(opened.st_mode) and same_file(before, opened), f"{kind} changed before read")
+        # Still a regular file and not a link at the path, right after opening.
+        require(stat.S_ISREG(opened.st_mode) and stat.S_ISREG(path.lstat().st_mode), f"{kind} must be a regular non-symlink file")
+        changed = path_handle_difference(before, opened)
+        require(not changed, f"{kind} changed before read ({path.name}: {changed})")
+        require(opened.st_size <= limit, f"{kind} exceeds bound")
         raw = stream.read(limit + 1)
-        require(handle_stamp(opened) == handle_stamp(os.fstat(stream.fileno())) and len(raw) == opened.st_size,
-                f"{kind} changed while reading")
+        after = os.fstat(stream.fileno())
+        changed = differences(opened, after)
+        require(not changed and len(raw) == opened.st_size,
+                f"{kind} changed while reading ({path.name}: {changed or f'read {len(raw)} of {opened.st_size} bytes'})")
     require(len(raw) <= limit, f"{kind} exceeds bound")
     return raw
 

@@ -169,19 +169,50 @@ class NightlyTests(unittest.TestCase):
         path = self.root / 'state.json'; path.write_text('{"ok":1}')
         with patch.object(n, '_posix', return_value=False), self.windows_style_lstat():
             self.assertEqual(n.bounded_json(path), {'ok': 1})
-        # On POSIX a differing device or inode still means another file: refuse.
-        with self.windows_style_lstat(), self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
+        # On POSIX a differing device or inode still means another file: refuse, naming the fields.
+        with self.windows_style_lstat(), self.assertRaisesRegex(n.InvalidNightly, r'changed before read \(state.json: st_dev .* st_ino '):
             n.bounded_json(path)
 
-    def test_file_modified_between_lstat_and_open_refuses_on_windows_and_posix(self):
+    def test_path_stat_differences_refuse_on_posix_and_name_the_fields(self):
         path = self.root / 'state.json'; path.write_text('{"ok":1}')
         info = os.lstat(path)
+        for label, change in (('st_size', {'st_size': info.st_size - 1}), ('st_mtime_ns', {'st_mtime_ns': info.st_mtime_ns - 1})):
+            with self.subTest(change=label), self.windows_style_lstat(**change), \
+                    self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
+                n.bounded_json(path)
+            # Windows: the handle is the only identity, so path-side differences are not a refusal.
+            with self.subTest(change=label, windows=True), patch.object(n, '_posix', return_value=False), self.windows_style_lstat(**change):
+                self.assertEqual(n.bounded_json(path), {'ok': 1})
+
+    def test_handle_changes_during_read_refuse_on_windows_too(self):
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        real_fstat = os.fstat; calls = [0]
+        def grow(descriptor):
+            calls[0] += 1
+            if calls[0] == 2:
+                with open(path, 'ab') as stream: stream.write(b' ')
+            return real_fstat(descriptor)
+        with patch.object(n, '_posix', return_value=False), patch.object(n.os, 'fstat', side_effect=grow), \
+                self.assertRaisesRegex(n.InvalidNightly, r'JSON changed while reading \(state.json: st_size 8 != 9'):
+            n.bounded_json(path)
+
+    def test_a_link_or_non_regular_path_after_open_refuses(self):
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        real_lstat, real_open = Path.lstat, os.open
+        opened = [False]
+        def lstat(path_self, *args, **kwargs):
+            info = real_lstat(path_self, *args, **kwargs)
+            if opened[0] and path_self.name == 'state.json':  # swapped for a link right after the open
+                return type('Stat', (), {**{k: getattr(info, k) for k in ('st_size', 'st_mtime_ns', 'st_dev', 'st_ino', 'st_ctime_ns')}, 'st_mode': stat.S_IFLNK | 0o777})()
+            return info
+        def open_(file, flags):
+            descriptor = real_open(file, flags); opened[0] = True
+            return descriptor
         for posix in (True, False):
-            for label, change in (('size', {'st_size': info.st_size - 1}), ('mtime', {'st_mtime_ns': info.st_mtime_ns - 1})):
-                # Windows-style identity noise plus a real size or mtime difference: always refuse.
-                with self.subTest(posix=posix, change=label), patch.object(n, '_posix', return_value=posix), \
-                        self.windows_style_lstat(**change), self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
-                    n.bounded_json(path)
+            opened[0] = False
+            with self.subTest(posix=posix), patch.object(n, '_posix', return_value=posix), patch.object(Path, 'lstat', lstat), \
+                    patch.object(n.os, 'open', side_effect=open_), self.assertRaisesRegex(n.InvalidNightly, 'regular non-symlink'):
+                n.bounded_json(path)
 
     def test_bounded_bytes_preserves_non_json_bytes_and_exact_cap(self):
         path = self.root / 'version.txt'
