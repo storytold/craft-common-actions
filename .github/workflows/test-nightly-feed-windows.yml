@@ -4,7 +4,7 @@ name: nightly feed reads on Windows
 # validate job (windows-latest, Python 3.13) on the workspace volume. The files have the shapes that
 # job reads: written in the workspace, written by another process, checked out by git, and extracted
 # from a zip. It also records whether the path and handle stats agree on the
-# runner image, and runs the same tests against the strict-comparison build so the drift, when this
+# runner image, and runs the strict-comparison build over just-arrived files so the drift, when this
 # runner exposes it, is visible in the same run.
 on:
   pull_request:
@@ -82,6 +82,8 @@ jobs:
           # signer's refusal and says nothing about the fix. discover -k keeps the test importable
           # under -I, which implies -P and therefore leaves the checkout off sys.path.
           gh api "repos/storytold/craft-common-actions/contents/scripts/nightly_feed.py?ref=644556debe518ff6963c8d08b92a69aa6cabb534" --jq .content | base64 -d > "$RUNNER_TEMP/nightly_feed_strict.py"
+          # Without the module there is nothing to compare, so refuse rather than run an empty file.
+          grep -q 'def bounded_bytes' "$RUNNER_TEMP/nightly_feed_strict.py" || { echo "::error::could not fetch the pre-fix module, so this gate proves nothing"; exit 1; }
           set +e
           NIGHTLY_FEED_MODULE="$RUNNER_TEMP/nightly_feed_strict.py" python -I -B -m unittest discover \
             -s tests -p test_nightly_feed_windows.py -k test_a_just_written_or_extracted_json_reads -v 2>&1 | tee "$RUNNER_TEMP/strict.log"
