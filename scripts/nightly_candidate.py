@@ -177,9 +177,15 @@ def contract(policy, producer):
 
 class Reads:
     """Shared aggregate accounting across both fixed-host API transports."""
-    def __init__(self, github, sonar):
+    def __init__(self, github, sonar, now=None):
         self.github = github; self.sonar = sonar
         self.remaining = MAX_READS; self.deadline = time.monotonic() + 120
+        self.base = now; self.started = time.monotonic()
+
+    def observed(self):
+        """Current time for checking provider timestamps: the collection's start plus elapsed time,
+        so an analysis that lands during collection is not mistaken for one from the future."""
+        return (time.time() if self.base is None else self.base) + (time.monotonic() - self.started)
 
     def get(self, provider, path):
         n.require(provider in ('github', 'sonar') and path.startswith('/') and not path.startswith('//') and '://' not in path and '\r' not in path and '\n' not in path, 'fixed-host GET reads only')
@@ -267,7 +273,7 @@ def _workflows(reads, policy, producer, now):
     for wanted in policy['required_workflows']:
         run = _run(reads, policy, producer, wanted)
         created = legacy.timestamp(run.get('created_at'))
-        n.require(created <= now, 'future quality run')
+        n.require(created <= reads.observed(), 'future quality run')
         jobs = reads.rows('github', f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?filter=all", 'jobs')
         names = [j.get('name') for j in jobs]
         n.require(all(isinstance(name, str) for name in names) and len(set(names)) == len(names), 'ambiguous job inventory')
@@ -286,7 +292,7 @@ def _workflows(reads, policy, producer, now):
             n.require(not inactive or run['event'] in ('push', 'schedule'), 'manual-input-only job applicable to this event')
             n.require(job.get('run_id') == run['id'] and ('run_attempt' not in job or (type(job['run_attempt']) is int and job['run_attempt'] == run['run_attempt'])) and job.get('head_sha') == producer['source_commit'] and job.get('status') == 'completed' and job.get('conclusion') == conclusion, 'required job source/attempt/result differs')
             n.require(type(check.get('id')) is int and check['id'] == check_id and check.get('head_sha') == producer['source_commit'] and check.get('name') == item['name'] and type(check.get('app', {}).get('id')) is int and check['app']['id'] == 15368 and check.get('status') == 'completed' and check.get('conclusion') == conclusion and check.get('details_url') == f"https://github.com/{policy['repository']}/actions/runs/{run['id']}/job/{job['id']}", 'required official app/check/run linkage differs')
-            n.require(created <= legacy.timestamp(check.get('started_at')) <= legacy.timestamp(check.get('completed_at')) <= now and created <= legacy.timestamp(job.get('completed_at')) <= now, 'quality evidence timestamps differ')
+            n.require(created <= legacy.timestamp(check.get('started_at')) <= legacy.timestamp(check.get('completed_at')) <= reads.observed() and created <= legacy.timestamp(job.get('completed_at')) <= reads.observed(), 'quality evidence timestamps differ')
             n.require(reads.get('github', '/check-runs/' + str(check_id)) == check, 'required check changed during collection')
             evidence.append({'name': item['name'], 'job_id': job['id'], 'check_id': check_id, 'result': conclusion, 'app_id': 15368})
         n.require(_run(reads, policy, producer, wanted) == run, 'newer quality run supersedes selection')
@@ -330,7 +336,7 @@ def _exact(reads, s, source, now, missing=n.InvalidNightly):
         # A short page must have consumed every declared analysis (an empty history is total 0).
         n.require(len(rows) == PAGE_SIZE or (page - 1) * PAGE_SIZE + len(rows) == paging['total'], 'Sonar analysis history page is short of its declared total')
         for row in rows:
-            _analysis_row(row, now)
+            _analysis_row(row, reads.observed())
             n.require(row['key'] not in seen, 'duplicate Sonar analysis in history pages'); seen.add(row['key'])
             when = provider_time(row['date'])
             n.require(previous is None or when <= previous, 'Sonar analyses are not newest first')
@@ -353,7 +359,7 @@ def _latest(reads, s, now):
     reply = reads.get('sonar', '/api/project_analyses/search?' + urlencode({'project': s['project'], 'branch': 'main', 'ps': 1, 'p': 1}))
     rows = reply.get('analyses'); paging = reply.get('paging', {})
     n.require(isinstance(rows, list) and len(rows) == 1 and paging.get('pageIndex') == 1 and paging.get('pageSize') == 1 and type(paging.get('total')) is int and paging['total'] >= 1, 'missing latest Sonar branch analysis')
-    return _analysis_row(rows[0], now)
+    return _analysis_row(rows[0], reads.observed())
 
 
 def _gate(reads, s, analysis):
@@ -385,7 +391,7 @@ def _sonar_check(reads, s, producer, gate, analysis, now):
     n.require(len(rows) == 1, 'missing/ambiguous Sonar candidate check')
     check = rows[0]; n.positive(check.get('id'), 'Sonar check ID')
     n.require(check.get('head_sha') == producer['source_commit'] and type(check.get('app', {}).get('id')) is int and check['app']['id'] == s['app_id'] and check.get('details_url') == s['details_url'] and check.get('status') == 'completed' and check.get('conclusion') == ('success' if gate['status'] == 'OK' else 'failure'), 'Sonar official app/source/project/gate check differs')
-    n.require(legacy.timestamp(check.get('started_at')) <= provider_time(analysis['date']) <= legacy.timestamp(check.get('completed_at')) <= now, 'Sonar check/analysis timestamps differ')
+    n.require(legacy.timestamp(check.get('started_at')) <= provider_time(analysis['date']) <= legacy.timestamp(check.get('completed_at')) <= reads.observed(), 'Sonar check/analysis timestamps differ')
     n.require(reads.get('github', '/check-runs/' + str(check['id'])) == check, 'Sonar check changed during snapshot')
     return check['id']
 
@@ -587,11 +593,15 @@ def _final_rereads(reads, s, policy, producer, snapshot, workflows, now, stage):
             _fresh_workflows(reads, policy, producer, workflows)
 
 
-def _retrying(collect):
-    """Run a whole collection again when a new main analysis lands; give up after RETRIES."""
+def _retrying(collect, now):
+    """Run a whole collection again when a new main analysis lands; give up after RETRIES.
+
+    Each attempt gets a fresh `now` (the caller's time plus time spent so far) for its age checks.
+    """
+    started = time.monotonic()
     for attempt in range(1, RETRIES + 1):
         try:
-            return collect()
+            return collect(now + (time.monotonic() - started))
         except Retry:
             if attempt == RETRIES:
                 raise
@@ -599,18 +609,18 @@ def _retrying(collect):
 
 
 def admit_candidate(policy, producer, github, sonar, *, now):
-    return _retrying(lambda: _admit_once(policy, producer, github, sonar, now=now))
+    return _retrying(lambda when: _admit_once(policy, producer, github, sonar, now=when), now)
 
 
 def revalidate_candidate(policy, producer, receipt, github, sonar, *, now):
-    return _retrying(lambda: _revalidate_once(policy, producer, receipt, github, sonar, now=now))
+    return _retrying(lambda when: _revalidate_once(policy, producer, receipt, github, sonar, now=when), now)
 
 
 def _admit_once(policy, producer, github, sonar, *, now):
     """Read candidate quality first; caller must separately admit P/bootstrap."""
     s = contract(policy, producer)
     n.require(type(now) in (int, float) and now >= legacy.timestamp(producer['created_at']), 'invalid current admission time')
-    reads = Reads(github, sonar)
+    reads = Reads(github, sonar, now)
     snapshot = _snapshot(reads, s, producer, now)
     ancestry = _ancestry(reads, producer['source_commit'], None)
     workflows = _workflows(reads, policy, producer, now)
@@ -631,7 +641,7 @@ def _revalidate_once(policy, producer, receipt, github, sonar, *, now):
     n.fields(receipt, {'schema', 'policy_sha256', 'producer_sha256', 'source_commit', 'sonar', 'workflows', 'main_at_admission'}, 'trusted candidate receipt')
     n.require(receipt['schema'] == RECEIPT and receipt['policy_sha256'] == digest(policy) and receipt['producer_sha256'] == digest(producer) and receipt['source_commit'] == producer['source_commit'], 'candidate receipt policy/producer/source binding differs')
     n.require(type(now) in (int, float) and now >= legacy.timestamp(producer['created_at']), 'invalid current admission time')
-    reads = Reads(github, sonar); retained = receipt['sonar']
+    reads = Reads(github, sonar, now); retained = receipt['sonar']
     n.require(isinstance(retained, dict) and isinstance(retained.get('analysis'), dict) and retained['analysis'].get('revision') == producer['source_commit'], 'missing retained candidate analysis')
     for value, key in (('remaining', 'issues_sha256'), ('closed_since', 'closed_sha256')):
         n.require(retained.get(key) == digest(retained.get(value)), 'retained issue digest differs')

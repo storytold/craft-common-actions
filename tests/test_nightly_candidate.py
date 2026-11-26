@@ -351,6 +351,40 @@ class CandidateTests(unittest.TestCase):
         with self.assertRaises(c.Retry) as raised: self.admit()
         self.assertIsInstance(raised.exception, c.n.Unavailable)
 
+    def test_analysis_dated_after_collection_start_is_a_retry_not_a_refusal(self):
+        # Real clocks move: an analysis landing mid-collection is dated after the `now` taken at its start.
+        clock = [1000.0]
+        def monotonic():
+            clock[0] += 0.05
+            return clock[0]
+        landed = '2026-11-22T13:00:03+0000'  # NOW is 13:00:00
+        count = [0]
+        def hook(provider, path):
+            if provider == 'sonar' and path.startswith('/api/project_analyses/search') and 'ps=1&' in path:
+                count[0] += 1
+                if count[0] == 2:
+                    clock[0] += 5  # the reread happens a few seconds into the collection
+                    self.f.history = [{'key': 'analysis-M', 'date': landed, 'revision': M}, dict(self.f.analysis)]
+        self.f.hook = hook
+        with patch.object(c.time, 'monotonic', side_effect=monotonic), patch.object(c.time, 'sleep') as nap:
+            result = self.admit()
+        self.assertEqual(result['sonar']['latest']['date'], landed)
+        nap.assert_called_once()
+        # Landing just before the C-history reread (which pages past the new analysis) behaves the same.
+        self.f = Fixture(); count[0] = 0
+        def history_hook(provider, path):
+            if provider == 'sonar' and path.startswith('/api/project_analyses/search') and 'ps=100&' in path:
+                count[0] += 1
+                if count[0] == 2:
+                    clock[0] += 5
+                    self.f.history = [{'key': 'analysis-M', 'date': landed, 'revision': M}, dict(self.f.analysis)]
+        self.f.hook = history_hook
+        with patch.object(c.time, 'monotonic', side_effect=monotonic), patch.object(c.time, 'sleep'):
+            self.assertEqual(self.admit()['sonar']['latest']['date'], landed)
+        # A timestamp genuinely in the future is still refused.
+        self.f = Fixture(); self.f.history = [{'key': 'analysis-M', 'date': '2026-11-22T14:00:00+0000', 'revision': M}, dict(self.f.analysis)]
+        with self.assertRaisesRegex(c.n.InvalidNightly, 'revision/date invalid'): self.admit()
+
     def test_inventory_drift_from_a_new_analysis_is_a_retry(self):
         # A descendant analysis fixes an issue between the inventory read and its reread.
         seen = [0]
