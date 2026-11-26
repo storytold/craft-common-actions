@@ -90,6 +90,13 @@ def owned_path(path):
 
 
 IDENTITY = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+# Windows only: a path's stat and an opened handle's stat come from different APIs there (Python 3.12+
+# fills stat from the directory entry and fstat from the handle), and a file written moments earlier can
+# report a ctime about 0.3 ms apart between the two until its directory entry settles. Measured on
+# windows-latest by reading a just-written JSON: gridcraft probe runs 45757755536, 45757906994 and the
+# settling probe. So ctime is not compared across those two APIs; it is still compared handle-to-handle
+# across the read, and no other field or platform is treated differently.
+PATH_HANDLE_IDENTITY = tuple(key for key in IDENTITY if not (os.name == "nt" and key == "st_ctime_ns"))
 
 
 def differences(first, second, keys=IDENTITY):
@@ -110,7 +117,7 @@ def bounded_bytes(path, limit, kind):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     with os.fdopen(os.open(path, flags), "rb") as stream:
         opened = os.fstat(stream.fileno())
-        changed = differences(before, opened)
+        changed = differences(before, opened, PATH_HANDLE_IDENTITY)
         require(not changed, f"{kind} changed before read ({path.name}: {changed or 'path and handle disagree'})")
         raw = stream.read(limit + 1)
         after = os.fstat(stream.fileno())

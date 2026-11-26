@@ -68,4 +68,7 @@ jobs:
               agree = all(getattr(entry, k) == getattr(handle, k) for k in fields)
               print(path, "lstat and fstat agree:", agree, {k: getattr(entry, k) for k in fields})
           EOF
-
+      - name: Report whether the strict comparison refused here
+        if: always()
+        shell: bash
+        run: cat "$RUNNER_TEMP/strict.outcome" || echo "strict comparison did not run"

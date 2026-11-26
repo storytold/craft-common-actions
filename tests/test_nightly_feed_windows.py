@@ -75,6 +75,36 @@ class RealFileReadTests(unittest.TestCase):
             n.bounded_json(path)
 
 
+class JustWrittenJsonTests(unittest.TestCase):
+    """A JSON written moments earlier must read: that is what the signer's validate step does."""
+
+    def setUp(self):
+        self.root = job_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        ownership = patch.dict(os.environ, {"GITHUB_WORKSPACE": str(self.root), "RUNNER_TEMP": str(self.root)})
+        ownership.start(); self.addCleanup(ownership.stop)
+
+    def test_a_just_written_json_reads(self):
+        deltas = {}
+        for attempt in range(50):
+            path = self.root / f"just-written-{attempt}.json"
+            path.write_text('{"admitted": true}', encoding="utf-8")
+            # What the strict comparison would have seen between the path and the opened handle.
+            entry = os.lstat(path)
+            with open(path, "rb") as stream:
+                handle = os.fstat(stream.fileno())
+            for key in n.IDENTITY:
+                if getattr(entry, key) != getattr(handle, key):
+                    deltas[key] = (getattr(entry, key), getattr(handle, key))
+            try:
+                self.assertEqual(n.bounded_json(path), {"admitted": True})
+            except n.InvalidNightly as error:
+                self.fail(f"attempt {attempt} refused a just-written file: {error}; path/handle deltas seen: {deltas}")
+        if not deltas:
+            raise unittest.SkipTest("the path/handle ctime disagreement was not observed on this run")
+        print(f"observed path/handle deltas: {deltas}")
+
+
 class CheckedOutAndDownloadedTests(unittest.TestCase):
     """Files the runner itself put on the workspace volume: the git checkout and an extracted artifact."""
 
