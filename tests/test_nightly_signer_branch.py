@@ -98,15 +98,18 @@ class StableReleaseGuardTests(unittest.TestCase):
                     self.assertIn("!contains(needs.*.result, 'failure')", condition)
                     self.assertNotIn('always()', condition)
 
-    def test_only_the_stable_release_workflow_names_the_release_environment(self):
-        # The nightly signer takes its keys from workflow_call secrets the caller forwards, so no
-        # nightly job binds an environment; only stable's release.yml does.
+    def test_only_stable_and_the_three_nightly_signers_name_the_release_environment(self):
+        # Stable retains its release-only expression; only the three nightly signers
+        # also bind release, never validation, fresh verification or publishing.
+        nightly = load('nightly-release.yml')['jobs']
+        bound = {name: job['environment'] for name, job in nightly.items() if 'environment' in job}
+        self.assertEqual(bound, {name: 'release' for name in ('sign-windows', 'sign-macos', 'sign-linux')})
         named = set()
         for path in WORKFLOWS.glob('*.yml'):
             for value in re.findall(r"(?m)^\s*environment:\s*(.+?)\s*$", path.read_text()):
                 if 'release' in value:
                     named.add(path.name)
-        self.assertEqual(named, {'release.yml'})
+        self.assertEqual(named, {'release.yml', 'nightly-release.yml'})
 
 
 
