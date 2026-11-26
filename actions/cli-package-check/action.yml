@@ -1,0 +1,43 @@
+name: "CLI package check"
+description: >-
+  Fails unless a Linux or FreeBSD package of a Craft CLI installs bash, zsh and fish completions and
+  a man page for the CLI and each subcommand (RFC-0018 rules 1.9 and 2.7). Reads only the package's file list.
+
+inputs:
+  package:
+    description: "The package archive: a tar archive, a FreeBSD .pkg, a .deb or an .rpm"
+    required: true
+  cli:
+    description: "The binary name, for example photocraft-cli"
+    required: true
+  subcommands:
+    description: "Subcommands that need a man page, separated by spaces"
+    required: false
+    default: ""
+  binary:
+    description: "A built CLI whose --help lists the subcommands (added to subcommands). Optional"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Completions and man pages are installed
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/check_cli_package.py
+        PACKAGE: ${{ inputs.package }}
+        CLI: ${{ inputs.cli }}
+        SUBCOMMANDS: ${{ inputs.subcommands }}
+        BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+        args=(python3 "$CHECK_PATH" --cli "$CLI" --package "$PACKAGE")
+        read -r -d '' -a subs <<< "$SUBCOMMANDS" || true
+        for s in "${subs[@]}"; do
+          args+=(--subcommand "$s")
+        done
+        if [ -n "$BINARY" ]; then
+          args+=(--binary "$BINARY")
+        fi
+        "${args[@]}"
