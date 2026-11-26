@@ -208,8 +208,34 @@ def signer_job_problems(app, jobs, pin):
         problems.append(f"nightly-sign.yml does not pass app-name: {app}")
     if CCA_CALL.fullmatch(job["uses"]).group(2) != pin or inputs.get("tooling-revision") != pin:
         problems.append(f"nightly-sign.yml job {name} does not call nightly-release.yml and pass tooling-revision at {pin}")
-    if "secrets" in job:
-        problems.append(f"nightly-sign.yml job {name} passes secrets; only the callee's signing job reads the {ENV} environment")
+    problems += forwarded_secrets_problems(app, job, name)
+    return problems
+
+
+def forwarded_secrets_problems(app, job, name):
+    """A caller may forward the reviewable signing secrets, an identity mapping of exactly the names its targets need.
+
+    The callee cannot read the release environment (an environment does not reach a cross-repo reusable
+    workflow), so the caller forwards them. Anything else stays refused: `inherit`, a value taken from a
+    different secret, an extra or missing name, and an environment on the calling job.
+    """
+    wanted = required_secrets(registry()["apps"][app])
+    if "environment" in job:
+        return [f"nightly-sign.yml job {name} binds an environment; the caller forwards the {ENV} secrets by name instead"]
+    if "secrets" not in job:
+        return [f"nightly-sign.yml job {name} forwards no secrets; the callee cannot read the {ENV} environment"]
+    spec = job["secrets"]
+    if not isinstance(spec, dict):
+        return [f"nightly-sign.yml job {name} passes secrets: {spec!r}; only an identity mapping of the reviewed names is allowed"]
+    problems = []
+    for key, value in spec.items():
+        if value != "${{ secrets." + key + " }}":
+            problems.append(f"nightly-sign.yml job {name} forwards {key} from {value!r}, not from secrets.{key}")
+    extra, missing = sorted(set(spec) - wanted), sorted(wanted - set(spec))
+    if extra:
+        problems.append(f"nightly-sign.yml job {name} forwards secrets outside the reviewed set: {extra}")
+    if missing:
+        problems.append(f"nightly-sign.yml job {name} does not forward {missing}, which this app's targets need")
     return problems
 
 
