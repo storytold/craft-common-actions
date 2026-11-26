@@ -25,6 +25,8 @@ jobs:
     with:
       tooling-revision: {PIN}
       app-name: gridcraft
+    secrets:
+      LINUX_SIGNING_KEY: ${{{{ secrets.LINUX_SIGNING_KEY }}}}
 """
 NIGHTLY = f"jobs:\n  build:\n    uses: storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@{PIN}\n"
 RELEASE_CALLER = "on: push\njobs:\n  release:\n    uses: storytold/craft-common-actions/.github/workflows/release.yml@{ref}\n"
@@ -33,6 +35,8 @@ GUARDED = "jobs:\n  linux:\n    runs-on: ubuntu-24.04\n    environment: " + s.GU
 POLICY = {"release_branch": "nightly-signer", "producer_tooling_revision": PIN, "signer_tooling_revision": PIN}
 ALL = sorted(s.SECRETS["linux"] | s.SECRETS["macos"] | s.SECRETS["windows"])
 LINUX_ROW = {"targets": [{"target": {"os": "linux", "arch": "x86_64", "format": "tar_gz"}}]}
+PHOTO_ROW = {"targets": [{"target": {"os": os_, "arch": "x86_64", "format": "tar_gz"}} for os_ in ("linux", "macos", "windows")]}
+LINUX_BLOCK = "    secrets:\n      LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}\n"
 TEAM = 19837241
 MAIN = "c" * 40
 # main's first-parent line, newest first; "f"*40 is a commit inside a merged branch (an ancestor, not first-parent).
@@ -49,7 +53,9 @@ class FakeGitHub:
         self.files = {".github/workflows/nightly-sign.yml": SIGN, ".github/workflows/nightly.yml": NIGHTLY,
                       ".github/workflows/release.yml": RELEASE_CALLER.format(ref="main"), ".github/workflows/ci.yml": CI,
                       ".github/nightly-signing-policy.json": json.dumps(POLICY)}
-        self.cca = {".github/workflows/release.yml": GUARDED, ".github/workflows/gate.yml": "jobs:\n  t:\n    runs-on: x\n    steps: []\n"}
+        self.cca = {".github/workflows/release.yml": GUARDED, ".github/workflows/gate.yml": "jobs:\n  t:\n    runs-on: x\n    steps: []\n",
+                    "nightly-apps.json": json.dumps({"apps": {"gridcraft": LINUX_ROW, "photocraft": PHOTO_ROW}})}
+        self.cca[".nightly-apps.fixture"] = ""
         self.env_secrets, self.repo_secrets = ["LINUX_SIGNING_KEY"], []
         self.policies, self.branch, self.on_main = [("release", 1)], None, True
         self.rulesets, self.rulesets_readable = existing_rulesets(["gridcraft"]), True
@@ -232,7 +238,12 @@ class SettingsTests(unittest.TestCase):
             "no signer call": ({".github/workflows/nightly-sign.yml": "jobs:\n  release:\n    runs-on: x\n    steps: []\n"}, "expected exactly one"),
             "two signer jobs": ({".github/workflows/nightly-sign.yml": SIGN + SIGN.split("jobs:\n", 1)[1].replace("  release:", "  again:")}, "expected exactly one"),
             "tooling-revision": ({".github/workflows/nightly-sign.yml": SIGN.replace(f"tooling-revision: {PIN}", "tooling-revision: main")}, "tooling-revision"),
-            "secrets": ({".github/workflows/nightly-sign.yml": SIGN + "    secrets: inherit\n"}, "passes secrets"),
+            "secrets inherit": ({".github/workflows/nightly-sign.yml": SIGN.replace(LINUX_BLOCK, "    secrets: inherit\n")}, "only an identity mapping"),
+            "secrets retargeted": ({".github/workflows/nightly-sign.yml": SIGN.replace("secrets.LINUX_SIGNING_KEY", "secrets.UNRELATED_SECRET")}, "not from secrets.LINUX_SIGNING_KEY"),
+            "secrets extra": ({".github/workflows/nightly-sign.yml": SIGN.replace(LINUX_BLOCK, LINUX_BLOCK + "      EXTRA_SECRET: ${{ secrets.EXTRA_SECRET }}\n")}, "outside the reviewed set"),
+            "signing name not on the list": ({".github/workflows/nightly-sign.yml": SIGN.replace(LINUX_BLOCK, LINUX_BLOCK + "      APPLE_ID: ${{ secrets.APPLE_ID }}\n")}, "outside the reviewed set"),
+            "secrets absent": ({".github/workflows/nightly-sign.yml": SIGN.replace(LINUX_BLOCK, "")}, "forwards no secrets"),
+            "environment on the caller": ({".github/workflows/nightly-sign.yml": SIGN.replace("    secrets:", "    environment: release\n    secrets:")}, "binds an environment"),
             # The reusable-workflow boundary: only craft-common-actions callees, each checked down its chain.
             "outside callee": ({".github/workflows/x.yml": "jobs:\n  x:\n    uses: someone/else/.github/workflows/r.yml@" + "1" * 40 + "\n"}, "not an approved"),
             "expression callee": ({".github/workflows/x.yml": "jobs:\n  x:\n    uses: ${{ inputs.w }}\n"}, "not an approved"),
