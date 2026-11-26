@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """RFC-0018 rules 1.9 and 2.7: a Linux or FreeBSD package of a Craft CLI installs bash, zsh and fish
-completions and a man page for the CLI and for each of its subcommands.
+completions and a man page for the CLI and for each of its subcommands. Man pages sit in `man/man1`
+under `share` (Linux, and FreeBSD packages that use it) or under the prefix itself (a FreeBSD tarball or
+port: `man/man1`), so either is accepted.
 
 Reads the package's file list on standard input, one installed path per line: the action lists a
 tar archive, a FreeBSD .pkg, a .deb or an .rpm with the tool that opens it and pipes the list here."""
@@ -18,11 +20,11 @@ def required_patterns(cli, subcommands):
         (f'bash completion share/bash-completion/completions/{cli}', rf'(^|/)share/bash-completion/completions/{name}$'),
         (f'zsh completion share/zsh/site-functions/_{cli}', rf'(^|/)share/zsh/site-functions/_{name}$'),
         (f'fish completion share/fish/vendor_completions.d/{cli}.fish', rf'(^|/)share/fish/vendor_completions\.d/{name}\.fish$'),
-        (f'man page share/man/man1/{cli}.1', rf'(^|/)share/man/man1/{name}{MAN_SUFFIX}$'),
+        (f'man page man/man1/{cli}.1', rf'(^|/)man/man1/{name}{MAN_SUFFIX}$'),
     ]
     for sub in subcommands:
-        wanted.append((f'man page share/man/man1/{cli}-{sub}.1',
-                       rf'(^|/)share/man/man1/{name}-{re.escape(sub)}{MAN_SUFFIX}$'))
+        wanted.append((f'man page man/man1/{cli}-{sub}.1',
+                       rf'(^|/)man/man1/{name}-{re.escape(sub)}{MAN_SUFFIX}$'))
     return wanted
 
 

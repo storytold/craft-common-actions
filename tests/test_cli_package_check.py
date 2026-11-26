@@ -40,8 +40,8 @@ class MissingFiles(unittest.TestCase):
             ('bash-completion', 'bash completion'),
             ('zsh/site-functions', 'zsh completion'),
             ('fish/vendor_completions.d', 'fish completion'),
-            ('man1/app-cli.1', 'man page share/man/man1/app-cli.1'),
-            ('man1/app-cli-info.1', 'man page share/man/man1/app-cli-info.1'),
+            ('man1/app-cli.1', 'man page man/man1/app-cli.1'),
+            ('man1/app-cli-info.1', 'man page man/man1/app-cli-info.1'),
         ]:
             with self.subTest(dropped=dropped):
                 paths = [p for p in FULL if dropped not in p]
@@ -55,6 +55,10 @@ class MissingFiles(unittest.TestCase):
 
     def test_freebsd_paths_under_usr_local_and_other_compressions_match(self):
         paths = ['/usr/local/' + p.removeprefix('usr/').replace('.1.gz', '.1.zst') for p in FULL]
+        self.assertEqual(CHECK.missing_files(paths, 'app-cli', ['convert', 'info']), [])
+
+    def test_a_freebsd_tarball_keeps_man_pages_under_man_man1(self):
+        paths = [p.replace('usr/share/man/', 'man/') for p in FULL]
         self.assertEqual(CHECK.missing_files(paths, 'app-cli', ['convert', 'info']), [])
 
     def test_another_clis_files_do_not_count(self):
@@ -79,7 +83,7 @@ class Command(unittest.TestCase):
         code, _, err = run(['--cli', 'app-cli'], FULL[:3])
         self.assertEqual(code, 1)
         self.assertIn('fish completion', err)
-        self.assertIn('man page share/man/man1/app-cli.1', err)
+        self.assertIn('man page man/man1/app-cli.1', err)
 
     def test_a_subcommand_without_a_man_page_fails(self):
         code, _, err = run(['--cli', 'app-cli', '--subcommand', 'info', '--subcommand', 'run'], FULL)
