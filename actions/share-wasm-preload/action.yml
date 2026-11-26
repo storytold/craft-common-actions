@@ -1,0 +1,11 @@
+name: Share the WASM download
+description: Start one integrity-checked WASM download in packaged Trunk web entries
+
+runs:
+  using: composite
+  steps:
+    - name: Update packaged Trunk entries
+      shell: bash
+      env:
+        SCRIPT: ${{ github.action_path }}/share_wasm_preload.py
+      run: python3 "$SCRIPT" dist/release
