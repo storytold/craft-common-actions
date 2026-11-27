@@ -25,10 +25,19 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
-          if [ -z "$DISPATCH_TOKEN" ]; then
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
             echo "::warning::ARTCRAFT_SERVICES_DISPATCH_TOKEN is not configured; skipping artcraft-services rebuild dispatch."
             exit 0
           fi
+          if [ "${RELEASE_PRERELEASE:-}" = "true" ]; then prerelease=true; else prerelease=false; fi
+          # Serialize with jq so a tag containing a quote or backslash cannot break the JSON body.
+          jq -n \
+            --arg repo "${GITHUB_REPOSITORY}" \
+            --arg action "${EVENT_ACTION}" \
+            --arg tag "${RELEASE_TAG}" \
+            --argjson prerelease "${prerelease}" \
+            '{event_type: "craft-release-changed", client_payload: {repo: $repo, action: $action, tag: $tag, prerelease: $prerelease}}' |
           curl --fail --silent --show-error \
             --connect-timeout 10 --max-time 30 \
             -X POST \
@@ -36,4 +45,4 @@ jobs:
             -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/storytold/artcraft-services/dispatches" \
-            -d "{\"event_type\":\"craft-release-changed\",\"client_payload\":{\"repo\":\"${GITHUB_REPOSITORY}\",\"action\":\"${EVENT_ACTION}\",\"tag\":\"${RELEASE_TAG}\",\"prerelease\":${RELEASE_PRERELEASE:-false}}}"
+            --data-binary @-
