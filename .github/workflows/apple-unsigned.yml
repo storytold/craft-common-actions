@@ -1,0 +1,516 @@
+name: "Apple unsigned validation (opt-in)"
+
+on:
+  workflow_call:
+    inputs:
+      phase:
+        description: "build, test, package, or all (runs the applicable phases in order)"
+        type: string
+        default: build
+      platform:
+        description: "all, macos, ios-simulator, or ios-device"
+        type: string
+        default: all
+      configuration:
+        description: "Debug or Release"
+        type: string
+        default: Debug
+      driver:
+        description: "Reviewed app-owned Bash driver, relative to repository root"
+        type: string
+        default: scripts/build-apple.sh
+      xcode-version:
+        description: "Exact installed Xcode version, e.g. 26.2; no latest/fallback"
+        type: string
+        required: true
+      rust-toolchain:
+        description: "Exact Rust release, e.g. 1.99.0; no floating channel"
+        type: string
+        required: true
+      simulator-runtime:
+        description: "Exact installed iOS runtime identifier; required for Simulator tests"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Validate inputs and select isolated jobs
+        id: plan
+        shell: bash
+        env:
+          PHASE: ${{ inputs.phase }}
+          PLATFORM: ${{ inputs.platform }}
+          CONFIGURATION: ${{ inputs.configuration }}
+          DRIVER: ${{ inputs.driver }}
+          XCODE_VERSION: ${{ inputs.xcode-version }}
+          RUST_TOOLCHAIN: ${{ inputs.rust-toolchain }}
+          SIMULATOR_RUNTIME: ${{ inputs.simulator-runtime }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import PurePosixPath
+
+          phase = os.environ["PHASE"]
+          platform = os.environ["PLATFORM"]
+          supported = {
+              "build": ["macos", "ios-simulator", "ios-device"],
+              "test": ["macos", "ios-simulator"],
+              "package": ["macos", "ios-simulator", "ios-device"],
+              "all": ["macos", "ios-simulator", "ios-device"],
+          }
+          if phase not in supported or platform not in ("all", "macos", "ios-simulator", "ios-device"):
+              raise SystemExit("phase/platform is not a supported Apple driver selection")
+          if os.environ["CONFIGURATION"] not in ("Debug", "Release"):
+              raise SystemExit("configuration must be Debug or Release")
+          if phase in ("test", "all") and os.environ["CONFIGURATION"] != "Debug":
+              raise SystemExit("this POC's native tests require Debug; select build/package for Release")
+          driver = os.environ["DRIVER"]
+          path = PurePosixPath(driver)
+          if (not re.fullmatch(r"[A-Za-z0-9_./-]+\.sh", driver)
+                  or path.is_absolute() or ".." in path.parts or driver.startswith("-")):
+              raise SystemExit("driver must be a repository-relative .sh path without traversal")
+          if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", os.environ["XCODE_VERSION"]):
+              raise SystemExit("xcode-version must be an exact installed numeric version")
+          if not re.fullmatch(r"\d+\.\d+\.\d+", os.environ["RUST_TOOLCHAIN"]):
+              raise SystemExit("rust-toolchain must be an exact numeric release")
+          platforms = supported[phase] if platform == "all" else [platform]
+          if any(item not in supported[phase] for item in platforms):
+              raise SystemExit("test ios-device is unsupported: unsigned device builds are not device tests")
+          if phase in ("test", "all") and "ios-simulator" in platforms:
+              if not re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-\d+-\d+(?:-\d+)?",
+                                  os.environ["SIMULATOR_RUNTIME"]):
+                  raise SystemExit("Simulator tests require an exact installed simulator-runtime identifier")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("platforms=" + json.dumps(platforms) + "\n")
+          PY
+
+  validate:
+    name: ${{ inputs.phase }} (${{ matrix.platform }}, ${{ inputs.configuration }}, unsigned)
+    needs: plan
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.plan.outputs.platforms) }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      PHASE: ${{ inputs.phase }}
+      PLATFORM: ${{ matrix.platform }}
+      CONFIGURATION: ${{ inputs.configuration }}
+      DRIVER: ${{ inputs.driver }}
+      XCODE_VERSION: ${{ inputs.xcode-version }}
+      SIMULATOR_RUNTIME: ${{ inputs.simulator-runtime }}
+      RUSTUP_TOOLCHAIN: ${{ inputs.rust-toolchain }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Select exact Xcode and validate driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -m)" != arm64 ]]; then
+            echo "::error::This workflow requires the ARM64 macos-15 image; review runner architecture and Rust Simulator targets."
+            exit 1
+          fi
+          developer="/Applications/Xcode_${XCODE_VERSION}.app/Contents/Developer"
+          if [[ ! -d "$developer" ]]; then
+            echo "::error::Requested Xcode is not installed: $developer. Review the macos-15 runner image."
+            exit 1
+          fi
+          export DEVELOPER_DIR="$developer"
+          echo "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path.cwd().resolve()
+          driver = (root / os.environ["DRIVER"]).resolve(strict=True)
+          if root not in driver.parents or not driver.is_file():
+              raise SystemExit("driver must resolve to a file inside the app repository")
+          PY
+          version=$(xcodebuild -version)
+          printf '%s\n' "$version"
+          XCODE_REPORTED_VERSION="$version" python3 - <<'PY'
+          import os
+          import re
+
+          reported = re.search(r"^Xcode (\d+\.\d+(?:\.\d+)?)$", os.environ["XCODE_REPORTED_VERSION"], re.M)
+          if reported is None:
+              raise SystemExit("Selected Xcode did not report a recognizable numeric version")
+          requested = os.environ["XCODE_VERSION"]
+          def normalized(version):
+              parts = tuple(map(int, version.split(".")))
+              return parts + (0,) * (3 - len(parts))
+          if normalized(requested) != normalized(reported[1]):
+              raise SystemExit(f"Requested Xcode {requested}, but selected Xcode reports {reported[1]}")
+          PY
+          xcodebuild -showsdks
+          case "$PLATFORM" in
+            macos) sdk=macosx ;;
+            ios-simulator) sdk=iphonesimulator ;;
+            ios-device) sdk=iphoneos ;;
+          esac
+          xcrun --sdk "$sdk" --show-sdk-path
+          if [[ "$PLATFORM" == ios-simulator ]]; then
+            xcrun simctl list runtimes
+            xcrun simctl list devices available
+          fi
+          git rev-parse HEAD
+          uname -m
+      - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios-sim,aarch64-apple-ios
+      - name: Create job-owned iPhone and iPad simulators
+        id: simulators
+        if: matrix.platform == 'ios-simulator' && (inputs.phase == 'test' || inputs.phase == 'all')
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import uuid
+
+          def simctl(*args):
+              result = subprocess.run(["xcrun", "simctl", *args], capture_output=True,
+                                      text=True, timeout=60)
+              if result.returncode:
+                  raise SystemExit(f"simctl {args[0]} failed: {result.stderr.strip()}")
+              return result.stdout.strip()
+
+          runtimes = json.loads(simctl("list", "runtimes", "--json"))["runtimes"]
+          runtime = next((item for item in runtimes
+                          if item["identifier"] == os.environ["SIMULATOR_RUNTIME"]
+                          and item.get("isAvailable") is True), None)
+          if runtime is None:
+              raise SystemExit("Requested iOS runtime is not installed/available; inspect simctl list runtimes")
+          supported = runtime.get("supportedDeviceTypes")
+          if not supported:
+              raise SystemExit("Runtime exposes no supported device types; inspect the selected Xcode/runtime")
+          selected = []
+          for family, variable in (("iPhone", "CRAFT_IPHONE_SIMULATOR_UDID"),
+                                   ("iPad", "CRAFT_IPAD_SIMULATOR_UDID")):
+              candidates = sorted((item for item in supported
+                                   if item.get("productFamily") == family
+                                   and item.get("name", "").startswith(family)),
+                                  key=lambda item: item["identifier"])
+              if not candidates:
+                  raise SystemExit(f"Selected runtime has no supported {family} device type")
+              selected.append((family, variable, candidates[0]["identifier"]))
+          owned = []
+          manifest = Path(".craft-apple-simulators.json")
+          if manifest.exists() or manifest.is_symlink():
+              raise SystemExit("Refusing to overwrite an existing simulator ownership manifest")
+          manifest.write_text("[]\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("owned=true\n")
+          for family, variable, device_type in selected:
+              name = f"craft-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{family}"
+              identifier = simctl("create", name, device_type, runtime["identifier"])
+              uuid.UUID(identifier)
+              if any(item["udid"] == identifier for item in owned):
+                  raise SystemExit("simctl returned duplicate simulator UUIDs")
+              owned.append({"family": family, "udid": identifier, "device_type": device_type,
+                            "runtime": runtime["identifier"], "name": name})
+              manifest.write_text(json.dumps(owned, indent=2) + "\n")
+              with open(os.environ["GITHUB_ENV"], "a") as environment:
+                  environment.write(f"{variable}={identifier}\n")
+              print(f"{family}: {identifier}, {device_type}, {runtime['identifier']}")
+          PY
+      - name: Run reviewed app driver
+        shell: bash
+        env:
+          CODE_SIGNING_ALLOWED: "NO"
+          CODE_SIGNING_REQUIRED: "NO"
+        run: |
+          set -euo pipefail
+          compiler=$(rustc --version)
+          echo "$compiler"
+          if [[ "$compiler" != "rustc ${RUSTUP_TOOLCHAIN} "* ]]; then
+            echo "::error::Active Rust compiler does not match the requested rust-toolchain"
+            exit 1
+          fi
+          cargo --version
+          run_phase() {
+            bash -- "$DRIVER" "$1" "$PLATFORM" "$CONFIGURATION"
+          }
+          if [[ "$PHASE" == all ]]; then
+            run_phase build
+            if [[ "$PLATFORM" != ios-device ]]; then run_phase test; fi
+            run_phase package
+          else
+            run_phase "$PHASE"
+          fi
+      - name: Require packaging products
+        if: inputs.phase == 'package' || inputs.phase == 'all'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import stat
+          import zipfile
+          from collections import deque
+          from pathlib import Path, PurePosixPath
+
+          max_symlink_target_bytes = 4096
+          max_symlink_resolution_steps = 100_000
+
+          def validate_archive(package, archive):
+              entries = {}
+              symlinks = {}
+              implicit_directories = set()
+              for info in package.infolist():
+                  name = info.filename
+                  path = PurePosixPath(name)
+                  if (not name or "\\" in name or "\x00" in name or path.is_absolute()
+                          or re.match(r"^[A-Za-z]:", name) or ".." in path.parts):
+                      raise SystemExit(f"package ZIP contains an unsafe path: {archive}: {name!r}")
+                  normalized = path.as_posix().rstrip("/")
+                  if normalized in entries:
+                      raise SystemExit(f"package ZIP contains a duplicate path: {archive}: {normalized}")
+                  entries[normalized] = info
+                  for index in range(1, len(path.parts)):
+                      implicit_directories.add("/".join(path.parts[:index]))
+                  mode = info.external_attr >> 16
+                  kind = stat.S_IFMT(mode)
+                  if kind not in (0, stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK):
+                      raise SystemExit(f"package ZIP contains a special file: {archive}: {normalized}")
+                  if stat.S_ISLNK(mode):
+                      try:
+                          with package.open(info) as source:
+                              target_bytes = source.read(max_symlink_target_bytes + 1)
+                          if len(target_bytes) > max_symlink_target_bytes:
+                              raise SystemExit(f"package ZIP symlink target is too long: {archive}: {normalized}")
+                          target = target_bytes.decode("utf-8")
+                      except (UnicodeDecodeError, RuntimeError) as error:
+                          raise SystemExit(f"package ZIP contains an invalid symlink: {archive}: {normalized}: {error}")
+                      if (not target or "\\" in target or "\x00" in target
+                              or target.startswith("/") or re.match(r"^[A-Za-z]:", target)):
+                          raise SystemExit(f"package ZIP contains an unsafe symlink: {archive}: {normalized}")
+                      symlinks[normalized] = target
+
+              def is_directory(path):
+                  info = entries.get(path)
+                  if info is None:
+                      return path in implicit_directories
+                  mode = info.external_attr >> 16
+                  return stat.S_ISDIR(mode) or (stat.S_IFMT(mode) == 0 and info.is_dir())
+
+              resolution_steps = 0
+
+              def resolve(parts, active):
+                  nonlocal resolution_steps
+                  resolved = []
+                  pending = deque(parts)
+                  while pending:
+                      resolution_steps += 1
+                      if resolution_steps > max_symlink_resolution_steps:
+                          raise SystemExit(
+                              f"package ZIP symlink resolution exceeded its work limit: {archive}"
+                          )
+                      part = pending.popleft()
+                      if isinstance(part, tuple):
+                          _, link, requires_directory = part
+                          destination = "/".join(resolved)
+                          if requires_directory and destination and not is_directory(destination):
+                              raise SystemExit(
+                                  f"package ZIP symlink has a non-directory target: {archive}: {destination}"
+                              )
+                          active.remove(link)
+                          continue
+                      if part in ("", "."):
+                          if part == "." and resolved and not is_directory("/".join(resolved)):
+                              raise SystemExit(
+                                  f"package ZIP symlink traverses a non-directory path component: "
+                                  f"{archive}: {'/'.join(resolved)}"
+                              )
+                          continue
+                      if part == "..":
+                          if not resolved:
+                              raise SystemExit(f"package ZIP symlink escapes the archive: {archive}")
+                          current = "/".join(resolved)
+                          if not is_directory(current):
+                              message = (
+                                  "dangling symlink"
+                                  if current not in entries and current not in implicit_directories
+                                  else "non-directory path component"
+                              )
+                              raise SystemExit(
+                                  f"package ZIP symlink has a {message}: {archive}: {current}"
+                              )
+                          resolved.pop()
+                          continue
+                      if resolved and not is_directory("/".join(resolved)):
+                          raise SystemExit(
+                              f"package ZIP symlink traverses a non-directory path component: "
+                              f"{archive}: {'/'.join(resolved)}"
+                          )
+                      resolved.append(part)
+                      current = "/".join(resolved)
+                      if current in symlinks:
+                          if current in active:
+                              raise SystemExit(f"package ZIP contains a symlink cycle: {archive}: {current}")
+                          target = symlinks[current]
+                          pending.extendleft(reversed(
+                              target.split("/") + [(None, current, target.endswith("/"))]
+                          ))
+                          resolved.pop()
+                          active.add(current)
+                  destination = "/".join(resolved)
+                  if (destination and destination not in entries
+                          and not any(name.startswith(destination + "/") for name in entries)):
+                      raise SystemExit(f"package ZIP contains a dangling symlink: {archive}: {destination}")
+                  return destination
+
+              for name, target in symlinks.items():
+                  resolve(PurePosixPath(name).parent.parts + tuple(target.split("/")), {name})
+
+          artifact_root = Path("target/apple")
+          platform = os.environ["PLATFORM"]
+          configuration = artifact_root / os.environ["CONFIGURATION"]
+          root = configuration / platform
+          if not root.is_dir() or any(path.is_symlink() for path in (artifact_root, configuration, root)):
+              raise SystemExit(f"package must create {root} as a real directory")
+          if any(artifact_root.rglob("*.ipa")):
+              raise SystemExit("unsigned validation must not export an installable IPA")
+          for path in root.rglob("*"):
+              if path.is_symlink():
+                  try:
+                      target = path.resolve(strict=True)
+                  except (OSError, RuntimeError) as error:
+                      raise SystemExit(f"package contains an invalid symlink: {path}: {error}")
+                  if root.resolve() not in target.parents:
+                      raise SystemExit(f"package symlink escapes its platform output directory: {path}")
+                  if path.suffix in (".app", ".xcarchive", ".zip"):
+                      raise SystemExit(f"package product must not be a symlink: {path}")
+          if platform in ("macos", "ios-simulator"):
+              plist = "Contents/Info.plist" if platform == "macos" else "Info.plist"
+              bundles = [app for app in root.rglob("*.app")
+                         if (app / plist).is_file()]
+              archives = list(root.rglob("*.zip" if platform == "macos" else "*.app.zip"))
+              if not archives or (platform == "macos" and not bundles):
+                  raise SystemExit(f"{platform} package requires an unsigned app ZIP (and macOS .app) in {root}")
+              contains_app = False
+              for archive in archives:
+                  with zipfile.ZipFile(archive) as package:
+                      validate_archive(package, archive)
+                      contains_app |= any(
+                          info.filename.endswith(f".app/{plist}")
+                          and not info.is_dir()
+                          and not stat.S_ISLNK(info.external_attr >> 16)
+                          for info in package.infolist()
+                      )
+              if not contains_app:
+                  raise SystemExit(f"a {platform} ZIP must contain an app bundle")
+          else:
+              archives = [archive for archive in root.rglob("*.xcarchive")
+                          if (archive / "Info.plist").is_file()
+                          and any(plist.is_file() for plist in
+                                  (archive / "Products/Applications").glob("*.app/Info.plist"))]
+              if not archives:
+                  raise SystemExit(f"ios-device package requires an unsigned .xcarchive in {root}")
+          PY
+      - name: Clean up only job-owned simulators
+        if: always() && steps.simulators.outputs.owned == 'true'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+          import uuid
+
+          manifest = Path(".craft-apple-simulators.json")
+          if manifest.is_symlink() or not manifest.is_file():
+              raise SystemExit("Refusing to read a missing or non-regular simulator ownership manifest")
+          owned = json.loads(manifest.read_text())
+          failures = []
+          evidence = Path("target/apple/ci")
+          try:
+              for directory in (Path("target"), Path("target/apple"), evidence):
+                  if directory.is_symlink():
+                      raise OSError(f"refusing symlinked evidence directory: {directory}")
+                  directory.mkdir(exist_ok=True)
+                  if not directory.is_dir():
+                      raise OSError(f"evidence path is not a directory: {directory}")
+              evidence_file = evidence / "simulators.json"
+              if evidence_file.is_symlink():
+                  raise OSError(f"refusing symlinked evidence file: {evidence_file}")
+              evidence_file.write_text(manifest.read_text())
+          except OSError as error:
+              failures.append(f"Could not write simulator cleanup evidence: {error}")
+          result = subprocess.run(["xcrun", "simctl", "list", "devices", "--json"],
+                                  capture_output=True, text=True, check=True, timeout=60)
+          devices = {item["udid"]: item for group in json.loads(result.stdout)["devices"].values()
+                     for item in group}
+          for item in owned:
+              identifier = item["udid"]
+              uuid.UUID(identifier)
+              device = devices.get(identifier)
+              if device is None:
+                  print(f"Job-owned simulator already removed: {identifier}")
+                  continue
+              if device["name"] != item["name"]:
+                  failures.append(f"Refusing to remove simulator with changed identity: {identifier}")
+                  continue
+              commands = ["delete"] if device["state"] == "Shutdown" else ["shutdown", "delete"]
+              for command in commands:
+                  try:
+                      result = subprocess.run(["xcrun", "simctl", command, identifier],
+                                              capture_output=True, text=True, timeout=60)
+                  except subprocess.TimeoutExpired as error:
+                      failures.append(f"simctl {command} {identifier} timed out after {error.timeout} seconds")
+                      continue
+                  if result.returncode:
+                      failures.append(f"simctl {command} {identifier}: {result.stderr.strip()}")
+          if failures:
+              raise SystemExit("\n".join(failures))
+          manifest.unlink()
+          PY
+      # Tar preserves .app/.xcarchive symlinks and modes that artifact upload does not.
+      - name: Preserve unsigned outputs and test evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d target/apple ]]; then
+            tar -czf apple-unsigned-evidence.tar.gz -C target apple
+          elif [[ "$PHASE" == package || "$PHASE" == all ]]; then
+            echo "::error::Package phase produced no target/apple artifacts"
+            exit 1
+          else
+            echo "No optional target/apple evidence; build/test outputs stay in app-owned locations"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && hashFiles('apple-unsigned-evidence.tar.gz') != ''
+        with:
+          name: apple-unsigned-${{ inputs.phase }}-${{ matrix.platform }}-${{ inputs.configuration }}-${{ github.run_attempt }}
+          path: apple-unsigned-evidence.tar.gz
+          if-no-files-found: error
+          retention-days: 7
