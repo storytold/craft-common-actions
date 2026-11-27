@@ -47,7 +47,7 @@ jobs:
       ok: ${{ steps.admit.outputs.ok }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - name: Bind immutable defining workflow before any shared code
@@ -80,7 +80,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,12 +223,12 @@ jobs:
           if ((git -C .nightly-tools rev-parse HEAD) -cne $env:TOOLING_REVISION) { throw 'tooling checkout differs' }
           python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform windows-x86_64 --output .unsigned-plan
           if ($LASTEXITCODE -ne 0) { throw 'unsigned producer identity refused' }
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@68718895f523c6606fc0f38501db735291ee18ed
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@68718895f523c6606fc0f38501db735291ee18ed
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@68718895f523c6606fc0f38501db735291ee18ed
         with:
           targets: x86_64-pc-windows-msvc
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -328,7 +328,7 @@ jobs:
         run: |
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform windows-x86_64 --directory .unsigned
       - name: Attest actual independently hashed unsigned payload, never a caller digest
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
   build-macos:
@@ -349,11 +349,11 @@ jobs:
       unsigned-sha256: ${{ steps.seal.outputs.unsigned-sha256 }}
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -394,12 +394,12 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -m)" = arm64
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform macos-aarch64 --output .unsigned-plan
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@68718895f523c6606fc0f38501db735291ee18ed
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@68718895f523c6606fc0f38501db735291ee18ed
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@68718895f523c6606fc0f38501db735291ee18ed
         with:
           targets: aarch64-apple-darwin
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -501,7 +501,7 @@ jobs:
         run: |
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform macos-aarch64 --directory .unsigned
       - name: Attest actual independently hashed unsigned payload, never a caller digest
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
   build-linux:
@@ -523,11 +523,11 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -566,16 +566,16 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -m)" = x86_64
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@68718895f523c6606fc0f38501db735291ee18ed
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@68718895f523c6606fc0f38501db735291ee18ed
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@68718895f523c6606fc0f38501db735291ee18ed
         with:
           deb-arch: amd64
           nfpm-version: 2.47.0
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@68718895f523c6606fc0f38501db735291ee18ed
         with:
           targets: x86_64-unknown-linux-gnu
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -672,7 +672,7 @@ jobs:
           EXPECTED_COMPILER_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
         run: python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-subject --platform linux-x86_64 --directory .unsigned
       - name: Attest actual independently hashed unsigned payload, never a caller digest
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
 
@@ -697,11 +697,11 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Select Python for nightly helpers
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.13'
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -745,16 +745,16 @@ jobs:
           APP_NAME: ${{ inputs.app-name }}
         run: python3 -I -B .nightly-tools/scripts/nightly_app.py names --app-name "$APP_NAME" >> "$GITHUB_OUTPUT"
       - name: Export the app's build variables
-        uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/export-app-build-env@68718895f523c6606fc0f38501db735291ee18ed
         with:
           app-name: ${{ inputs.app-name }}
           version: ${{ steps.plan.outputs.version }}
           date: ${{ steps.plan.outputs.build-date }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@68718895f523c6606fc0f38501db735291ee18ed
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@68718895f523c6606fc0f38501db735291ee18ed
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@68718895f523c6606fc0f38501db735291ee18ed
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: 2.47.0
@@ -766,7 +766,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@68718895f523c6606fc0f38501db735291ee18ed
         with:
           targets: ${{ matrix.target }}
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -981,7 +981,7 @@ jobs:
       actions: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1105,6 +1105,6 @@ jobs:
           test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-packages-subject --platform linux-x86_64 --directory .linux-packages --formats "$LINUX_PACKAGE_FORMATS"
       - name: Attest Linux package payloads
-        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
