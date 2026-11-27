@@ -7,8 +7,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = {name: yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
              for name in ("release.yml", "windows-arm64.yml")}
-IMPORT = "storytold/craft-common-actions/actions/import-macos-certificate@main"
-SETUP = "storytold/craft-common-actions/actions/setup-windows-signing@main"
+# From the reusable workflow's own commit, not @main: a pinned release signs with that commit's helpers.
+IMPORT = "$/actions/import-macos-certificate"
+SETUP = "$/actions/setup-windows-signing"
 
 
 def steps():
@@ -56,6 +57,13 @@ class SharedSigningWiringTests(unittest.TestCase):
                 expected = "${{ inputs.app-title }}" if workflow == "release.yml" else "${{ inputs.app-title || inputs.app-dir }}"
                 self.assertEqual(job["steps"][setup[0]]["with"], {"product-name": expected})
         self.assertEqual(sorted(set(found)), ["release.yml", "windows-arm64.yml"])
+
+    def test_the_signing_helpers_come_from_the_workflows_own_commit(self):
+        for workflow, job, _, _, step in steps():
+            uses = step.get("uses", "")
+            if "import-macos-certificate" in uses or "setup-windows-signing" in uses:
+                with self.subTest(workflow=workflow, job=job, step=step.get("name")):
+                    self.assertIn(uses, (IMPORT, SETUP))
 
     def test_the_arm64_title_is_optional_so_callers_need_no_change(self):
         app_title = WORKFLOWS["windows-arm64.yml"]["on"]["workflow_call"]["inputs"]["app-title"]

@@ -723,7 +723,10 @@ decoded bundle is deleted as soon as it is imported, and a failed import also de
 Without a certificate it only warns and exits successfully, so unsigned test builds still work.
 
 The shared `release.yml` imports the certificate with this action, so an app's own
-`packaging/macos/import-cert.sh` is no longer run and can be deleted.
+`packaging/macos/import-cert.sh` is no longer run and can be deleted. It calls the action as
+`$/actions/import-macos-certificate`, from the workflow's own repository and commit: an app that
+calls `release.yml@main` gets main's action, and one that pins `release.yml` to a commit signs with
+that commit's action.
 
 ## Job time limits
 
@@ -819,8 +822,9 @@ warns and leaves the files unsigned.
 
 The shared `release.yml` and `windows-arm64.yml` run this action before `package.ps1`, with the
 app's `app-title` as the product name (`windows-arm64.yml` falls back to `app-dir`), so
-`CRAFT_SIGN_SCRIPT` is always set there. An app switches by making `package.ps1` call it instead of
-its own `sign.ps1`, then deletes its copy; until then nothing changes for it.
+`CRAFT_SIGN_SCRIPT` is always set there. Both call it as `$/actions/setup-windows-signing`, so the
+script comes from the same commit as the workflow. An app switches by making `package.ps1` call it
+instead of its own `sign.ps1`, then deletes its copy; until then nothing changes for it.
 
 ## Testing workflow failure paths
 
