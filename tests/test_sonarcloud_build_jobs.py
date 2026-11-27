@@ -60,6 +60,19 @@ class SonarCloudBuildJobsTests(unittest.TestCase):
                                         capture_output=True, text=True, check=False)
                 self.assertEqual(result.returncode == 0, value in {"1", "2", "3", "4"})
 
+    def test_catalog_endpoint_is_only_allowed_for_launcher_compilation(self):
+        endpoint = "${{ github.repository == 'storytold/craft-launcher' && 'getartcraft.com:443' || '' }}"
+        for job_name, job in DATA["jobs"].items():
+            with self.subTest(job=job_name):
+                runner = _step(job, "Harden runner")["with"]
+                self.assertEqual(runner["egress-policy"], "block")
+                endpoints = runner["allowed-endpoints"]
+                if job_name in ("build", "sonarcloud"):
+                    self.assertIn(endpoint, endpoints)
+                    self.assertEqual(endpoints.count("getartcraft.com:443"), 1)
+                else:
+                    self.assertNotIn("getartcraft.com", endpoints)
+
     def test_shard_test_runners_do_not_compile_and_do_not_take_the_limit(self):
         self.assertNotIn("env", DATA["jobs"]["coverage"])
         self.assertNotIn("CARGO_BUILD_JOBS", _step(DATA["jobs"]["coverage"], "Run this shard's tests").get("env", {}))
