@@ -219,11 +219,15 @@ def verified_history_roles(api, policy, request):
         role = request[name]; branch = r.signer_branch(policy) if name == "signer" else "main"
         run = api.request("GET", f"/actions/runs/{role['run_id']}/attempts/{role['run_attempt']}")
         r.repository(policy, run.get("repository")); r.repository(policy, run.get("head_repository"))
+        # A live v3 request retains the canonical creation time. Compare the known skew
+        # to the exact attempt, not the root endpoint, which can now describe a rerun.
+        created_matches = run.get("created_at") == role["created_at"] or (
+            name == "signer" and policy.get("schema") == r.LIVE_POLICY and r.first_signer_creation_skew(role, run))
         n.require(run.get("id") == role["run_id"] and run.get("run_attempt") == role["run_attempt"] and
             run.get("head_sha") == role["source_commit"] and run.get("workflow_id") == role["workflow_id"] and
             run.get("head_branch") == branch and p.run_workflow_path(run, branch) == role["workflow_path"] and
             run.get("event") == role["event"] and run.get("run_number") == role["run_number"] and
-            run.get("created_at") == role["created_at"] and run.get("run_started_at") == role["run_started_at"] and
+            created_matches and run.get("run_started_at") == role["run_started_at"] and
             run.get("triggering_actor", {}).get("login") == role["triggering_actor"] and run.get("status") == "completed" and
             run.get("conclusion") == "success", "prior exact run/attempt differs or failed")
     # A skipped/green wrapper does not prove publication. Require the exact source-owned step.

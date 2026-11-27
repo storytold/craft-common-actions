@@ -290,11 +290,21 @@ def role(policy, row, run_id, attempt, *, signer=False, producer=None):
         'event': event, 'triggering_actor': actor}
 
 
+def first_signer_creation_skew(canonical, exact):
+    """Match only the observed first-attempt creation skew, not a time window."""
+    return (canonical['run_attempt'] == 1 and isinstance(exact, dict) and
+            canonical['created_at'] == canonical['run_started_at'] == exact.get('run_started_at') and
+            p.timestamp(exact.get('created_at')) == p.timestamp(canonical['created_at']) + 1)
+
+
 def read_role(api, policy, run_id, attempt, *, signer=False, producer=None):
     # Root is current attempt authority; attempts endpoint is exact-attempt evidence.
     root = role(policy, api.request('GET', f'/actions/runs/{run_id}'), run_id, attempt, signer=signer, producer=producer)
-    exact = role(policy, api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}'),
-        run_id, attempt, signer=signer, producer=producer)
+    row = api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}')
+    # Normalize only creation; role() still validates the exact attempt.
+    if signer and first_signer_creation_skew(root, row):
+        row = {**row, 'created_at': root['created_at']}
+    exact = role(policy, row, run_id, attempt, signer=signer, producer=producer)
     n.require(root == exact, 'root/exact-attempt run metadata changed')
     return root
 
