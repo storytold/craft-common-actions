@@ -1,0 +1,44 @@
+name: "Hayro syntax features"
+
+# Fails unless craft-pdf resolves hayro-syntax without its unsafe Cargo feature.
+#
+# Call it beside an app's gate:
+#
+#   hayro-syntax:
+#     uses: storytold/craft-common-actions/.github/workflows/hayro-syntax.yml@main
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "The Cargo workspace root, relative to the checkout"
+        type: string
+        required: false
+        default: "."
+      package:
+        description: "The package whose dependency graph is checked"
+        type: string
+        required: false
+        default: "craft-pdf"
+      crate:
+        description: "The crate whose resolved features are checked"
+        type: string
+        required: false
+        default: "hayro-syntax"
+
+permissions:
+  contents: read
+
+jobs:
+  hayro-syntax:
+    name: hayro-syntax has no unsafe feature
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/check-hayro-syntax@main
+        with:
+          working-directory: ${{ inputs.working-directory }}
+          package: ${{ inputs.package }}
+          crate: ${{ inputs.crate }}
