@@ -22,8 +22,12 @@ if ($Mode -eq 'sign') {
   }
   # Stable optional sign.ps1 is guarded above and independently verified below.
   # Source path is workflow-owned, never read from an archive/descriptor.
+  # A normal PowerShell return leaves LASTEXITCODE unset or stale.
+  # Reset the global status that native tools and explicit script exits update.
+  $global:LASTEXITCODE = 0
   & $Signer -Required -CheckOnly | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'required app signing configuration preflight failed' }
+  $global:LASTEXITCODE = 0
   & $Signer -Required -Files @($Exe) | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'app signing backend failed' }
 }

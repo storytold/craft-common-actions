@@ -7,8 +7,10 @@ import json
 import os
 import re
 from pathlib import Path
+import shutil
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -516,6 +518,55 @@ class SigningWorkflowTests(unittest.TestCase):
         self.assertIn('TimeStamperCertificate',script)
         self.assertIn('$Signature.SignerCertificate.Subject -cne $ExpectedPublisher',script)
         self.assertNotIn('& $Exe',script); self.assertNotIn('Thumbprint -',script)
+
+
+@unittest.skipUnless(shutil.which('pwsh'), 'requires PowerShell')
+class WindowsAdapterExitTests(unittest.TestCase):
+    def run_wrapper(self, *, check='return', sign='return'):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root/'gridcraft.exe').write_bytes(b'not a signed PE')
+            adapter = root/'sign.ps1'
+            adapter.write_text("""param([switch]$Required, [switch]$CheckOnly, [string[]]$Files)
+if (-not $Required) { throw 'required switch missing' }
+if ($CheckOnly) { $phase = 'check'; $outcome = $env:FIXTURE_CHECK }
+else { $phase = 'sign'; $outcome = $env:FIXTURE_SIGN }
+Add-Content -LiteralPath (Join-Path $PSScriptRoot 'phases') -Value $phase
+if ($outcome -eq 'exit') { exit 17 }
+if ($outcome -eq 'throw') { throw "fixture $phase error" }
+# A PowerShell script may return normally without running a native process.
+return
+""", encoding='utf-8')
+            script = ROOT/'scripts/nightly_signing_windows.ps1'
+            env = {**s.verification_env(), **dict.fromkeys(s.AZURE_SECRETS, 'not-a-real-credential'),
+                   'FIXTURE_CHECK': check, 'FIXTURE_SIGN': sign}
+            result = subprocess.run(['pwsh', '-NoProfile', '-File', str(script), '-Mode', 'sign',
+                                     '-Root', str(root), '-Signer', str(adapter),
+                                     '-ExpectedPublisher', 'CN=Fixture Publisher', '-ExpectedVersion', '0.0.0-test',
+                                     '-ExeName', 'gridcraft.exe', '-ProductName', 'GridCraft Nightly'],
+                                    env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding='utf-8', errors='replace', timeout=30)
+            return result, (root/'phases').read_text().splitlines()
+
+    def test_normal_returns_reach_mandatory_verification(self):
+        result, phases = self.run_wrapper()
+        self.assertEqual(phases, ['check', 'sign'], result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('signed PE lost exact nightly ProductName/ProductVersion', result.stdout)
+
+    def test_signer_exit_or_exception_refuses_in_each_phase(self):
+        cases = (
+            ('exit', 'return', ['check'], 'required app signing configuration preflight failed'),
+            ('throw', 'return', ['check'], 'fixture check error'),
+            ('return', 'exit', ['check', 'sign'], 'app signing backend failed'),
+            ('return', 'throw', ['check', 'sign'], 'fixture sign error'),
+        )
+        for check, sign, expected_phases, message in cases:
+            with self.subTest(check=check, sign=sign):
+                result, phases = self.run_wrapper(check=check, sign=sign)
+                self.assertEqual(phases, expected_phases, result.stdout)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout)
 
 
 def re_secret_value(text):
