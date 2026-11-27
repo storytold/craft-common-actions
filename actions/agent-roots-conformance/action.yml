@@ -1,0 +1,60 @@
+name: Check agent roots conformance
+description: >-
+  Verify Rule 18 startup confinement on a built <app>-cli MCP entry point:
+  refuses to start without both valid automation roots, answers MCP initialize
+  with both valid roots, and refuses connected/bridged mode against an
+  unconfined control channel.
+
+inputs:
+  binary:
+    description: "Path to the built <app>-cli executable"
+    required: true
+  subcommand:
+    description: "Agent entry-point subcommand tokens"
+    required: false
+    default: "mcp"
+  extra-args:
+    description: "Optional extra arguments for headless cases (for example '--headless')"
+    required: false
+    default: ""
+  connect-flag:
+    description: "Connected-mode flag to test against an unconfined loopback stub (for example '--connect', '--bridge', or '--attach'); empty skips the connected check"
+    required: false
+    default: ""
+  connect-address-format:
+    description: "Endpoint format passed after connect-flag ('host:port' or 'port')"
+    required: false
+    default: "host:port"
+  connect-extra-args:
+    description: "Optional extra arguments passed for the connected-mode check"
+    required: false
+    default: ""
+  timeout-seconds:
+    description: "Per-case timeout in seconds (0.5 to 60)"
+    required: false
+    default: "5"
+
+runs:
+  using: composite
+  steps:
+    - name: Verify Rule 18 agent roots conformance
+      shell: bash
+      env:
+        CHECK_PATH: ${{ github.action_path }}/check_agent_roots.py
+        TARGET_BINARY: ${{ inputs.binary }}
+        SUBCOMMAND: ${{ inputs.subcommand }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+        CONNECT_FLAG: ${{ inputs.connect-flag }}
+        CONNECT_ADDRESS_FORMAT: ${{ inputs.connect-address-format }}
+        CONNECT_EXTRA_ARGS: ${{ inputs.connect-extra-args }}
+        TIMEOUT_SECONDS: ${{ inputs.timeout-seconds }}
+      run: |
+        set -euo pipefail
+        python3 "$CHECK_PATH" \
+          --binary="$TARGET_BINARY" \
+          --subcommand="$SUBCOMMAND" \
+          --extra-args="$EXTRA_ARGS" \
+          --connect-flag="$CONNECT_FLAG" \
+          --connect-address-format="$CONNECT_ADDRESS_FORMAT" \
+          --connect-extra-args="$CONNECT_EXTRA_ARGS" \
+          --timeout="$TIMEOUT_SECONDS"

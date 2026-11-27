@@ -1,0 +1,110 @@
+name: Agent roots conformance
+
+# Verifies Rule 18 startup confinement on a built <app>-cli artifact:
+# refuses to start without both valid automation roots, answers MCP initialize
+# with both valid roots, and (when connect-flag is set) refuses connected or
+# bridged mode against an unconfined loopback control channel.
+#
+#   agent-roots:
+#     needs: gate
+#     uses: storytold/craft-common-actions/.github/workflows/agent-roots-conformance.yml@main
+#     with:
+#       artifact-name: wordcraft-cli-ubuntu-24.04
+#       binary-path: wordcraft-cli
+#       connect-flag: --connect
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the workflow artifact containing the built <app>-cli binary"
+        type: string
+        required: true
+      binary-path:
+        description: "Path to the <app>-cli executable inside the downloaded artifact"
+        type: string
+        required: true
+      subcommand:
+        description: "Agent entry-point subcommand tokens"
+        type: string
+        required: false
+        default: "mcp"
+      extra-args:
+        description: "Optional extra arguments for headless cases (for example '--headless')"
+        type: string
+        required: false
+        default: ""
+      connect-flag:
+        description: "Connected-mode flag to test against an unconfined loopback stub (for example '--connect', '--bridge', or '--attach'); empty skips the connected check"
+        type: string
+        required: false
+        default: ""
+      connect-address-format:
+        description: "Endpoint format passed after connect-flag ('host:port' or 'port')"
+        type: string
+        required: false
+        default: "host:port"
+      connect-extra-args:
+        description: "Optional extra arguments passed for the connected-mode check"
+        type: string
+        required: false
+        default: ""
+      timeout-seconds:
+        description: "Per-case timeout in seconds (0.5 to 60)"
+        type: string
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: Agent roots conformance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Download CLI artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: artifact
+      - name: Prepare CLI binary
+        id: prepare
+        shell: bash
+        env:
+          BINARY_PATH: ${{ inputs.binary-path }}
+        run: |
+          set -euo pipefail
+          case "$BINARY_PATH" in
+            ""|/*)
+              echo "::error::binary-path must be a relative path inside the downloaded artifact"
+              exit 1
+              ;;
+          esac
+          case "/$BINARY_PATH/" in
+            */../*)
+              echo "::error::binary-path must not contain '..' segments"
+              exit 1
+              ;;
+          esac
+          resolved="artifact/$BINARY_PATH"
+          if [ ! -f "$resolved" ]; then
+            echo "::error::CLI binary not found at $resolved"
+            exit 1
+          fi
+          chmod +x "$resolved"
+          echo "binary=$resolved" >> "$GITHUB_OUTPUT"
+      - name: Check agent roots conformance
+        uses: storytold/craft-common-actions/actions/agent-roots-conformance@main
+        with:
+          binary: ${{ steps.prepare.outputs.binary }}
+          subcommand: ${{ inputs.subcommand }}
+          extra-args: ${{ inputs.extra-args }}
+          connect-flag: ${{ inputs.connect-flag }}
+          connect-address-format: ${{ inputs.connect-address-format }}
+          connect-extra-args: ${{ inputs.connect-extra-args }}
+          timeout-seconds: ${{ inputs.timeout-seconds }}
