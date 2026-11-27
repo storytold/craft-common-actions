@@ -872,6 +872,24 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "final asset digest"):
             b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
 
+    def test_admitted_first_signer_creation_skew_round_trips_as_history(self):
+        path = '/actions/runs/200/attempts/1'
+        self.fx.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.fx.api.rows[path]['created_at'] = '2026-11-22T00:00:02Z'
+        self.request = self.fx.invoke()
+        api, release = self.history(live=True)
+        prior = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(prior['identity'], self.plan['identity'])
+        for updates in ({'created_at': '2026-11-22T00:00:03Z'},
+                        {'created_at': '2026-11-22T00:00:00Z'},
+                        {'run_started_at': '2026-11-22T00:00:02Z'},
+                        {'head_sha': 'f'*40}, {'run_attempt': 2}):
+            with self.subTest(updates=updates):
+                api, release = self.history(live=True)
+                api.rows[path].update(updates)
+                with self.assertRaisesRegex(ValueError, 'prior exact run'):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
+
     def test_live_v2_history_requires_the_linux_detached_signature(self):
         # A receipt that simply omits Linux support must not authenticate history (the feed requires the .asc).
         api, release = self.history(live=True, missing_signature=True)
