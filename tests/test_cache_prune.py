@@ -383,6 +383,24 @@ class ClearRollingTests(unittest.TestCase):
         api = ClearApi(self.entries(), [[tolerated]], late=[(1, entry(9, SAVED, '10:40'))])
         self.assertEqual((self.clear(api)[0], api.deleted), (0, [1]))
 
+    def test_a_failed_post_step_before_the_save_deletes_nothing(self):
+        failed = warm('in_progress', step('Post Upload logs', 'completed', 'failure'), step('Post Setup', 'in_progress'))
+        api = ClearApi(self.entries(), [[failed]])
+        status, out = self.clear(api)
+        self.assertEqual((status, api.deleted), (1, []))
+        self.assertIn("'Post Upload logs' failed", out)
+        # A post step that runs after the save does not decide it.
+        after = warm('in_progress', step('Post Setup', 'completed', 'success'), step('Post Checkout', 'completed', 'failure'))
+        api = ClearApi(self.entries(), [[after]], late=[(1, entry(9, SAVED, '10:40'))])
+        self.assertEqual((self.clear(api)[0], api.deleted), (0, [1]))
+
+    def test_a_save_first_seen_after_the_deadline_deletes_nothing(self):
+        # The leg started at 10:00 with 60 minutes; this poll first sees its save at 11:01.
+        api = ClearApi(self.entries(), [[SAVING_NOW]])
+        status, out = self.clear(api, minutes=60, now=lambda: at('11:01'))
+        self.assertEqual((status, api.deleted), (1, []))
+        self.assertIn('nothing deleted', out)
+
     def test_a_successful_step_that_saved_no_entry_fails(self):
         # Another run's entry saved after the leg started does not count as the leg's.
         polls = [[warm('in_progress', step('Post Setup', 'completed', 'success'))]]
@@ -409,15 +427,15 @@ class ClearRollingTests(unittest.TestCase):
                  [warm('completed', step('Post Upload logs', 'completed', 'success'), step('Post Setup', 'completed', 'skipped'),
                        conclusion='success')]]
         api = ClearApi(self.entries(), polls)
-        self.assertEqual(self.clear(api)[0], 0)
+        self.assertEqual(self.clear(api)[0], 1)
         self.assertEqual(api.deleted, [])
 
-    def test_a_job_that_ends_before_its_save_deletes_nothing(self):
-        for conclusion, expected in (('failure', 1), ('cancelled', 1), ('success', 0)):
+    def test_a_job_that_ends_before_its_save_deletes_nothing_and_fails(self):
+        for conclusion in ('failure', 'cancelled', 'success'):
             with self.subTest(conclusion):
                 ending = warm('completed', step('Post Setup', 'completed', 'skipped'), conclusion=conclusion)
                 api = ClearApi(self.entries(), [[ending]])
-                self.assertEqual(self.clear(api)[0], expected)
+                self.assertEqual(self.clear(api)[0], 1)
                 self.assertEqual(api.deleted, [])
 
     def test_an_attempt_without_the_saving_job_asks_the_earlier_attempt(self):
@@ -433,6 +451,15 @@ class ClearRollingTests(unittest.TestCase):
                 self.assertEqual(api.deleted, [])
         api = ClearApi(self.entries(), [others, others])
         self.assertEqual(self.clear(api)[0], 1)  # the jobs it needs stopped, so it never ran
+
+    def test_an_earlier_attempt_with_two_matching_jobs_fails(self):
+        others = [job(7, 'cache prune', 'completed')]
+        saved = warm('completed', step('Post Setup', 'completed', 'success'), conclusion='success')
+        windows = dict(saved, id=6, name='gate / cache warm (windows-latest)')
+        api = ClearApi(self.entries() + [entry(9, SAVED, '10:40')], [others, others], earlier={1: [saved, windows]})
+        status, out = self.clear(api, attempt='2')
+        self.assertEqual((status, api.deleted), (1, []))
+        self.assertIn('matches 2 jobs', out)
 
     def test_an_entry_newer_than_the_jobs_start_stays_in_a_later_attempt(self):
         # "Re-run all jobs" lists the leg of attempt 1 again, already saved; the run's start is now

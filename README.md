@@ -700,8 +700,8 @@ compiled libraries and unit-test executables, so a change rebuilds only the crat
   the save step succeeds and the cache list shows the new entry. A save that is canceled or fails
   after the deletion leaves the branch without a rolling entry, and the next run builds cold. When
   a step before the save failed (rust-cache then saves nothing), or the job failed or was canceled
-  before its save step, nothing is deleted and the step fails; a job that succeeds without a save
-  step deletes nothing. The expression must match one job only, so name the leg's OS when the
+  before its save step, nothing is deleted and the step fails. A job that succeeds without a save
+  step also deletes nothing and fails the step. The expression must match one job only, so name the leg's OS when the
   gate runs on several. Run this step without `continue-on-error`,
   so that "Re-run failed jobs" runs it again beside the re-run saving job. `watch-minutes` counts
   from the saving job's start, so give the caller job a `timeout-minutes` that also covers the

@@ -237,12 +237,16 @@ def saving(job, step):
                for s in save_steps(job, step))
 
 
-def failed_step(job):
-    """The first step before the post steps that failed or was canceled, or None. rust-cache does
-    not save after a failed step (gate-setup sets `cache-on-failure: false`), even though the post
-    step that holds its save still runs the other post actions."""
-    return next((s['name'] for s in job.get('steps') or [] if not s['name'].startswith('Post ')
-                 and s['name'] not in TOLERATED and s.get('conclusion') in STOPPED), None)
+def failed_step(job, step):
+    """The first step before the save step that failed or was canceled, post steps included, or
+    None. rust-cache does not save after a failed step (gate-setup sets `cache-on-failure: false`),
+    even though the post step that holds its save still runs the other post actions."""
+    for s in job.get('steps') or []:
+        if s['name'] == step:
+            return None
+        if s['name'] not in TOLERATED and s.get('conclusion') in STOPPED:
+            return s['name']
+    return None
 
 
 def save_outcome(job, step):
@@ -289,7 +293,12 @@ def earlier_save(api, ref, rolling, run, attempt, pattern, step, sleep):
     """The exit status when the saving job is not part of this attempt: 0 when the latest earlier
     attempt that ran it saved its entry."""
     for earlier in range(int(attempt) - 1, 0, -1):
-        job = next((j for j in api.jobs(run, earlier) if pattern.search(j['name'])), None)
+        matching = [j for j in api.jobs(run, earlier) if pattern.search(j['name'])]
+        if len(matching) > 1:
+            print(f"::error::{pattern.pattern} matches {len(matching)} jobs in attempt {earlier} "
+                  f"({', '.join(j['name'] for j in matching)}); name the one that saves the rolling entry. Nothing deleted")
+            return 1
+        job = matching[0] if matching else None
         if job:
             outcome = save_outcome(job, step)
             if outcome == 'success' and saved_entry(api, ref, rolling, run, job, sleep, 0):
@@ -311,7 +320,8 @@ def clear_rolling(api, ref, rolling, run, attempt, pattern, step, dry_run, me, m
     The deleted entries are those created before the run, or the saving job, started, so an entry
     another run saved meanwhile stays unless it is older than the job. The wait for the save, and for
     its result, ends `minutes` after the saving job started (after this started, while the job has
-    not). A job that ends without its save step deletes nothing. When the job is not part of this
+    not), and a save first seen after that deletes nothing. A job that ends without its save step
+    deletes nothing and fails. When the job is not part of this
     attempt and no other job is queued or running for two polls, the latest earlier attempt that ran
     it decides the result. After the step succeeds, the cache list must show the entry the job saved
     (at most FINAL_POLLS more polls). Returns 1 with an error when the
@@ -329,13 +339,14 @@ def clear_rolling(api, ref, rolling, run, attempt, pattern, step, dry_run, me, m
                 return 1
             job = matching[0] if matching else None
             if job and saving(job, step):
+                if overdue(job, began, minutes, now):
+                    print(f"::error::{job['name']}'s {step} step was first seen more than {minutes} minutes after "
+                          'the job started; nothing deleted')
+                    return 1
                 break
             if job and job['status'] == 'completed':
-                if job.get('conclusion') in STOPPED:
-                    print(f"::error::{job['name']} ended {job['conclusion']} before its {step} step; nothing deleted")
-                    return 1
-                print(f"{job['name']} finished without a {step} step; nothing deleted")
-                return 0
+                print(f"::error::{job['name']} ended {job.get('conclusion')} without its {step} step; nothing deleted")
+                return 1
             idle = idle + 1 if job is None and all(j['status'] == 'completed' for j in jobs) else 0
             if idle >= 2:
                 return earlier_save(api, ref, rolling, run, attempt, pattern, step, sleep)
@@ -347,7 +358,7 @@ def clear_rolling(api, ref, rolling, run, attempt, pattern, step, dry_run, me, m
     if outcome not in (None, 'success'):
         print(f'::error::{outcome}: no new {rolling} entry was saved; nothing deleted')
         return 1
-    failed = failed_step(job)
+    failed = failed_step(job, step)
     if failed:
         print(f"::error::{job['name']}: the step {failed!r} failed, so the {step} step saves no entry; nothing deleted")
         return 1
