@@ -98,6 +98,46 @@ class PlanTests(unittest.TestCase):
         ]
         self.assertEqual(self.deleted(entries), [3])
 
+    def test_a_plain_entry_on_another_architecture_stays(self):
+        entries = [entry(1, f'v2-rust-{PROFILE}-gate-Linux-arm64-304bc087-3e8a8849', '09:00'),
+                   entry(2, crates('100'), '12:00')]
+        self.assertEqual(self.deleted(entries), [])
+
+    def test_a_plain_entry_of_another_job_stays(self):
+        entries = [entry(1, f'v2-rust-{PROFILE}-lint-Linux-x64-304bc087-3e8a8849', '09:00'),
+                   entry(2, crates('100'), '12:00')]
+        self.assertEqual(self.deleted(entries), [])
+
+
+class RefTests(unittest.TestCase):
+    def test_the_cache_list_asks_for_one_ref(self):
+        api = prune.Api('o/r', 't', url='https://api.example')
+        paths = []
+        with unittest.mock.patch.object(api, 'pages', side_effect=lambda path, field: paths.append(path) or []):
+            api.caches('refs/heads/main')
+        self.assertIn('ref=refs%2Fheads%2Fmain', paths[0])
+
+    def test_entries_on_another_ref_are_untouched(self):
+        main, pull = 'refs/heads/main', 'refs/pull/7/merge'
+
+        class RefApi:
+            def __init__(self, entries):
+                self.entries = entries
+                self.deleted = []
+
+            def caches(self, ref):  # without a ref the API lists every ref's entries
+                return [e for e, r in self.entries if ref is None or r == ref]
+
+            def delete(self, cache_id):
+                self.deleted.append(cache_id)
+        api = RefApi([(entry(1, f'v2-rust-{PROFILE}-gate-Linux-x64-304bc087-3e8a8849', '09:00'), main),
+                      (entry(2, crates('100'), '12:00'), main),
+                      (entry(3, f'v2-rust-{PROFILE}-gate-Linux-x64-304bc087-3e8a8849', '09:00'), pull),
+                      (entry(4, crates('99'), '08:00'), pull)])
+        with contextlib.redirect_stdout(io.StringIO()):
+            prune.prune(api, main, [], False)
+        self.assertEqual(api.deleted, [1])
+
 
 class FakeApi:
     def __init__(self, entries, job_polls, late=(), failures=0):
