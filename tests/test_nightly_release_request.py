@@ -839,4 +839,50 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'run branch/workflow differs'):
             self.invoke()
 
+    def test_main_tooling_revision_and_workflow_ref_admission_and_attestation(self):
+        main_ref = 'storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@main'
+        self.policy['producer_tooling_revision'] = 'main'
+        self.policy['signer_tooling_revision'] = 'main'
+        self.policy['producer_workflow_ref'] = main_ref
+        self.env['TOOLING_REVISION'] = 'main'
+        self.modify_run(100, 'referenced_workflows',
+            [{'path': main_ref, 'ref': 'refs/heads/main', 'sha': 'b'*40}])
+        request = self.invoke()
+        self.assertEqual(request['producer']['tooling_revision'], 'main')
+        self.assertEqual(request['signer']['tooling_revision'], 'main')
+        r.request_contract(self.policy, request)
+
+        # Missing refs/heads/main or invalid sha in referenced_workflows refuses.
+        for bad in ([{'path': main_ref, 'ref': 'refs/heads/feature', 'sha': 'b'*40}],
+                    [{'path': main_ref, 'sha': 'b'*40}],
+                    [{'path': main_ref, 'ref': 'refs/heads/main', 'sha': '0'*40}]):
+            with self.subTest(bad=bad):
+                saved = copy.deepcopy(self.api.rows)
+                self.modify_run(100, 'referenced_workflows', bad)
+                try:
+                    with self.assertRaisesRegex(ValueError, 'provenance missing'):
+                        self.invoke()
+                finally:
+                    self.api.rows = saved
+
+        # Non-main branch ref or mismatched revision in policy refuses.
+        with self.assertRaisesRegex(ValueError, 'immutable nonzero commit required'):
+            r.validate_policy({**self.policy, 'producer_tooling_revision': 'feature'})
+        with self.assertRaisesRegex(ValueError, 'unpinned reusable producer'):
+            r.validate_policy({**self.policy, 'producer_workflow_ref': main_ref.replace('@main', '@' + 'b'*40)})
+
+        # Attestation verification expects @refs/heads/main in buildSignerURI/builder.id and a valid 40-char buildSignerDigest.
+        results = self.result()
+        main_builder = 'https://github.com/storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main'
+        results[0]['verificationResult']['signature']['certificate']['buildSignerURI'] = main_builder
+        results[0]['verificationResult']['signature']['certificate']['buildSignerDigest'] = 'b'*40
+        results[0]['verificationResult']['statement']['predicate']['runDetails']['builder']['id'] = main_builder
+        claims = r.verify_unsigned_attestation(self.policy, request, results, 'f'*64)
+        self.assertEqual(claims['builder'], main_builder)
+
+        bad_digest = copy.deepcopy(results)
+        bad_digest[0]['verificationResult']['signature']['certificate']['buildSignerDigest'] = 'main'
+        with self.assertRaisesRegex(ValueError, 'immutable nonzero commit required'):
+            r.verify_unsigned_attestation(self.policy, request, bad_digest, 'f'*64)
+
 if __name__ == '__main__': unittest.main()

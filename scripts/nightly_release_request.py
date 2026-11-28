@@ -75,6 +75,12 @@ def commit(value):
     return value
 
 
+def tooling_revision(value):
+    if value == 'main':
+        return value
+    return commit(value)
+
+
 def identifier(value):
     if isinstance(value, str):
         n.require(re.fullmatch(r'[1-9][0-9]{0,18}', value), 'invalid numeric identifier')
@@ -99,10 +105,10 @@ def validate_policy(policy):
     for key in ('repository_id', 'producer_workflow_id'): n.positive(policy[key], key)
     for key in ('producer_workflow_path', 'signer_workflow_path'):
         n.require(isinstance(policy[key], str) and WORKFLOW.fullmatch(policy[key]), 'invalid workflow path')
-    for key in ('producer_tooling_revision', 'signer_tooling_revision'): commit(policy[key])
+    for key in ('producer_tooling_revision', 'signer_tooling_revision'): tooling_revision(policy[key])
     ref = policy['producer_workflow_ref']
     n.require(isinstance(ref, str) and re.fullmatch(
-        r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-]+\.ya?ml@[0-9a-f]{40}', ref)
+        r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_-]+\.ya?ml@(?:[0-9a-f]{40}|main)', ref)
         and ref.rsplit('@', 1)[1] == policy['producer_tooling_revision'], 'unpinned reusable producer')
     if policy['schema'] != LIVE_POLICY:
         subject = policy['windows_publisher_subject']
@@ -273,10 +279,18 @@ def role(policy, row, run_id, attempt, *, signer=False, producer=None):
             'producer not completed successfully')
         refs = row.get('referenced_workflows')
         expected = policy['producer_workflow_ref']
-        n.require(isinstance(refs, list) and 0 < len(refs) <= 32 and sum(
-            isinstance(item, dict) and item.get('path') == expected and
-            item.get('sha') == policy['producer_tooling_revision'] for item in refs) == 1,
-            'pinned reusable producer provenance missing')
+        if policy['producer_tooling_revision'] == 'main':
+            n.require(isinstance(refs, list) and 0 < len(refs) <= 32 and sum(
+                isinstance(item, dict) and item.get('path') == expected and
+                item.get('ref') == 'refs/heads/main' and
+                isinstance(item.get('sha'), str) and n.HEX40.fullmatch(item['sha']) and item['sha'] != '0'*40
+                for item in refs) == 1,
+                'pinned reusable producer provenance missing')
+        else:
+            n.require(isinstance(refs, list) and 0 < len(refs) <= 32 and sum(
+                isinstance(item, dict) and item.get('path') == expected and
+                item.get('sha') == policy['producer_tooling_revision'] for item in refs) == 1,
+                'pinned reusable producer provenance missing')
     actor = object_value(row.get('triggering_actor')).get('login')
     n.require(invocation.valid_login(actor), 'current triggering actor missing')
     require_actor(policy, event, attempt, actor, signer=signer, producer=producer)
@@ -541,7 +555,10 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
     n.require(len(json.dumps(verified_results, allow_nan=False).encode()) <= n.MAX_JSON_BYTES,
         'verification results exceed bound')
     producer = request['producer']; base = 'https://github.com/'+policy['repository']
-    builder = 'https://github.com/'+policy['producer_workflow_ref']
+    producer_rev = policy['producer_tooling_revision']
+    builder = 'https://github.com/' + (
+        policy['producer_workflow_ref'].split('@', 1)[0] + '@refs/heads/main'
+        if producer_rev == 'main' else policy['producer_workflow_ref'])
     expected_invocation = base+f"/actions/runs/{producer['run_id']}/attempts/{producer['run_attempt']}"
     # Refuse mixed/ambiguous verified statements rather than selecting a convenient one.
     for result in verified_results:
@@ -550,12 +567,16 @@ def verify_unsigned_attestation(policy, request, verified_results, payload_sha25
         verified = result['verificationResult']
         cert = object_value(verified.get('signature')).get('certificate')
         expected_cert = {'issuer': 'https://token.actions.githubusercontent.com',
-            'buildSignerURI': builder, 'buildSignerDigest': policy['producer_tooling_revision'],
+            'buildSignerURI': builder,
             'sourceRepositoryURI': base, 'sourceRepositoryIdentifier': str(policy['repository_id']),
             'sourceRepositoryRef': 'refs/heads/main', 'sourceRepositoryDigest': producer['source_commit'],
             'buildConfigURI': base+'/'+policy['producer_workflow_path']+'@refs/heads/main'}
+        if producer_rev != 'main':
+            expected_cert['buildSignerDigest'] = producer_rev
         n.require(isinstance(cert, dict) and all(cert.get(k) == v for k,v in expected_cert.items()),
             'certificate source/reusable builder binding differs')
+        if producer_rev == 'main':
+            commit(cert.get('buildSignerDigest'))
         statement = object_value(verified.get('statement'))
         n.require(statement.get('_type') == 'https://in-toto.io/Statement/v1' and
             statement.get('predicateType') == 'https://slsa.dev/provenance/v1', 'unsigned provenance type differs')

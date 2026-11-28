@@ -133,7 +133,7 @@ def unsigned_plan(api, registry, environment):
     path = p.run_workflow_path(row, "main")
     actual = p.verified_run({**row, "path": path}, environment)
     producer = {**actual, "run_id": actual["id"], "run_attempt": actual["attempt"],
-        "tooling_revision": r.commit(environment.get("TOOLING_REVISION"))}
+        "tooling_revision": r.tooling_revision(environment.get("TOOLING_REVISION"))}
     return identity_plan(registry, producer, p.stable_base(p.releases(api))), producer
 
 
@@ -424,11 +424,15 @@ def _gh_attest_verify(policy, request, file_path, payload_sha256, *, subject_nam
     with tempfile.TemporaryDirectory(prefix="nightly-gh-verify-", dir=os.environ["RUNNER_TEMP"]) as temporary:
         evidence = Path(temporary)/"verified.json"
         with evidence.open("xb") as stream:
-            runner(["gh", "attestation", "verify", str(Path(file_path).resolve()),
-                "--repo", policy["repository"], "--signer-workflow", workflow,
-                "--signer-digest", policy["producer_tooling_revision"], "--source-ref", "refs/heads/main",
-                "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"],
-                check=True, stdout=stream, timeout=120)
+            cmd = ["gh", "attestation", "verify", str(Path(file_path).resolve()),
+                "--repo", policy["repository"], "--signer-workflow", workflow]
+            if policy["producer_tooling_revision"] == "main":
+                cmd += ["--cert-identity", "https://" + workflow + "@refs/heads/main"]
+            else:
+                cmd += ["--signer-digest", policy["producer_tooling_revision"]]
+            cmd += ["--source-ref", "refs/heads/main",
+                "--source-digest", request["producer"]["source_commit"], "--deny-self-hosted-runners", "--format", "json"]
+            runner(cmd, check=True, stdout=stream, timeout=120)
         return r.verify_unsigned_attestation(policy, request, n.bounded_json(evidence), payload_sha256,
             subject_name=subject_name)
 
@@ -760,8 +764,17 @@ def source_policy(source, environment):
     policy = loads(git_read(source, ["show", "HEAD:.github/nightly-signing-policy.json"]))
     r.validate_policy(policy)
     tooling = Path(__file__).resolve().parent.parent
-    n.require(git_head(tooling) ==
-        policy["signer_tooling_revision"] == environment.get("TOOLING_REVISION"), "executing tooling checkout differs from reviewed signer pin")
+    tooling_head = git_head(tooling)
+    if policy["signer_tooling_revision"] == "main":
+        n.require(environment.get("TOOLING_REVISION") == "main",
+            "executing tooling checkout differs from reviewed signer pin")
+        if "DEFINING_SHA" in environment:
+            n.require(tooling_head == environment["DEFINING_SHA"],
+                "executing tooling checkout differs from defining workflow SHA")
+    else:
+        n.require(tooling_head ==
+            policy["signer_tooling_revision"] == environment.get("TOOLING_REVISION"),
+            "executing tooling checkout differs from reviewed signer pin")
     return policy
 
 

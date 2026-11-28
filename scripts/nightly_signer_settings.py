@@ -377,8 +377,8 @@ def check_tree(app, sha):
                 problems.append(f"{item['name']} calls nightly-release.yml; only nightly-sign.yml may")
             if callee in PINNED_TOOLING:
                 pins.add(pin)
-                if not SHA40.fullmatch(pin):
-                    problems.append(f"{item['name']} calls {callee}@{pin}, not a full SHA")
+                if pin != "main" and not SHA40.fullmatch(pin):
+                    problems.append(f"{item['name']} calls {callee}@{pin}, not a full SHA or main")
                 problems += callee_problems(callee, pin, seen, nightly=True,
                                             signer=callee == "nightly-release.yml" and item["name"] == "nightly-sign.yml")
             else:
@@ -393,7 +393,8 @@ def check_tree(app, sha):
         problems.append(f"caller and policy pins differ: {sorted(map(str, pins))}")
     else:
         pin = next(iter(pins))
-        if not (SHA40.fullmatch(pin) and ancestor(CCA, pin, "main") and ancestor(CCA, SIGNER_BRANCH_SUPPORT, pin)):
+        if not ((pin == "main" and ancestor(CCA, SIGNER_BRANCH_SUPPORT, "main")) or
+                (SHA40.fullmatch(pin) and ancestor(CCA, pin, "main") and ancestor(CCA, SIGNER_BRANCH_SUPPORT, pin))):
             problems.append(f"pin {pin} is not a craft-common-actions main commit that includes #364")
         else:
             data = registry(pin)

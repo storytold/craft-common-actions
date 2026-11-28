@@ -249,6 +249,21 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.run_setup(fake), [("POST", "repos/storytold/gridcraft/environments/release/deployment-branch-policies",
                                                  {"name": "nightly-signer", "type": "branch"})])
 
+    def test_trust_closure_accepts_main_tooling_ref(self):
+        fake = FakeGitHub(
+            files={
+                ".github/workflows/nightly-sign.yml": SIGN.replace(PIN, "main"),
+                ".github/workflows/nightly.yml": NIGHTLY.replace(PIN, "main"),
+                ".github/workflows/release.yml": RELEASE_CALLER.format(ref="main"),
+                ".github/workflows/ci.yml": CI,
+                ".github/nightly-signing-policy.json": json.dumps({
+                    **POLICY, "producer_tooling_revision": "main", "signer_tooling_revision": "main"}),
+            },
+            cca_refs={("nightly-apps.json", "main"): json.dumps({"apps": {"gridcraft": PHOTO_ROW, "photocraft": PHOTO_ROW}})},
+        )
+        out = self.closure(fake)
+        self.assertIn("trust closure clean", out)
+
     def test_unowned_existing_branch_refuses(self):
         for fake, owned in ((FakeGitHub(branch="d" * 40), False), (FakeGitHub(branch="d" * 40, on_main=False), True)):
             with self.subTest(owned=owned), self.assertRaisesRegex(s.Refuse, "not ours"):
@@ -267,7 +282,7 @@ class SettingsTests(unittest.TestCase):
             "release guard": ({".github/workflows/nightly-sign.yml": SIGN.replace("refs/heads/nightly-signer", "refs/heads/release")}, "does not guard"),
             "no repository guard": ({".github/workflows/nightly-sign.yml": SIGN.replace("storytold/gridcraft", "storytold/other")}, "does not guard"),
             "no app-name": ({".github/workflows/nightly-sign.yml": SIGN.replace("app-name: gridcraft", "app-name: photocraft")}, "app-name"),
-            "branch pin": ({".github/workflows/nightly.yml": NIGHTLY.replace(PIN, "main")}, "not a full SHA"),
+            "branch pin": ({".github/workflows/nightly.yml": NIGHTLY.replace(PIN, "feature")}, "not a full SHA or main"),
             "pin mismatch": ({".github/nightly-signing-policy.json": json.dumps({**POLICY, "signer_tooling_revision": "e" * 40})}, "pins differ"),
             "release policy": ({".github/nightly-signing-policy.json": json.dumps({**POLICY, "release_branch": "release"})}, "release_branch"),
             "direct environment": ({".github/workflows/x.yml": "jobs:\n  x:\n    runs-on: y\n    environment: release\n"}, "binds an environment"),

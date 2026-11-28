@@ -59,11 +59,12 @@ jobs:
           TOOLING_REVISION: ${{ inputs.tooling-revision }}
           SIGNER_SHA: ${{ github.event.workflow_run.head_sha }}
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$SIGNER_SHA"
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-oci.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - name: Resolve verified release target and exact producer package artifact IDs
         id: target
         env:

@@ -35,7 +35,8 @@ class SignerBranchWorkflowTests(unittest.TestCase):
                 refs = set(re.findall(r"refs/heads/[A-Za-z0-9_/-]+(?:\.[A-Za-z0-9_-]+)*", condition))
                 self.assertEqual(refs, {'refs/heads/release', 'refs/heads/nightly-signer'})
         text = (WORKFLOWS / 'nightly-release.yml').read_text()
-        self.assertEqual(set(re.findall(r"refs/heads/[A-Za-z0-9_/-]+(?:\.[A-Za-z0-9_-]+)*", text)), {'refs/heads/release', 'refs/heads/nightly-signer'})
+        stripped = text.replace('storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main', '')
+        self.assertEqual(set(re.findall(r"refs/heads/[A-Za-z0-9_/-]+(?:\.[A-Za-z0-9_-]+)*", stripped)), {'refs/heads/release', 'refs/heads/nightly-signer'})
 
     def test_registry_admission_accepts_either_signer_branch(self):
         registry = apps.load_registry()

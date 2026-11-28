@@ -20,13 +20,11 @@ STEPS = JOBS['gate']['steps']
 SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
 SETUP_STEPS = SETUP['runs']['steps']
 RUN_STEP = yaml.load((ROOT / 'actions/gate-run/action.yml').read_text(), Loader=yaml.BaseLoader)['runs']['steps'][0]
-# The reviewed revision of the first-party actions gate.yml calls: the commit that pinned
-# gate-setup to rust-cache's unit record. gate-setup pins its own (tests/test_gate_setup.py).
-OWN_ACTION_REV = '315eb1972c857c839c3abb3d9288bfd40d21b7da'
-# The commit that uses system Python 3.11+; the action is not in OWN_ACTION_REV.
-UNREACHED_RS_REV = '8830c54c077af2c6bf20833eb46252d775f7b35e'
+# First-party actions in storytold/craft-common-actions are always referenced at @main.
+OWN_ACTION_REV = 'main'
+UNREACHED_RS_REV = 'main'
 SETUP_ACTION = 'storytold/craft-common-actions/actions/gate-setup@' + OWN_ACTION_REV
-CACHE = 'storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
+CACHE = 'storytold/craft-common-actions/actions/rust-cache@main'
 # Pushes to the default branch and opted-in manual runs: the runs that write caches.
 WRITES = ("github.event_name != 'pull_request' && (github.ref_name == github.event.repository.default_branch"
           " || (inputs.cache-save-on-dispatch && github.event_name == 'workflow_dispatch'))")
@@ -316,7 +314,10 @@ class GateWorkflowTests(unittest.TestCase):
         for job, s in all_steps():
             if 'uses' in s:
                 with self.subTest(job=job, uses=s['uses']):
-                    self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+                    if s['uses'].startswith('storytold/craft-common-actions/'):
+                        self.assertTrue(s['uses'].endswith('@main'))
+                    else:
+                        self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
     def test_a_saving_leg_trims_its_entry_after_its_last_build_command(self):
         # The trim must follow every command that builds, and it runs only where actions/rust-cache

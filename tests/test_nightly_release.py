@@ -323,6 +323,70 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaises(ValueError): b.source_policy(source, {**env, "GITHUB_SHA": "f"*40})
         with self.assertRaises(ValueError): b.git_read(source, ["push"])
 
+    def test_source_policy_and_gh_attest_verify_accept_main_tooling_revision(self):
+        source = self.root/"git-main-fixture"; source.mkdir()
+        def git(*args):
+            return subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True).stdout
+        git("init", "--quiet")
+        (source/".github").mkdir()
+        policy = {**self.policy,
+            "producer_tooling_revision": "main",
+            "signer_tooling_revision": "main",
+            "producer_workflow_ref": "storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@main"}
+        b.write_json(source/".github/nightly-signing-policy.json", policy)
+        git("add", ".github/nightly-signing-policy.json")
+        git("-c", "user.name=Synthetic Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "Main policy fixture")
+        env = {**self.env, "GITHUB_SHA": b.git_head(source), "TOOLING_REVISION": "main"}
+        self.assertEqual(b.source_policy(source, env), policy)
+        self.assertEqual(b.source_policy(source, {**env, "DEFINING_SHA": b.git_head(ROOT)}), policy)
+        with self.assertRaisesRegex(ValueError, "defining workflow SHA"):
+            b.source_policy(source, {**env, "DEFINING_SHA": "f"*40})
+        with self.assertRaisesRegex(ValueError, "reviewed signer pin"):
+            b.source_policy(source, {**env, "TOOLING_REVISION": b.git_head(ROOT)})
+
+        # _gh_attest_verify uses --cert-identity @refs/heads/main instead of --signer-digest when producer_tooling_revision == "main".
+        payload = self.root/"payload.zip"; payload.write_bytes(b"zip")
+        payload_sha = hashlib.sha256(b"zip").hexdigest()
+        req = copy.deepcopy(self.request)
+        req["policy_sha256"] = b.r.digest(policy)
+        req["producer"]["tooling_revision"] = "main"
+        req["signer"]["tooling_revision"] = "main"
+        base = "https://github.com/" + policy["repository"]
+        main_builder = "https://github.com/storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main"
+        verified_json = [{"verificationResult": {
+            "signature": {"certificate": {
+                "issuer": "https://token.actions.githubusercontent.com",
+                "buildSignerURI": main_builder, "buildSignerDigest": "b"*40,
+                "sourceRepositoryURI": base, "sourceRepositoryIdentifier": str(policy["repository_id"]),
+                "sourceRepositoryRef": "refs/heads/main", "sourceRepositoryDigest": req["producer"]["source_commit"],
+                "buildConfigURI": base+"/"+policy["producer_workflow_path"]+"@refs/heads/main"}},
+            "statement": {
+                "_type": "https://in-toto.io/Statement/v1",
+                "subject": [{"name": "payload.zip", "digest": {"sha256": payload_sha}}],
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "predicate": {
+                    "buildDefinition": {
+                        "buildType": "https://actions.github.io/buildtypes/workflow/v1",
+                        "externalParameters": {"workflow": {"repository": base, "path": policy["producer_workflow_path"], "ref": "refs/heads/main"}},
+                        "internalParameters": {"github": {"event_name": req["producer"]["event"], "repository_id": str(policy["repository_id"])}},
+                        "resolvedDependencies": [{"uri": "git+"+base+"@refs/heads/main", "digest": {"gitCommit": req["producer"]["source_commit"]}}]},
+                    "runDetails": {"builder": {"id": main_builder},
+                        "metadata": {"invocationId": base+f"/actions/runs/{req['producer']['run_id']}/attempts/{req['producer']['run_attempt']}"}}}}}}]
+        seen = []
+        def fake_run(argv, **kwargs):
+            seen.append(argv)
+            if argv[:2] == ["gh", "--version"]:
+                return subprocess.CompletedProcess(argv, 0, stdout=b"gh version 2.102.0\n")
+            kwargs["stdout"].write(json.dumps(verified_json).encode())
+            return subprocess.CompletedProcess(argv, 0)
+        with patch.dict(os.environ, {"RUNNER_TEMP": str(self.root)}):
+            claims = b._gh_attest_verify(policy, req, payload, payload_sha, runner=fake_run)
+        self.assertEqual(claims["builder"], main_builder)
+        verify_argv = seen[1]
+        self.assertNotIn("--signer-digest", verify_argv)
+        self.assertIn("--cert-identity", verify_argv)
+        self.assertEqual(verify_argv[verify_argv.index("--cert-identity") + 1], main_builder)
+
     def history(self, *, live=False, missing_signature=False):
         """Frozen v1 Windows-only publication (legacy v2 policy), or a v2 all-platform one."""
         if live:
