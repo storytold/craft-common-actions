@@ -69,6 +69,35 @@ class PlanTests(unittest.TestCase):
                    entry(4, crates('101'), '12:00')]
         self.assertEqual(self.deleted(entries), [])
 
+    def test_a_rolling_entry_replaces_the_plain_entry_it_follows(self):
+        # storytold/vectorcraft's main entries on 2026-11-27, and the first rolling gate entry.
+        profile = 'a013abbb0b3813be455eef85113d3b9952597819a33feb6061a5f87a5cd184fb'
+
+        def real(id_, key, created, accessed):
+            return {'id': id_, 'key': key, 'created_at': created, 'last_accessed_at': accessed, 'size_in_bytes': 10**9}
+        entries = [
+            real(1, f'v2-rust-{profile}-gate-Linux-x64-46055934-01d60c35',
+                 '2026-11-27T05:58:09.801683Z', '2026-11-27T19:14:51.898171Z'),
+            real(2, f'v1-affinity-rust-{profile}-gate-Linux-x64-b541f517-01d60c35',
+                 '2026-11-27T05:02:11.656569Z', '2026-11-27T23:35:30.238353Z'),
+            real(3, 'v0-rust-build-Linux-x64-1fd829d9-01d60c35', '2026-11-27T23:20:00Z', '2026-11-27T23:20:00Z'),
+            real(4, f'v2-rust-{profile}-gate-crates-Linux-x64-0-0-Linux-x64-46055934-01d60c35',
+                 '2026-11-28T01:00:00Z', '2026-11-28T01:00:00Z'),
+        ]
+        self.assertEqual(self.deleted(entries), [1])
+
+    def test_only_an_unused_plain_entry_of_the_same_job_goes(self):
+        entries = [
+            entry(1, f'v2-rust-{PROFILE}-gate-Linux-x64-304bc087-3e8a8849', '09:00', '12:30'),  # used since
+            entry(2, crates('100'), '12:00'),
+            entry(3, f'v2-rust-{PROFILE}-web-Linux-x64-304bc087-3e8a8849', '09:00', '10:00'),
+            entry(4, crates('100').replace('-gate-', '-web-'), '11:00'),
+            entry(5, f'v2-rust-{PROFILE}-gate-Windows_NT-x64-ae62fac7-79024277', '09:00'),  # no Windows rolling entry
+            entry(6, crates('100').replace('-gate-', '-docs-'), '10:00'),
+            entry(7, f'v2-rust-{PROFILE}-docs-Linux-x64-304bc087-3e8a8849', '11:00'),  # newer than the rolling one
+        ]
+        self.assertEqual(self.deleted(entries), [3])
+
 
 class FakeApi:
     def __init__(self, entries, job_polls, late=(), failures=0):
