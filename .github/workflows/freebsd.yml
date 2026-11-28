@@ -139,6 +139,9 @@ jobs:
           cpu: 4
           mem: 12288
           copyback: false
+          # A pull request run neither restores nor saves the VM image and apt caches, so it adds
+          # no entry scoped to its merge ref.
+          disable-cache: ${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}
           envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND ARCH"
           prepare: |
             # Keep rustup/proxies outside the Cargo data cache.

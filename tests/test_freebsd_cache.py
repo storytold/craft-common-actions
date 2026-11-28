@@ -374,6 +374,8 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                 index = lambda name: next(i for i, step in enumerate(steps) if step.get("name") == name)
                 vm = next(step for step in steps if step.get("uses", "").startswith("step-security/freebsd-vm@"))
                 self.assertEqual(vm["with"]["copyback"], "false")
+                self.assertEqual(vm["with"]["disable-cache"],
+                                 "${{ github.event_name == 'pull_request' || github.event_name == 'pull_request_target' }}")
                 for variable in ("CARGO_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"):
                     self.assertIn(variable, vm["with"]["envs"].split())
                 cache_steps = [step for step in steps if "/freebsd-cargo-cache@" in step.get("uses", "")]
@@ -391,7 +393,9 @@ class WorkflowCacheIntegrationTests(unittest.TestCase):
                     self.assertEqual(cache_step.get("timeout-minutes"), "10")
                 self.assertIn("steps.cargo-cache.outputs.key != ''", save["if"])
                 self.assertIn("steps.cargo-cache.outcome", build["run"])
-                self.assertIn("pull_request", save["if"])
+                self.assertTrue(save["if"].startswith(
+                    "github.event_name != 'pull_request' && github.event_name != 'pull_request_target' && "), save["if"])
+                self.assertNotIn("||", save["if"])
                 if filename == "freebsd.yml":
                     self.assertIn("toJSON(inputs)", restore["with"]["configuration"])
                 else:
