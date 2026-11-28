@@ -9,6 +9,10 @@ Families:
   leaves out the environment and lockfile hashes, so that a toolchain or lockfile update replaces
   the old entry; two jobs that share a key name but differ in toolchain or environment would count
   as one family.
+A rolling entry also replaces the other rust-cache entries of the same job, OS and architecture
+(`<v>-rust-<profile>-<job>-<os>-<arch>-...`, written before the job turned `cache-workspace-crates`
+on): each goes once nothing has used it since the newest rolling entry was created. A plain entry
+never replaces a rolling one.
 Everything else stays.
 """
 import datetime
@@ -43,6 +47,12 @@ def family(key, content_names):
     return None
 
 
+def plain_family(rolling):
+    """The family of the job's other rust-cache entries, for a rolling family's name."""
+    head, _, tail = rolling.rpartition('-crates-')
+    return 'replaced', f'{head}-{tail}'
+
+
 def when(timestamp):
     return datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
 
@@ -62,6 +72,14 @@ def plan(entries, content_names):
             if rule == 'rolling':
                 deletions.append((entry, f"older than {newest['key']}"))
             elif when(entry['last_accessed_at']) < when(newest['created_at']):
+                deletions.append((entry, f"replaced by {newest['key']} and unused since"))
+    planned = {entry['id'] for entry, _ in deletions}
+    for (rule, name), members in families.items():
+        if rule != 'rolling':
+            continue
+        newest = members[0]
+        for entry in families.get(plain_family(name), []):
+            if entry['id'] not in planned and when(entry['last_accessed_at']) < when(newest['created_at']):
                 deletions.append((entry, f"replaced by {newest['key']} and unused since"))
     return deletions
 
