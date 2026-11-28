@@ -163,7 +163,7 @@ class SigningWiringTests(unittest.TestCase):
         names = [s.get("name") for s in job["steps"]]
         imported = next(i for i, u in enumerate(uses) if u.startswith("storytold/craft-common-actions/actions/import-signing-key@"))
         self.assertEqual(job["steps"][imported]["with"]["key"], "${{ secrets.LINUX_SIGNING_KEY }}")
-        self.assertEqual(job["steps"][imported]["if"], "github.ref == 'refs/heads/release'")
+        self.assertEqual(job["steps"][imported]["if"], "${{ !inputs.dry-run && github.ref == 'refs/heads/release' }}")
         self.assertEqual(job["env"]["OCI_SIGNATURES_READY"], "${{ vars.LINUX_OCI_SIGNATURES_READY }}")
         self.assertLess(imported, names.index("Build the Flatpak bundle"))
         upload = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/upload-artifact@"))
