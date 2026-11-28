@@ -5,12 +5,16 @@ on:
     paths:
       - actions/ast-grep/**
       - tests/ast-grep/**
+      - tests/test_ast_grep.py
+      - .github/workflows/ast-grep.yml
       - .github/workflows/test-ast-grep.yml
   push:
     branches: [main]
     paths:
       - actions/ast-grep/**
       - tests/ast-grep/**
+      - tests/test_ast_grep.py
+      - .github/workflows/ast-grep.yml
       - .github/workflows/test-ast-grep.yml
   workflow_dispatch:
 
@@ -37,6 +41,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Action and workflow unit tests
+        run: python3 -m unittest tests/test_ast_grep.py
       - name: Clean code passes
         uses: ./actions/ast-grep
         with:
@@ -70,12 +76,69 @@ jobs:
         with:
           config: tests/ast-grep/sgconfig.yml
           paths: tests/ast-grep/link-out
+      - name: Shared rules alone pass clean code
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          shared-rules: rfc-0018 rfc-0018-string-error
+          paths: tests/ast-grep/shared-clean
+      - name: Shared rules next to the repository's config
+        uses: ./actions/ast-grep
+        with:
+          config: tests/ast-grep/sgconfig.yml
+          shared-rules: rfc-0018
+          paths: tests/ast-grep/clean tests/ast-grep/shared-clean
+      - name: A shared rule finding fails
+        id: shared-finding
+        continue-on-error: true
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          shared-rules: rfc-0018
+          paths: tests/ast-grep/shared-finding
+      - name: string-error is off unless asked for
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          shared-rules: rfc-0018
+          paths: tests/ast-grep/shared-string-error
+      - name: string-error finds when asked for
+        id: string-error
+        continue-on-error: true
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          shared-rules: rfc-0018 rfc-0018-string-error
+          paths: tests/ast-grep/shared-string-error
+      - name: An unknown rule set is refused
+        id: unknown-set
+        continue-on-error: true
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          shared-rules: no-such-set
+          paths: tests/ast-grep/shared-clean
+      - name: No config and no shared rules is refused
+        id: nothing
+        continue-on-error: true
+        uses: ./actions/ast-grep
+        with:
+          config: ""
+          paths: tests/ast-grep/shared-clean
       - name: Check the outcomes
         env:
           FINDING: ${{ steps.finding.outcome }}
           OUTSIDE: ${{ steps.outside.outcome }}
           LINK: ${{ steps.link.outcome }}
+          SHARED_FINDING: ${{ steps.shared-finding.outcome }}
+          STRING_ERROR: ${{ steps.string-error.outcome }}
+          UNKNOWN_SET: ${{ steps.unknown-set.outcome }}
+          NOTHING: ${{ steps.nothing.outcome }}
         run: |
           test "$FINDING" = failure
           test "$OUTSIDE" = failure
           test "$LINK" = failure
+          test "$SHARED_FINDING" = failure
+          test "$STRING_ERROR" = failure
+          test "$UNKNOWN_SET" = failure
+          test "$NOTHING" = failure

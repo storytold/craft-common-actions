@@ -1,0 +1,31 @@
+id: args-os
+language: rust
+severity: error
+message: std::env::args() panics on an argument that isn't valid Unicode
+note: |
+  Read std::env::args_os() and let clap parse the OsStrings, so a Latin-1 file name reaches the
+  command (or is a usage error) instead of aborting before anything is printed (photocraft#1108).
+rule:
+  any:
+    - pattern: std::env::args()
+    - pattern: env::args()
+    # A bare args() only where the file imports std::env::args under that name, not any function
+    # named args (`args as os_args` binds os_args, so a local args() stays valid).
+    - all:
+        - pattern: args()
+        - inside:
+            kind: source_file
+            stopBy: end
+            has:
+              kind: use_declaration
+              stopBy: end
+              regex: std::env::(args\s*;|\{[^}]*\bargs\s*[,}])
+    # The renamed import: the call binds $F, then the file must import std::env::args as $F.
+    - all:
+        - pattern: $F()
+        - inside:
+            kind: source_file
+            stopBy: end
+            has:
+              stopBy: end
+              pattern: use std::env::args as $F;

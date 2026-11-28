@@ -47,6 +47,32 @@ class AstGrepTests(unittest.TestCase):
             with self.subTest(line=line.strip()):
                 self.assertIn(' -- "${paths[@]}"', line)
 
+    def test_every_shared_rule_set_has_its_tests_and_the_workflow_names_it(self):
+        shared = ROOT / 'actions/ast-grep/shared'
+        sets = sorted(d.name for d in shared.iterdir() if d.is_dir())
+        self.assertEqual(sets, ['rfc-0018', 'rfc-0018-string-error'])
+        description = WORKFLOW['on']['workflow_call']['inputs']['shared-rules']['description']
+        for name in sets:
+            with self.subTest(set=name):
+                self.assertIn(name, description)
+                self.assertIn(name, ACTION['inputs']['shared-rules']['description'])
+                for rule in (shared / name / 'rules').glob('*.yml'):
+                    body = yaml.load(rule.read_text(), Loader=yaml.BaseLoader)
+                    self.assertEqual(body['id'], rule.stem)
+                    self.assertEqual(body['language'], 'rust')
+                    self.assertTrue((shared / name / 'rule-tests' / f'{rule.stem}-test.yml').exists())
+
+    def test_string_error_is_not_in_the_default_set(self):
+        shared = ROOT / 'actions/ast-grep/shared'
+        self.assertFalse((shared / 'rfc-0018/rules/string-error.yml').exists())
+        self.assertTrue((shared / 'rfc-0018-string-error/rules/string-error.yml').exists())
+
+    def test_the_shared_step_reads_inputs_only_through_env_and_checks_the_set_name(self):
+        step = next(s for s in ACTION['runs']['steps'] if s.get('name') == 'Shared rules')
+        self.assertNotIn('${{', step['run'])
+        self.assertIn('[a-z0-9][a-z0-9-]*', step['run'])
+        self.assertEqual(step['if'], "inputs.shared-rules != ''")
+
 
 if __name__ == '__main__':
     unittest.main()
