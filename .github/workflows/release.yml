@@ -877,6 +877,18 @@ jobs:
           ref: ${{ inputs.craft-fonts-ref }}
       - name: Check out craft-i18n
         uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      # The runner has about 16 GB of RAM, so the 20 GB guest's cold memory goes to a host
+      # swap file on ext4, as in freebsd.yml. FreeBSD itself keeps no swap on ZFS.
+      - name: Add host swap for the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 16G /craft-vm-swap
+          sudo chmod 600 /craft-vm-swap
+          sudo mkswap /craft-vm-swap >/dev/null
+          sudo swapon /craft-vm-swap
+          swapon --show
+          free -b
       - name: Start the FreeBSD VM
         uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
@@ -885,7 +897,7 @@ jobs:
           # because an emulated aarch64 guest takes over 5 hours for most apps (#39).
           usesh: true
           cpu: 4
-          mem: 12288
+          mem: 20480
           copyback: false
           envs: "APP_NAME CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_PROFILE_RELEASE_CODEGEN_UNITS VERSION BUILD_DATE BUILD_SHA INPUT_VERSION ARCH ${{ steps.app-env.outputs.names }}"
           prepare: |

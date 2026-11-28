@@ -129,6 +129,19 @@ jobs:
           df -B1 / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
           df -i / "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
           echo "::endgroup::"
+      # One rustc for a large lib-test crate peaks near 10 GB at -j 1, which a 12 GB guest
+      # cannot hold. The runner has about 16 GB of RAM, so the guest gets 20 GB and the host
+      # pages its cold memory to a swap file on ext4. FreeBSD itself keeps no swap on ZFS.
+      - name: Add host swap for the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 16G /craft-vm-swap
+          sudo chmod 600 /craft-vm-swap
+          sudo mkswap /craft-vm-swap >/dev/null
+          sudo swapon /craft-vm-swap
+          swapon --show
+          free -b
       - name: Start the FreeBSD VM
         uses: step-security/freebsd-vm@a2f5754275f7b0d5cea7f2762c9960727950f128 # v1.5.9
         with:
@@ -137,7 +150,7 @@ jobs:
           # because an emulated aarch64 guest compiles about 23 times slower (#33).
           usesh: true
           cpu: 4
-          mem: 12288
+          mem: 20480
           copyback: false
           envs: "CARGO_HOME CARGO_TARGET_DIR CARGO_INCREMENTAL CARGO_BUILD_JOBS CARGO_BUILD_EXTRA_ARGS CARGO_TEST_EXTRA_ARGS CUSTOM_TEST_COMMAND ARCH"
           prepare: |
