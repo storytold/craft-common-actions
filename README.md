@@ -692,6 +692,36 @@ compiled libraries and unit-test executables, so a change rebuilds only the crat
   `completed`, branch main) with one job that holds `actions: write` and runs
   `actions/cache-prune` once removes the replaced entry after every attempt.
 
+- A cold build (`cold-build: true`) restores no rolling entry, so the old entry stays in the cache
+  while the new one is saved, and the two can push the repository past its 10 GB cache limit.
+  `clear-rolling-on-save` deletes the old entries of `rolling-family` once the saving job's
+  `save-step` (`Post Setup` in gate.yml's legs) starts. Only entries created before the run
+  started are deleted, so an entry another run saved meanwhile stays. The step then exits 1 unless
+  the save step succeeds and the cache list shows the new entry. A save that is canceled or fails
+  after the deletion leaves the branch without a rolling entry, and the next run builds cold. When
+  a step before the save failed (rust-cache then saves nothing), or the job failed or was canceled
+  before its save step, nothing is deleted and the step fails. A job that succeeds without a save
+  step also deletes nothing and fails the step. The expression must match one job only, so name the leg's OS when the
+  gate runs on several. Run this step without `continue-on-error`,
+  so that "Re-run failed jobs" runs it again beside the re-run saving job. `watch-minutes` counts
+  from the saving job's start, so give the caller job a `timeout-minutes` that also covers the
+  wait before that job starts:
+
+```yaml
+  cold-cache-clear:
+    name: cold cache clear
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    permissions:
+      actions: write
+    steps:
+      - uses: storytold/craft-common-actions/actions/cache-prune@main
+        with:
+          clear-rolling-on-save: '^gate / cache warm \(ubuntu-'
+          watch-minutes: 160
+```
+
 - After the restore, `actions/restore-mtimes` gives every tracked file an old mtime and touches
   the files that differ from the commit the entry was built from (`.ci-cache-meta/commit`, saved
   with the entry), so Cargo's fingerprints see exactly those as changed. The craft-fonts and
@@ -1026,7 +1056,7 @@ Individual actions are also available for composing custom pipelines:
   ```
 - `actions/cache-trim`: For a leg that saves the dependency cache (gate.yml runs it). Trims the target directory's build units (`<profile>/build/<package>/<hash>/`, Cargo's unit layout) using the build's record in `CRAFT_CACHE_UNITS`, before rust-cache's post step saves. `actions/rust-cache` sets `CRAFT_CACHE_UNITS` in a leg that saves; the build appends Cargo's JSON messages to it: run cargo with `--message-format json-render-diagnostics` (nextest: `--cargo-message-format json-render-diagnostics`), which keeps the diagnostics readable on stderr, and append the stdout lines that start with `{"reason":`. Record every cargo command of the leg, the one that builds a cargo-alias tool included. When an unrecorded unit was built in this job (a file newer than the start time actions/rust-cache writes beside the record), the trim keeps it and warns with the unit name. It still removes unrecorded units from earlier jobs, so an incomplete record does not save all restored units. An unrecorded command that used one of those restored units will rebuild it on the next run. Without a record it changes nothing. A trim that fails warns and exits 1; gate.yml runs it with `continue-on-error`, since the failure leaves a usable cache.
 - `actions/rust-channel`: Names the toolchain, targets and components a job installs: those of the checkout's `rust-toolchain.toml` (`channel`, `targets`, `components`) when it has one, merged with the caller's `targets` and `components`, else the caller's `toolchain` (default `stable`). Pass its outputs to the toolchain action (`toolchain`, `targets`, `components`) right after the checkout. rustup runs cargo with the file's channel, so a job that installs `stable` beside a file that names another release would make rustup fetch that release without the job's targets. Apps without the file get what they asked for. release.yml and windows-arm64.yml use it.
-- `actions/cache-prune`: For a caller job with `permissions: actions: write`. Deletes a branch's cache entries that no run will restore again: all but the newest rolling `cache-workspace-crates` entry per job, OS and architecture; and of the other rust-cache entries, and of `<name>-<sha256>` entries for the names in `content-keys`, each older entry once nothing has used it since the newest of its family was created. Other entries (apt packages, tool caches) stay. Families leave out the environment and lockfile hashes, so a toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different toolchains or environments would count as one family. `watch: true` runs beside the run's jobs and prunes each time one of `saving-jobs` (regular expressions on the jobs API's names, matching the skipped job's name too) finishes, ending when none is queued or running, once the cache list shows an entry created after the last one started (at most three more 30-second polls), or after `watch-minutes`, with one more pass; `dry-run: true` only lists. A failed pass warns and the next one tries again; a failure that stops the script warns and exits 1, so run it with `continue-on-error: true`.
+- `actions/cache-prune`: For a caller job with `permissions: actions: write`. Deletes a branch's cache entries that no run will restore again: all but the newest rolling `cache-workspace-crates` entry per job, OS and architecture; and of the other rust-cache entries, and of `<name>-<sha256>` entries for the names in `content-keys`, each older entry once nothing has used it since the newest of its family was created. A job's rolling entry also replaces its plain rust-cache entries for the same OS and architecture (the ones written before the job turned `cache-workspace-crates` on), each once nothing has used it since the newest rolling entry was created; a plain entry never replaces a rolling one. Other entries (apt packages, tool caches) stay. Families leave out the environment and lockfile hashes, so a toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different toolchains or environments would count as one family. `watch: true` runs beside the run's jobs and prunes each time one of `saving-jobs` (regular expressions on the jobs API's names, matching the skipped job's name too) finishes, ending when none is queued or running, once the cache list shows an entry created after the last one started (at most three more 30-second polls), or after `watch-minutes`, with one more pass; `dry-run: true` only lists. A failed pass warns and the next one tries again; a failure that stops the script warns and exits 1, so run it with `continue-on-error: true`. `clear-rolling-on-save` (a regular expression naming the one job that saves the rolling entry) is for a cold build instead: when that job's `save-step` (default `Post Setup`) starts, it deletes the `rolling-family` entries (default `v2-rust-gate-crates-Linux-x64`) created before the run started, then exits 1 unless the step succeeds and the new entry is listed, waiting at most `watch-minutes` from that job's start; see the cold-build note under the dependency cache above.
 - `actions/restore-mtimes`: For a `cache-workspace-crates` entry. `mode: record`, in the job that saves the entry, writes the commit it was built from and the commits of the craft-i18n and craft-fonts checkouts to `.ci-cache-meta`, which the entry keeps. `mode: restore`, after the restore, gives every tracked file an old mtime and touches the files that differ between that commit and HEAD, so Cargo rebuilds only the units that read a changed file; the external checkouts get old mtimes only while they are at the recorded commits. Without a marker, or when the commit cannot be fetched, it changes nothing and Cargo rebuilds every workspace crate.
 - `actions/gate-setup`: The setup a `gate.yml` job runs after its checkout: craft-fonts and craft-i18n, the caller's environment, Linux packages, the Rust toolchain and cargo tools, the dependency cache through `actions/rust-cache` (with `actions/restore-mtimes` for `cache-workspace-crates`), sccache, and the caller's setup command and its cache. It takes `gate.yml`'s inputs plus which parts a job needs; other workflows have no use for it.
 - `actions/gate-run`: Runs one of `gate.yml`'s commands with bash; with `timeout-minutes`, GNU `timeout` stops the command after that many minutes, and the log lists the processes still running a minute before.

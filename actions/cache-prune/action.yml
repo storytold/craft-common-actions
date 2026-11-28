@@ -13,7 +13,11 @@ description: >-
   toolchain or lockfile update replaces the old entry; two jobs sharing one key name with different
   toolchains or environments would count as one family. A failed pass prints a warning and the next
   pass tries again; a failure that stops the script prints a warning and exits 1, so run the step
-  with `continue-on-error: true` where the prune must not fail the run.
+  with `continue-on-error: true` where the prune must not fail the run. With
+  `clear-rolling-on-save`, for a run that restores no rolling entry (a cold build), it prunes
+  nothing else: it waits for that job's `save-step` to start, deletes the `rolling-family` entries
+  created before the run started, waits for the step's result and exits 1 unless the step succeeded
+  and the cache list shows the new entry.
 
 inputs:
   ref:
@@ -38,9 +42,36 @@ inputs:
     required: false
     default: "false"
   watch-minutes:
-    description: "With watch: end after this many minutes, with one more pass; keep it under the job's timeout-minutes"
+    description: >-
+      With watch: end after this many minutes, with one more pass; keep it under the job's
+      timeout-minutes. With clear-rolling-on-save: how long to wait for the save and its result,
+      counted from the saving job's start (from this step's start while that job has not started);
+      the job's timeout-minutes must also cover the time before the saving job starts
     required: false
     default: "110"
+  clear-rolling-on-save:
+    description: >-
+      A regular expression matching the one job that saves the rolling entry, as the jobs API names
+      it (for example `^gate / cache warm \(ubuntu-`); a pattern that matches more than one job
+      deletes nothing and fails. Set it only on a run that restores no rolling entry,
+      such as a cold build: when that job's `save-step` starts, the `rolling-family` entries created
+      before the run started are deleted, and the step exits 1 unless the save succeeds. Empty
+      (default): off
+    required: false
+    default: ""
+  rolling-family:
+    description: >-
+      With clear-rolling-on-save: the rolling entries to delete, as
+      `<cache-version>-rust-<cache job>-crates-<os>-<arch>` (the key without its profile hash and
+      run numbers)
+    required: false
+    default: "v2-rust-gate-crates-Linux-x64"
+  save-step:
+    description: >-
+      With clear-rolling-on-save: the saving job's step that saves the dependency cache, as the jobs
+      API names it. gate.yml's legs save in `Post Setup`, the post step of their `Setup` step
+    required: false
+    default: "Post Setup"
   dry-run:
     description: "List what would be deleted without deleting it (true/false)"
     required: false
@@ -65,6 +96,9 @@ runs:
         PRUNE_WATCH: ${{ inputs.watch }}
         PRUNE_WATCH_MINUTES: ${{ inputs.watch-minutes }}
         PRUNE_DRY_RUN: ${{ inputs.dry-run }}
+        PRUNE_CLEAR_ROLLING_ON_SAVE: ${{ inputs.clear-rolling-on-save }}
+        PRUNE_ROLLING_FAMILY: ${{ inputs.rolling-family }}
+        PRUNE_SAVE_STEP: ${{ inputs.save-step }}
         PRUNE_RUN: ${{ github.run_id }}
         PRUNE_ATTEMPT: ${{ github.run_attempt }}
       run: python3 "$PRUNE"
