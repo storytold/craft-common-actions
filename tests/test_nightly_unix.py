@@ -101,7 +101,15 @@ class UnixProducerTests(unittest.TestCase):
         self.assertEqual(targets[0]['target'],{'os':'windows','arch':'x86_64','format':'portable_zip'})
         self.assertEqual([row for row in targets if row['target']['os']=='macos'],[u.registry_target(mac)])
         self.assertEqual([row for row in targets if row['target']['os']=='linux'],[u.registry_target(linux)])
-        self.assertTrue(all(not row['targets'] for name,row in self.registry['apps'].items() if name!='photocraft'))
+        # Other apps' Unix rows are their own contracts, never PhotoCraft's (the asset and identity name the app).
+        for name,row in self.registry['apps'].items():
+            if name=='photocraft' or not row['targets']: continue
+            for platform in ('linux-x86_64','macos-aarch64'):
+                with self.subTest(app=name,platform=platform):
+                    own=u.pending_contract(None,platform,name)
+                    self.assertEqual([t for t in row['targets'] if t['target']==own['target']],[u.registry_target(own)])
+                    self.assertTrue(own['asset_pattern'].startswith(name+'-'))
+                    self.assertEqual(own['isolation']['package_identity'],f'ai.storyteller.{name}.nightly')
 
     def test_admitted_linux_row_must_match_the_feed_registry_exactly(self):
         self.assertTrue(self.check()['feed_admitted'])
@@ -196,9 +204,9 @@ class UnixProducerTests(unittest.TestCase):
         for extra,payload in [([('PHOTOCRAFT',b'bad','file')],self.elf),([],b'not elf')]:
             archive=self.tar(extra=extra,payload=payload)
             original=u.member_name
-            def inspect(name):
+            def inspect(name, *app):
                 self.assertFalse(output.exists())
-                return original(name)
+                return original(name, *app)
             with patch.object(u,'member_name',side_effect=inspect),self.assertRaises(n.InvalidNightly):
                 u.verify_archive(self.pending,'linux-x86_64',archive,self.version,output)
             self.assertFalse(output.exists())

@@ -17,6 +17,7 @@ import stat
 import subprocess
 import tempfile
 import zipfile
+import nightly_app as apps
 import nightly_artifacts as a
 import nightly_feed as n
 import nightly_unix as u
@@ -70,8 +71,18 @@ def sha(path):
     return n.digest_file(path.parent, path.name)[1]
 
 
+def pending_metadata(path):
+    """PhotoCraft's old pending file when given (validated against the registry row), else None."""
+    return n.bounded_json(path) if path else None
+
+
+def windows_names():
+    app = apps.current()
+    return app.binary('windows-x86_64'), app.product_name
+
+
 def context(environment):
-    n.require(environment.get('GITHUB_REPOSITORY') == 'storytold/photocraft' and
+    n.require(environment.get('GITHUB_REPOSITORY') == apps.current(environment).repository and
               environment.get('GITHUB_REF') == 'refs/heads/main' and
               environment.get('GITHUB_EVENT_NAME') in ('schedule', 'workflow_dispatch'),
               'signing requires literal Photo/main schedule or dispatch context')
@@ -122,6 +133,7 @@ def adapter(platform, source):
 
 def windows_unpack(archive, output):
     """Flat GUI-only archive, no scripts/DLLs/links, bounded before ZipFile allocation."""
+    exe = windows_names()[0]
     archive, output = n.owned_path(archive), n.owned_path(output)
     n.require(not output.exists() and not output.is_symlink(), 'unpack output must be new')
     stream, info = n.regular_file(archive.parent, archive.name)
@@ -138,13 +150,13 @@ def windows_unpack(archive, output):
                           stat.S_IFMT(mode) in (0, stat.S_IFREG), 'non-regular/encrypted Windows ZIP member')
                 n.require(re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,127}', name) and
                           name.casefold() not in names, 'unsafe/duplicate Windows ZIP member')
-                n.require(name in {'photocraft.exe', 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE',
+                n.require(name in {exe, 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE',
                                   'NOTICE', 'ATTRIBUTION.md'} or re.fullmatch('OFL-[A-Za-z0-9._-]+[.]txt', name),
                           'unexpected Windows ZIP payload')
                 names.add(name.casefold()); total += member.file_size
                 n.require(0 < member.file_size <= n.MAX_ASSET_BYTES and total <= n.MAX_TOTAL_BYTES,
                           'Windows ZIP expanded bytes exceed bound')
-            n.require('photocraft.exe' in {entry.filename for entry in entries}, 'missing exact nightly GUI')
+            n.require(exe in {entry.filename for entry in entries}, 'missing exact nightly GUI')
             output.mkdir(parents=True, exist_ok=False)
             for member in entries:
                 with container.open(member) as src, (output/member.filename).open('xb') as dst:
@@ -154,7 +166,7 @@ def windows_unpack(archive, output):
                         n.require(count <= member.file_size, 'Windows ZIP member exceeds size')
                         dst.write(block)
                     n.require(count == member.file_size, 'truncated Windows ZIP member')
-    pe = output/'photocraft.exe'
+    pe = output/exe
     with pe.open('rb') as stream:
         header = stream.read(64)
         n.require(len(header) == 64 and header[:2] == b'MZ', 'not a PE executable')
@@ -170,8 +182,10 @@ def windows_verify(root, environment, version):
     publisher = environment.get('NIGHTLY_WINDOWS_PUBLISHER_SUBJECT', '')
     n.require(publisher and not any(c in publisher for c in '\r\n\0'), 'configured exact Windows publisher subject required')
     script = Path(__file__).with_name('nightly_signing_windows.ps1').resolve()
+    exe, product = windows_names()
     return command(['pwsh', '-NoProfile', '-File', script, '-Mode', 'verify', '-Root', n.owned_path(root),
-                    '-ExpectedPublisher', publisher, '-ExpectedVersion', version], env=verification_env(environment))
+                    '-ExpectedPublisher', publisher, '-ExpectedVersion', version,
+                    '-ExeName', exe, '-ProductName', product], env=verification_env(environment))
 
 
 def repack_windows(root, archive):
@@ -199,7 +213,7 @@ def hardened_runtime(details):
 
 def mac_verify(archive, version, pending, environment, output):
     # Inventory is not signature proof; system tools below verify separately.
-    u.verify_archive(pending, 'macos-aarch64', archive, version)
+    u.verify_archive(pending, 'macos-aarch64', archive, version, app=apps.current_name(environment))
     team = environment.get('NIGHTLY_APPLE_TEAM_ID', '')
     n.require(re.fullmatch('[A-Z0-9]{10}', team), 'configured reviewed Apple team required')
     # inventory has already forbidden links, traversal, extra roots and special files.
@@ -208,15 +222,16 @@ def mac_verify(archive, version, pending, environment, output):
     clean = verification_env(environment)  # Keeps PATH/HOME/TMPDIR/LANG/DEVELOPER_DIR, never signing secrets.
     # Unpack like the Launcher: no resource forks or extended attributes restored.
     command(['/usr/bin/ditto', '-x', '-k', '--norsrc', '--noextattr', archive, output], env=clean)
-    app = Path(output)/'PhotoCraft Nightly.app'
-    executable = app/'Contents/MacOS/PhotoCraft'
+    names = apps.current(environment)
+    app = Path(output)/names.bundle
+    executable = Path(output)/names.binary('macos-aarch64')
     n.require(command(['/usr/bin/lipo', '-archs', executable], env=clean) == 'arm64', 'Mac GUI must be thin aarch64')
     command(['/usr/bin/codesign', '--verify', '--strict', '--deep', app], env=clean)
     # codesign -d writes details to stderr, merged explicitly in this one tool.
     details = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(app)],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=60, env=clean).stdout.decode()
     n.require(len(details) <= n.MAX_JSON_BYTES and
-              '\nIdentifier='+u.ISOLATION['package_identity']+'\n' in '\n'+details+'\n' and
+              '\nIdentifier='+names.identity+'\n' in '\n'+details+'\n' and
               '\nAuthority=Developer ID Application:' in '\n'+details and
               '\nTeamIdentifier='+team+'\n' in '\n'+details and
               re.search(r'^Timestamp=.+$', details, re.M) and
@@ -408,7 +423,8 @@ def sign_windows(source, archive, output, environment, version):
         payload = windows_unpack(archive, Path(temporary)/'payload')
         command(['pwsh', '-NoProfile', '-File', Path(__file__).with_name('nightly_signing_windows.ps1').resolve(),
                  '-Mode', 'sign', '-Root', payload, '-Signer', Path(source).resolve()/'packaging/windows/sign.ps1',
-                 '-ExpectedPublisher', environment['NIGHTLY_WINDOWS_PUBLISHER_SUBJECT'], '-ExpectedVersion', version], env=environment)
+                 '-ExpectedPublisher', environment['NIGHTLY_WINDOWS_PUBLISHER_SUBJECT'], '-ExpectedVersion', version,
+                 '-ExeName', windows_names()[0], '-ProductName', windows_names()[1]], env=environment)
         signer = windows_verify(payload, environment, version)
         repack_windows(payload, output)
         # Verify signatures in final repacked package as well, without execution.
@@ -477,16 +493,18 @@ def main():
         policy = n.bounded_json(Path(args.identity_directory)/'nightly-producer-policy.json')
         registry = n.bounded_json(args.registry)
         import nightly_windows as w
-        w.validate_prepared(registry, 'photocraft', prepared, Path(args.source)/'Cargo.toml', args.version, os.environ, policy)
+        w.validate_prepared(registry, apps.current_name(), prepared, Path(args.source)/'Cargo.toml', args.version, os.environ, policy)
         suffix = {'windows-x86_64': 'windows-x86_64-nightly.zip', 'macos-aarch64': 'macos-aarch64-nightly.zip',
                   'linux-x86_64': 'linux-x86_64-nightly.tar.gz'}[args.platform]
-        asset = 'photocraft-'+prepared['version']+'-'+suffix
+        asset = apps.current_name()+'-'+prepared['version']+'-'+suffix
         unsigned_name = asset[:-4]+'.unsigned.zip' if args.platform == 'windows-x86_64' else asset
         n.require(Path(args.archive).name == unsigned_name and args.asset == asset, 'signing asset differs from immutable identity')
         n.require(a.SHA256.fullmatch(args.unsigned_sha256 or '') and sha(args.archive) == args.unsigned_sha256,
                   'unsigned bytes differ from independent build output')
+        # Optional: without --pending the app's registry row is the producer contract.
+        pending = pending_metadata(args.pending)
         if args.platform in ('linux-x86_64', 'macos-aarch64'):
-            u.verify_archive(n.bounded_json(args.pending), args.platform, args.archive, args.version)
+            u.verify_archive(pending, args.platform, args.archive, args.version, app=apps.current_name())
         output = n.owned_path(args.output)
         receipt_directory = n.owned_path(args.receipt_directory)
         n.require(not output.exists() and output.name == asset, 'final signed output must be new and exact-named')
@@ -500,7 +518,7 @@ def main():
                      '--arch', 'aarch64', '--input', Path(args.archive).resolve(), '--output', output.resolve()], env=dict(os.environ),
                     timeout=5400)
             with tempfile.TemporaryDirectory(prefix='nightly-mac-verify-', dir=n.owned_path(os.environ['RUNNER_TEMP'])) as temporary:
-                signer = mac_verify(output, args.version, n.bounded_json(args.pending), os.environ, Path(temporary)/'payload')
+                signer = mac_verify(output, args.version, pending, os.environ, Path(temporary)/'payload')
         n.require(sha(args.archive) == args.unsigned_sha256, 'original unsigned build bytes changed during signing')
         final = sha(output)
         if args.platform != 'linux-x86_64': n.require(final != args.unsigned_sha256, 'signing did not change package; unsigned fallback refused')

@@ -25,6 +25,12 @@ class ReceiptTests(unittest.TestCase):
    self.assertEqual(set(data),r.FIELDS);self.assertEqual(json.loads((out/'ownership.json').read_text()),data)
    self.assertEqual(set(p.name for p in out.iterdir()),{'ownership.json'})
    with self.assertRaises(ValueError):r.emit(self.ident,self.release,self.env,out)
+ def test_receipt_is_bound_to_the_validated_identity_not_nightly_app(self):
+  # A stray NIGHTLY_APP after publication must not turn a published release into PublishedWithoutReceipt.
+  data=r.receipt(self.ident,self.release,{**self.env,'NIGHTLY_APP':'artcraft'})
+  self.assertEqual((data['app'],data['repository']),('photocraft','storytold/photocraft'))
+  with self.assertRaisesRegex(ValueError,'ownership context mismatch'):
+   r.receipt({**self.ident,'repository':'storytold/artcraft'},self.release,{**self.env,'GITHUB_REPOSITORY':'storytold/artcraft'})
  def test_pending_reservation_never_creates_the_canonical_receipt(self):
   with tempfile.TemporaryDirectory(dir=self.root) as tmp:
    out=Path(tmp)/'owned'

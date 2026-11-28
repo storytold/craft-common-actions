@@ -22,6 +22,7 @@ spec = importlib.util.spec_from_file_location("nightly_feed", ROOT / "scripts/ni
 n = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(n)
 sys.modules["nightly_feed"] = n
+sys.modules.pop("nightly_app", None)  # it imported the replaced nightly_feed
 spec = importlib.util.spec_from_file_location("nightly_windows", ROOT / "scripts/nightly_windows.py")
 w = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(w)
@@ -76,7 +77,13 @@ class WindowsCandidateTests(unittest.TestCase):
         self.assertEqual([row for row in live if row["target"]["os"] == "windows"], [golden])
         self.assertEqual(sorted(row["target"]["os"] for row in live), ["linux", "macos", "windows"])
         self.assertEqual(len(self.live_registry["apps"]), 19)
-        self.assertTrue(all(not row["targets"] for app, row in self.live_registry["apps"].items() if app != "photocraft"))
+        # Other apps' Windows rows are each their own exact row, never PhotoCraft's golden one.
+        for app, record in self.live_registry["apps"].items():
+            if app == "photocraft" or not record["targets"]: continue
+            with self.subTest(app=app):
+                self.assertEqual([row for row in record["targets"] if row["target"]["os"] == "windows"], [w.windows_target(app)])
+                self.assertNotEqual(w.windows_target(app), golden)
+                self.assertTrue(w.reviewed_windows_target(record, app))
         # The Windows adapter accepts its exact row beside reviewed platform rows, never a changed one.
         self.check(registry=self.live_registry)
         changed = copy.deepcopy(self.live_registry)

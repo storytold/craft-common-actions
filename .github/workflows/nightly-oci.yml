@@ -20,7 +20,8 @@ jobs:
   push-oci:
     if: >-
       github.repository == 'storytold/photocraft' && github.event_name == 'workflow_run' && github.event.action == 'completed' &&
-      github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'release' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.head_branch == 'release' || github.event.workflow_run.head_branch == 'nightly-signer') &&
       github.event.workflow_run.repository.full_name == 'storytold/photocraft' &&
       github.event.workflow_run.head_repository.full_name == 'storytold/photocraft'
     # This repository owns one set of floating OCI tags. Never let a second
@@ -67,6 +68,8 @@ jobs:
         id: target
         env:
           TOOLING_REVISION: ${{ inputs.tooling-revision }}
+          # The scripts require exactly the signer branch the completed run's reviewed policy names.
+          SIGNER_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: python3 -I -B .nightly-tools/scripts/nightly_oci.py policy
       - name: Download exact-attempt protected publisher proof
         if: steps.target.outputs.oci-enabled == 'true'

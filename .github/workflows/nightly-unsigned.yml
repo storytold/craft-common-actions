@@ -33,9 +33,46 @@ permissions:
 env:
   TOOLING_REVISION: ${{ inputs.tooling-revision }}
   NIGHTLY_MANUAL_ACTORS: ${{ inputs.manual-actors }}
+  # Every shared script derives the app's names from its reviewed registry row (scripts/nightly_app.py).
+  NIGHTLY_APP: ${{ inputs.app-name }}
 jobs:
+  admit-app:
+    # The allowlist: only a reviewed nightly-apps.json row with targets, for its own repository,
+    # on its default branch. Every other job runs only when this says ok.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      ok: ${{ steps.admit.outputs.ok }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        with:
+          egress-policy: audit
+      - name: Bind immutable defining workflow before any shared code
+        env:
+          DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_SHA: ${{ job.workflow_sha }}
+        run: |
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .nightly-tools
+          persist-credentials: false
+      - name: Admit only a reviewed registry app on its own repository's main
+        id: admit
+        run: |
+          set -euo pipefail
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          python3 -I -B .nightly-tools/scripts/nightly_app.py admit --app-name "$NIGHTLY_APP" \
+            --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" | tee -a "$GITHUB_OUTPUT"
+
   git-sources:
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    needs: [admit-app]
+    if: needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     name: Git dependencies come from storytold
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -85,9 +122,10 @@ jobs:
 
 
   select-platforms:
+    needs: [admit-app]
     # Validate the caller's list once. Build jobs then match exact array elements; a bare
     # JSON string such as "not-linux-x86_64" can never substring-match a platform.
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    if: needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -137,8 +175,8 @@ jobs:
           PY
 
   build:
-    needs: [git-sources, select-platforms]
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'windows-x86_64')
+    needs: [admit-app, git-sources, select-platforms]
+    if: needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'windows-x86_64')
     runs-on: windows-latest
     timeout-minutes: 90
     permissions:
@@ -166,6 +204,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         shell: pwsh
@@ -192,14 +240,17 @@ jobs:
       - name: Compile unsigned package only
         shell: pwsh
         env:
-          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
-          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
-          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          NIGHTLY_VERSION: ${{ steps.plan.outputs.version }}
+          NIGHTLY_SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          NIGHTLY_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: '1'
           DIST: dist
         run: |
+          # The app's own <PREFIX>_BUILD_CHANNEL/VERSION/BUILD_SHA/BUILD_DATE, for this step only.
+          $identity = python -I -B .nightly-tools/scripts/nightly_app.py env --app-name $env:NIGHTLY_APP --version $env:NIGHTLY_VERSION --sha $env:NIGHTLY_SOURCE_COMMIT --date $env:NIGHTLY_BUILD_DATE
+          if ($LASTEXITCODE -ne 0) { throw 'nightly build identity refused' }
+          foreach ($line in $identity) { $name, $value = $line -split '=', 2; Set-Item -LiteralPath "env:$name" -Value $value }
           pwsh -NoProfile -File packaging/windows/package.ps1 -Arch x64 -Nightly -BuildOnly
           if ($LASTEXITCODE -ne 0) { throw 'unsigned compiler failed' }
       - name: Smoke only in the credentialless compiler job
@@ -211,7 +262,9 @@ jobs:
           $unpack = Join-Path $env:RUNNER_TEMP 'nightly-compiler-smoke'
           $profile = Join-Path $env:RUNNER_TEMP 'nightly-compiler-profile'
           Expand-Archive -LiteralPath (Join-Path 'dist' $env:EXACT_ASSET) -DestinationPath $unpack
-          python -B .nightly-tools/scripts/nightly_smoke.py --executable (Join-Path $unpack 'photocraft.exe') --profile-root $profile --version $env:EXACT_VERSION
+          $gui = python -I -B .nightly-tools/scripts/nightly_app.py path --app-name $env:NIGHTLY_APP --platform windows-x86_64 --kind binary
+          if ($LASTEXITCODE -ne 0) { throw 'no reviewed Windows GUI name' }
+          python -B .nightly-tools/scripts/nightly_smoke.py --app $env:NIGHTLY_APP --executable (Join-Path $unpack $gui) --profile-root $profile --version $env:EXACT_VERSION
           if ($LASTEXITCODE -ne 0) { throw 'unsigned GUI smoke failed' }
       - name: Seal only the exact unsigned compiler bytes
         id: seal
@@ -279,10 +332,10 @@ jobs:
         with:
           subject-path: ${{ steps.subject.outputs.subject-path }}
   build-macos:
-    needs: [git-sources, select-platforms]
-    if: inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'macos-aarch64')
+    needs: [admit-app, git-sources, select-platforms]
+    if: needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main' && contains(fromJSON(needs.select-platforms.outputs.platforms), 'macos-aarch64')
     # Same larger Arm runner as the stable macOS build; no secrets, environment, OIDC or cache.
-    runs-on: macos-15-xlarge
+    runs-on: macos-15
     timeout-minutes: 90
     permissions:
       contents: read
@@ -320,6 +373,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         shell: bash
@@ -349,15 +412,20 @@ jobs:
       - name: Compile unsigned package only
         shell: bash
         env:
-          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
-          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
-          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          NIGHTLY_VERSION: ${{ steps.plan.outputs.version }}
+          NIGHTLY_SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          NIGHTLY_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
           DIST: ${{ runner.temp }}/nightly-dist/macos-aarch64
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: '1'
-        run: bash packaging/macos/nightly.sh --arch aarch64
+        run: |
+          set -euo pipefail
+          # The app's own <PREFIX>_BUILD_CHANNEL/VERSION/BUILD_SHA/BUILD_DATE, for this step only.
+          identity="$(python3 -I -B .nightly-tools/scripts/nightly_app.py env --app-name "$NIGHTLY_APP" --export \
+            --version "$NIGHTLY_VERSION" --sha "$NIGHTLY_SOURCE_COMMIT" --date "$NIGHTLY_BUILD_DATE")"
+          eval "$identity"
+          bash packaging/macos/nightly.sh --arch aarch64
       - name: Smoke only in the credentialless compiler job
         shell: bash
         env:
@@ -366,13 +434,14 @@ jobs:
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/nightly-dist/macos-aarch64/$BUILT_ASSET"
-          python3 -B .nightly-tools/scripts/nightly_unix.py inventory --pending .nightly-tools/nightly-unix-pending.json \
+          python3 -B .nightly-tools/scripts/nightly_unix.py inventory --app "$NIGHTLY_APP" \
             --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive"
-          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private --pending .nightly-tools/nightly-unix-pending.json \
+          python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private --app "$NIGHTLY_APP" \
             --platform macos-aarch64 --version "$EXACT_VERSION" --archive "$archive" \
             --output "$RUNNER_TEMP/nightly-compiler-smoke"
-          python3 -B .nightly-tools/scripts/nightly_smoke.py \
-            --executable "$RUNNER_TEMP/nightly-compiler-smoke/PhotoCraft Nightly.app/Contents/MacOS/PhotoCraft" \
+          gui="$(python3 -I -B .nightly-tools/scripts/nightly_app.py path --app-name "$NIGHTLY_APP" --platform macos-aarch64 --kind binary)"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py --app "$NIGHTLY_APP" \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/$gui" \
             --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
       - name: Seal only the exact unsigned compiler bytes
         id: seal
@@ -438,8 +507,8 @@ jobs:
   build-linux:
     # Linux joins the same producer run as Windows (one release, every admitted platform).
     # Off unless the caller lists linux-x86_64; no secrets, environment, OIDC, cache or version mutation.
-    needs: [git-sources, select-platforms]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    needs: [admit-app, git-sources, select-platforms]
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     permissions:
@@ -477,6 +546,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity without editing source
         id: plan
         env:
@@ -506,15 +585,20 @@ jobs:
           components: ${{ steps.rust.outputs.components }}
       - name: Compile unsigned package only
         env:
-          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
-          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
-          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          NIGHTLY_VERSION: ${{ steps.plan.outputs.version }}
+          NIGHTLY_SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          NIGHTLY_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           CARGO_TARGET_DIR: ${{ runner.temp }}/nightly-targets
           DIST: ${{ runner.temp }}/nightly-dist/linux-x86_64
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: '1'
-        run: bash packaging/linux/nightly.sh --arch x86_64
+        run: |
+          set -euo pipefail
+          # The app's own <PREFIX>_BUILD_CHANNEL/VERSION/BUILD_SHA/BUILD_DATE, for this step only.
+          identity="$(python3 -I -B .nightly-tools/scripts/nightly_app.py env --app-name "$NIGHTLY_APP" --export \
+            --version "$NIGHTLY_VERSION" --sha "$NIGHTLY_SOURCE_COMMIT" --date "$NIGHTLY_BUILD_DATE")"
+          eval "$identity"
+          bash packaging/linux/nightly.sh --arch x86_64
       - name: Inventory and smoke only in the credentialless compiler job
         env:
           EXACT_VERSION: ${{ steps.plan.outputs.version }}
@@ -522,11 +606,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B .nightly-tools/scripts/nightly_unix.py unpack-private \
-            --pending .nightly-tools/nightly-unix-pending.json --platform linux-x86_64 \
+            --app "$NIGHTLY_APP" --platform linux-x86_64 \
             --version "$EXACT_VERSION" --archive "$RUNNER_TEMP/nightly-dist/linux-x86_64/$EXACT_ASSET" \
             --output "$RUNNER_TEMP/nightly-compiler-smoke"
-          python3 -B .nightly-tools/scripts/nightly_smoke.py \
-            --executable "$RUNNER_TEMP/nightly-compiler-smoke/photocraft" \
+          # The ELF itself, in the Launcher's profile form; the tar's entrypoint may be a launcher script.
+          gui="$(python3 -I -B .nightly-tools/scripts/nightly_app.py path --app-name "$NIGHTLY_APP" --platform linux-x86_64 --kind binary)"
+          python3 -B .nightly-tools/scripts/nightly_smoke.py --app "$NIGHTLY_APP" \
+            --executable "$RUNNER_TEMP/nightly-compiler-smoke/$gui" \
             --profile-root "$RUNNER_TEMP/nightly-compiler-profile" --version "$EXACT_VERSION"
       - name: Seal only the exact unsigned compiler bytes
         id: seal
@@ -592,8 +678,8 @@ jobs:
 
   build-linux-packages:
     name: Linux packages ${{ matrix.arch }}
-    needs: [git-sources, select-platforms]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && needs.select-platforms.outputs.linux-package-formats != '[]' && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    needs: [admit-app, git-sources, select-platforms]
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && needs.select-platforms.outputs.linux-package-formats != '[]' && needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     permissions:
@@ -634,6 +720,16 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .nightly-tools
           persist-credentials: false
+      - name: Keep the shared helper checkouts out of the app's clean-source check
+        # The app's own git status must see only the app source. These exact paths are separate
+        # checkouts and hand-off files the shared workflow puts inside the workspace; they're
+        # listed in the local .git/info/exclude (never committed), and nothing else is excluded.
+        shell: bash
+        run: |
+          set -euo pipefail
+          exclude="$(git rev-parse --git-path info/exclude)"
+          mkdir -p "$(dirname "$exclude")"
+          printf '%s\n' /.nightly-tools/ /.unsigned-plan /.unsigned-plan/ /.unsigned-handoff/ /craft-fonts/ /craft-i18n/ >> "$exclude"
       - name: Prepare exact original-run identity
         id: plan
         env:
@@ -643,6 +739,11 @@ jobs:
           test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
+      - name: Derive the app's nightly Linux package names
+        id: names
+        env:
+          APP_NAME: ${{ inputs.app-name }}
+        run: python3 -I -B .nightly-tools/scripts/nightly_app.py names --app-name "$APP_NAME" >> "$GITHUB_OUTPUT"
       - name: Export the app's build variables
         uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         with:
@@ -675,16 +776,18 @@ jobs:
           components: ${{ steps.rust.outputs.components }}
       - name: Build and package (AppImage, deb, rpm, tar.gz) in isolated nightly mode
         env:
-          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
-          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_OVERRIDE_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
-          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          NIGHTLY_VERSION: ${{ steps.plan.outputs.version }}
+          NIGHTLY_SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          NIGHTLY_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
           CRAFT_FONTS_REQUIRED: '1'
         run: |
           set -euo pipefail
+          # The app's own <PREFIX>_BUILD_CHANNEL/VERSION/BUILD_SHA/BUILD_DATE, for this step only.
+          identity="$(python3 -I -B .nightly-tools/scripts/nightly_app.py env --app-name "$NIGHTLY_APP" --export --with-override \
+            --version "$NIGHTLY_VERSION" --sha "$NIGHTLY_SOURCE_COMMIT" --date "$NIGHTLY_BUILD_DATE")"
+          eval "$identity"
           pkg_formats="$(python3 -I -B -c "import json,os; fmts=set(json.loads(os.environ['LINUX_PACKAGE_FORMATS'])); out=[f for f in ('appimage','deb','rpm') if f in fmts]; out.append('tar'); print(' '.join(out))")"
           arch_tar_args=()
           if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'arch' in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
@@ -695,15 +798,19 @@ jobs:
       - name: Build Flatpak bundle and OCI layout
         if: contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'flatpak') || contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'oci')
         env:
-          PHOTOCRAFT_BUILD_CHANNEL: nightly-v1
-          PHOTOCRAFT_VERSION: ${{ steps.plan.outputs.version }}
-          PHOTOCRAFT_BUILD_SHA: ${{ steps.plan.outputs.source-commit }}
-          PHOTOCRAFT_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
+          NIGHTLY_VERSION: ${{ steps.plan.outputs.version }}
+          NIGHTLY_SOURCE_COMMIT: ${{ steps.plan.outputs.source-commit }}
+          NIGHTLY_BUILD_DATE: ${{ steps.plan.outputs.build-date }}
           VERSION: ${{ steps.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
           LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
+          APP_NAME: ${{ inputs.app-name }}
         run: |
           set -euo pipefail
+          # The app's own <PREFIX>_BUILD_CHANNEL/VERSION/BUILD_SHA/BUILD_DATE, for this step only.
+          identity="$(python3 -I -B .nightly-tools/scripts/nightly_app.py env --app-name "$NIGHTLY_APP" --export \
+            --version "$NIGHTLY_VERSION" --sha "$NIGHTLY_SOURCE_COMMIT" --date "$NIGHTLY_BUILD_DATE")"
+          eval "$identity"
           shopt -s nullglob
           tarballs=()
           for f in dist/release/*-"${VERSION}"-linux-"${ARCH}".tar.gz; do
@@ -718,7 +825,7 @@ jobs:
             test -x packaging/linux/flatpak-oci.sh || { echo "::error::packaging/linux/flatpak-oci.sh is missing or not executable"; exit 1; }
             packaging/linux/flatpak-oci.sh "${tarballs[0]}"
             test -d "dist/release/$base-oci" || { echo "::error::expected OCI layout dist/release/$base-oci not found"; exit 1; }
-            python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
+            ref_label="$(python3 -I -B - "dist/release/$base-oci" "dist/release/$base.oci-manifest.json" <<'PY'
           import hashlib, json, pathlib, shutil, sys
           layout, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
           index = json.loads((layout / "index.json").read_text(encoding="utf-8"))
@@ -732,9 +839,11 @@ jobs:
           manifest_obj = json.loads(blob.read_bytes())
           cfg_hex = manifest_obj["config"]["digest"].split(":", 1)[1]
           cfg_obj = json.loads((layout / "blobs" / "sha256" / cfg_hex).read_bytes())
-          ref_label = cfg_obj.get("config", {}).get("Labels", {}).get("org.flatpak.ref", "")
-          assert ref_label.startswith("app/ai.storyteller.photocraft.nightly/"), f"expected nightly Flatpak app ID, got {ref_label!r}"
+          print(cfg_obj.get("config", {}).get("Labels", {}).get("org.flatpak.ref", ""))
           PY
+            )"
+            # The nightly Flatpak app ID comes from the app name, never a hard-coded app.
+            python3 -I -B .nightly-tools/scripts/nightly_app.py check --app-name "$APP_NAME" --kind flatpak --value "$ref_label"
             if python3 -I -B -c "import json,os,sys; sys.exit(0 if 'flatpak' not in json.loads(os.environ['LINUX_PACKAGE_FORMATS']) else 1)"; then
               rm -f "dist/release/$base.flatpak"
             fi
@@ -771,6 +880,9 @@ jobs:
           TARGET_ARCH: ${{ matrix.arch }}
           VERSION: ${{ steps.plan.outputs.version }}
           GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+          APP: ${{ steps.names.outputs.app }}
+          ARCH_PKG: ${{ steps.names.outputs.arch }}
+          ARCH_STABLE_PKG: ${{ steps.names.outputs.arch-stable }}
         run: |
           set -euo pipefail
           bash .nightly-tools/actions/arch-package/run.sh
@@ -779,18 +891,18 @@ jobs:
           # The container's non-root builder has a different UID from the runner.
           chmod 0755 "$smoke_dir"
           # The stable fixture must use the ordinary payload, not the Arch nightly launcher.
-          cp "dist/release/photocraft-${VERSION}-linux-x86_64.tar.gz" "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
-          chmod 0644 "$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz"
-          TARBALL="$smoke_dir/photocraft-0.0.1-linux-x86_64.tar.gz" \
+          cp "dist/release/${APP}-${VERSION}-linux-x86_64.tar.gz" "$smoke_dir/${APP}-0.0.1-linux-x86_64.tar.gz"
+          chmod 0644 "$smoke_dir/${APP}-0.0.1-linux-x86_64.tar.gz"
+          TARBALL="$smoke_dir/${APP}-0.0.1-linux-x86_64.tar.gz" \
             TARGET_ARCH="x86_64" \
             OUTPUT_DIR="$smoke_dir/out" \
             PKGREL="1" \
             ARCH_LICENSE="LicenseRef-Proprietary" \
             bash .nightly-tools/actions/arch-package/run.sh
-          cp "dist/release/photocraft-${VERSION}-linux-x86_64.pkg.tar.zst" "$smoke_dir/out/"
-          docker run --rm -v "$PWD/$smoke_dir/out:/pkgs:ro" \
+          cp "dist/release/${APP}-${VERSION}-linux-x86_64.pkg.tar.zst" "$smoke_dir/out/"
+          docker run --rm -v "$PWD/$smoke_dir/out:/pkgs:ro" -e APP -e ARCH_PKG -e ARCH_STABLE_PKG \
             archlinux:base-devel@sha256:949ecb1661609ab7e8f6854ba03efd62792e7a796313738e94b040c095c20d91 \
-            bash -euxc 'pacman -U --noconfirm --assume-installed glibc=2.39 --assume-installed gcc-libs=14.1 --assume-installed hicolor-icon-theme=0.18 --assume-installed libxkbcommon=1.7 --assume-installed libxkbcommon-x11=1.7 --assume-installed vulkan-icd-loader=1.3 /pkgs/photocraft-0.0.1-linux-x86_64.pkg.tar.zst /pkgs/photocraft-*-nightly.*-linux-x86_64.pkg.tar.zst && pacman -Qi ai.storyteller.photocraft ai.storyteller.photocraft.nightly && test -x /usr/bin/photocraft && test -x /usr/bin/photocraft-nightly'
+            bash -euxc 'pacman -U --noconfirm --assume-installed glibc=2.39 --assume-installed gcc-libs=14.1 --assume-installed hicolor-icon-theme=0.18 --assume-installed libxkbcommon=1.7 --assume-installed libxkbcommon-x11=1.7 --assume-installed vulkan-icd-loader=1.3 "/pkgs/$APP-0.0.1-linux-x86_64.pkg.tar.zst" /pkgs/"$APP"-*-nightly.*-linux-x86_64.pkg.tar.zst && pacman -Qi "$ARCH_STABLE_PKG" "$ARCH_PKG" && test -x "/usr/bin/$APP" && test -x "/usr/bin/$APP-nightly"'
           rm -rf "$smoke_dir"
           trap - EXIT
       - name: Upload aarch64 tarball handoff for Arch package job
@@ -805,12 +917,13 @@ jobs:
         if: matrix.arch == 'x86_64'
         env:
           VERSION: ${{ steps.plan.outputs.version }}
+          APP: ${{ steps.names.outputs.app }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pkg-smoke"
-          tar -xzf dist/release/photocraft-"${VERSION}"-linux-x86_64.tar.gz -C "$RUNNER_TEMP/pkg-smoke" --strip-components=1
-          python3 -B .nightly-tools/scripts/nightly_smoke.py \
-            --executable "$RUNNER_TEMP/pkg-smoke/bin/photocraft" \
+          tar -xzf dist/release/"${APP}"-"${VERSION}"-linux-x86_64.tar.gz -C "$RUNNER_TEMP/pkg-smoke" --strip-components=1
+          python3 -B .nightly-tools/scripts/nightly_smoke.py --app "$NIGHTLY_APP" \
+            --executable "$RUNNER_TEMP/pkg-smoke/bin/${APP}" \
             --profile-root "$RUNNER_TEMP/pkg-smoke-profile" --version "$VERSION"
       - name: Remove duplicate unsigned tarballs after packaging
         env:
@@ -823,20 +936,26 @@ jobs:
         env:
           VERSION: ${{ steps.plan.outputs.version }}
           ARCH: ${{ matrix.arch }}
+          APP_NAME: ${{ inputs.app-name }}
         run: |
           set -euo pipefail
           shopt -s nullglob
+          names=(python3 -I -B .nightly-tools/scripts/nightly_app.py check --app-name "$APP_NAME")
           for f in dist/release/*; do
             name="$(basename "$f")"
             case "$name" in
               *-"${VERSION}"-linux-"${ARCH}".deb)
-                test "$(dpkg-deb -f "$f" Package)" = "photocraft-nightly" || { echo "::error::$name is not Package: photocraft-nightly"; exit 1; }
+                value="$(dpkg-deb -f "$f" Package)" || { echo "::error::could not read the deb Package of $name"; exit 1; }
+                "${names[@]}" --kind deb --value "$value" || { echo "::error::$name has the wrong deb Package"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".rpm)
-                test "$(rpm -qp --qf '%{NAME}' "$f")" = "photocraft-nightly" || { echo "::error::$name is not Name: photocraft-nightly"; exit 1; }
+                value="$(rpm -qp --qf '%{NAME}' "$f")" || { echo "::error::could not read the rpm Name of $name"; exit 1; }
+                "${names[@]}" --kind rpm --value "$value" || { echo "::error::$name has the wrong rpm Name"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".pkg.tar.zst)
-                tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$name is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+                # A separate assignment keeps pipefail: a read or decompression error after partial output refuses.
+                value="$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::could not read .PKGINFO of $name"; exit 1; }
+                "${names[@]}" --kind arch --value "$value" || { echo "::error::$name has the wrong pkgname"; exit 1; }
                 ;;
               *-"${VERSION}"-linux-"${ARCH}".*) ;;
               *-"${VERSION}"-linux-"${ARCH}"-oci) ;;
@@ -853,8 +972,8 @@ jobs:
 
   build-linux-arch-arm:
     name: Arch Linux aarch64
-    needs: [select-platforms, build-linux-packages]
-    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch') && inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+    needs: [admit-app, select-platforms, build-linux-packages]
+    if: contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') && contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch') && needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -906,10 +1025,15 @@ jobs:
           TARBALL: ${{ steps.tarball.outputs.path }}
           TARGET_ARCH: aarch64
           GITHUB_ACTION_PATH: ${{ github.workspace }}/.nightly-tools/actions/arch-package
+          APP_NAME: ${{ inputs.app-name }}
         run: |
+          set -euo pipefail
           bash .nightly-tools/actions/arch-package/run.sh
           for f in dist/release/*.pkg.tar.zst; do
-            tar --zstd -xOf "$f" .PKGINFO | grep -Fx 'pkgname = ai.storyteller.photocraft.nightly' >/dev/null || { echo "::error::$f is not pkgname = ai.storyteller.photocraft.nightly"; exit 1; }
+            # A separate assignment keeps pipefail: a read or decompression error after partial output refuses.
+            value="$(tar --zstd -xOf "$f" .PKGINFO | sed -n 's/^pkgname = //p')" || { echo "::error::could not read .PKGINFO of $f"; exit 1; }
+            python3 -I -B .nightly-tools/scripts/nightly_app.py check --app-name "$APP_NAME" \
+              --kind arch --value "$value" || { echo "::error::$f has the wrong pkgname"; exit 1; }
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -919,13 +1043,13 @@ jobs:
           retention-days: 14
 
   attest-linux-packages:
-    needs: [select-platforms, build-linux-packages, build-linux-arch-arm]
+    needs: [admit-app, select-platforms, build-linux-packages, build-linux-arch-arm]
     if: >-
       !cancelled() && contains(fromJSON(needs.select-platforms.outputs.platforms), 'linux-x86_64') &&
       needs.select-platforms.outputs.linux-package-formats != '[]' &&
       needs.build-linux-packages.result == 'success' &&
       (!contains(fromJSON(needs.select-platforms.outputs.linux-package-formats), 'arch') || needs.build-linux-arch-arm.result == 'success') &&
-      inputs.app-name == 'photocraft' && github.repository == 'storytold/photocraft' && github.ref == 'refs/heads/main'
+      needs.admit-app.outputs.ok == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

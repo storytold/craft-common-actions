@@ -74,7 +74,7 @@ class ThreePlatformRunTests(unittest.TestCase):
             b.write_json(directory/'unsigned.json', b.unsigned_manifest(self.bt.plan, self.bt.request['producer'], platform, digest))
         return root
 
-    def test_windows_linux_and_macos_run_end_to_end_and_round_trip_as_history(self):
+    def test_windows_linux_and_macos_publish_new_mutable_prerelease_and_round_trip_as_history(self):
         bt, policy = self.bt, self.bt.policy
         platforms = b.r.policy_platforms(policy)
         self.assertEqual(platforms, [LINUX, MAC, WINDOWS])
@@ -123,9 +123,13 @@ class ThreePlatformRunTests(unittest.TestCase):
         api = bt.publication_api()
         result = b.publish(policy, shared, combined, self.root/'packet', self.root/'ownership', api, lambda: True, bt.registry)
         self.assertEqual(result['id'], 7)
+        self.assertFalse(result['immutable'])
+        self.assertTrue(result['prerelease'])
+        self.assertFalse(result['draft'])
+        self.assertEqual(result['make_latest'], 'false')
         uploads = sorted(name for kind, name, _ in api.writes if kind == 'UPLOAD')
         self.assertIn(linux_asset+'.asc', uploads)
-        # The next night authenticates this release as history, including the Linux detached signature.
+        # The history verifier checks the visible release and its current digests even on a mutable repository.
         prior = b.previous_publication(api, bt.registry, policy, bt.request, [api.release])
         self.assertEqual(prior['identity'], bt.plan['identity'])
         api.assets[:] = [asset for asset in api.assets if asset['name'] != linux_asset+'.asc']

@@ -9,8 +9,10 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import nightly_app as apps
 import nightly_feed as n
 
+# PhotoCraft's row, exactly as its fixtures record it; windows_target(app) derives any app's.
 PHOTO_TARGET = {
     "target": {"os": "windows", "arch": "x86_64", "format": "portable_zip"},
     "asset_pattern": "photocraft-{version}-windows-x86_64-nightly.zip",
@@ -22,24 +24,37 @@ CONTEXT_FIELDS = {"GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_REPOSITORY",
                   "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"}
 
 
-def reviewed_windows_target(record):
+def windows_target(app):
+    names = apps.App(app)
+    return {"target": {"os": "windows", "arch": "x86_64", "format": "portable_zip"},
+            "asset_pattern": names.asset_pattern("windows-x86_64"),
+            "isolation": {"package_identity": names.identity, "profile_contract": "nightly",
+                          "profile_version": 1, "associations": "none"}}
+
+
+def reviewed_windows_target(record, app=None):
     """The exact Windows row, alone or beside other reviewed platform rows (one release)."""
+    app = app or apps.current_name()
     targets = record["targets"]
-    if targets == [PHOTO_TARGET]:
+    expected = windows_target(app)
+    if targets == [expected]:
         return type(targets[0]["isolation"]["profile_version"]) is int
     import nightly_release_platforms as plat
     try:
-        platforms = plat.registry_platforms({"schema": "craft-nightly-registry/v1", "apps": {"photocraft": record}})
+        platforms = plat.registry_platforms({"schema": "craft-nightly-registry/v1", "apps": {app: record}}, app)
     except ValueError:
         return False
-    rows = [item for item in targets if item == PHOTO_TARGET]
+    rows = [item for item in targets if item == expected]
     return "windows-x86_64" in platforms and len(rows) == 1 and type(rows[0]["isolation"]["profile_version"]) is int
 
 
 def validate_prepared(registry, app, prepared, cargo, version, environment, policy=None):
-    n.require(app == "photocraft", "no Windows nightly adapter for this app")
+    try:
+        apps.App(app, registry)
+    except (n.InvalidNightly, KeyError, TypeError) as error:
+        raise n.InvalidNightly("no Windows nightly adapter for this app") from error
     record = n.trusted_context(registry, app, environment)
-    n.require(reviewed_windows_target(record), "unreviewed Windows target contract")
+    n.require(reviewed_windows_target(record, app), "unreviewed Windows target contract")
     n.fields(prepared, {"schema", "channel", "app", "repository", "tag", "source_commit",
                         "published_at", "version", "ready"}, "prepared identity")
     n.require(prepared["ready"] is True, "prepared capability unavailable")
@@ -51,7 +66,7 @@ def validate_prepared(registry, app, prepared, cargo, version, environment, poli
     n.require(prepared == fresh and version == fresh["version"],
               "prepared source/run/version identity mismatch")
     return {"version": version,
-            "asset": PHOTO_TARGET["asset_pattern"].replace("{version}", version),
+            "asset": windows_target(app)["asset_pattern"].replace("{version}", version),
             "source_commit": prepared["source_commit"],
             "build_date": dt.datetime.fromtimestamp(prepared["published_at"], dt.timezone.utc).strftime("%Y-%m-%d")}
 

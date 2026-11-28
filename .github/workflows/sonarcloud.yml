@@ -226,6 +226,7 @@ jobs:
             esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
+            ${{ github.repository == 'storytold/craft-launcher' && 'getartcraft.com:443' || '' }}
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443
@@ -577,6 +578,7 @@ jobs:
             esm.ubuntu.com:443
             files.pythonhosted.org:443
             github.com:443
+            ${{ github.repository == 'storytold/craft-launcher' && 'getartcraft.com:443' || '' }}
             index.crates.io:443
             keys.openpgp.org:443
             keyserver.ubuntu.com:443

@@ -30,7 +30,7 @@ class PacketAPI(fixtures.API):
         self.calls.append((method, suffix))
         if method != "GET": self.writes.append((method, suffix, copy.deepcopy(data)))
         if method == "POST" and suffix == "/releases":
-            self.release = {**data, "id": 7, "published_at": None}
+            self.release = {**data, "id": 7, "published_at": None, "immutable": False}
             return copy.deepcopy(self.release)
         if method == "PATCH" and suffix == "/releases/7":
             self.release.update(data, published_at="2026-11-21T00:00:00Z" if self.bad_timestamp else "2026-11-22T02:00:00Z")
@@ -872,6 +872,24 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "final asset digest"):
             b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
 
+    def test_admitted_first_signer_creation_skew_round_trips_as_history(self):
+        path = '/actions/runs/200/attempts/1'
+        self.fx.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.fx.api.rows[path]['created_at'] = '2026-11-22T00:00:02Z'
+        self.request = self.fx.invoke()
+        api, release = self.history(live=True)
+        prior = b.previous_publication(api, self.registry, self.policy, self.request, [release])
+        self.assertEqual(prior['identity'], self.plan['identity'])
+        for updates in ({'created_at': '2026-11-22T00:00:03Z'},
+                        {'created_at': '2026-11-22T00:00:00Z'},
+                        {'run_started_at': '2026-11-22T00:00:02Z'},
+                        {'head_sha': 'f'*40}, {'run_attempt': 2}):
+            with self.subTest(updates=updates):
+                api, release = self.history(live=True)
+                api.rows[path].update(updates)
+                with self.assertRaisesRegex(ValueError, 'prior exact run'):
+                    b.previous_publication(api, self.registry, self.policy, self.request, [release])
+
     def test_live_v2_history_requires_the_linux_detached_signature(self):
         # A receipt that simply omits Linux support must not authenticate history (the feed requires the .asc).
         api, release = self.history(live=True, missing_signature=True)
@@ -895,3 +913,44 @@ class BridgeTests(unittest.TestCase):
 
 
 if __name__ == "__main__": unittest.main()
+
+
+
+class SignerBranchHistoryTests(unittest.TestCase):
+    """verified_history_roles checks the prior signer run on the branch the prior policy names."""
+    def rows(self, signer_branch):
+        repo = {"full_name": "storytold/photocraft", "id": 123}
+        def run(role_id, branch, path, event, sha):
+            return {"id": role_id, "run_attempt": 1, "run_number": role_id, "workflow_id": role_id + 1, "head_sha": sha,
+                    "head_branch": branch, "path": path, "event": event, "repository": repo, "head_repository": repo,
+                    "created_at": "2026-11-22T00:00:00Z", "run_started_at": "2026-11-22T00:00:01Z",
+                    "triggering_actor": {"login": "github-actions[bot]"}, "status": "completed", "conclusion": "success"}
+        producer = run(100, "main", ".github/workflows/nightly.yml", "schedule", "a" * 40)
+        signer = run(200, signer_branch, ".github/workflows/nightly-sign.yml", "workflow_dispatch", "d" * 40)
+        role = lambda row: {"run_id": row["id"], "run_attempt": 1, "source_commit": row["head_sha"], "workflow_id": row["workflow_id"],
+                            "workflow_path": row["path"], "event": row["event"], "run_number": row["run_number"],
+                            "created_at": row["created_at"], "run_started_at": row["run_started_at"],
+                            "triggering_actor": "github-actions[bot]"}
+        jobs = {"total_count": 1, "jobs": [{"status": "completed", "conclusion": "success",
+                                            "steps": [{"name": b.PUBLISH_STEP, "conclusion": "success"}]}]}
+        api_rows = {"/actions/runs/100/attempts/1": producer, "/actions/runs/200/attempts/1": signer}
+        return api_rows, jobs, {"producer": role(producer), "signer": role(signer)}
+
+    def check(self, policy_branch, run_branch):
+        api_rows, jobs, request = self.rows(run_branch)
+        policy = {"repository": "storytold/photocraft", "repository_id": 123, "release_branch": policy_branch}
+        class API:
+            def request(self, method, path):
+                return copy.deepcopy(api_rows[path])
+        with patch.object(b.p, "bounded_rows", return_value=jobs["jobs"]):
+            return b.verified_history_roles(API(), policy, request)
+
+    def test_prior_signer_branch_comes_from_the_prior_policy(self):
+        for branch in ("release", "nightly-signer"):
+            with self.subTest(branch=branch):
+                self.assertIsNone(self.check(branch, branch))
+        for policy_branch, run_branch in (("release", "nightly-signer"), ("nightly-signer", "release")):
+            with self.subTest(policy=policy_branch, run=run_branch), self.assertRaisesRegex(ValueError, "prior exact run"):
+                self.check(policy_branch, run_branch)
+        with self.assertRaisesRegex(ValueError, "unreviewed release policy"):
+            self.check("main", "main")

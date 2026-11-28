@@ -61,6 +61,11 @@ class AttestationTests(unittest.TestCase):
         self.assertEqual(result['digest'],'sha256:'+hashlib.sha256(self.data).hexdigest())
         self.assertEqual(result['source_commit'],'a'*40)
         self.assertTrue(result['name'].endswith('/'+self.filename))
+    def test_subject_uses_the_validated_identity_app_not_nightly_app(self):
+        # The legacy Windows adapter subject follows the packet's validated app, whatever NIGHTLY_APP says.
+        self.case.env = {**self.case.env, 'NIGHTLY_APP': 'artcraft'}
+        with patch.object(a.publisher,'HTTPTransport',side_effect=AssertionError('network forbidden')): result=self.invoke()
+        self.assertTrue(result['name'].endswith('/'+self.filename))
     def test_changed_local_package_does_not_receive_a_subject(self):
         (self.packet/self.filename).write_bytes(self.data+b'TAMPER')
         with self.assertRaises(ValueError): self.invoke()

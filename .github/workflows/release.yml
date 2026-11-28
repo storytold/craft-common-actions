@@ -226,6 +226,19 @@ jobs:
         uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         with:
           egress-policy: audit
+      # The `release` environment holds the signing keys and also trusts refs/heads/nightly-signer (the
+      # nightly signer's branch). A stable build binds it only on refs/heads/release (see each job's
+      # `environment:`), and a real (non-dry) stable run anywhere else stops here, before any build.
+      - name: Stable releases run only on refs/heads/release
+        # Expression `==` ignores case, so the exact ref check is done in the shell, for every real run.
+        if: ${{ !inputs.dry-run }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/release" ]; then
+            echo "::error::stable releases run only on refs/heads/release, not $REF; use dry-run elsewhere"
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -242,7 +255,7 @@ jobs:
     if: ${{ !inputs.dry-run }}
     needs: [version]
     runs-on: ${{ inputs.macos-runner }}
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
@@ -322,11 +335,15 @@ jobs:
         if: inputs.version != ''
         run: cargo xtask version set "$VERSION"
       - name: Import signing certificate
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
-        run: packaging/macos/import-cert.sh
+        # The shared import, not the app's packaging/macos/import-cert.sh: it exports the same
+        # MACOS_SIGN_IDENTITY and MACOS_KEYCHAIN that package.sh reads, from a private directory.
+        # $/ is this workflow's own repository and commit, so a release pinned to a commit signs
+        # with that commit's helpers; the same holds for setup-windows-signing below.
+        uses: $/actions/import-macos-certificate
+        with:
+          certificate: ${{ secrets.APPLE_CERTIFICATE }}
+          certificate-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          keychain-password: ${{ secrets.KEYCHAIN_PASSWORD }}
       - name: Build, sign, notarize
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -372,7 +389,7 @@ jobs:
     # arm64 builds natively on GitHub's Arm runner (free for public repositories). Cross-compiled
     # on x64 it was the slowest job of the 11 Nov 2026 releases (30 to 39 minutes).
     runs-on: ${{ matrix.runner }}
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -464,6 +481,12 @@ jobs:
         uses: storytold/craft-common-actions/actions/install-wix@main
         with:
           wix-version: ${{ inputs.wix-version }}
+      - name: Set up the shared signing script
+        # Exports CRAFT_SIGN_SCRIPT, CRAFT_SIGN_PRODUCT and CRAFT_SIGN_URL. An app's package.ps1
+        # signs with `& $env:CRAFT_SIGN_SCRIPT <files>` instead of its own sign.ps1.
+        uses: $/actions/setup-windows-signing
+        with:
+          product-name: ${{ inputs.app-title }}
       - name: Build, sign, package
         shell: pwsh
         env:
@@ -490,7 +513,7 @@ jobs:
     needs: [version]
     # The signing key lives in the release environment, as it does for the macOS, Windows and
     # flatpak jobs; without this the Linux packages are built unsigned.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -594,7 +617,7 @@ jobs:
     needs: [version, linux]
     runs-on: ${{ matrix.runner }}
     # LINUX_SIGNING_KEY comes from the repo's release environment, as the macOS secrets do.
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: read
       packages: write
@@ -894,7 +917,7 @@ jobs:
               printf 'FreeBSD-ports: { url: "https://pkg.FreeBSD.org/${ABI}/quarterly" }\n' > /usr/local/etc/pkg/repos/FreeBSD.conf
               pkg update -f -q
             fi
-            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib
+            pkg install -y bash git curl pkgconf cmake-core python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader gtk3 webkit2-gtk_41 libsoup3 fontconfig freetype2 alsa-lib
             # aarch64-unknown-freebsd is a tier-3 Rust target: rustup publishes no toolchain
             # or standard library for it ("installer for platform not found"), so use
             # FreeBSD's lang/rust package.
@@ -1226,7 +1249,7 @@ jobs:
     name: Linux riscv64
     if: inputs.has-riscv64
     needs: [version]
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     # Not 22.04 like the other Linux jobs: Ubuntu never built jammy's ncurses security update for
     # riscv64, so the amd64 and riscv64 libtinfo6 can't match and the cross deps don't install (#44).
     runs-on: ubuntu-24.04
@@ -1410,7 +1433,7 @@ jobs:
     if: "!inputs.dry-run && !cancelled() && !contains(needs.*.result, 'failure')"
     needs: [version, macos, windows, linux, linux-riscv64, flatpak, arch, freebsd, web, server]
     runs-on: ubuntu-24.04
-    environment: ${{ !inputs.dry-run && 'release' || '' }}
+    environment: ${{ !inputs.dry-run && github.ref == 'refs/heads/release' && 'release' || '' }}
     permissions:
       contents: write
     steps:

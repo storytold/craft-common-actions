@@ -172,6 +172,48 @@ class RequestTests(unittest.TestCase):
         self.api.rows['/actions/runs/100/attempts/1']['triggering_actor']={'login':'different'}
         with self.assertRaisesRegex(ValueError,'metadata changed'): self.invoke()
 
+    def test_first_signer_attempt_accepts_exact_api_creation_skew(self):
+        # Synthetic times reproduce GitHub's observed row shape: root creation equals start,
+        # and only the exact attempt's creation field is one second later.
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows['/actions/runs/200/attempts/1']['created_at'] = '2026-11-22T00:00:02Z'
+        request = self.invoke()
+        self.assertEqual(request['signer']['created_at'], request['signer']['run_started_at'])
+        r.request_contract(self.policy, request)
+
+    def test_signer_timestamp_exception_does_not_mask_attempt_or_identity_drift(self):
+        path = '/actions/runs/200/attempts/1'
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows[path]['created_at'] = '2026-11-22T00:00:02Z'
+        for key, value in [('created_at', '2026-11-22T00:00:03Z'),
+                           ('created_at', '2026-11-22T00:00:00Z'),
+                           ('created_at', 'not a timestamp'),
+                           ('run_started_at', '2026-11-22T00:00:02Z'),
+                           ('head_sha', 'e'*40), ('workflow_id', 93), ('run_attempt', 2)]:
+            with self.subTest(key=key, value=value):
+                saved = copy.deepcopy(self.api.rows[path])
+                self.api.rows[path][key] = value
+                try:
+                    with self.assertRaises(ValueError): self.invoke()
+                finally:
+                    self.api.rows[path] = saved
+        self.modify_run(200, 'created_at', '2026-11-22T00:00:02Z')
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'): self.invoke()
+
+    def test_timestamp_exception_does_not_apply_to_producer_or_rerun(self):
+        self.modify_run(100, 'created_at', '2026-11-22T00:00:01Z')
+        self.api.rows['/actions/runs/100/attempts/1']['created_at'] = '2026-11-22T00:00:02Z'
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'): self.invoke()
+
+        self.policy['manual_actors'] = ['approved']
+        signer = self.api.rows['/actions/runs/200']
+        signer.update(run_attempt=2, triggering_actor={'login': 'approved'},
+                      created_at=signer['run_started_at'])
+        self.api.rows['/actions/runs/200/attempts/2'] = {
+            **signer, 'created_at': '2026-11-22T00:00:02Z'}
+        with self.assertRaisesRegex(ValueError, 'run timestamps differ'):
+            r.read_role(self.api, self.policy, 200, 2, signer=True)
+
     def test_manual_producer_and_all_reruns_use_current_not_original_actor(self):
         self.modify_run(100,'event','workflow_dispatch'); self.modify_run(100,'actor',{'login':'approved'})
         self.modify_run(100,'triggering_actor',{'login':'unapproved'})
@@ -763,5 +805,38 @@ class RequestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'policy v3'):
             r.release_receipt_v3(self.legacy_policy(), self.legacy_request(), 'windows-x86_64', 'f'*64, '1'*64, 'CN=Synthetic fixture only', {})
 
+
+    def use_signer_branch(self, branch):
+        """Move the fixture's policy, signer run and runner context to one signer branch."""
+        self.policy['release_branch'] = branch
+        self.env['GITHUB_REF'] = 'refs/heads/'+branch
+        self.env['GITHUB_WORKFLOW_REF'] = 'storytold/photocraft/.github/workflows/nightly-sign.yml@refs/heads/'+branch
+        for key, row in self.api.rows.items():
+            if isinstance(row, dict) and row.get('id') == 200 and 'head_branch' in row:
+                row['head_branch'] = branch
+
+    def test_signer_branch_is_the_policy_value_from_the_allowlist(self):
+        for branch in ('release', 'nightly-signer'):
+            with self.subTest(branch=branch):
+                self.assertEqual(r.signer_branch({**self.policy, 'release_branch': branch}), branch)
+        for branch in ('main', 'nightly-signer-x', 'refs/heads/release', 'Release', '', None, 'v1.0.0'):
+            with self.subTest(branch=branch), self.assertRaisesRegex(ValueError, 'unreviewed release policy'):
+                r.validate_policy({**self.policy, 'release_branch': branch})
+
+    def test_request_runs_on_exactly_the_policy_signer_branch(self):
+        self.assertEqual(self.invoke()['signer']['source_commit'], 'd'*40)  # release, as before
+        self.use_signer_branch('nightly-signer')
+        self.assertEqual(self.invoke()['signer']['source_commit'], 'd'*40)
+        # A nightly-signer policy refuses a run on release, and the reverse.
+        for policy_branch, run_branch in (('nightly-signer', 'release'), ('release', 'nightly-signer')):
+            with self.subTest(policy=policy_branch, run=run_branch):
+                self.use_signer_branch(run_branch); self.policy['release_branch'] = policy_branch
+                with self.assertRaisesRegex(ValueError, 'release branch dispatch required'):
+                    self.invoke()
+        # The authenticated run's own head_branch must agree too, not only the runner context.
+        self.use_signer_branch('nightly-signer')
+        self.api.rows['/actions/runs/200']['head_branch'] = 'release'
+        with self.assertRaisesRegex(ValueError, 'run branch/workflow differs'):
+            self.invoke()
 
 if __name__ == '__main__': unittest.main()

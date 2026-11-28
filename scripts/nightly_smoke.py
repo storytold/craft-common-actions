@@ -6,13 +6,15 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+import nightly_app as apps
 import nightly_feed as n
 from nightly_unix import verify_version_output
 
 LIMIT=4096
 TIMEOUT=15
 
-def smoke(executable,profile_root,version):
+def smoke(executable,profile_root,version,app=None):
+    app=app or apps.current_name()
     from nightly_policy import semver_key
     semver_key(version)
     executable=Path(executable); profile_root=Path(profile_root)
@@ -23,7 +25,9 @@ def smoke(executable,profile_root,version):
     profile_root.mkdir(parents=True,exist_ok=False)
     # No shell, descriptor-provided selector, startup files, version override or stable fallback.
     argv=[str(executable),'--launch-profile','nightly-v1','--profile-root',str(profile_root),'--version']
-    environment={key:value for key,value in os.environ.items() if not key.startswith('PHOTOCRAFT_')}
+    # The app's own build variables never reach the packaged GUI (PHOTOCRAFT_* for PhotoCraft).
+    prefix=apps.App(app).prefix+'_'
+    environment={key:value for key,value in os.environ.items() if not key.startswith(prefix)}
     # File capture avoids pipe deadlocks and holds at most LIMIT+1 bytes in memory.
     # Polling is bounded to this one owned process; no CI-status waiter/retry loop.
     with tempfile.TemporaryFile() as stdout,tempfile.TemporaryFile() as stderr:
@@ -40,7 +44,7 @@ def smoke(executable,profile_root,version):
                 n.require(len(data)<=LIMIT,'smoke output exceeded bound'); outputs.append(data)
             n.require(process.returncode==0,'packaged GUI --version failed')
             n.require(not outputs[1],'unexpected smoke stderr')
-            verify_version_output(outputs[0].decode('utf-8'),version)
+            verify_version_output(outputs[0].decode('utf-8'),version,app)
             return {'exact_version_and_flavor':True,'isolated_selector':'nightly-v1','runtime_qualified':False}
         finally:
             if process.poll() is None: process.kill(); process.wait(timeout=5)
@@ -48,8 +52,9 @@ def smoke(executable,profile_root,version):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--executable',required=True); parser.add_argument('--profile-root',required=True); parser.add_argument('--version',required=True)
+    parser.add_argument('--app',default=apps.current_name())
     args=parser.parse_args()
-    try: print(smoke(args.executable,args.profile_root,args.version))
+    try: print(smoke(args.executable,args.profile_root,args.version,args.app))
     except (ValueError,OSError,subprocess.SubprocessError) as error: parser.exit(1,f'packaged nightly smoke refused: {error}\n')
 
 if __name__=='__main__': main()

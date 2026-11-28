@@ -154,6 +154,40 @@ class NightlyTests(unittest.TestCase):
             with self.assertRaisesRegex(n.InvalidNightly, 'changed before read'):
                 n.bounded_json(path)
 
+    def windows_style_lstat(self, **changes):
+        """Path.lstat as Python 3.12+ on Windows may report it: other st_dev/st_ino/ctime than fstat."""
+        real = Path.lstat
+        def fake(path_self, *args, **kwargs):
+            info = real(path_self, *args, **kwargs)
+            fields = {key: getattr(info, key) for key in ('st_mode', 'st_size', 'st_mtime_ns')}
+            fields.update(st_dev=info.st_dev + 7, st_ino=info.st_ino + 11, st_ctime_ns=info.st_ctime_ns + 13)
+            fields.update(changes)
+            return type('Stat', (), fields)()
+        return patch.object(Path, 'lstat', fake)
+
+    def test_a_differing_identity_field_refuses_and_names_the_file_and_field(self):
+        # The comparison is the same on every platform; the value is supplied so the test doesn't
+        # depend on how quickly the filesystem's clock ticks.
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        before = os.lstat(path)
+        for label in ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns'):
+            with self.subTest(field=label), \
+                    self.windows_style_lstat(**{label: getattr(before, label) + 1}), \
+                    self.assertRaisesRegex(n.InvalidNightly, rf'JSON changed before read \(state.json: .*{label} '):
+                n.bounded_json(path)
+
+    def test_handle_changes_during_read_refuse_on_windows_too(self):
+        path = self.root / 'state.json'; path.write_text('{"ok":1}')
+        real_fstat = os.fstat; calls = [0]
+        def grow(descriptor):
+            calls[0] += 1
+            if calls[0] == 2:
+                with open(path, 'ab') as stream: stream.write(b' ')
+            return real_fstat(descriptor)
+        with patch.object(n.os, 'fstat', side_effect=grow), \
+                self.assertRaisesRegex(n.InvalidNightly, r'JSON changed while reading \(state.json: st_size 8 != 9'):
+            n.bounded_json(path)
+
     def test_bounded_bytes_preserves_non_json_bytes_and_exact_cap(self):
         path = self.root / 'version.txt'
         payload = b'1.2.3\r\n'
@@ -214,7 +248,9 @@ class NightlyTests(unittest.TestCase):
         production = json.loads((ROOT / "nightly-apps.json").read_text())
         self.assertGreaterEqual(len(production["apps"]), 18)
         self.assertEqual(len(production["apps"]), 19)
-        self.assertEqual([name for name, row in production["apps"].items() if row["targets"]], ["photocraft"])
+        # PhotoCraft's three platforms plus fourteen apps' Linux nightly tar rows (canonical launcher).
+        self.assertEqual([name for name, row in production["apps"].items() if row["targets"]],
+                         sorted(("photocraft",) + ('anicraft', 'cadcraft', 'deckcraft', 'designcraft', 'effectcraft', 'figcraft', 'filmcraft', 'gridcraft', 'lightcraft', 'materialcraft', 'soundcraft', 'texturecraft', 'vectorcraft', 'wordcraft')))
         # One release carries every admitted platform: Windows, Linux and the notarized macOS app.
         self.assertEqual([row["target"] for row in production["apps"]["photocraft"]["targets"]],
                          [{"os": "windows", "arch": "x86_64", "format": "portable_zip"},

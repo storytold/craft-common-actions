@@ -88,7 +88,7 @@ def validate_policy(policy):
         ('craft-nightly-release-policy/v1', 'craft-nightly-release-policy/v2', LIVE_POLICY), 'unknown release policy schema')
     n.fields(policy, {'craft-nightly-release-policy/v1': POLICY_V1_FIELDS, 'craft-nightly-release-policy/v2': POLICY_FIELDS,
         LIVE_POLICY: POLICY_V3_FIELDS}[policy['schema']], 'release policy')
-    n.require(policy['release_branch'] == 'release', 'unreviewed release policy')
+    signer_branch(policy)
     if policy['schema'] == LIVE_POLICY:
         validate_platforms(policy['platforms'])
     else:
@@ -241,12 +241,23 @@ def require_actor(policy, event, attempt, actor, *, signer=False, producer=None,
     n.require(automatic_request and actor.lower() in automatic, reason)
 
 
+# The protected refs a reviewed policy may name for the signer. `release` is the stable branch;
+# `nightly-signer` is the per-app signer-only branch (trusted by the same `release` environment).
+SIGNER_BRANCHES = ('release', 'nightly-signer')
+
+
+def signer_branch(policy):
+    """The reviewed policy's signer branch, exactly one of SIGNER_BRANCHES."""
+    n.require(isinstance(policy, dict) and policy.get('release_branch') in SIGNER_BRANCHES, 'unreviewed release policy')
+    return policy['release_branch']
+
+
 def role(policy, row, run_id, attempt, *, signer=False, producer=None):
     n.require(isinstance(row, dict), 'missing authenticated run metadata')
     for key in ('id', 'run_attempt', 'run_number', 'workflow_id'): n.positive(row.get(key), key)
     n.require(row['id'] == run_id and row['run_attempt'] == attempt, 'run/attempt differs or superseded')
     repository(policy, row.get('repository')); repository(policy, row.get('head_repository'))
-    branch = 'release' if signer else 'main'
+    branch = signer_branch(policy) if signer else 'main'
     path = policy['signer_workflow_path' if signer else 'producer_workflow_path']
     # Accept only GitHub's documented bare or own-branch `path@branch` run spelling.
     n.require(row.get('head_branch') == branch and p.run_workflow_path(row, branch) == path, 'run branch/workflow differs')
@@ -279,11 +290,21 @@ def role(policy, row, run_id, attempt, *, signer=False, producer=None):
         'event': event, 'triggering_actor': actor}
 
 
+def first_signer_creation_skew(canonical, exact):
+    """Match only the observed first-attempt creation skew, not a time window."""
+    return (canonical['run_attempt'] == 1 and isinstance(exact, dict) and
+            canonical['created_at'] == canonical['run_started_at'] == exact.get('run_started_at') and
+            p.timestamp(exact.get('created_at')) == p.timestamp(canonical['created_at']) + 1)
+
+
 def read_role(api, policy, run_id, attempt, *, signer=False, producer=None):
     # Root is current attempt authority; attempts endpoint is exact-attempt evidence.
     root = role(policy, api.request('GET', f'/actions/runs/{run_id}'), run_id, attempt, signer=signer, producer=producer)
-    exact = role(policy, api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}'),
-        run_id, attempt, signer=signer, producer=producer)
+    row = api.request('GET', f'/actions/runs/{run_id}/attempts/{attempt}')
+    # Normalize only creation; role() still validates the exact attempt.
+    if signer and first_signer_creation_skew(root, row):
+        row = {**row, 'created_at': root['created_at']}
+    exact = role(policy, row, run_id, attempt, signer=signer, producer=producer)
     n.require(root == exact, 'root/exact-attempt run metadata changed')
     return root
 
@@ -352,10 +373,10 @@ def validate_request(policy, environment, producer_run_id, producer_run_attempt,
     producer_id, producer_attempt = identifier(producer_run_id), identifier(producer_run_attempt)
     n.require(environment.get('GITHUB_REPOSITORY') == policy['repository'] and
         environment.get('GITHUB_REPOSITORY_ID') == str(policy['repository_id']) and
-        environment.get('GITHUB_REF') == 'refs/heads/release' and
+        environment.get('GITHUB_REF') == 'refs/heads/'+signer_branch(policy) and
         environment.get('GITHUB_REF_TYPE') == 'branch' and
         environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and
-        environment.get('GITHUB_WORKFLOW_REF') == policy['repository']+'/'+policy['signer_workflow_path']+'@refs/heads/release',
+        environment.get('GITHUB_WORKFLOW_REF') == policy['repository']+'/'+policy['signer_workflow_path']+'@refs/heads/'+signer_branch(policy),
         'actual top-level release branch dispatch required')
     n.require(environment.get('TOOLING_REVISION') == policy['signer_tooling_revision'],
         'release tooling pin differs')
