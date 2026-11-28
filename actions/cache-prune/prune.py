@@ -25,7 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-CRATES = re.compile(r'^(?P<prefix>.+?)-rust-[0-9a-f]{64}-(?P<entry>.+-crates-[A-Za-z_]+-[a-z0-9]+)-[0-9]+-[0-9]+-')
+CRATES = re.compile(r'^(?P<prefix>.+?)-rust-[0-9a-f]{64}-(?P<entry>.+-crates-[A-Za-z_]+-[a-z0-9]+)-(?P<run>[0-9]+)-(?P<attempt>[0-9]+)-')
 RUST = re.compile(r'^(?P<name>.+-rust-.+)-(?P<os>Linux|Windows_NT|Darwin)-(?P<arch>[a-z0-9]+)-[0-9a-f]{8}-[0-9a-f]{8}$')
 PROFILE = re.compile(r'-[0-9a-f]{64}(?=-)')
 POLL_SECONDS = 30
@@ -128,6 +128,9 @@ class Api:
     def jobs(self, run, attempt):
         return self.pages(f'/repos/{self.repo}/actions/runs/{run}/attempts/{attempt}/jobs', 'jobs')
 
+    def run(self, run):
+        return self.request('GET', f'/repos/{self.repo}/actions/runs/{run}')
+
 
 def prune(api, ref, content_names, dry_run):
     entries = api.caches(ref)
@@ -163,6 +166,15 @@ def finished(jobs, patterns):
                for p in patterns)
 
 
+def other_jobs(api, run, attempt, me):
+    """The attempt's jobs without this one, or None (with a warning) when listing them failed."""
+    try:
+        return [j for j in api.jobs(run, attempt) if not (me and j.get('runner_name') == me and j['status'] != 'completed')]
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
+        print(f'::warning::listing the run\'s jobs failed ({error!r}); trying again in {POLL_SECONDS} s')
+        return None
+
+
 def watch(api, ref, content_names, dry_run, run, attempt, patterns, me, minutes,
           sleep=time.sleep, clock=time.monotonic):
     """Prunes once now and again after each saving job finishes; returns when none is left.
@@ -184,10 +196,8 @@ def watch(api, ref, content_names, dry_run, run, attempt, patterns, me, minutes,
             try_prune(api, ref, content_names, dry_run)
             return
         sleep(POLL_SECONDS)
-        try:
-            jobs = [j for j in api.jobs(run, attempt) if not (me and j.get('runner_name') == me and j['status'] != 'completed')]
-        except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
-            print(f'::warning::listing the run\'s jobs failed ({error!r}); trying again in {POLL_SECONDS} s')
+        jobs = other_jobs(api, run, attempt, me)
+        if jobs is None:
             continue
         relevant = [j for j in jobs if any(p.search(j['name']) for p in patterns)] if patterns else jobs
         done_now = [j for j in relevant if j['status'] == 'completed' and j['id'] not in seen]
@@ -211,6 +221,166 @@ def watch(api, ref, content_names, dry_run, run, attempt, patterns, me, minutes,
             return
 
 
+STOPPED = ('failure', 'cancelled', 'timed_out')
+# gate.yml's steps with continue-on-error in the jobs that save: their failure leaves the job's
+# status, and so the save, unchanged.
+TOLERATED = ('Trim the cache entry to this build',)
+
+
+def save_steps(job, step):
+    return [s for s in job.get('steps') or [] if s['name'] == step]
+
+
+def saving(job, step):
+    """The job's save step is running or has run (a skipped one has not)."""
+    return any(s['status'] == 'in_progress' or (s['status'] == 'completed' and s.get('conclusion') != 'skipped')
+               for s in save_steps(job, step))
+
+
+def failed_step(job):
+    """The first step before the post steps that failed or was canceled, or None. rust-cache does
+    not save after a failed step (gate-setup sets `cache-on-failure: false`), even though the post
+    step that holds its save still runs the other post actions."""
+    return next((s['name'] for s in job.get('steps') or [] if not s['name'].startswith('Post ')
+                 and s['name'] not in TOLERATED and s.get('conclusion') in STOPPED), None)
+
+
+def save_outcome(job, step):
+    """'success' once the save step succeeded, why the save did not succeed, or None while it runs."""
+    steps = save_steps(job, step)
+    if steps and all(s['status'] == 'completed' for s in steps):
+        failed = next((s.get('conclusion') for s in steps if s.get('conclusion') != 'success'), None)
+        return f'the {step} step ended {failed}' if failed else 'success'
+    if job['status'] == 'completed':
+        return f"the job ended {job.get('conclusion')} before its {step} step finished"
+    return None
+
+
+def overdue(job, began, minutes, now):
+    """`minutes` have passed since the job started, or since `began` while it has not started."""
+    started = job.get('started_at') if job and job['status'] in ('in_progress', 'completed') else None
+    return now() - (when(started) if started else began) > datetime.timedelta(minutes=minutes)
+
+
+def rolling_before(entries, rolling, moment):
+    """The entries of the rolling family created before `moment`."""
+    return [e for e in entries if family(e['key'], []) == ('rolling', rolling) and when(e['created_at']) < moment]
+
+
+def saved_entry(api, ref, rolling, run, job, sleep, polls):
+    """The entry the job saved, or None: a cold build's key ends its rolling family with the job's
+    `<run>-<attempt>` (actions/rust-cache, Run entry). Lists again up to `polls` more times while the
+    list does not show it yet."""
+    suffix = (str(run), str(job.get('run_attempt') or ''))
+    for poll in range(polls + 1):
+        try:
+            for entry in api.caches(ref):
+                m = CRATES.match(entry['key'])
+                if m and family(entry['key'], []) == ('rolling', rolling) and (m['run'], m['attempt']) == suffix:
+                    return entry
+        except (urllib.error.URLError, OSError, ValueError, KeyError) as error:
+            print(f'::warning::listing the cache entries failed ({error!r})')
+        if poll < polls:
+            sleep(POLL_SECONDS)
+    return None
+
+
+def earlier_save(api, ref, rolling, run, attempt, pattern, step, sleep):
+    """The exit status when the saving job is not part of this attempt: 0 when the latest earlier
+    attempt that ran it saved its entry."""
+    for earlier in range(int(attempt) - 1, 0, -1):
+        job = next((j for j in api.jobs(run, earlier) if pattern.search(j['name'])), None)
+        if job:
+            outcome = save_outcome(job, step)
+            if outcome == 'success' and saved_entry(api, ref, rolling, run, job, sleep, 0):
+                print(f"{job['name']} saved its entry in attempt {earlier}; nothing deleted")
+                return 0
+            outcome = 'no entry listed' if outcome == 'success' else outcome or 'still running'
+            print(f"::error::{job['name']} did not save in attempt {earlier} ({outcome}) "
+                  'and is not part of this attempt; nothing deleted')
+            return 1
+    print(f'::error::no job matching {pattern.pattern} ran in this attempt; nothing deleted')
+    return 1
+
+
+def clear_rolling(api, ref, rolling, run, attempt, pattern, step, dry_run, me, minutes,
+                  sleep=time.sleep, now=lambda: datetime.datetime.now(datetime.timezone.utc)):
+    """For a run that restores no rolling entry: deletes the rolling family's older entries once the
+    saving job's save step starts, and returns 0 only when that save then succeeds.
+
+    The deleted entries are those created before the run, or the saving job, started, so an entry
+    another run saved meanwhile stays unless it is older than the job. The wait for the save, and for
+    its result, ends `minutes` after the saving job started (after this started, while the job has
+    not). A job that ends without its save step deletes nothing. When the job is not part of this
+    attempt and no other job is queued or running for two polls, the latest earlier attempt that ran
+    it decides the result. After the step succeeds, the cache list must show the entry the job saved
+    (at most FINAL_POLLS more polls). Returns 1 with an error when the
+    save did not run, did not succeed or saved no entry; after a deletion the branch then holds no
+    rolling entry of the family, and the next run starts cold.
+    """
+    began, idle, job = now(), 0, None
+    while True:
+        jobs = other_jobs(api, run, attempt, me)
+        if jobs is not None:
+            matching = [j for j in jobs if pattern.search(j['name'])]
+            if len(matching) > 1:
+                print(f"::error::{pattern.pattern} matches {len(matching)} jobs ({', '.join(j['name'] for j in matching)}); "
+                      'name the one that saves the rolling entry. Nothing deleted')
+                return 1
+            job = matching[0] if matching else None
+            if job and saving(job, step):
+                break
+            if job and job['status'] == 'completed':
+                if job.get('conclusion') in STOPPED:
+                    print(f"::error::{job['name']} ended {job['conclusion']} before its {step} step; nothing deleted")
+                    return 1
+                print(f"{job['name']} finished without a {step} step; nothing deleted")
+                return 0
+            idle = idle + 1 if job is None and all(j['status'] == 'completed' for j in jobs) else 0
+            if idle >= 2:
+                return earlier_save(api, ref, rolling, run, attempt, pattern, step, sleep)
+        if overdue(job, began, minutes, now):
+            print(f'::error::no {step} step started within {minutes} minutes; nothing deleted')
+            return 1
+        sleep(POLL_SECONDS)
+    outcome = save_outcome(job, step)
+    if outcome not in (None, 'success'):
+        print(f'::error::{outcome}: no new {rolling} entry was saved; nothing deleted')
+        return 1
+    failed = failed_step(job)
+    if failed:
+        print(f"::error::{job['name']}: the step {failed!r} failed, so the {step} step saves no entry; nothing deleted")
+        return 1
+    cutoff = min(when(api.run(run)['run_started_at']), when(job['started_at']))
+    old = rolling_before(api.caches(ref), rolling, cutoff)
+    for entry in old:
+        print(f"{'would delete' if dry_run else 'delete'} {entry['key']} ({gb(entry['size_in_bytes'])}): "
+              f"{job['name']} is saving its successor")
+        if not dry_run:
+            api.delete(entry['id'])
+    while True:
+        outcome = save_outcome(job, step)
+        if outcome is not None:
+            break
+        if overdue(job, began, minutes, now):
+            print(f'::error::the {step} step is still running {minutes} minutes after {job["name"]} started')
+            return 1
+        sleep(POLL_SECONDS)
+        jobs = other_jobs(api, run, attempt, None)
+        job = next((j for j in jobs or [] if j['id'] == job['id']), job)
+    gone = ', and the next run starts cold' if old and not dry_run else ''
+    if outcome != 'success':
+        print(f'::error::{outcome}: no new {rolling} entry was saved{gone}')
+        return 1
+    new = saved_entry(api, ref, rolling, run, job, sleep, FINAL_POLLS)
+    if new:
+        print(f"saved {new['key']} ({gb(new['size_in_bytes'])})")
+        return 0
+    print(f"::error::the {step} step succeeded, but the cache list shows no {rolling} entry that "
+          f"{job['name']} saved{gone}")
+    return 1
+
+
 def main():
     env = os.environ
     api = Api(env['PRUNE_REPO'], env['GH_TOKEN'])
@@ -218,6 +388,12 @@ def main():
     content_names = env.get('PRUNE_CONTENT_KEYS', '').split()
     dry_run = env.get('PRUNE_DRY_RUN', 'false') == 'true'
     try:
+        clear = env.get('PRUNE_CLEAR_ROLLING_ON_SAVE', '').strip()
+        if clear:
+            return clear_rolling(api, ref, env.get('PRUNE_ROLLING_FAMILY') or 'v2-rust-gate-crates-Linux-x64',
+                                 env['PRUNE_RUN'], env['PRUNE_ATTEMPT'], re.compile(clear),
+                                 env.get('PRUNE_SAVE_STEP') or 'Post Setup', dry_run, env.get('RUNNER_NAME'),
+                                 float(env.get('PRUNE_WATCH_MINUTES') or 110))
         if env.get('PRUNE_WATCH', 'false') == 'true':
             patterns = [re.compile(line.strip()) for line in env.get('PRUNE_SAVING_JOBS', '').splitlines() if line.strip()]
             watch(api, ref, content_names, dry_run, env['PRUNE_RUN'], env['PRUNE_ATTEMPT'], patterns,
