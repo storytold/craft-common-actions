@@ -98,10 +98,11 @@ jobs:
         shell: pwsh
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -238,10 +239,11 @@ jobs:
         shell: pwsh
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -325,11 +327,12 @@ jobs:
         shell: bash
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
-          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -405,11 +408,12 @@ jobs:
         shell: bash
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
-          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -459,11 +463,12 @@ jobs:
         shell: bash
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA" || { echo 'release source differs from real execution SHA'; exit 1; }
-          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
       - name: Download only exact signer-produced macOS artifact ID
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -517,11 +522,12 @@ jobs:
       - name: Bind protected policy and actual immutable defining workflow
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -592,11 +598,12 @@ jobs:
       - name: Bind protected policy and actual immutable defining workflow
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .release-source rev-parse HEAD)" = "$GITHUB_SHA"
-          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
+          python3 -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p; assert 'linux-x86_64' in config['platforms']"
       - name: Check out only the defining shared workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -654,10 +661,11 @@ jobs:
         shell: pwsh
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           if ((git -C .release-source rev-parse HEAD) -cne $env:GITHUB_SHA) { throw 'release source differs from real execution SHA' }
-          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p; config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
+          python -I -B -c "import os,json,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-release.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p); config=json.load(open('.release-source/.github/nightly-signing-policy.json')); assert config['schema']=='craft-nightly-release-policy/v3'; assert config['signer_tooling_revision']==p"
           if ($LASTEXITCODE -ne 0) { throw 'protected policy/tooling binding refused' }
       - name: Check out only the defining shared workflow revision
         timeout-minutes: 5

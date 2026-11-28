@@ -132,7 +132,7 @@ runs:
 
     # Does nothing unless the repository has craft-i18n.rev; then builds require the translations.
     - name: Check out craft-i18n
-      uses: storytold/craft-common-actions/actions/checkout-craft-i18n@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
+      uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
 
     # Before the cache step: rust-cache keys on CARGO_* and RUST* variables.
     - name: Caller environment
@@ -175,7 +175,7 @@ runs:
 
     - name: Install Linux build dependencies
       if: runner.os == 'Linux' && inputs.packages != ''
-      uses: storytold/craft-common-actions/actions/install-apt-packages@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
+      uses: storytold/craft-common-actions/actions/install-apt-packages@main
       with:
         packages: ${{ inputs.packages }}
 
@@ -209,7 +209,7 @@ runs:
     # No save on failure: a main run that fails before its build has not filled the entry, and
     # rust-cache never replaces an exact-key entry, so that half-filled entry would be restored by
     # every run until Cargo.lock changes.
-    - uses: storytold/craft-common-actions/actions/rust-cache@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
+    - uses: storytold/craft-common-actions/actions/rust-cache@main
       if: inputs.rust-cache == 'true'
       with:
         cache-version: ${{ inputs.cache-version }}
@@ -222,7 +222,7 @@ runs:
     # A cold build leaves every source newer than the (absent) outputs, so it builds everything.
     - name: Restore mtimes
       if: inputs.rust-cache == 'true' && inputs.cache-workspace-crates == 'true' && inputs.cold-build != 'true'
-      uses: storytold/craft-common-actions/actions/restore-mtimes@fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6
+      uses: storytold/craft-common-actions/actions/restore-mtimes@main
       with:
         mode: restore
 

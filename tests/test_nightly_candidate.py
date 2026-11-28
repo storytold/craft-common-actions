@@ -731,6 +731,13 @@ class CandidateTests(unittest.TestCase):
         self.admit()
         self.assertFalse(any('/actions/workflows/50' in path for _, path in self.f.calls))
 
+    def test_contract_accepts_main_tooling_revision(self):
+        self.f.producer['tooling_revision'] = 'main'
+        c.contract(self.f.policy, self.f.producer)
+        self.f.producer['tooling_revision'] = 'feature'
+        with self.assertRaises(ValueError):
+            c.contract(self.f.policy, self.f.producer)
+
     def test_ref_qualified_quality_run_path_is_canonical_and_other_refs_refuse(self):
         # GitHub's workflow-run schema documents the own-branch `path@main` form.
         self.f.run['path'] = '.github/workflows/ci.yml@main'

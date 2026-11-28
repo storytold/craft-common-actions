@@ -167,7 +167,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_all_external_actions_use_immutable_full_commit_pins(self):
         for text in (self.unsigned, self.release, self.safe):
             for value in re.findall(r"uses:\s*(\S+)", text):
-                self.assertRegex(value, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+                if value.startswith("storytold/craft-common-actions/"):
+                    self.assertRegex(value, r"^storytold/craft-common-actions/[A-Za-z0-9_./-]+@main$")
+                else:
+                    self.assertRegex(value, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 
     def test_lockfile_git_origins_are_checked_before_cargo_metadata_can_fetch(self):
         # `cargo metadata --locked` still resolves and fetches git sources over the network.

@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SETUP = yaml.load((ROOT / 'actions/gate-setup/action.yml').read_text(), Loader=yaml.BaseLoader)
 STEPS = SETUP['runs']['steps']
 OWN = 'storytold/craft-common-actions/actions/'
-# The commit that added rust-cache's cache-workspace-crates and restore-mtimes.
-OWN_ACTION_REV = 'fc3e1afc1cb4916c9134e9754c70c80da7e1ffc6'
+# First-party actions in storytold/craft-common-actions are always referenced at @main.
+OWN_ACTION_REV = 'main'
 CACHE = f'{OWN}rust-cache@{OWN_ACTION_REV}'
 
 
@@ -20,7 +20,10 @@ class PinTests(unittest.TestCase):
         for s in STEPS:
             if 'uses' in s:
                 with self.subTest(uses=s['uses']):
-                    self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
+                    if s['uses'].startswith(OWN):
+                        self.assertTrue(s['uses'].endswith('@main'))
+                    else:
+                        self.assertRegex(s['uses'], r'@[0-9a-f]{40}$')
 
     def test_first_party_actions_share_one_reviewed_revision(self):
         names = set()

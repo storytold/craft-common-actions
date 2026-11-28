@@ -53,9 +53,10 @@ jobs:
       - name: Bind immutable defining workflow before any shared code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -64,9 +65,11 @@ jobs:
           persist-credentials: false
       - name: Admit only a reviewed registry app on its own repository's main
         id: admit
+        env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           python3 -I -B .nightly-tools/scripts/nightly_app.py admit --app-name "$NIGHTLY_APP" \
             --repository "$GITHUB_REPOSITORY" --ref "$GITHUB_REF" | tee -a "$GITHUB_OUTPUT"
 
@@ -194,9 +197,10 @@ jobs:
         shell: pwsh
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
           if ($LASTEXITCODE -ne 0) { throw 'unreviewed defining workflow' }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -218,17 +222,18 @@ jobs:
         id: plan
         shell: pwsh
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ((git -C .nightly-tools rev-parse HEAD) -cne $env:TOOLING_REVISION) { throw 'tooling checkout differs' }
+          if ((git -C .nightly-tools rev-parse HEAD) -cne $env:DEFINING_SHA) { throw 'tooling checkout differs' }
           python -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform windows-x86_64 --output .unsigned-plan
           if ($LASTEXITCODE -ne 0) { throw 'unsigned producer identity refused' }
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@main
         with:
           targets: x86_64-pc-windows-msvc
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -298,9 +303,10 @@ jobs:
       - name: Bind defining workflow without loading application code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -309,10 +315,11 @@ jobs:
           persist-credentials: false
       - name: Require the actual compiler artifact ID and independent compiler hash
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           COMPILER_ARTIFACT: ${{ needs.build.outputs.artifact-id }}
           COMPILER_SHA256: ${{ needs.build.outputs.unsigned-sha256 }}
         run: |
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -364,9 +371,10 @@ jobs:
         shell: bash
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -387,19 +395,20 @@ jobs:
         id: plan
         shell: bash
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -m)" = arm64
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform macos-aarch64 --output .unsigned-plan
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@main
         with:
           targets: aarch64-apple-darwin
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -471,9 +480,10 @@ jobs:
       - name: Bind defining workflow without loading application code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -482,10 +492,11 @@ jobs:
           persist-credentials: false
       - name: Require the actual compiler artifact ID and independent compiler hash
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           COMPILER_ARTIFACT: ${{ needs.build-macos.outputs.artifact-id }}
           COMPILER_SHA256: ${{ needs.build-macos.outputs.unsigned-sha256 }}
         run: |
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -537,9 +548,10 @@ jobs:
       - name: Bind immutable defining workflow before any shared code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -559,23 +571,24 @@ jobs:
       - name: Prepare exact original-run identity without editing source
         id: plan
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(uname -m)" = x86_64
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@main
         with:
           deb-arch: amd64
           nfpm-version: 2.47.0
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@main
         with:
           targets: x86_64-unknown-linux-gnu
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -643,9 +656,10 @@ jobs:
       - name: Bind defining workflow without loading application code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -654,10 +668,11 @@ jobs:
           persist-credentials: false
       - name: Require the actual compiler artifact ID and independent compiler hash
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           COMPILER_ARTIFACT: ${{ needs.build-linux.outputs.artifact-id }}
           COMPILER_SHA256: ${{ needs.build-linux.outputs.unsigned-sha256 }}
         run: |
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           python3 -B .nightly-tools/scripts/nightly_artifacts.py download-contract --artifact-id "$COMPILER_ARTIFACT" --expected-sha256 "$COMPILER_SHA256"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -711,9 +726,10 @@ jobs:
       - name: Bind immutable defining workflow before any shared code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -733,10 +749,11 @@ jobs:
       - name: Prepare exact original-run identity
         id: plan
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-plan --platform linux-x86_64 --output .unsigned-plan
       - name: Derive the app's nightly Linux package names
@@ -745,16 +762,16 @@ jobs:
           APP_NAME: ${{ inputs.app-name }}
         run: python3 -I -B .nightly-tools/scripts/nightly_app.py names --app-name "$APP_NAME" >> "$GITHUB_OUTPUT"
       - name: Export the app's build variables
-        uses: storytold/craft-common-actions/actions/export-app-build-env@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/export-app-build-env@main
         with:
           app-name: ${{ inputs.app-name }}
           version: ${{ steps.plan.outputs.version }}
           date: ${{ steps.plan.outputs.build-date }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
         with:
           ref: ${{ inputs.craft-fonts-ref }}
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
-      - uses: storytold/craft-common-actions/actions/install-linux-deps@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - uses: storytold/craft-common-actions/actions/install-linux-deps@main
         with:
           deb-arch: ${{ matrix.deb }}
           nfpm-version: 2.47.0
@@ -766,7 +783,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@main
         with:
           targets: ${{ matrix.target }}
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
@@ -991,9 +1008,10 @@ jobs:
       - name: Bind immutable defining workflow before shared packaging code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -1008,8 +1026,10 @@ jobs:
           digest-mismatch: error
       - name: Find aarch64 tarball
         id: tarball
+        env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           shopt -s nullglob
           tarballs=()
           for f in dist/linux/*-linux-aarch64.tar.gz; do
@@ -1062,9 +1082,10 @@ jobs:
       - name: Bind defining workflow without loading application code
         env:
           DEFINING_REPOSITORY: ${{ job.workflow_repository }}
+          DEFINING_REF: ${{ job.workflow_ref }}
           DEFINING_SHA: ${{ job.workflow_sha }}
         run: |
-          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; assert re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert os.environ['DEFINING_SHA']==p"
+          python3 -I -B -c "import os,re; p=os.environ['TOOLING_REVISION']; s=os.environ['DEFINING_SHA']; assert re.fullmatch('[0-9a-f]{40}',s) and s!='0'*40; assert os.environ['DEFINING_REPOSITORY']=='storytold/craft-common-actions'; assert (p=='main' and os.environ['DEFINING_REF']=='storytold/craft-common-actions/.github/workflows/nightly-unsigned.yml@refs/heads/main') or (re.fullmatch('[0-9a-f]{40}',p) and p!='0'*40 and s==p)"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
@@ -1099,10 +1120,11 @@ jobs:
       - name: Inventory Linux package payloads for attestation
         id: subject
         env:
+          DEFINING_SHA: ${{ job.workflow_sha }}
           GH_TOKEN: ${{ github.token }}
           LINUX_PACKAGE_FORMATS: ${{ needs.select-platforms.outputs.linux-package-formats }}
         run: |
-          test "$(git -C .nightly-tools rev-parse HEAD)" = "$TOOLING_REVISION"
+          test "$(git -C .nightly-tools rev-parse HEAD)" = "$DEFINING_SHA"
           python3 -I -B .nightly-tools/scripts/nightly_release_entry.py main-packages-subject --platform linux-x86_64 --directory .linux-packages --formats "$LINUX_PACKAGE_FORMATS"
       - name: Attest Linux package payloads
         uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f

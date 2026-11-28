@@ -205,7 +205,7 @@ class WorkflowSourceTests(unittest.TestCase):
                        "step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f"):
             self.assertIn(action, source)
         for action in ("checkout-craft-fonts","checkout-craft-i18n","rust-channel"):
-            self.assertIn("actions/"+action+"@f5141455aac7b2eb4708aa259d8ffcdf10fde939",source)
+            self.assertIn("actions/"+action+"@main",source)
         self.assertIn("cargo metadata --locked", source)
         self.assertIn("no Windows nightly adapter", (ROOT / "scripts/nightly_windows.py").read_text())
         build = source.split('  build:\n', 1)[1].split('\n  # Fresh runner:', 1)[0]

@@ -117,7 +117,8 @@ def contract(policy, producer):
         n.positive(producer.get(key), 'producer ' + key)
     legacy.timestamp(producer.get('created_at'))
     n.require(legacy.workflow_path(producer.get('workflow_path')), 'invalid producer workflow path')
-    sha(producer.get('tooling_revision'))
+    if producer.get('tooling_revision') != 'main':
+        sha(producer.get('tooling_revision'))
     workflows = policy['required_workflows']
     n.require(isinstance(workflows, list) and 0 < len(workflows) <= 32, 'bounded explicit required workflows missing')
     ids = set(); paths = set(); count = 0
