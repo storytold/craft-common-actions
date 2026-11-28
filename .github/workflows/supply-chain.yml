@@ -23,7 +23,7 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - name: Download release artifacts
@@ -53,7 +53,7 @@ jobs:
           done < "$PWD/release-files"
 
       - name: Generate the CycloneDX SBOM
-        uses: step-security/sbom-action@28bb7d0d2869c9ab0e5571c93591747945819d39 # v0.24.2
+        uses: step-security/sbom-action@eb16f44c4d6e93eb081c681c2be26df28c3ad79a # v0.24.3
         with:
           path: subjects
           format: cyclonedx-json
