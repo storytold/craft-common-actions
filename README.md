@@ -409,7 +409,9 @@ time budget. A failed
 restore discards partial guest data before building; a failed checkpoint discards
 the partial release profile before packaging. Required build/package steps reclaim
 debug disk space independently of the optional checkpoint. GitHub's normal repository and branch cache access rules apply.
-The VM's base image cache is separate from this Cargo cache.
+The VM's base image cache is separate from this Cargo cache. PR runs turn the VM action's
+image and apt caches off (`disable-cache`), so they download the image each time and save no
+entry; other runs restore and save it as before.
 
 For package checks, debug artifacts are checkpointed on the host before freeing
 guest disk space and loading the cached release profile. Release jobs keep their
