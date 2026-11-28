@@ -174,12 +174,25 @@ class FreeBSDReleaseMemoryTests(unittest.TestCase):
         self.assertNotIn('LTO', ' '.join(env))
 
     def test_vm_size_build_jobs_and_release_profile_are_unchanged(self):
-        self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '12288'))  # Host runner keeps its headroom.
+        self.assertEqual((VM['with']['cpu'], VM['with']['mem']), ('4', '20480'))
         self.assertEqual(DATA['jobs']['freebsd']['env']['CARGO_BUILD_JOBS'], '4')
         for text in (VM['with']['prepare'], BUILD):
             text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
             for forbidden in ('mdconfig', 'swapon', 'CARGO_PROFILE_RELEASE', 'codegen-units', 'lto', 'thinlto'):
                 self.assertNotIn(forbidden, text)  # No ZFS-backed swap file; LTO settings stay the app's.
+
+    def test_host_swap_backs_the_guest_memory_in_both_workflows(self):
+        # The 20 GB guest is larger than the runner's RAM: a host swap file on ext4 must be
+        # enabled before the VM starts, in the release job and in the shared CI job.
+        for steps, vm in ((STEPS, VM), (CI['jobs']['freebsd']['steps'], CI_VM)):
+            self.assertEqual(vm['with']['mem'], '20480')
+            names = [step.get('name') for step in steps]
+            swap = names.index('Add host swap for the VM')
+            self.assertLess(swap, steps.index(vm))
+            run = steps[swap]['run']
+            for needed in ('set -euo pipefail', 'fallocate -l 16G /craft-vm-swap', 'chmod 600 /craft-vm-swap',
+                           'mkswap /craft-vm-swap', 'swapon /craft-vm-swap'):
+                self.assertIn(needed, run)
 
 if __name__ == '__main__':
     unittest.main()
