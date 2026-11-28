@@ -872,6 +872,63 @@ class BridgeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "final asset digest"):
             b.previous_publication(api, self.registry, self.policy, self.request, [api.release])
 
+    def test_combined_release_emits_linux_distro_packages_into_nightly_json(self):
+        state, packet = self.publication_fixture(); api = self.publication_api()
+        combined = self.root/"combined"
+        version = self.plan["identity"]["version"]
+        armored = b"-----BEGIN PGP SIGNATURE-----\nfixture\n-----END PGP SIGNATURE-----\n"
+        binary_sig = b"\x89\x02\x04\x00binary-sig-fixture"
+        extra_files = {
+            f"photocraft-{version}-linux-x86_64.flatpak": b"flatpak-x64",
+            f"photocraft-{version}-linux-x86_64.flatpak.asc": armored,
+            f"photocraft-{version}-linux-aarch64.flatpak": b"flatpak-arm64",
+            f"photocraft-{version}-linux-aarch64.flatpak.asc": armored,
+            f"photocraft-{version}-linux-x86_64.deb": b"deb-x64",
+            f"photocraft-{version}-linux-x86_64.deb.asc": armored,
+            f"photocraft-{version}-linux-x86_64.rpm": b"rpm-x64",
+            f"photocraft-{version}-linux-x86_64.rpm.asc": armored,
+            f"photocraft-{version}-linux-x86_64.AppImage": b"appimage-x64",
+            f"photocraft-{version}-linux-x86_64.AppImage.asc": armored,
+            f"photocraft-{version}-linux-x86_64.AppImage.zsync": b"zsync-x64",
+            f"photocraft-{version}-linux-x86_64.AppImage.zsync.asc": armored,
+            f"photocraft-{version}-linux-x86_64.pkg.tar.zst": b"arch-x64",
+            f"photocraft-{version}-linux-x86_64.pkg.tar.zst.sig": binary_sig,
+            f"photocraft-{version}-linux-x86_64.oci-manifest.json": b'{"schemaVersion":2}',
+            f"photocraft-{version}-linux-x86_64.oci.sig": b"\x89oci-sig",
+        }
+        for name, data in extra_files.items():
+            (combined/name).write_bytes(data)
+            state["signing"][LINUX]["support"][name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+        result = b.publish(self.policy, state, combined, packet, self.root/"ownership", api, lambda: True, self.registry)
+        self.assertEqual(result["id"], 7)
+        feed = json.loads((packet/"NIGHTLY.json").read_text())
+        self.assertEqual(feed["schema"], "craft-nightly/v2")
+        linux_targets = {(row["target"]["arch"], row["target"]["format"]): row for row in feed["artifacts"] if row["target"]["os"] == "linux"}
+        self.assertEqual(set(linux_targets), {
+            ("x86_64", "tar_gz"),
+            ("x86_64", "flatpak"), ("aarch64", "flatpak"),
+            ("x86_64", "deb"), ("x86_64", "rpm"),
+            ("x86_64", "appimage"), ("x86_64", "arch_pkg"),
+        })
+        for row in linux_targets.values():
+            self.assertEqual(row["isolation"], {
+                "associations": "none",
+                "package_identity": "ai.storyteller.photocraft.nightly",
+                "profile_contract": "nightly",
+                "profile_version": 1,
+            })
+        self.assertEqual(linux_targets[("x86_64", "arch_pkg")]["signature"]["name"],
+                         f"photocraft-{version}-linux-x86_64.pkg.tar.zst.sig")
+        self.assertEqual(linux_targets[("x86_64", "flatpak")]["signature"]["name"],
+                         f"photocraft-{version}-linux-x86_64.flatpak.asc")
+        # Auxiliary files are uploaded and checksummed, but not promoted into NIGHTLY.json artifacts.
+        uploaded = {name for _, name, _ in [w for w in api.writes if w[0] == "UPLOAD"]}
+        self.assertTrue(set(extra_files) <= uploaded)
+        feed_asset_names = {row["asset"]["name"] for row in feed["artifacts"]}
+        self.assertNotIn(f"photocraft-{version}-linux-x86_64.AppImage.zsync", feed_asset_names)
+        self.assertNotIn(f"photocraft-{version}-linux-x86_64.oci-manifest.json", feed_asset_names)
+
     def test_admitted_first_signer_creation_skew_round_trips_as_history(self):
         path = '/actions/runs/200/attempts/1'
         self.fx.modify_run(200, 'created_at', '2026-11-22T00:00:01Z')

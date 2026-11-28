@@ -28,6 +28,19 @@ TARGET_OS = {"windows", "macos", "linux", "freebsd"}
 TARGET_ARCH = {"x86", "x86_64", "aarch64"}
 # System installers/ordinary DMGs cannot silently reuse stable package identities.
 PORTABLE_FORMATS = {"portable_zip": ".zip", "appimage": ".AppImage", "tar_gz": ".tar.gz"}
+# Signed Linux distro packages emitted into craft-nightly/v2 alongside tar_gz when
+# linux-package-formats is enabled: format -> (asset_suffix, signature_suffix, binary_signature).
+LINUX_PACKAGE_FORMATS = {
+    "flatpak": (".flatpak", ".asc", False),
+    "deb": (".deb", ".asc", False),
+    "rpm": (".rpm", ".asc", False),
+    "appimage": (".AppImage", ".asc", False),
+    "arch_pkg": (".pkg.tar.zst", ".sig", True),
+}
+LINUX_SIGNED_FORMATS = {
+    "tar_gz": (".tar.gz", ".asc", False),
+    **LINUX_PACKAGE_FORMATS,
+}
 
 class InvalidNightly(ValueError):
     pass
@@ -286,27 +299,90 @@ def stage_feed(feed, artifacts, output):
         destination.writelines(sums)
 
 
-def build_feed_v2(registry, ident, version, artifacts):
+def _download_url(ident, name):
+    return f"https://github.com/{ident['repository']}/releases/download/{quote(ident['tag'], safe='')}/{quote(name, safe='')}"
+
+
+def _linux_signature(artifacts, asset_name, asset_url, sig_suffix, binary):
+    name = asset_name + sig_suffix
+    stream, info = regular_file(artifacts, name)
+    with stream:
+        require(info.st_size <= 16384, 'Linux detached signature exceeds 16KiB')
+        raw = stream.read(16385)
+    if not binary:
+        require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and
+                raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
+                all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
+    size, digest = digest_file(artifacts, name)
+    require(size == len(raw) and digest == hashlib.sha256(raw).hexdigest(), 'signature changed while reading')
+    return {'name': name, 'url': asset_url + sig_suffix, 'size': size, 'sha256': digest}
+
+
+def _parse_linux_package_asset(app, version, name):
+    """Return (arch, format_name) if name is a canonical Linux distro package for app/version."""
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        return None
+    prefix = f"{app}-{version}-linux-"
+    if not name.startswith(prefix):
+        return None
+    rest = name[len(prefix):]
+    for fmt, (suffix, _, _) in LINUX_PACKAGE_FORMATS.items():
+        if rest.endswith(suffix):
+            arch = rest[:-len(suffix)]
+            if arch in TARGET_ARCH:
+                return arch, fmt
+    return None
+
+
+def build_feed_v2(registry, ident, version, artifacts, *, extra_assets=()):
     """Final signed-byte metadata only; signature trust is a separate signer/consumer gate."""
     feed = build_feed(registry, ident, version, artifacts)
     feed['schema'] = 'craft-nightly/v2'
     total = sum(row['asset']['size'] for row in feed['artifacts'])
+    existing_targets = set()
+    existing_names = set()
+    linux_isolation = None
     for row in feed['artifacts']:
-        require(row['target']['os'] in {'windows', 'macos', 'linux'}, 'unqualified signed target')
-        if row['target']['os'] == 'linux':
-            require(row['target']['format'] == 'tar_gz', 'signed Linux requires tar.gz')
-            name = row['asset']['name'] + '.asc'
-            stream, info = regular_file(artifacts, name)
-            with stream:
-                require(info.st_size <= 16384, 'Linux detached signature exceeds 16KiB')
-                raw = stream.read(16385)
-            require(raw.startswith(b'-----BEGIN PGP SIGNATURE-----') and
-                    raw.rstrip().endswith(b'-----END PGP SIGNATURE-----') and
-                    all(byte < 128 for byte in raw), 'expected ASCII-armored detached OpenPGP signature')
-            size, digest = digest_file(artifacts, name)
-            require(size == len(raw) and digest == hashlib.sha256(raw).hexdigest(), 'signature changed while reading')
-            row['signature'] = {'name': name, 'url': row['asset']['url'] + '.asc', 'size': size, 'sha256': digest}
-            total += size
+        target = row['target']
+        require(target['os'] in {'windows', 'macos', 'linux'}, 'unqualified signed target')
+        existing_targets.add((target['os'], target['arch'], target['format']))
+        existing_names.add(row['asset']['name'])
+        if target['os'] == 'linux':
+            require(target['format'] in LINUX_SIGNED_FORMATS, 'unsupported signed Linux format')
+            _, sig_suffix, binary = LINUX_SIGNED_FORMATS[target['format']]
+            sig = _linux_signature(artifacts, row['asset']['name'], row['asset']['url'], sig_suffix, binary)
+            row['signature'] = sig
+            existing_names.add(sig['name'])
+            total += sig['size']
+            if target['format'] == 'tar_gz' and linux_isolation is None:
+                linux_isolation = dict(row['isolation'])
+    for name in sorted(set(extra_assets)):
+        parsed = _parse_linux_package_asset(ident['app'], version, name)
+        if parsed is None:
+            continue
+        arch, fmt = parsed
+        require(linux_isolation is not None, 'Linux package artifacts require a reviewed Linux tar_gz target')
+        key = ('linux', arch, fmt)
+        require(key not in existing_targets, 'duplicate signed Linux target')
+        require(name not in existing_names and 'nightly' in name, 'invalid or duplicate signed Linux package name')
+        _, sig_suffix, binary = LINUX_PACKAGE_FORMATS[fmt]
+        size, digest = digest_file(artifacts, name)
+        url = _download_url(ident, name)
+        sig = _linux_signature(artifacts, name, url, sig_suffix, binary)
+        require(sig['name'] not in existing_names, 'duplicate signed Linux signature name')
+        total += size + sig['size']
+        require(total <= MAX_TOTAL_BYTES, 'aggregate signed artifact bytes exceed limit')
+        feed['artifacts'].append({
+            'target': {'os': 'linux', 'arch': arch, 'format': fmt},
+            'asset': {'name': name, 'url': url, 'size': size, 'sha256': digest},
+            'signature': sig,
+            'isolation': dict(linux_isolation),
+        })
+        existing_targets.add(key)
+        existing_names.add(name)
+        existing_names.add(sig['name'])
+    require(len(feed['artifacts']) <= MAX_ARTIFACTS, 'too many signed target entries')
+    feed['artifacts'].sort(key=lambda value: tuple(value['target'][k] for k in ('os', 'arch', 'format')))
     require(total <= MAX_TOTAL_BYTES, 'aggregate signed artifact bytes exceed limit')
     require(len(json.dumps(feed, sort_keys=True).encode()) <= MAX_JSON_BYTES, 'signed descriptor exceeds limit')
     return feed
@@ -319,35 +395,59 @@ def validate_feed_v2(registry, ident, version, feed):
     record = app_record(registry, ident['app'])
     if not record['targets']:
         raise Unavailable('no reviewed signed profile adapter')
-    require(isinstance(feed['artifacts'], list) and len(feed['artifacts']) == len(record['targets']), 'signed target inventory mismatch')
+    require(isinstance(feed['artifacts'], list) and len(record['targets']) <= len(feed['artifacts']) <= MAX_ARTIFACTS,
+            'signed target inventory mismatch')
     expected = {}
+    linux_isolation = None
     for item in record['targets']:
         target = item['target']; key = tuple(target[k] for k in ('os', 'arch', 'format'))
         require(key not in expected, 'duplicate reviewed target')
         expected[key] = item
+        if target['os'] == 'linux' and target['format'] == 'tar_gz' and linux_isolation is None:
+            linux_isolation = item['isolation']
     seen = set(); names = set(); total = 0
     for row in feed['artifacts']:
         require(isinstance(row, dict) and isinstance(row.get('target'), dict), 'invalid signed artifact')
         target = row['target']; fields(target, {'os', 'arch', 'format'}, 'signed target')
         key = tuple(target[k] for k in ('os', 'arch', 'format'))
-        require(key in expected and key not in seen and target['os'] in {'windows','macos','linux'}, 'unreviewed/duplicate signed target')
-        reviewed = expected[key]; seen.add(key)
-        fields(row, {'target','asset','isolation'} | ({'signature'} if target['os']=='linux' else set()), 'signed artifact')
-        require(row['isolation'] == reviewed['isolation'], 'signed isolation mismatch')
-        name = reviewed['asset_pattern'].replace('{version}', version)
-        require(NAME.fullmatch(name) and name.endswith(PORTABLE_FORMATS.get(target['format'], '\0')) and 'nightly' in name, 'invalid signed asset name')
-        require(target['os'] != 'windows' or target['format']=='portable_zip', 'Windows format mismatch')
+        require(key not in seen and target['os'] in {'windows', 'macos', 'linux'} and target['arch'] in TARGET_ARCH,
+                'unreviewed/duplicate signed target')
+        if key in expected:
+            reviewed = expected[key]
+            expected_isolation = reviewed['isolation']
+            name = reviewed['asset_pattern'].replace('{version}', version)
+            if target['os'] == 'linux':
+                require(target['format'] in LINUX_SIGNED_FORMATS, 'unsupported signed Linux format')
+                suffix, sig_suffix, _ = LINUX_SIGNED_FORMATS[target['format']]
+            else:
+                require(target['format'] in PORTABLE_FORMATS, 'unsupported signed format')
+                suffix, sig_suffix = PORTABLE_FORMATS[target['format']], None
+        else:
+            require(target['os'] == 'linux' and target['format'] in LINUX_PACKAGE_FORMATS and linux_isolation is not None,
+                    'unreviewed/duplicate signed target')
+            expected_isolation = linux_isolation
+            suffix, sig_suffix, _ = LINUX_PACKAGE_FORMATS[target['format']]
+            name = f"{ident['app']}-{version}-linux-{target['arch']}{suffix}"
+        seen.add(key)
+        fields(row, {'target', 'asset', 'isolation'} | ({'signature'} if target['os'] == 'linux' else set()), 'signed artifact')
+        require(row['isolation'] == expected_isolation, 'signed isolation mismatch')
+        require(isinstance(row['isolation'].get('package_identity'), str) and
+                NAME.fullmatch(row['isolation']['package_identity']) and
+                row['isolation']['package_identity'].endswith('.nightly') and
+                row['isolation'].get('associations') == 'none', 'invalid signed isolation')
+        require(NAME.fullmatch(name) and name.endswith(suffix) and 'nightly' in name, 'invalid signed asset name')
+        require(target['os'] != 'windows' or target['format'] == 'portable_zip', 'Windows format mismatch')
         downloads = [(row['asset'], name, MAX_ASSET_BYTES)]
-        if target['os']=='linux':
-            require(target['format']=='tar_gz', 'signed Linux requires tar.gz')
-            downloads.append((row['signature'], name+'.asc', 16384))
+        if target['os'] == 'linux':
+            downloads.append((row['signature'], name + sig_suffix, 16384))
         for download, actual_name, cap in downloads:
-            fields(download, {'name','url','size','sha256'}, 'signed download')
-            url = f"https://github.com/{ident['repository']}/releases/download/{quote(ident['tag'], safe='')}/{quote(actual_name, safe='')}"
-            require(download['name']==actual_name and download['url']==url and actual_name not in names, 'signed name/URL mismatch')
+            fields(download, {'name', 'url', 'size', 'sha256'}, 'signed download')
+            url = _download_url(ident, actual_name)
+            require(download['name'] == actual_name and download['url'] == url and actual_name not in names, 'signed name/URL mismatch')
             require(type(download['size']) is int and 0 < download['size'] <= cap and
                     isinstance(download['sha256'], str) and re.fullmatch('[0-9a-f]{64}', download['sha256']), 'invalid signed size/digest')
             total += download['size']; names.add(actual_name)
+    require(set(expected) <= seen, 'signed target inventory mismatch')
     require(total <= MAX_TOTAL_BYTES and len(json.dumps(feed).encode()) <= MAX_JSON_BYTES, 'signed descriptor exceeds limit')
     return True
 
@@ -355,7 +455,15 @@ def validate_feed_v2(registry, ident, version, feed):
 def stage_feed_v2(registry, ident, version, feed, artifacts, output, *, extra_assets=()):
     output = owned_path(output)
     validate_feed_v2(registry, ident, version, feed)
-    require(feed == build_feed_v2(registry, ident, version, artifacts), 'signed descriptor differs from final package bytes')
+    record = app_record(registry, ident['app'])
+    reviewed_keys = {tuple(item['target'][k] for k in ('os', 'arch', 'format')) for item in record['targets']}
+    feed_extra_packages = tuple(sorted(
+        row['asset']['name']
+        for row in feed['artifacts']
+        if tuple(row['target'][k] for k in ('os', 'arch', 'format')) not in reviewed_keys
+    ))
+    require(feed == build_feed_v2(registry, ident, version, artifacts, extra_assets=feed_extra_packages),
+            'signed descriptor differs from final package bytes')
     # Reuse the bounded copy-and-rehash boundary for signatures too; the serialized
     # descriptor remains the actual v2 target inventory, not flattened copy rows.
     copy_feed = {**feed, 'artifacts': list(feed['artifacts'])}

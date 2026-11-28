@@ -78,3 +78,160 @@ class SignedFeedTests(unittest.TestCase):
     def test_feed_shape_is_not_cryptographic_proof(self):
         # Armor deliberately contains invalid crypto: shape parser cannot replace gpgv.
         self.assertTrue(n.validate_feed_v2(self.registry,self.ident,self.version,self.feed()))
+
+    def _write_linux_distro_packages(self, arches=('x86_64', 'aarch64')):
+        armored = b'-----BEGIN PGP SIGNATURE-----\nfixture-only-not-valid-crypto\n-----END PGP SIGNATURE-----\n'
+        binary_sig = b'\x89\x02\x04\x00\x01\x08binary-openpgp-sig-fixture'
+        specs = [
+            ('flatpak', '.flatpak', '.asc', armored),
+            ('deb', '.deb', '.asc', armored),
+            ('rpm', '.rpm', '.asc', armored),
+            ('appimage', '.AppImage', '.asc', armored),
+            ('arch_pkg', '.pkg.tar.zst', '.sig', binary_sig),
+        ]
+        all_names = []
+        expected_formats = {}
+        for arch in arches:
+            for fmt, suffix, sig_suffix, sig_bytes in specs:
+                pkg = f'photocraft-{self.version}-linux-{arch}{suffix}'
+                sig = pkg + sig_suffix
+                (self.assets / pkg).write_bytes(f'{fmt}-{arch}-payload'.encode())
+                (self.assets / sig).write_bytes(sig_bytes)
+                all_names.extend([pkg, sig])
+                expected_formats[('linux', arch, fmt)] = (pkg, sig)
+        return all_names, expected_formats
+
+    def test_v2_linux_distro_packages_build_validate_and_stage_with_auxiliary_extras(self):
+        self.registry['apps']['photocraft']['targets'][0]['isolation'] = {
+            'package_identity': 'ai.storyteller.photocraft.nightly',
+            'profile_contract': 'nightly',
+            'profile_version': 1,
+            'associations': 'none',
+        }
+        pkg_names, expected_formats = self._write_linux_distro_packages()
+        armored = b'-----BEGIN PGP SIGNATURE-----\naux\n-----END PGP SIGNATURE-----\n'
+        aux_files = {
+            f'photocraft-{self.version}-linux-x86_64.AppImage.zsync': b'zsync-meta',
+            f'photocraft-{self.version}-linux-x86_64.AppImage.zsync.asc': armored,
+            f'photocraft-{self.version}-linux-x86_64.oci-manifest.json': b'{"schemaVersion":2}',
+            f'photocraft-{self.version}-linux-x86_64.oci.sig': b'\x89oci-sig-bytes',
+        }
+        for name, data in aux_files.items():
+            (self.assets / name).write_bytes(data)
+
+        all_support = tuple(sorted([self.name + '.asc', *pkg_names, *aux_files]))
+        feed = n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=all_support)
+        self.assertTrue(n.validate_feed_v2(self.registry, self.ident, self.version, feed))
+        # 1 tar_gz + 5 formats * 2 arches = 11 artifacts; auxiliary zsync/oci files stay out of NIGHTLY.json.
+        self.assertEqual(len(feed['artifacts']), 11)
+        by_key = {(r['target']['os'], r['target']['arch'], r['target']['format']): r for r in feed['artifacts']}
+        self.assertIn(('linux', 'x86_64', 'tar_gz'), by_key)
+        for key, (pkg, sig) in expected_formats.items():
+            row = by_key[key]
+            self.assertEqual(row['asset']['name'], pkg)
+            self.assertEqual(row['signature']['name'], sig)
+            self.assertEqual(row['isolation'], {
+                'associations': 'none',
+                'package_identity': 'ai.storyteller.photocraft.nightly',
+                'profile_contract': 'nightly',
+                'profile_version': 1,
+            })
+            self.assertTrue(row['isolation']['package_identity'].endswith('.nightly'))
+            self.assertEqual(row['asset']['size'], (self.assets / pkg).stat().st_size)
+            self.assertEqual(row['signature']['size'], (self.assets / sig).stat().st_size)
+
+        feed_names = {r['asset']['name'] for r in feed['artifacts']} | {r['signature']['name'] for r in feed['artifacts']}
+        remaining_extra = tuple(sorted(name for name in all_support if name not in feed_names))
+        self.assertEqual(set(remaining_extra), set(aux_files))
+
+        out = self.root / 'stage-all'
+        n.stage_feed_v2(self.registry, self.ident, self.version, feed, self.assets, out, extra_assets=remaining_extra)
+        self.assertEqual(json.loads((out / 'NIGHTLY.json').read_text()), feed)
+        self.assertEqual({p.name for p in out.iterdir()},
+                         {self.name, self.name + '.asc', *pkg_names, *aux_files, 'NIGHTLY.json', 'SHA256SUMS.txt'})
+        sums = (out / 'SHA256SUMS.txt').read_text()
+        for name in [self.name, *pkg_names, *aux_files, 'NIGHTLY.json']:
+            self.assertIn(n.digest_file(out, name)[1] + '  ' + name + '\n', sums)
+
+    def test_v2_backward_compatible_three_artifacts_when_extra_assets_empty(self):
+        full_registry = json.loads((ROOT / 'nightly-apps.json').read_text())
+        ident, version = n.identity(full_registry, 'photocraft', 'storytold/photocraft', 'a' * 40, '1.2.3', 123, 1, 1795190400)
+        win = f'photocraft-{version}-windows-x86_64-nightly.zip'
+        lin = f'photocraft-{version}-linux-x86_64-nightly.tar.gz'
+        mac = f'photocraft-{version}-macos-aarch64-nightly.zip'
+        for name in (win, lin, mac):
+            (self.assets / name).write_bytes(b'payload-' + name.encode())
+        (self.assets / (lin + '.asc')).write_bytes(b'-----BEGIN PGP SIGNATURE-----\nok\n-----END PGP SIGNATURE-----\n')
+        feed = n.build_feed_v2(full_registry, ident, version, self.assets, extra_assets=(lin + '.asc',))
+        self.assertEqual(len(feed['artifacts']), 3)
+        self.assertTrue(n.validate_feed_v2(full_registry, ident, version, feed))
+
+    def test_v2_linux_distro_package_signature_and_tamper_checks(self):
+        pkg_names, _ = self._write_linux_distro_packages(arches=('x86_64',))
+        # Missing signature for .flatpak refuses.
+        flatpak = f'photocraft-{self.version}-linux-x86_64.flatpak'
+        flatpak_sig = self.assets / (flatpak + '.asc')
+        flatpak_sig.unlink()
+        with self.assertRaises(FileNotFoundError):
+            n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        # Unarmored .asc for .flatpak refuses.
+        flatpak_sig.write_bytes(b'not-armored-signature')
+        with self.assertRaises(n.InvalidNightly):
+            n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        flatpak_sig.write_bytes(b'-----BEGIN PGP SIGNATURE-----\nok\n-----END PGP SIGNATURE-----\n')
+
+        # Oversized, empty, or symlinked binary .sig for .pkg.tar.zst refuses.
+        arch_pkg = f'photocraft-{self.version}-linux-x86_64.pkg.tar.zst'
+        arch_sig = self.assets / (arch_pkg + '.sig')
+        for bad in (b'', b'\x89' * 16385):
+            arch_sig.write_bytes(bad)
+            with self.subTest(size=len(bad)), self.assertRaises(n.InvalidNightly):
+                n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        arch_sig.unlink()
+        arch_sig.symlink_to(self.assets / arch_pkg)
+        with self.assertRaises(n.InvalidNightly):
+            n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        arch_sig.unlink()
+        arch_sig.write_bytes(b'\x89\x02valid-binary-sig')
+
+        # Tampering with a Linux distro package after build_feed_v2 refuses staging.
+        feed = n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        (self.assets / flatpak).write_bytes(b'tampered-flatpak-bytes')
+        with self.assertRaises(n.InvalidNightly):
+            n.stage_feed_v2(self.registry, self.ident, self.version, feed, self.assets, self.root / 'tampered-stage')
+        self.assertFalse((self.root / 'tampered-stage').exists())
+
+    def test_validate_feed_v2_rejects_invalid_linux_distro_package_mutations(self):
+        pkg_names, _ = self._write_linux_distro_packages(arches=('x86_64',))
+        feed = n.build_feed_v2(self.registry, self.ident, self.version, self.assets, extra_assets=pkg_names)
+        flatpak_idx = next(i for i, r in enumerate(feed['artifacts']) if r['target']['format'] == 'flatpak')
+        arch_idx = next(i for i, r in enumerate(feed['artifacts']) if r['target']['format'] == 'arch_pkg')
+        tar_idx = next(i for i, r in enumerate(feed['artifacts']) if r['target']['format'] == 'tar_gz')
+
+        mutations = [
+            lambda f: f['artifacts'][flatpak_idx]['isolation'].update(package_identity='ai.storyteller.photocraft'),
+            lambda f: f['artifacts'][flatpak_idx]['isolation'].update(associations='stable'),
+            lambda f: f['artifacts'][flatpak_idx].pop('signature'),
+            lambda f: f['artifacts'][arch_idx]['signature'].update(name=f['artifacts'][arch_idx]['asset']['name'] + '.asc'),
+            lambda f: f['artifacts'][flatpak_idx]['target'].update(format='zsync'),
+            lambda f: f['artifacts'].append(copy.deepcopy(f['artifacts'][flatpak_idx])),
+            lambda f: f['artifacts'].pop(tar_idx),
+        ]
+        for idx, mutate in enumerate(mutations):
+            changed = copy.deepcopy(feed)
+            mutate(changed)
+            with self.subTest(mutation=idx), self.assertRaises(n.InvalidNightly):
+                n.validate_feed_v2(self.registry, self.ident, self.version, changed)
+
+    def test_build_feed_v2_refuses_linux_distro_packages_without_reviewed_linux_target(self):
+        win_registry = copy.deepcopy(self.registry)
+        win_registry['apps']['photocraft']['targets'] = [{
+            'target': {'os': 'windows', 'arch': 'x86_64', 'format': 'portable_zip'},
+            'asset_pattern': 'photocraft-{version}-windows-x86_64-nightly.zip',
+            'isolation': {'package_identity': 'ai.storyteller.photocraft.nightly', 'profile_contract': 'nightly', 'profile_version': 1, 'associations': 'none'},
+        }]
+        win_name = f'photocraft-{self.version}-windows-x86_64-nightly.zip'
+        (self.assets / win_name).write_bytes(b'win-zip')
+        pkg_names, _ = self._write_linux_distro_packages(arches=('x86_64',))
+        with self.assertRaises(n.InvalidNightly):
+            n.build_feed_v2(win_registry, self.ident, self.version, self.assets, extra_assets=pkg_names)

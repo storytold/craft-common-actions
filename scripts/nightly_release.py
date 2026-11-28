@@ -654,14 +654,18 @@ def publish(policy, state, combined, packet, ownership, api, guard, registry):
     ownership = owned_output(ownership)
     plan = state["plan"]; prepared = plan["identity"]
     ident = {key: value for key, value in prepared.items() if key not in {"version", "ready"}}
-    feed = n.build_feed_v2(registry, ident, prepared["version"], combined)
+    all_support = tuple(sorted(
+        name
+        for receipt in state["signing"].values()
+        for name in receipt["support"]
+    ))
+    feed = n.build_feed_v2(registry, ident, prepared["version"], combined, extra_assets=all_support)
     feed_names = {entry["asset"]["name"] for entry in feed["artifacts"]} | {
         entry["signature"]["name"] for entry in feed["artifacts"] if "signature" in entry
     }
     extra_assets = tuple(sorted(
         name
-        for receipt in state["signing"].values()
-        for name in receipt["support"]
+        for name in all_support
         if name not in feed_names
     ))
     n.stage_feed_v2(registry, ident, prepared["version"], feed, combined, packet, extra_assets=extra_assets)
